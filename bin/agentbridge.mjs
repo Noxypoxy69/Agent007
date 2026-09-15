@@ -4,6 +4,7 @@ import { protectSecret, unprotectSecret, isWindows } from '../src/secretstore.mj
 import { collect } from '../src/collect.mjs';
 import { runDaemon } from '../src/daemon.mjs';
 import { publish } from '../src/client.mjs';
+import { resolveCommit } from '../src/git.mjs';
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -31,8 +32,10 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge release-risk [--json] [--strict]
                                         exit 1 if any worktree carries release risk
   agentbridge delegate --id <id> --from <session> --to <session> --task <text>
-             --base <sha> [--allow a,b] [--forbid a,b] [--shared a,b]
-                                        record a bounded task handoff as a contract
+             [--base <commit-ish>] [--repo <dir>] [--allow a,b] [--forbid a,b] [--shared a,b]
+                                        record a bounded task handoff as a contract.
+                                        the base is RESOLVED THROUGH GIT and defaults
+                                        to HEAD; one that does not resolve is refused
   agentbridge delegations [--json]      list recorded handoffs and their state
   agentbridge delegations --for <session> [--all] [--json]
                                         what THIS session still owes: outstanding
@@ -207,13 +210,47 @@ try {
     }
 
     if (cmd === 'delegate') {
+      /*
+       * THE BRIDGE RESOLVES THE BASE. AN AGENT NEVER TYPES ONE FROM MEMORY.
+       *
+       * validateDelegation checks the SHA's SHAPE, which a fabricated string
+       * satisfies. On 2026-09-15 a contract was recorded against a forty-
+       * character hex string that had never named an object -- a short SHA the
+       * agent knew, padded out. It stored cleanly and pointed nowhere.
+       *
+       * So the identifier comes from the machine, not the operator: --base is
+       * optional and defaults to HEAD, whatever is given is resolved through
+       * git, and an unresolvable base refuses the whole command. The stored
+       * value is always the canonical 40-character id, never the abbreviation
+       * that was typed.
+       *
+       * Exit 2: a base that does not resolve makes the command impossible,
+       * which is what 2 means here. Nothing is written.
+       */
+      const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+      if (args.base !== undefined && typeof args.base !== 'string') {
+        console.error('--base needs a value: a commit-ish this repository can resolve');
+        process.exit(2);
+      }
+      const resolved = await resolveCommit(repo, args.base);
+      if (!resolved.ok) {
+        console.error(resolved.reason === 'not-a-git-worktree'
+          ? `error: ${repo} is not a git worktree; pass --repo <dir>`
+          : `error: base "${resolved.rev}" does not resolve to a commit in ${repo}`);
+        console.error('the Bridge resolves the base itself — do not type a SHA from memory');
+        process.exit(2);
+      }
+      if (typeof args.base === 'string' && args.base !== resolved.sha) {
+        console.log(`base ${args.base} -> ${resolved.sha}`);
+      }
+
       const rec = P.createDelegation({
         id: args.id,
         assigning_session: args.from,
         assigned_session: args.to,
         task: args.task,
         lane_id: args.lane ?? null,
-        base_sha: args.base,
+        base_sha: resolved.sha,
         allowed_paths: split(args.allow),
         forbidden_paths: split(args.forbid),
         shared_paths: split(args.shared),

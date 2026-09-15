@@ -64,6 +64,39 @@ export async function listWorktrees(cwd) {
 }
 
 /**
+ * Resolve a commit-ish to a full 40-character SHA, or refuse.
+ *
+ * WHY THIS EXISTS. On 2026-09-15 a delegation was recorded against
+ * "e38ebd9d0e7a4cf7cc0e3c46c43e7ac8be9d9b0e". No such object has ever existed:
+ * the agent knew the short form, padded it to forty characters, and
+ * validateDelegation accepted it because the SHA rule is a SHAPE check --
+ * /^[0-9a-f]{7,40}$/i -- and a fabricated string is the right shape. The
+ * contract stored cleanly and pointed nowhere. A delegate checking it out
+ * would have got "fatal: could not get object info" and no way to tell a typo
+ * from a branch they had not fetched.
+ *
+ * A SHA is machine-verifiable, so no agent should ever type one from memory.
+ * The rule now: the Bridge resolves it, and a base that does not resolve is
+ * not a contract.
+ *
+ * `^{commit}` is doing real work -- it rejects a tree or blob whose hex is
+ * perfectly valid but which no one can check out, and it canonicalises a short
+ * SHA or a branch name to the full object id, so what is stored is unambiguous
+ * forever rather than only until another object shares the prefix.
+ */
+export async function resolveCommit(cwd, rev) {
+  const target = typeof rev === 'string' && rev.trim().length ? rev.trim() : 'HEAD';
+  const toplevel = line(await git(cwd, ['rev-parse', '--show-toplevel']));
+  if (!toplevel) return { ok: false, reason: 'not-a-git-worktree', cwd };
+
+  const sha = line(await git(cwd, ['rev-parse', '--verify', '--end-of-options', `${target}^{commit}`]));
+  if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) {
+    return { ok: false, reason: 'unresolvable', rev: target, cwd };
+  }
+  return { ok: true, sha: sha.toLowerCase(), rev: target, worktree: toplevel };
+}
+
+/**
  * Full git snapshot for one worktree. Every field is observed, never inferred:
  * a field we could not determine is null, not a guess.
  */
