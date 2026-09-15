@@ -30,12 +30,21 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         show the lane registry, or explain one path
   agentbridge release-risk [--json] [--strict]
                                         exit 1 if any worktree carries release risk
+  agentbridge delegate --id <id> --from <session> --to <session> --task <text>
+             --base <sha> [--allow a,b] [--forbid a,b] [--shared a,b]
+                                        record a bounded task handoff as a contract
+  agentbridge delegations [--json]      list recorded handoffs and their state
+  agentbridge audit-delegation --id <id> [--head <sha>] [--files a,b] [--repo <dir>]
+                                        exit 1 if the delegate went outside the contract
   agentbridge doctor                    verify secret sealing and file permissions
   agentbridge daemon start
 
 This layer is READ-ONLY. It observes and publishes state. It does not take
 instructions from the bridge, and cannot execute anything on its behalf.
 `;
+
+/** Comma-separated CLI list -> array. Empty, absent, or a bare flag mean none. */
+const split = (v) => (typeof v === 'string' && v.length ? v.split(',').map((s) => s.trim()).filter(Boolean) : []);
 
 const cmd = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
@@ -108,6 +117,82 @@ try {
       if (s.processes.length) console.log(`  running  ${s.processes.map((p) => `${p.kind}:${p.pid}${p.ambiguous ? '?' : ''}`).join(', ')}${s.processes.some((p) => p.ambiguous) ? '   (? = ambiguous match, may belong to another worktree)' : ''}`);
     }
     process.exit(0);
+  }
+
+  /*
+   * delegate / delegations / audit-delegation — the handoff as a contract.
+   *
+   * Records who assigned what to whom, from which SHA, with which files in and
+   * out of bounds. Stored beside the machine's own state rather than in the
+   * repository: it is coordination data, not project history.
+   *
+   * `audit-delegation` is the point of the whole thing -- it takes the files
+   * the delegate actually changed and COMPUTES whether the contract held,
+   * instead of a human reading a diff and remembering what was agreed.
+   */
+  if (cmd === 'delegate' || cmd === 'delegations' || cmd === 'audit-delegation') {
+    const { readDelegations, writeDelegations } = await import('../src/provenanceStore.mjs');
+    const P = await import('../src/provenance.mjs');
+    const all = await readDelegations();
+
+    if (cmd === 'delegations') {
+      if (args.json) { console.log(JSON.stringify(all, null, 2)); process.exit(0); }
+      if (!all.length) { console.log('no delegations recorded'); process.exit(0); }
+      for (const d of all) {
+        console.log(`${d.id}  [${d.state}]  ${d.assigning_session} -> ${d.assigned_session}`);
+        console.log(`  task     ${d.task}`);
+        console.log(`  base     ${d.base_sha}${d.head_sha ? `   head ${d.head_sha}` : ''}`);
+        if (d.allowed_paths.length) console.log(`  allowed  ${d.allowed_paths.join(', ')}`);
+        if (d.forbidden_paths.length) console.log(`  forbidden ${d.forbidden_paths.join(', ')}`);
+        if (d.audit) console.log(`  audit    ${d.audit.ok ? 'clean' : `${d.audit.violations.length} violation(s)`}`);
+      }
+      process.exit(0);
+    }
+
+    if (cmd === 'delegate') {
+      const rec = P.createDelegation({
+        id: args.id,
+        assigning_session: args.from,
+        assigned_session: args.to,
+        task: args.task,
+        lane_id: args.lane ?? null,
+        base_sha: args.base,
+        allowed_paths: split(args.allow),
+        forbidden_paths: split(args.forbid),
+        shared_paths: split(args.shared),
+        now: new Date().toISOString(),
+      });
+      const v = P.validateDelegation(rec);
+      if (!v.ok) { for (const e of v.errors) console.error(`  - ${e}`); process.exit(2); }
+      if (all.some((d) => d.id === rec.id)) { console.error(`delegation "${rec.id}" already exists`); process.exit(2); }
+      await writeDelegations([...all, rec]);
+      console.log(`recorded delegation ${rec.id}: ${rec.assigning_session} -> ${rec.assigned_session} from ${rec.base_sha.slice(0, 12)}`);
+      process.exit(0);
+    }
+
+    // audit-delegation --id <id> --head <sha> [--files a,b] [--accept|--reject]
+    const d = all.find((x) => x.id === args.id);
+    if (!d) { console.error(`no delegation "${args.id}"`); process.exit(2); }
+
+    let files = split(args.files);
+    if (!files.length) {
+      const head = args.head ?? d.head_sha;
+      if (!head) { console.error('need --head <sha> or --files'); process.exit(2); }
+      const { run } = await import('../src/exec.mjs');
+      const r = await run('git', ['diff', '--name-only', `${d.base_sha}..${head}`], { cwd: args.repo ?? process.cwd() });
+      if (!r.ok) { console.error(`cannot diff ${d.base_sha}..${head}: ${r.error}`); process.exit(2); }
+      files = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+
+    const result = P.auditChangedPaths(d, files);
+    if (args.json) console.log(JSON.stringify({ delegation: d.id, result }, null, 2));
+    else {
+      console.log(`audit ${d.id}: ${files.length} file(s) changed`);
+      for (const v of result.violations) console.log(`  VIOLATION  ${v.path}  (${v.reason}) — ${v.detail}`);
+      if (result.shared.length) console.log(`  shared touched: ${result.shared.join(', ')}`);
+      console.log(result.ok ? '  contract held' : `  ${result.violations.length} violation(s)`);
+    }
+    process.exit(result.ok ? 0 : 1);
   }
 
   /*
