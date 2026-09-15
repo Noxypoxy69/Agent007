@@ -720,6 +720,26 @@ try {
       process.exit(2);
     }
 
+    /*
+     * --interval IS VALIDATED HERE, BEFORE ANYTHING IS PUBLISHED.
+     *
+     * It used to be checked inside the `if (args.watch)` block further down --
+     * which runs AFTER the first beat() has already posted the registration.
+     * So `--watch --interval 1` published the row, refused, and then called
+     * process.exit(2) on a process that had just done a fetch: the same libuv
+     * assertion as the success path, turning a refusal into exit 127 and
+     * leaving a published registration that nothing was going to refresh.
+     *
+     * A refusal must happen before the work, not after it. This was found by
+     * the structural gate in test/registerSessionExit.test.mjs on the day it
+     * was written, in code that had already been reviewed for exactly this.
+     */
+    const everyMs = Number(args.interval ?? 120) * 1000;
+    if (args.watch && (!Number.isFinite(everyMs) || everyMs < 5000)) {
+      console.error('error: --interval must be at least 5 seconds');
+      process.exit(2);
+    }
+
     const { resolveCommit } = await import('../src/git.mjs');
     const cwd = args.repo ?? process.cwd();
     const g = await resolveCommit(cwd, 'HEAD');
@@ -802,17 +822,40 @@ try {
      * timing problem.
      */
     if (args.watch) {
-      const everyMs = Number(args.interval ?? 120) * 1000;
-      if (!Number.isFinite(everyMs) || everyMs < 5000) {
-        console.error('error: --interval must be at least 5 seconds');
-        process.exit(2);
-      }
+      // everyMs was validated before the first publish — see the note there.
       console.log(`  watch    refreshing every ${everyMs / 1000}s (stale after 600s); Ctrl-C to stop`);
 
+      /*
+       * UNPARKING IS THE EXIT. There is no process.exit() on this path.
+       *
+       * stop() ends with a publishRegistration -- a fetch -- and exiting
+       * explicitly after a fetch is the libuv assertion documented at the top
+       * of this file. Ctrl-C therefore CRASHED instead of deregistering, which
+       * is what made "clean shutdown" untestable: the one path whose entire job
+       * is to say "I am going away" was the one path that died before it could
+       * finish saying it, so a worker stopped deliberately left exactly the
+       * same trace as a worker that was killed.
+       *
+       * So stop() clears the timer and resolves the park promise. Control
+       * returns to the bottom of this block and leaves through the same
+       * closeHttp() + natural exit as every other outcome here.
+       */
       let stopping = false;
+      let timer = null;
+      let unpark;
+      const parked = new Promise((resolve) => { unpark = resolve; });
+
       const stop = async () => {
         if (stopping) return;
         stopping = true;
+        /*
+         * STOP BEATING FIRST. A heartbeat landing between the removal below and
+         * the exit would re-register the session that was just removed, and the
+         * worker would then age out ten minutes later looking as though it had
+         * died rather than stopped -- the exact confusion deregistering exists
+         * to prevent.
+         */
+        clearInterval(timer);
         // A clean shutdown DEREGISTERS rather than waiting to age out. Ten
         // minutes of a dead worker looking idle is ten minutes of contracts
         // addressed to nobody.
@@ -821,7 +864,7 @@ try {
           await H.publishRegistration(process.env, { ...row, capacity: 'offline' });
         } catch { /* best effort */ }
         console.log(`\nunregistered ${row.session_id}`);
-        process.exit(0);
+        unpark();
       };
       process.on('SIGINT', stop);
       process.on('SIGTERM', stop);
@@ -840,15 +883,15 @@ try {
        * the flag itself, and it was invisible until somebody actually ran it
        * for longer than one interval.
        */
-      setInterval(async () => {
+      timer = setInterval(async () => {
         const r = await beat(capacity);
         if (r.state !== H.HOSTED.OK && r.state !== H.HOSTED.NOT_CONFIGURED) {
           console.error(`  heartbeat: hosted unreachable (${r.detail})`);
         }
       }, everyMs);
       /*
-       * PARK HERE FOREVER. Two separate things are needed and BOTH were got
-       * wrong once, each in a way that looked like it worked:
+       * PARK HERE UNTIL stop(). Three separate things are needed and ALL THREE
+       * were got wrong once, each in a way that looked like it worked:
        *
        *   the ref'd interval   keeps the event loop alive. Unref'ing it made
        *                        node exit immediately with "Detected unsettled
@@ -861,15 +904,37 @@ try {
        *                        level; dropping it entirely sent the process on
        *                        to the unknown-command handler, which printed
        *                        the help text and exited 2.
+       *   it must SETTLE       this was `new Promise(() => {})`, which cannot.
+       *                        That forced stop() to end in process.exit(), and
+       *                        exiting after stop()'s fetch is the crash. An
+       *                        unresolvable park and a clean shutdown are not
+       *                        compatible; the park has to have a way out.
        *
-       * Neither failure is visible in under one interval, which is why this is
-       * the one flag in the CLI that had to be run for real rather than
+       * None of the three is visible in under one interval, which is why this
+       * is the one flag in the CLI that had to be run for real rather than
        * reasoned about.
        */
-      await new Promise(() => {});
+      await parked;
     }
 
-    process.exit(0);
+    /*
+     * THE ONLY EXIT FROM THIS COMMAND, AND IT IS NOT process.exit().
+     *
+     * Both paths here have just published over HTTP: the one-shot through
+     * beat(), the --watch through stop(). undici keeps a global dispatcher with
+     * pooled sockets, and calling process.exit() while it still holds handles
+     * trips the assertion documented in src/hostedRegistry.mjs:
+     *
+     *   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c:94
+     *
+     * So register-session printed its correct output and then died nonzero, and
+     * every caller checking an exit code saw a failure that had not happened.
+     * closeHttp() drains the pool, the handled flag stops execution falling
+     * through to the unknown-command handler, and node then exits naturally
+     * with 0 -- the same shape workers uses, for the same reason.
+     */
+    await H.closeHttp();
+    handled = true;
   }
 
   /*
