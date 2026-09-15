@@ -43,18 +43,28 @@ DATA_PLANE_URL = "https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp"
 binding = "OAUTH"
 id = "ca7371ea5ae946e6bf2b9607d70b3b18"
 
-# THE DISPATCHER TICK.
+# THE DISPATCHER TICK NO LONGER LIVES HERE.
 #
-# Every minute the Worker asks the data plane to prepare proposals. One minute
-# is the finest granularity Cron Triggers offer and it is plenty: /wait already
-# gives a waiting worker a sub-two-second wake-up, so this cadence bounds how
-# stale the COORDINATOR's view is, not how fast work starts.
+# This Worker carried `crons = ["* * * * *"]` from 14:25:35 UTC on 2026-09-15.
+# It fired ZERO times in the 95 minutes that followed, confirmed three ways: a
+# connected `wrangler tail` that captured a positive-control GET but never a
+# scheduled event, the analytics API reporting 0 invocations across windows that
+# should have held ~95, and an empty proposals table. The trigger was read back
+# from the Cloudflare API as registered, `scheduled()` was present in the
+# deployed bundle, all three secrets were bound at runtime, and calling
+# /dispatch by hand with the same token returned 200 and wrote a proposal. The
+# fault was never on this side, so the schedule moved rather than being debugged
+# further.
 #
-# It carries BRIDGE_DISPATCHER_TOKEN, which opens exactly one endpoint and
-# cannot assign anything. That is the owner's "prepare, do not decide" ruling
-# enforced by capability rather than by the dispatcher's good behaviour.
-[triggers]
-crons = ["* * * * *"]
+# It now runs as pg_cron inside the Agent Bridge Supabase project, which is
+# where the data plane already lives -- see the migrations
+# `the_scheduler_moves_into_the_database`,
+# `dispatch_tick_reads_its_token_from_the_vault` and
+# `the_pg_cron_dispatcher_mints_its_own_token`.
+#
+# DO NOT ADD A CRON BACK HERE. Two schedulers would each supersede the other's
+# open proposal set every minute, and `open` would stop meaning "what the
+# dispatcher thinks now".
 
 # Uploaded out of band, never committed:
 #   npx wrangler secret put BRIDGE_READER_TOKEN
@@ -65,3 +75,13 @@ crons = ["* * * * *"]
 # than falling back to the reader -- a silent downgrade would surface as write
 # tools missing from tools/list, which is the exact symptom the scope-aware
 # forwarding was written to eliminate.
+
+# THE EMPTY SET IS DECLARED, NOT IMPLIED.
+#
+# Deleting the [triggers] block is NOT enough: `wrangler deploy` with no
+# triggers section leaves whatever crons are already registered untouched, and
+# the `* * * * *` from 14:25 survived two deploys that way. An empty list is the
+# only thing that actually removes them, and it also states the intent loudly
+# enough that a future deploy cannot quietly resurrect a second scheduler.
+[triggers]
+crons = []
