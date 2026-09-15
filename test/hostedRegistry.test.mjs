@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  fetchHostedRegistrations, mergeRegistrations, hostedConfig, HOSTED,
+  fetchHostedRegistrations, mergeRegistrations, readerConfig, registrationConfig, HOSTED,
 } from '../src/hostedRegistry.mjs';
 import { registryFromSessions, isLive } from '../src/liveRegistry.mjs';
 import { resolveWorker } from '../src/laneRegistry.mjs';
@@ -52,10 +52,34 @@ const okFetch = (rows) => stubFetch(async () => ({
   ok: true, status: 200, json: async () => mcpEnvelope(rows),
 }));
 
+test('NO WORKER CREDENTIAL IS A DATABASE KEY', async () => {
+  /*
+   * The two things a worker may hold, and neither is a Supabase key.
+   *
+   * Written after a worker read an error message naming AGENTBRIDGE_SUPABASE_KEY
+   * and correctly refused to go and find one. The variable was read by an
+   * orphaned hostedConfig() that nothing called any more, so its only remaining
+   * effect was to tell people to install a production credential. Deleted; this
+   * asserts it stays deleted.
+   */
+  const src = await (await import('node:fs/promises'))
+    .readFile(new URL('../src/hostedRegistry.mjs', import.meta.url), 'utf8');
+
+  // Named only inside the comment explaining the deletion, never read.
+  assert.doesNotMatch(src, /env\.AGENTBRIDGE_SUPABASE_KEY/,
+    'a worker credential path is reading a database key again');
+  assert.doesNotMatch(src, /env\.AGENTBRIDGE_SUPABASE_URL/,
+    'a worker credential path is reading a database URL again');
+
+  assert.equal(registrationConfig({}), null);
+  assert.ok(registrationConfig({ AGENTBRIDGE_REGISTRATION_TOKEN: 'abw_x'.repeat(8) }));
+  assert.ok(readerConfig({ AGENTBRIDGE_READER_TOKEN: 'abr_x'.repeat(8) }));
+});
+
 test('not configured is NOT the same as unreachable', async () => {
   // The distinction the whole module turns on. Local-only operation is honest;
   // a configured-and-failing registry is a refusal.
-  assert.equal(hostedConfig({}), null);
+  assert.equal(readerConfig({}), null);
   const r = await fetchHostedRegistrations({}, { fetchImpl: okFetch([]) });
   assert.equal(r.state, HOSTED.NOT_CONFIGURED);
 });

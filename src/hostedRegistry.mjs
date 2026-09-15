@@ -59,11 +59,25 @@ export const HOSTED = {
   MALFORMED: 'malformed',
 };
 
-export function hostedConfig(env = {}) {
-  const url = String(env.AGENTBRIDGE_SUPABASE_URL ?? '').replace(/\/+$/, '');
-  const key = env.AGENTBRIDGE_SUPABASE_KEY ?? '';
-  return url && key ? { url, key } : null;
-}
+/*
+ * hostedConfig() USED TO LIVE HERE AND IS DELETED ON PURPOSE.
+ *
+ * It read AGENTBRIDGE_SUPABASE_URL and AGENTBRIDGE_SUPABASE_KEY, and once the
+ * read path moved to a reader token and the write path to a registration token,
+ * nothing called it. It survived as an orphan whose only remaining effect was
+ * to ADVERTISE a requirement that no longer existed: a worker reading this file
+ * would conclude it needed a database key, and the error message that named
+ * those variables was, as c8 put it, an instruction to go and find one.
+ *
+ * An orphan that tells people to install a production credential is worse than
+ * an orphan. Deleted rather than deprecated, so the wrong answer cannot be
+ * copied from it.
+ *
+ *   read  -> readerConfig()        AGENTBRIDGE_READER_TOKEN
+ *   write -> registrationConfig()  AGENTBRIDGE_REGISTRATION_TOKEN
+ *
+ * Neither is a database key, and no worker machine holds one.
+ */
 
 /**
  * Where a worker PUBLISHES its own liveness.
