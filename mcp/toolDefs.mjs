@@ -83,8 +83,23 @@ export function toolDefs(store) {
       title: 'List agents',
       description: 'All registered agents with lane, branch, HEAD, and staleness. Start here.',
       input: obj(),
+      /*
+       * sessionId, repoId, worktree and capacity are projected here so this one
+       * tool answers the whole "who is running and where" question. They were
+       * absent, which forced `agentbridge workers` to read the database
+       * directly with a service key to get facts this tool already had -- and
+       * that key is the thing the registration write path exists to eliminate.
+       *
+       * A worker on a machine that has not adopted session registration reports
+       * null for these rather than being hidden: unknown and absent are
+       * different answers.
+       */
       run: async () => jsonResult((await listSessions()).map((s) => ({
         agentId: s.agentId, lane: s.lane, machine: s.machineLabel,
+        sessionId: s.sessionId ?? null,
+        repoId: s.repoId ?? null,
+        worktree: s.worktree ?? null,
+        capacity: s.capacity ?? null,
         branch: s.git?.branch ?? null, head: s.git?.head ?? null,
         baseSha: s.git?.baseSha ?? null,
         unpushed: s.git?.unpushed ?? null,

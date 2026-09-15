@@ -381,6 +381,10 @@ export function toolDefs(store) {
       input: obj(),
       run: async () => jsonResult((await listSessions()).map((s) => ({
         agentId: s.agentId, lane: s.lane, machine: s.machineLabel,
+        sessionId: s.sessionId ?? null,
+        repoId: s.repoId ?? null,
+        worktree: s.worktree ?? null,
+        capacity: s.capacity ?? null,
         branch: s.git?.branch ?? null, head: s.git?.head ?? null,
         baseSha: s.git?.baseSha ?? null,
         unpushed: s.git?.unpushed ?? null,

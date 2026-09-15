@@ -19,30 +19,38 @@ import { createLeadWork, appendLeadWork, leadWorkFor } from '../src/leadWork.mjs
 const NOW = '2026-09-15T12:00:00.000Z';
 const ago = (ms) => new Date(Date.parse(NOW) - ms).toISOString();
 
-const ENV = {
-  AGENTBRIDGE_SUPABASE_URL: 'https://ornbhvaijcpsbcgquzhd.supabase.co',
-  AGENTBRIDGE_SUPABASE_KEY: 'k'.repeat(40),
-};
+/*
+ * The hosted roster is now read through the MCP surface with a READER token,
+ * not from PostgREST with a service key. That change is the point: a machine no
+ * longer needs a full database credential to see who is running.
+ */
+const ENV = { AGENTBRIDGE_READER_TOKEN: 'abr_' + 'k'.repeat(40) };
 
-/** A hosted row exactly as the view returns it. */
+/** A row exactly as the `list_agents` tool returns it. */
 const hostedRow = (over = {}) => ({
-  session_id: 'sess-remote',
-  agent_id: 'code-d',
-  machine_id: '22222222-2222-4222-8222-222222222222',
-  repo_id: 'agentbridge-d',
-  worktree_id: 'agentbridge-d',
-  lane_id: 'agentbridge',
+  agentId: 'code-d',
+  sessionId: 'sess-remote',
+  machine: '22222222-2222-4222-8222-222222222222',
+  repoId: 'agentbridge-d',
+  worktree: 'agentbridge-d',
+  lane: 'agentbridge',
   capacity: 'idle',
-  head_sha: 'b'.repeat(40),
-  verification_state: 'runtime-self-registration',
-  heartbeat_at: ago(30_000),
-  created_at: ago(600_000),
-  updated_at: ago(30_000),
+  head: 'b'.repeat(40),
+  lastSeenAt: ago(30_000),
   ...over,
 });
 
+/** Wrap rows in the MCP tool-result envelope the endpoint actually returns. */
+const mcpEnvelope = (rows) => ({
+  jsonrpc: '2.0',
+  id: 1,
+  result: { content: [{ type: 'text', text: JSON.stringify(rows) }] },
+});
+
 const stubFetch = (impl) => impl;
-const okFetch = (rows) => stubFetch(async () => ({ ok: true, status: 200, json: async () => rows }));
+const okFetch = (rows) => stubFetch(async () => ({
+  ok: true, status: 200, json: async () => mcpEnvelope(rows),
+}));
 
 test('not configured is NOT the same as unreachable', async () => {
   // The distinction the whole module turns on. Local-only operation is honest;
@@ -69,7 +77,7 @@ test('a cross-machine delegation RESOLVES against hosted registrations', async (
 });
 
 test('a STALE remote registration refuses', async () => {
-  const stale = hostedRow({ heartbeat_at: ago(60 * 60 * 1000) });
+  const stale = hostedRow({ lastSeenAt: ago(60 * 60 * 1000) });
   const { rows } = await fetchHostedRegistrations(ENV, { fetchImpl: okFetch([stale]) });
   assert.equal(isLive(rows[0], { now: NOW }), false);
 
@@ -80,8 +88,8 @@ test('a STALE remote registration refuses', async () => {
 });
 
 test('DUPLICATE live sessions for one agent refuse as ambiguous, across machines', async () => {
-  const a = hostedRow({ session_id: 'sess-a' });
-  const b = hostedRow({ session_id: 'sess-b', machine_id: '33333333-3333-4333-8333-333333333333' });
+  const a = hostedRow({ sessionId: 'sess-a' });
+  const b = hostedRow({ sessionId: 'sess-b', machine: '33333333-3333-4333-8333-333333333333' });
   const { rows } = await fetchHostedRegistrations(ENV, { fetchImpl: okFetch([a, b]) });
 
   const r = resolveWorker(registryFromSessions(rows, { now: NOW }), { agent_id: 'code-d' });

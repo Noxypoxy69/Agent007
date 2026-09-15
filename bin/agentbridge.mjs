@@ -131,6 +131,25 @@ async function loadLaneRegistry(explicitFile) {
 const cmd = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
 
+/*
+ * A COMMAND THAT MUST NOT CALL process.exit().
+ *
+ * On node 24 / Windows, calling process.exit() after a `fetch` trips a libuv
+ * assertion and kills the process with 127:
+ *
+ *   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c:94
+ *
+ * The command prints the right answer and then dies, so anything reading the
+ * exit code sees a failure that did not happen. Reproduced in four lines
+ * outside this project, so it is node's, not ours. Exiting NATURALLY is clean.
+ *
+ * Every other branch still exits explicitly, which is fine because none of them
+ * opens a socket. A branch that does sets this flag instead, and the
+ * unknown-command handler at the bottom honours it -- `return` is not available
+ * here, this being module top level rather than a function body.
+ */
+let handled = false;
+
 try {
   if (!cmd || cmd === 'help' || args.help) { console.log(HELP); process.exit(0); }
 
@@ -1358,26 +1377,39 @@ try {
           ...w,
           sessions: (w.sessions ?? []).map((s) => ({ ...s, origin: originOf.get(s.session_id) ?? 'local' })),
         })), null, 2));
-        process.exit(0);
-      }
-      if (!roster.length) {
+      } else if (!roster.length) {
         console.log('no workers registered');
         console.log('  workers register with: agentbridge register-session --agent <a> --session <s> --watch');
-        process.exit(0);
-      }
-      for (const w of roster) {
-        const sessions = w.sessions ?? [];
-        console.log(`${w.agent_id}  ${sessions.length ? '' : '(no live session)'}`);
-        for (const s of sessions) {
-          // local vs hosted stays visible: the second is a claim another
-          // machine can check, the first is this machine talking about itself.
-          const origin = originOf.get(s.session_id) ?? 'local';
-          console.log(`  ${s.session_id}  ${s.capacity ?? 'unknown'}  ${s.repo_id ?? '-'} / ${s.worktree_id ?? '-'}  [${origin}]`);
+      } else {
+        for (const w of roster) {
+          const sessions = w.sessions ?? [];
+          console.log(`${w.agent_id}  ${sessions.length ? '' : '(no live session)'}`);
+          for (const s of sessions) {
+            // local vs hosted stays visible: the second is a claim another
+            // machine can check, the first is this machine talking about itself.
+            const origin = originOf.get(s.session_id) ?? 'local';
+            console.log(`  ${s.session_id}  ${s.capacity ?? 'unknown'}  ${s.repo_id ?? '-'} / ${s.worktree_id ?? '-'}  [${origin}]`);
+          }
         }
       }
-      process.exit(0);
+      // NO process.exit() HERE. This branch has just made a fetch, and exiting
+      // explicitly after one trips a libuv assertion on Windows (see `handled`
+      // at the top). Exiting naturally is clean; the flag stops execution
+      // falling through to the unknown-command handler.
+      await H.closeHttp();
+      handled = true;
     }
 
+    /*
+     * The FILE-registry path, and it must be an `else`.
+     *
+     * The live branch above no longer calls process.exit(), so without this
+     * guard execution ran straight on into `registry.R` with registry null --
+     * the command printed the correct roster and then an error about reading a
+     * property of null. Removing an exit turns every following statement into a
+     * sequel to the branch that was supposed to be terminal.
+     */
+    if (!handled) {
     const roster = registry.R.workerRoster(registry.reg);
     if (args.json) { console.log(JSON.stringify(roster, null, 2)); process.exit(0); }
     if (!roster.length) { console.log('no workers registered'); process.exit(0); }
@@ -1390,6 +1422,7 @@ try {
       if (w.lanes?.length) console.log(`  lanes: ${w.lanes.join(', ')}`);
     }
     process.exit(0);
+    }
   }
 
   if (cmd === 'daemon') {
@@ -1398,7 +1431,10 @@ try {
     process.exit(0);
   }
 
-  console.error(`unknown command: ${cmd}\n`); console.log(HELP); process.exit(2);
+  // `handled` means a branch above finished its work and deliberately declined
+  // to call process.exit() — see the flag's declaration. Without this guard the
+  // command would print its answer and then its own help text.
+  if (!handled) { console.error(`unknown command: ${cmd}\n`); console.log(HELP); process.exit(2); }
 } catch (e) {
   console.error('error:', e.message);
   process.exit(1);

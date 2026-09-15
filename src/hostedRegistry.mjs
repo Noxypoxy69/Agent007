@@ -26,6 +26,31 @@
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
+/**
+ * Release node's HTTP connection pool before the process exits.
+ *
+ * WHY THIS EXISTS. `fetch` is undici, which keeps a global dispatcher with
+ * pooled sockets. A CLI calls process.exit() the instant it has printed, and on
+ * Windows exiting while that pool still holds handles trips a libuv assertion:
+ *
+ *   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c:94
+ *
+ * The command printed the correct answer and then died with exit 127, so every
+ * caller checking an exit code saw a failure that had not happened. Setting
+ * `connection: close` on the request is not sufficient -- the dispatcher itself
+ * is the handle.
+ *
+ * Awaiting close() drains it properly. Failures are swallowed on purpose: this
+ * runs on the way out, and a tidy-up that can fail a command is worse than the
+ * untidiness it prevents.
+ */
+export async function closeHttp() {
+  try {
+    const dispatcher = globalThis[Symbol.for('undici.globalDispatcher.1')];
+    if (dispatcher && typeof dispatcher.close === 'function') await dispatcher.close();
+  } catch { /* exiting anyway */ }
+}
+
 /** Distinguishable outcomes. `unreachable` must never be treated as `absent`. */
 export const HOSTED = {
   NOT_CONFIGURED: 'not-configured',
@@ -71,8 +96,28 @@ export function registrationConfig(env = {}) {
  *
  * @returns {{state: string, rows?: Array, detail?: string}}
  */
+/**
+ * Where a client READS the hosted roster.
+ *
+ * Through the MCP surface with a READER token -- the same credential and the
+ * same endpoint ChatGPT uses. The previous version queried PostgREST directly
+ * with the service key, which meant `agentbridge workers` could only see hosted
+ * state on a machine holding a full database credential. That is exactly the
+ * key the registration write path exists to eliminate, so reading it back
+ * through the front door removes the last reason to have one locally.
+ */
+export function readerConfig(env = {}) {
+  const token = env.AGENTBRIDGE_READER_TOKEN ?? '';
+  if (!token) return null;
+  const url = String(
+    env.AGENTBRIDGE_MCP_URL
+    ?? 'https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp',
+  );
+  return { url, token };
+}
+
 export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const cfg = hostedConfig(env);
+  const cfg = readerConfig(env);
   if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
 
   const doFetch = fetchImpl ?? globalThis.fetch;
@@ -83,30 +128,76 @@ export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs 
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await doFetch(`${cfg.url}/rest/v1/session_registrations?select=*`, {
-      method: 'GET',
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
       signal: ac.signal,
       headers: {
-        apikey: cfg.key,
-        authorization: `Bearer ${cfg.key}`,
-        accept: 'application/json',
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        // DO NOT POOL THIS SOCKET. A CLI process calls process.exit() the
+        // instant it has printed, and on Windows exiting while undici holds a
+        // keep-alive socket trips a libuv assertion in async.c -- the command
+        // printed the right answer and then died with exit 127, so anything
+        // checking the exit code saw a failure. A short-lived command has
+        // nothing to gain from connection reuse anyway.
+        connection: 'close',
       },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'list_agents', arguments: {} },
+      }),
     });
+    if (res.status === 401) {
+      // A rejected credential is not an unreachable service. Collapsing them
+      // has somebody restarting a network they cannot fix instead of rotating
+      // a token they can.
+      return { state: HOSTED.UNREACHABLE, detail: 'reader token rejected (401)' };
+    }
     if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
 
     const body = await res.json();
+    const text = body?.result?.content?.[0]?.text;
+    if (typeof text !== 'string') {
+      return { state: HOSTED.MALFORMED, detail: 'no tool result in the response' };
+    }
+
+    let rows;
+    try { rows = JSON.parse(text); } catch { rows = null; }
     // Not an array is MALFORMED, not empty. An empty array is a real and calm
     // answer ("nobody is registered"); a malformed body is a broken dependency,
     // and rendering the two identically is how an outage becomes "no workers".
-    if (!Array.isArray(body)) return { state: HOSTED.MALFORMED, detail: 'response was not an array' };
+    if (!Array.isArray(rows)) return { state: HOSTED.MALFORMED, detail: 'tool result was not an array' };
 
-    return { state: HOSTED.OK, rows: body.map(toRegistration) };
+    return { state: HOSTED.OK, rows: rows.map(fromToolResult) };
   } catch (e) {
     if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
     return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Shape a list_agents row like a local registration.
+ *
+ * `origin: 'hosted'` is added rather than folded in: a local-only registration
+ * and a hosted one must stay distinguishable, because the second is a claim
+ * another machine can check and the first is not.
+ */
+function fromToolResult(r) {
+  return {
+    session_id: r?.sessionId ?? null,
+    agent_id: r?.agentId ?? null,
+    machine_id: r?.machine ?? null,
+    repo_id: r?.repoId ?? null,
+    worktree_id: r?.worktree ?? null,
+    lane_id: r?.lane ?? null,
+    capacity: r?.capacity ?? 'idle',
+    head_sha: r?.head ?? null,
+    verification: 'runtime-self-registration',
+    heartbeat_at: r?.lastSeenAt ?? null,
+    origin: 'hosted',
+  };
 }
 
 /**
@@ -158,6 +249,10 @@ export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs 
       headers: {
         authorization: `Bearer ${cfg.token}`,
         'content-type': 'application/json',
+        // See fetchHostedRegistrations: a pooled socket outliving process.exit()
+        // trips a libuv assertion on Windows. --watch reuses nothing between
+        // heartbeats either, so there is no cost.
+        connection: 'close',
       },
       body: JSON.stringify(body),
     });
