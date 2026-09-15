@@ -33,6 +33,29 @@ import { HOSTED, publishRegistration } from '../src/hostedRegistry.mjs';
  * as the reviewer-lease columns that nothing wrote.
  */
 
+/*
+ * ═══ WHAT THIS FILE CANNOT CATCH, STATED SO NOBODY INFERS OTHERWISE ═══
+ *
+ * These tests point at a LOOPBACK bridge. The libuv assertion that turns a
+ * refusal into exit 127 --
+ *
+ *   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\winsync.c:94
+ *
+ * -- was measured in this repo as reproducing against a REAL REMOTE endpoint
+ * and NOT against loopback, TLS-to-localhost, or a local server. See the note
+ * on the Done class in bin/agentbridge.mjs.
+ *
+ * So the assertions below catch the sentinel LEAKING (`error: done:`) and the
+ * wrong exit code, both of which reproduce anywhere. They cannot catch a
+ * regression that reintroduces process.exit() while still converting Done:
+ * mutating the boundary to `process.exit(e.exitCode)` leaves this file GREEN,
+ * because loopback does not trip the assertion.
+ *
+ * That gap is real and it is why b6's live probe is load-bearing rather than a
+ * duplicate of this file. A hermetic suite cannot reach it. Anyone changing the
+ * exit discipline should re-probe against the live Bridge, not trust this.
+ */
+
 const here = dirname(fileURLToPath(import.meta.url));
 const CLI = join(here, '..', 'bin', 'agentbridge.mjs');
 
@@ -139,7 +162,7 @@ async function runCli(t, args, env, home = null) {
   });
 }
 
-test('A REFUSED REGISTRATION EXITS NON-ZERO', async (t) => {
+test('A REFUSED REGISTRATION EXITS EXACTLY 1, CLEANLY', async (t) => {
   /*
    * THE test, and the one b6's finding is actually about. Everything else here
    * is about wording; this is the line a script reads.
@@ -152,8 +175,24 @@ test('A REFUSED REGISTRATION EXITS NON-ZERO', async (t) => {
     AGENTBRIDGE_REGISTRATION_TOKEN: 'x'.repeat(24),
   });
 
-  assert.notEqual(r.code, 0,
-    'a registration the Bridge refused reported success to every caller that cannot read English');
+  /*
+   * EXACTLY 1, AND CLEANLY. `notEqual(0)` is what this asserted first, and it
+   * passed on 127 -- which is what the process actually returned, because the
+   * Done sentinel escaped to the outer catch, got printed as `error: done:1`,
+   * and then hit process.exit() after a fetch and died on the libuv assertion.
+   *
+   * 127 is the shell's conventional "command not found". A caller branching on
+   * the exit code could not tell a refused credential from a missing binary,
+   * and the operator this path prints a careful message for would be sent to
+   * check their PATH. Found by b6 probing live; the weaker assertion is why my
+   * own suite did not.
+   */
+  assert.equal(r.code, 1,
+    `a refused registration must exit exactly 1, got ${r.code} (127 means it crashed)`);
+  assert.doesNotMatch(r.err, /error: done:/,
+    'the Done sentinel leaked to the user as a fault message');
+  assert.doesNotMatch(r.err, /Assertion failed/,
+    'the process died on the libuv assertion instead of exiting cleanly');
   assert.match(`${r.out}${r.err}`, /REJECTED/,
     'the refusal must be named as a refusal, not as a network problem');
 });
@@ -190,6 +229,8 @@ test('NOT CONFIGURED still exits 0 — local-only is a chosen mode, not a failur
   ], { AGENTBRIDGE_REGISTER_URL: '', AGENTBRIDGE_REGISTRATION_TOKEN: '' });
 
   assert.equal(r.code, 0, 'running without a hosted token is legitimate and must not fail');
+  assert.doesNotMatch(r.err, /error: done:|Assertion failed/,
+    'the success path must exit cleanly too, or the refusal assertions prove nothing specific');
   assert.match(`${r.out}${r.err}`, /NOT CONFIGURED/);
 });
 
@@ -229,12 +270,14 @@ async function registerThenDeregister(t, base, session) {
   return { ...un, all };
 }
 
-test('A REFUSED DEREGISTRATION EXITS NON-ZERO', async (t) => {
+test('A REFUSED DEREGISTRATION EXITS EXACTLY 1, CLEANLY', async (t) => {
   const { base } = await refusingBridge(t);
   const r = await registerThenDeregister(t, base, 'probe-y-1');
 
-  assert.notEqual(r.code, 0,
-    'a deregistration the Bridge refused exited 0, leaving a session other machines still believe is alive');
+  assert.equal(r.code, 1,
+    `a refused deregistration must exit exactly 1, got ${r.code} (127 means it crashed)`);
+  assert.doesNotMatch(r.err, /error: done:|Assertion failed/,
+    'the refusal path crashed rather than exiting');
   assert.match(r.all, /REJECTED/i);
 });
 

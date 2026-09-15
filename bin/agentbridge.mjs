@@ -2056,6 +2056,37 @@ try {
   // command would print its answer and then its own help text.
   if (!handled) { console.error(`unknown command: ${cmd}\n`); console.log(HELP); process.exit(2); }
 } catch (e) {
-  console.error('error:', e.message);
-  process.exit(1);
+  /*
+   * THE OUTER BOUNDARY DID NOT KNOW ABOUT Done, AND THAT UNDID THE WHOLE
+   * MECHANISM.
+   *
+   * Found by b6 probing live. A refused registration exited 127 -- the shell's
+   * conventional "command not found" -- with `error: done:1` on stderr. Two
+   * failures from one cause:
+   *
+   *   Done is an internal control-flow sentinel. This catch printed it to the
+   *   operator as though it were a fault message.
+   *
+   *   It then called process.exit() -- the exact call the sentinel exists to
+   *   avoid. After a fetch on node 24 / Windows that trips the libuv assertion
+   *   documented at the Done class, and the process dies at 127. So a caller
+   *   branching on the exit code could not tell a refused credential from a
+   *   missing binary, and the operator this path prints a careful message for
+   *   was sent to check their PATH.
+   *
+   * The inner boundary around the delegation commands got this right. This one
+   * never did, so every done() outside that block -- including ones that
+   * predate the refusal path -- has been landing here. b6's finding made it
+   * reachable on a common path rather than creating it.
+   *
+   * NOTHING HERE CALLS process.exit(). Setting exitCode and letting the module
+   * end lets node drain its handles, which is the entire reason Done throws
+   * instead of exiting.
+   */
+  if (e instanceof Done) {
+    process.exitCode = e.exitCode;
+  } else {
+    console.error('error:', e.message);
+    process.exitCode = 1;
+  }
 }
