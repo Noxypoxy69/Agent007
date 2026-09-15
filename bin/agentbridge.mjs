@@ -42,6 +42,13 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         work only, or --all for its whole history
   agentbridge audit-delegation --id <id> [--head <sha>] [--files a,b] [--repo <dir>]
                                         exit 1 if the delegate went outside the contract
+                                        [--record] persists the verdict onto the contract,
+                                        which is what may-integrate later reads
+  agentbridge delegation-state --id <id> --to returned|accepted|rejected|withdrawn
+             [--head <sha>]             drive the contract lifecycle. returning requires
+                                        the head SHA of the delivered work
+  agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
+                                        recorded audit held. both, not either
   agentbridge workers [--registry-file <f>] [--json]
                                         the worker pool: agents, their live
                                         sessions, where each is, and capacity
