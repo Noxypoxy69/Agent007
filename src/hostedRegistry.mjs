@@ -84,6 +84,65 @@ export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs 
 }
 
 /**
+ * Publish this session's registration.
+ *
+ * WHAT IS SENT AND WHAT IS NOT. heartbeat_at, created_at and updated_at are
+ * deliberately absent from the body: the database stamps them in a trigger, and
+ * sending them would be sending a value the server is about to discard. That is
+ * not merely redundant -- a caller who believes its timestamp matters will
+ * eventually be written to depend on it.
+ *
+ * Returns the same state vocabulary as the read path, so a caller never has to
+ * tell an outage from a misconfiguration by inspecting an error string.
+ */
+export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = hostedConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') {
+    return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+  }
+
+  const body = {
+    session_id: row.session_id,
+    agent_id: row.agent_id,
+    machine_id: row.machine_id,
+    repo_id: row.repo_id ?? null,
+    worktree_id: row.worktree_id ?? null,
+    lane_id: row.lane_id ?? null,
+    capacity: row.capacity ?? 'idle',
+    head_sha: row.head_sha ?? null,
+    verification_state: 'runtime-self-registration',
+  };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(`${cfg.url}/rest/v1/session_registrations?on_conflict=session_id`, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        apikey: cfg.key,
+        authorization: `Bearer ${cfg.key}`,
+        'content-type': 'application/json',
+        // Upsert on session_id: a heartbeat REPLACES this session's row and
+        // touches nobody else's.
+        prefer: 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+    return { state: HOSTED.OK };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Shape a hosted row like a local registration, so src/liveRegistry.mjs can
  * consume both without caring where a worker came from.
  *

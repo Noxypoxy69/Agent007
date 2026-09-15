@@ -71,3 +71,12 @@ export const writeDecisions = (rows) => writeJsonArray(DECISIONS(), rows);
 const MEASUREMENTS = () => path.join(HOME, 'tokenMeasurements.json');
 export const readMeasurements = () => readJsonArray(MEASUREMENTS());
 export const writeMeasurements = (rows) => writeJsonArray(MEASUREMENTS(), rows);
+
+/*
+ * Lead work: provenance for work the integrator did directly. Append-only, and
+ * a peer of the delegation ledger rather than a variant of it -- self-work is
+ * first-class provenance, not a handoff with the names filled in wrong.
+ */
+const LEAD_WORK = () => path.join(HOME, 'leadWork.json');
+export const readLeadWork = () => readJsonArray(LEAD_WORK());
+export const writeLeadWork = (rows) => writeJsonArray(LEAD_WORK(), rows);

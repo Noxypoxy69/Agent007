@@ -211,10 +211,26 @@ test('workers: prints the pool, so capacity is read from state not from folders'
   assert.deepEqual(z.sessions, []);
 });
 
-test('workers: with no registry it refuses rather than printing an empty pool', async (t) => {
-  // "No workers" and "I cannot see the workers" must not render the same.
+test('workers: an empty LIVE registry is a real answer, not a blind one', async (t) => {
+  /*
+   * THE SOURCE OF TRUTH CHANGED, SO THIS TEST'S MEANING DID.
+   *
+   * It used to assert that `workers` refuses when no lane FILE is configured,
+   * because a missing file meant the command could not see anything. Now the
+   * pool comes from runtime self-registration, and an empty registry is a
+   * genuine, checkable fact: nobody has registered.
+   *
+   * The original intent -- "no workers" and "I cannot see the workers" must not
+   * render the same -- is unchanged and now lives where the blindness actually
+   * occurs: a hosted registry that is configured and failing still exits 2
+   * rather than printing a partial pool. That is asserted in
+   * test/hostedRegistry.test.mjs and in the delegate path.
+   */
   const { repo, env } = await fixture(t, null);
   const r = await run(['workers'], env, repo);
-  assert.equal(r.code, 2);
-  assert.match(r.stderr, /no lane registry configured/);
+  assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /no workers registered/);
+  // And it must say how to fix that, rather than leaving an empty pool to be
+  // read as a broken tool.
+  assert.match(r.stdout, /register-session/);
 });

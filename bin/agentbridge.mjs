@@ -51,11 +51,20 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         recorded audit held. both, not either
   agentbridge register-session --agent <agent_id> --session <session_id>
              [--lane <l>] [--capacity idle|busy|blocked|offline] [--repo <dir>]
-                                        SELF-REGISTER. repo, worktree and head are
-                                        DERIVED FROM GIT, never accepted as flags,
-                                        so a worker cannot claim to be elsewhere
+             [--watch] [--interval <seconds>]
+                                        SELF-REGISTER, locally AND hosted. repo,
+                                        worktree and head are DERIVED FROM GIT,
+                                        never flags; the server stamps the time.
+                                        --watch refreshes automatically so a live
+                                        session never ages out, and deregisters
+                                        on Ctrl-C
   agentbridge unregister-session --session <session_id>
                                         clean shutdown, rather than aging out
+  agentbridge lead-work --id <id> --agent <a> --session <s> --scope <text>
+             --base <commit-ish> [--head <commit-ish>] [--tests <t>] [--repo <dir>]
+  agentbridge lead-work [--json]        provenance for work nobody delegated.
+                                        self-work is first-class, NOT a contract
+                                        with the names filled in wrong
   agentbridge supersede --id <new> --supersedes <old> --reason <text>
              --replacement-task <id> [--replacement-head <sha>] [--repo <dir>]
                                         append a correction BESIDE a wrong record.
@@ -362,6 +371,25 @@ try {
         process.exit(2);
       }
 
+      /*
+       * HOSTED REGISTRATIONS JOIN THE ROSTER, AND AN OUTAGE REFUSES.
+       *
+       * If the hosted registry is configured and failing, this command stops.
+       * Carrying on with local state would silently downgrade a cross-machine
+       * target from verified to accepted-on-trust at exactly the moment nobody
+       * is watching, and would be indistinguishable from a machine that has no
+       * hosted project at all. Not-configured is fine and stays local-only.
+       */
+      const H = await import('../src/hostedRegistry.mjs');
+      const hosted = await H.fetchHostedRegistrations(process.env);
+      if (hosted.state === H.HOSTED.UNREACHABLE || hosted.state === H.HOSTED.MALFORMED) {
+        console.error(`error: the hosted registry is configured but ${hosted.state}: ${hosted.detail ?? ''}`);
+        console.error('       refusing rather than recording this target as unverified —');
+        console.error('       an outage must not quietly downgrade a verified delegation.');
+        process.exit(2);
+      }
+      if (hosted.state === H.HOSTED.OK) live = H.mergeRegistrations(live, hosted.rows);
+
       const liveReg = LR.registryFromSessions(live, { now: new Date().toISOString() });
       if (liveReg.sessions.length) {
         const R = await import('../src/laneRegistry.mjs');
@@ -622,10 +650,169 @@ try {
       verification: 'runtime-self-registration',
     };
 
-    await R.upsertRegistration(row);
+    const { loadConfig } = await import('../src/config.mjs');
+    const cfgForMachine = await loadConfig();
+    row.machine_id = cfgForMachine?.machineId ?? null;
+
+    const H = await import('../src/hostedRegistry.mjs');
+
+    /*
+     * ONE REGISTRATION, WRITTEN TO BOTH PLACES.
+     *
+     * Local answers "who is running on THIS machine" and works with no network.
+     * Hosted answers "is code-b alive on the OTHER machine", which is the
+     * question a cross-machine delegation actually asks and which local state
+     * can never answer.
+     *
+     * A hosted failure does NOT fail the command: the worker really is running,
+     * and refusing to record that locally because a network call failed would
+     * take a machine offline for a reason that has nothing to do with it. It is
+     * reported loudly instead, and the row keeps origin 'local' -- which is
+     * what stops it being mistaken for something another machine has confirmed.
+     */
+    async function beat(capacityNow) {
+      const r = { ...row, capacity: capacityNow, heartbeat_at: new Date().toISOString() };
+      await R.upsertRegistration(r);
+      const pub = await H.publishRegistration(process.env, r);
+      return pub;
+    }
+
+    const first = await beat(capacity);
     console.log(`registered ${row.agent_id} as session ${row.session_id}`);
     console.log(`  repo     ${row.repo_id} @ ${row.head_sha.slice(0, 12)}`);
     console.log(`  capacity ${row.capacity}${row.lane_id ? `   lane ${row.lane_id}` : ''}`);
+    if (first.state === H.HOSTED.OK) {
+      console.log('  hosted   published — other machines can resolve this session');
+    } else if (first.state === H.HOSTED.NOT_CONFIGURED) {
+      console.log('  hosted   NOT CONFIGURED — local only, not visible to other machines');
+      console.log('           set AGENTBRIDGE_SUPABASE_URL and AGENTBRIDGE_SUPABASE_KEY');
+    } else {
+      console.error(`  hosted   UNREACHABLE (${first.detail}) — registered LOCALLY ONLY`);
+    }
+
+    /*
+     * --watch: KEEP IT ALIVE WITHOUT A HUMAN.
+     *
+     * A registration that must be re-run by hand is a registration that goes
+     * stale the first time somebody is busy, and the whole staleness mechanism
+     * then reads as "this worker died" when it merely stopped being typed at.
+     *
+     * The interval is deliberately well inside the 10-minute window rather than
+     * near it: a refresh that lands at 9m59s on a slow network has already
+     * aged the worker out, and the failure looks like flapping rather than a
+     * timing problem.
+     */
+    if (args.watch) {
+      const everyMs = Number(args.interval ?? 120) * 1000;
+      if (!Number.isFinite(everyMs) || everyMs < 5000) {
+        console.error('error: --interval must be at least 5 seconds');
+        process.exit(2);
+      }
+      console.log(`  watch    refreshing every ${everyMs / 1000}s (stale after 600s); Ctrl-C to stop`);
+
+      let stopping = false;
+      const stop = async () => {
+        if (stopping) return;
+        stopping = true;
+        // A clean shutdown DEREGISTERS rather than waiting to age out. Ten
+        // minutes of a dead worker looking idle is ten minutes of contracts
+        // addressed to nobody.
+        try { await R.removeRegistration(row.session_id); } catch { /* best effort */ }
+        try {
+          await H.publishRegistration(process.env, { ...row, capacity: 'offline' });
+        } catch { /* best effort */ }
+        console.log(`\nunregistered ${row.session_id}`);
+        process.exit(0);
+      };
+      process.on('SIGINT', stop);
+      process.on('SIGTERM', stop);
+
+      // Unref'd so the timer alone never holds the process open.
+      const t = setInterval(async () => {
+        const r = await beat(capacity);
+        if (r.state !== H.HOSTED.OK && r.state !== H.HOSTED.NOT_CONFIGURED) {
+          console.error(`  heartbeat: hosted unreachable (${r.detail})`);
+        }
+      }, everyMs);
+      t.unref?.();
+      // Hold the process open explicitly, so the reason it stays alive is
+      // visible rather than being a side effect of an un-unref'd timer.
+      await new Promise(() => {});
+    }
+
+    process.exit(0);
+  }
+
+  /*
+   * lead-work — PROVENANCE FOR WORK NOBODY DELEGATED.
+   *
+   *   agentbridge lead-work --id <id> --agent <a> --session <s> --scope <text>
+   *              --base <commit-ish> [--head <commit-ish>] [--tests <text>] [--repo <dir>]
+   *   agentbridge lead-work [--json]
+   *
+   * The ledger refuses a contract whose assigning and assigned sessions are the
+   * same, correctly: a contract to yourself is not a handoff, and allowing it
+   * would let anyone manufacture the appearance of oversight. But the
+   * integrator does real work, and with self-delegation forbidden all of it was
+   * falling out of provenance -- the runtime registration enforcement shipped
+   * with no contract and no audit.
+   *
+   * So this is a first-class record that says what it is, rather than a
+   * contract wearing a disguise. Both shas are RESOLVED THROUGH GIT here, for
+   * the same reason --base is on `delegate`: a sha somebody typed from memory
+   * once pointed at nothing for days.
+   */
+  if (cmd === 'lead-work') {
+    const { readLeadWork, writeLeadWork } = await import('../src/provenanceStore.mjs');
+    const LW = await import('../src/leadWork.mjs');
+
+    let rows;
+    try { rows = await readLeadWork(); }
+    catch (e) { console.error(`error: cannot read the lead-work ledger: ${e.message}`); process.exit(2); }
+
+    if (!args.id) {
+      if (args.json) { console.log(JSON.stringify(rows, null, 2)); process.exit(0); }
+      if (!rows.length) { console.log('no lead work recorded'); process.exit(0); }
+      for (const r of rows) {
+        console.log(`${r.work_id}  ${r.agent_id}/${r.session_id}  ${r.base_sha.slice(0, 12)}..${r.head_sha.slice(0, 12)}`);
+        console.log(`  ${r.scope}`);
+        console.log(`  files ${r.files_changed.length}${r.tests ? `   tests ${r.tests}` : ''}`);
+      }
+      process.exit(0);
+    }
+
+    const { resolveCommit } = await import('../src/git.mjs');
+    const { run: gitRun } = await import('../src/exec.mjs');
+    const cwd = args.repo ?? process.cwd();
+
+    const base = await resolveCommit(cwd, args.base);
+    if (!base.ok) { console.error(`error: --base did not resolve: ${base.reason}`); process.exit(2); }
+    const head = await resolveCommit(cwd, args.head ?? 'HEAD');
+    if (!head.ok) { console.error(`error: --head did not resolve: ${head.reason}`); process.exit(2); }
+
+    // The files are COMPUTED from the diff, not listed by the author. A record
+    // whose file list is typed is a record that can quietly omit a file.
+    const diff = await gitRun('git', ['diff', '--name-only', `${base.sha}..${head.sha}`], { cwd });
+    if (!diff.ok) { console.error(`error: cannot diff: ${diff.error}`); process.exit(2); }
+    const files = diff.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+
+    const result = LW.appendLeadWork(rows, {
+      work_id: args.id,
+      agent_id: args.agent,
+      session_id: args.session,
+      repo_id: (await import('node:path')).basename(head.worktree),
+      base_sha: base.sha,
+      head_sha: head.sha,
+      scope: args.scope,
+      files_changed: files,
+      tests: args.tests ?? null,
+      created_at: new Date().toISOString(),
+    });
+    if (!result.ok) { for (const e of result.errors) console.error(`  - ${e}`); process.exit(2); }
+
+    await writeLeadWork(result.rows);
+    console.log(`recorded lead work ${result.record.work_id}: ${files.length} file(s)`);
+    console.log(`  ${result.record.base_sha.slice(0, 12)}..${result.record.head_sha.slice(0, 12)}`);
     process.exit(0);
   }
 
@@ -1098,13 +1285,69 @@ try {
    * somebody's mental model of the machine.
    */
   if (cmd === 'workers') {
-    let registry;
-    try { registry = await loadLaneRegistry(args['registry-file']); }
-    catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
-    if (!registry) {
-      console.error('no lane registry configured. set lanesFile in config, or pass --registry-file <path>.');
-      process.exit(2);
+    /*
+     * THE POOL COMES FROM WHAT IS RUNNING, not from a file somebody typed.
+     *
+     * A file registry is still honoured with --registry-file, because it is
+     * useful for inspecting a hypothetical roster, but it is no longer what
+     * `workers` means by default. Capacity read from a stale file is exactly
+     * the confidently-wrong answer the runtime registry exists to replace.
+     */
+    const R = await import('../src/laneRegistry.mjs');
+    const LR = await import('../src/liveRegistry.mjs');
+    const H = await import('../src/hostedRegistry.mjs');
+    const { readRegistrations } = await import('../src/registrationStore.mjs');
+
+    let registry = null;
+    if (args['registry-file']) {
+      try { registry = await loadLaneRegistry(args['registry-file']); }
+      catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
     }
+
+    if (!registry) {
+      let local = [];
+      try { local = await readRegistrations(); }
+      catch (e) { console.error(`error: cannot read the registration store: ${e.message}`); process.exit(2); }
+
+      const hosted = await H.fetchHostedRegistrations(process.env);
+      if (hosted.state === H.HOSTED.UNREACHABLE || hosted.state === H.HOSTED.MALFORMED) {
+        // "I cannot see the workers" and "there are no workers" must not print
+        // the same. A half-roster is worse than a refusal here, because it is
+        // the thing somebody schedules against.
+        console.error(`error: the hosted registry is configured but ${hosted.state}: ${hosted.detail ?? ''}`);
+        console.error('       refusing to print a partial pool.');
+        process.exit(2);
+      }
+      const merged = H.mergeRegistrations(local, hosted.state === H.HOSTED.OK ? hosted.rows : []);
+      const reg = LR.registryFromSessions(merged, { now: new Date().toISOString() });
+      const roster = R.workerRoster(reg);
+      const originOf = new Map(merged.map((m) => [m.session_id, m.origin ?? 'local']));
+
+      if (args.json) {
+        console.log(JSON.stringify(roster.map((w) => ({
+          ...w,
+          sessions: (w.sessions ?? []).map((s) => ({ ...s, origin: originOf.get(s.session_id) ?? 'local' })),
+        })), null, 2));
+        process.exit(0);
+      }
+      if (!roster.length) {
+        console.log('no workers registered');
+        console.log('  workers register with: agentbridge register-session --agent <a> --session <s> --watch');
+        process.exit(0);
+      }
+      for (const w of roster) {
+        const sessions = w.sessions ?? [];
+        console.log(`${w.agent_id}  ${sessions.length ? '' : '(no live session)'}`);
+        for (const s of sessions) {
+          // local vs hosted stays visible: the second is a claim another
+          // machine can check, the first is this machine talking about itself.
+          const origin = originOf.get(s.session_id) ?? 'local';
+          console.log(`  ${s.session_id}  ${s.capacity ?? 'unknown'}  ${s.repo_id ?? '-'} / ${s.worktree_id ?? '-'}  [${origin}]`);
+        }
+      }
+      process.exit(0);
+    }
+
     const roster = registry.R.workerRoster(registry.reg);
     if (args.json) { console.log(JSON.stringify(roster, null, 2)); process.exit(0); }
     if (!roster.length) { console.log('no workers registered'); process.exit(0); }
