@@ -262,6 +262,97 @@ test('a corrupt registration store STOPS, rather than falling back to unverified
   assert.match(r.stderr, /registration store/);
 });
 
+test('--watch KEEPS RUNNING and actually refreshes the heartbeat', async (t) => {
+  /*
+   * THE ONLY TEST HERE THAT HAD TO BE RUN RATHER THAN REASONED ABOUT.
+   *
+   * --watch failed three separate ways on 2026-09-15, and every one of them
+   * looked like success for the first interval:
+   *
+   *   1. the interval was unref'd, so node exited at once with "Detected
+   *      unsettled top-level await". The command printed "refreshing every
+   *      120s" and was already dead.
+   *   2. replacing the parking await with `return` is a syntax error at module
+   *      top level -- Illegal return statement.
+   *   3. dropping the await entirely let execution fall THROUGH the block into
+   *      the rest of the dispatch, reaching the unknown-command handler, which
+   *      printed the help text and exited 2. After registering, so the store
+   *      looked right.
+   *
+   * None is visible in under one interval, and all three leave a registration
+   * on disk. A worker whose heartbeat silently stops ages offline in ten
+   * minutes and its contracts start resolving to nobody, which is the exact
+   * failure this flag exists to prevent.
+   *
+   * So this spawns the real binary and watches a real clock.
+   */
+  const { repo, env } = await fixture(t);
+  const { spawn } = await import('node:child_process');
+
+  const child = spawn(process.execPath, [
+    CLI, 'register-session', '--agent', 'code-w', '--session', 'watch-probe',
+    '--watch', '--interval', '5',
+  ], { env: { ...process.env, ...env }, cwd: repo, windowsHide: true });
+
+  let out = '';
+  child.stdout.on('data', (d) => { out += String(d); });
+  child.stderr.on('data', (d) => { out += String(d); });
+
+  /*
+   * SIGKILL, and release the pipes.
+   *
+   * A graceful kill() is SIGTERM, which this CLI handles by deregistering and
+   * exiting -- correct in production and wrong here, because Windows does not
+   * deliver it the way POSIX does and the runner then waits forever on a child
+   * that never left. The piped stdio are themselves live handles, so they are
+   * destroyed too; otherwise the test process stays open on a dead child's
+   * streams. An earlier version of this test hung for five minutes for exactly
+   * that reason.
+   */
+  t.after(() => {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    try { child.stdout.destroy(); child.stderr.destroy(); } catch { /* already closed */ }
+    child.unref();
+  });
+
+  const readBeat = async () => {
+    const rows = await regs(env);
+    return rows[0]?.heartbeat_at ?? null;
+  };
+  const wait = (ms) => new Promise((r) => { setTimeout(r, ms); });
+
+  await wait(3000);
+  const first = await readBeat();
+  assert.ok(first, `nothing was registered: ${out}`);
+
+  // Past one interval. If the process died, this is unchanged.
+  await wait(8000);
+  const second = await readBeat();
+
+  assert.ok(child.exitCode === null, `the watcher exited early (code ${child.exitCode}): ${out}`);
+  assert.notEqual(second, first, `the heartbeat never refreshed — the watcher is not alive: ${out}`);
+  assert.ok(Date.parse(second) > Date.parse(first), 'the heartbeat went backwards');
+
+  // And the failure mode that printed help instead of watching.
+  assert.doesNotMatch(out, /unknown command/, 'execution fell through the watch block');
+  assert.doesNotMatch(out, /unsettled top-level await/, 'the event loop was not held open');
+
+  /*
+   * STOP THE CHILD AND WAIT FOR IT, HERE, BEFORE THE FIXTURE CLEANS UP.
+   *
+   * The watcher's cwd is the temp repo, and Windows refuses to rmdir a
+   * directory that is any live process's working directory. Leaving this to
+   * t.after raced the fixture's own cleanup and failed the test with EBUSY
+   * after every assertion had already passed -- a green test reported red by
+   * its teardown.
+   */
+  await new Promise((resolve) => {
+    if (child.exitCode !== null) { resolve(); return; }
+    child.once('exit', resolve);
+    child.kill('SIGKILL');
+  });
+});
+
 test('unregister removes only that session', async (t) => {
   const { repo, env } = await fixture(t);
   await run(['register-session', '--agent', 'code-b', '--session', 'sess-1'], env, repo);

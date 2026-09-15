@@ -727,16 +727,46 @@ try {
       process.on('SIGINT', stop);
       process.on('SIGTERM', stop);
 
-      // Unref'd so the timer alone never holds the process open.
-      const t = setInterval(async () => {
+      /*
+       * THE TIMER IS WHAT HOLDS THE PROCESS OPEN. Do not unref it.
+       *
+       * The first version unref'd this and then tried to stay alive with a
+       * top-level `await new Promise(() => {})`. An unsettled promise is NOT a
+       * libuv handle: node saw no remaining work and exited immediately,
+       * printing "Detected unsettled top-level await" and leaving a
+       * registration that never refreshed. It looked like it was watching. It
+       * had already stopped.
+       *
+       * That is the whole failure this flag exists to prevent, reintroduced by
+       * the flag itself, and it was invisible until somebody actually ran it
+       * for longer than one interval.
+       */
+      setInterval(async () => {
         const r = await beat(capacity);
         if (r.state !== H.HOSTED.OK && r.state !== H.HOSTED.NOT_CONFIGURED) {
           console.error(`  heartbeat: hosted unreachable (${r.detail})`);
         }
       }, everyMs);
-      t.unref?.();
-      // Hold the process open explicitly, so the reason it stays alive is
-      // visible rather than being a side effect of an un-unref'd timer.
+      /*
+       * PARK HERE FOREVER. Two separate things are needed and BOTH were got
+       * wrong once, each in a way that looked like it worked:
+       *
+       *   the ref'd interval   keeps the event loop alive. Unref'ing it made
+       *                        node exit immediately with "Detected unsettled
+       *                        top-level await", leaving a registration that
+       *                        never refreshed while the command claimed to be
+       *                        watching.
+       *   this await           stops execution falling THROUGH this block into
+       *                        the rest of the dispatch. Replacing it with a
+       *                        bare `return` is a syntax error at module top
+       *                        level; dropping it entirely sent the process on
+       *                        to the unknown-command handler, which printed
+       *                        the help text and exited 2.
+       *
+       * Neither failure is visible in under one interval, which is why this is
+       * the one flag in the CLI that had to be run for real rather than
+       * reasoned about.
+       */
       await new Promise(() => {});
     }
 
