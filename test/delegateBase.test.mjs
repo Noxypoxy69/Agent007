@@ -5,6 +5,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hermeticEnv } from './helpers/hermeticEnv.mjs';
 
 /**
  * A DELEGATION MAY NOT NAME A COMMIT THAT DOES NOT EXIST.
@@ -27,7 +28,7 @@ const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
 function run(args, env, cwd) {
   return new Promise((resolve) => {
     execFile(process.execPath, [CLI, ...args], {
-      env: { ...process.env, ...env }, cwd, windowsHide: true, timeout: 120000,
+      env: hermeticEnv(env), cwd, windowsHide: true, timeout: 120000,
     }, (err, stdout, stderr) => {
       resolve({ code: err?.code ?? 0, stdout: String(stdout), stderr: String(stderr) });
     });

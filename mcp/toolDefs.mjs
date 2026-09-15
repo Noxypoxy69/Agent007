@@ -1,7 +1,7 @@
 import { detectCollisions } from '../bridge/collisions.mjs';
 // Pure: no node builtins, no clock, no filesystem. Safe on the edge, which is
 // why the resolution rules live in their own module rather than in the CLI.
-import { resolveOwnerDecision } from '../src/ownerDecisions.mjs';
+import { resolveOwnerDecision, activeDecisions } from '../src/ownerDecisions.mjs';
 
 /**
  * THE TOOLS, ONCE, FOR EVERY TRANSPORT.
@@ -271,6 +271,125 @@ export function toolDefs(store) {
       run: async ({ action, project, repo, lane, task } = {}) => {
         const rows = await listDecisions();
         return jsonResult(resolveOwnerDecision(rows, action, { project, repo, lane, task }));
+      },
+    });
+  }
+
+  /*
+   * ── THE COORDINATOR SURFACE ────────────────────────────────────────────
+   *
+   * Registered ONLY when the store provides write methods, and the store only
+   * provides them when the caller presented a coordinator token. So for a
+   * reader these tools do not exist -- not "exist and refuse", which a model
+   * can be talked into retrying, but absent from tools/list and answering
+   * "no such tool" identically to a name that was never defined.
+   *
+   * WHAT IS DELIBERATELY NOT HERE: shell, SQL, file writes, deploy, merge,
+   * command execution. Their absence is the control. A refusal string is
+   * something a model argues with; a missing tool is not.
+   */
+  const { listTasks, assignTask, sendMessage, recordOwnerDecision } = store;
+
+  if (typeof listTasks === 'function') {
+    defs.push({
+      name: 'list_tasks',
+      title: 'List tasks',
+      description:
+        'Coordination tasks with state (runnable, assigned, blocked, returned, accepted, '
+        + 'cancelled), lane, repo, base commit, path contract and dependencies. Read this '
+        + 'before assigning anything: a task that is blocked or already assigned is not work '
+        + 'you can hand out.',
+      input: obj({ state: { type: 'string', description: 'filter to one state' } }),
+      run: async ({ state } = {}) => {
+        const rows = await listTasks();
+        return jsonResult(state ? rows.filter((t) => t?.state === state) : rows);
+      },
+    });
+  }
+
+  if (typeof assignTask === 'function') {
+    defs.push({
+      name: 'assign_task',
+      title: 'Assign task',
+      description:
+        'Assign an existing task to a worker, BY DURABLE AGENT ID. The Bridge resolves the '
+        + 'agent to its live session itself — never pass a session id you read somewhere. '
+        + 'REFUSES, rather than warning, when: the worker is stale, offline or ambiguous; the '
+        + 'task is not runnable or returned; a dependency is unsatisfied; the work is already '
+        + 'satisfied upstream; a path collides with another assignment; the repo or lane does '
+        + 'not match; or the base commit is stale. A refusal names every reason at once.',
+      input: obj({
+        task_id: { type: 'string', description: 'an existing task id' },
+        agent_id: { type: 'string', description: 'durable agent id, e.g. "code-b"' },
+      }, ['task_id', 'agent_id']),
+      run: async ({ task_id, agent_id }) => jsonResult(await assignTask({ task_id, agent_id })),
+    });
+  }
+
+  if (typeof sendMessage === 'function') {
+    defs.push({
+      name: 'send_message',
+      title: 'Send message',
+      description:
+        'Send a STRUCTURED coordination message to a worker. Fixed fields only: task_id, '
+        + 'from_agent, to_agent, type, body. The body is prose for a person or an agent to '
+        + 'READ — it is never executed by anything, and a body that looks like a command is '
+        + 'refused. This is not a way to run something on another machine.',
+      input: obj({
+        to_agent: { type: 'string', description: 'durable agent id of the recipient' },
+        from_agent: { type: 'string', description: 'who is speaking' },
+        type: {
+          type: 'string',
+          description: 'assignment | question | answer | status | blocker | handoff | review',
+        },
+        body: { type: 'string', description: 'plain prose, max 8000 chars' },
+        task_id: { type: 'string', description: 'the task this concerns, if any' },
+      }, ['to_agent', 'from_agent', 'type', 'body']),
+      run: async (m) => jsonResult(await sendMessage(m)),
+    });
+  }
+
+  if (typeof recordOwnerDecision === 'function') {
+    defs.push({
+      name: 'record_owner_decision',
+      title: 'Record owner decision',
+      description:
+        'Append a scoped decision the OWNER has made, so no worker asks it again. '
+        + 'Append-only: an existing decision is never edited, only superseded or revoked. '
+        + 'owner_id and created_by must be the same person — a coordinator may RECORD what '
+        + 'the owner decided, and may not decide on their behalf.',
+      input: obj({
+        decision_id: { type: 'string' },
+        owner_id: { type: 'string', description: 'the builder whose decision this is' },
+        statement: { type: 'string', description: "the owner's own words" },
+        scope_type: { type: 'string', description: 'bridge | project | repo | lane | task' },
+        scope_id: { type: 'string', description: 'required unless scope_type is bridge' },
+        effect: { type: 'string', description: 'allow | deny | require_owner' },
+        capabilities: { type: 'array', items: { type: 'string' }, description: 'e.g. ["deploy.*"]' },
+        supersedes: { type: 'string', description: 'a decision id this replaces' },
+      }, ['decision_id', 'owner_id', 'statement', 'scope_type', 'effect', 'capabilities']),
+      run: async (d) => jsonResult(await recordOwnerDecision(d)),
+    });
+  }
+
+  if (typeof listDecisions === 'function') {
+    defs.push({
+      name: 'get_owner_decisions',
+      title: 'Get owner decisions',
+      description:
+        'Every standing decision, including superseded and revoked ones, so the history of '
+        + 'what the owner said is visible and not just what is currently in force. Use '
+        + 'resolve_owner_decision to ask whether a specific action is permitted.',
+      input: obj({ includeInactive: { type: 'boolean', description: 'default true' } }),
+      run: async ({ includeInactive = true } = {}) => {
+        const rows = await listDecisions();
+        const live = new Set(activeDecisions(rows).map((d) => d.decision_id));
+        return jsonResult(rows
+          .filter((d) => includeInactive || live.has(d.decision_id))
+          .map((d) => ({
+            ...d,
+            state: d.revoked_at ? 'revoked' : (live.has(d.decision_id) ? 'active' : 'superseded'),
+          })));
       },
     });
   }

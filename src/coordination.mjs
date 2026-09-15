@@ -17,7 +17,7 @@
  * string a model could be talked out of.
  */
 
-const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
+const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
 const arr = (v) => (Array.isArray(v) ? v : []);
 
 /** Message types. A closed set: an unknown type is refused, not passed through. */
@@ -64,20 +64,69 @@ export function looksExecutable(text) {
 export function validateMessage(m = {}) {
   const errors = [];
 
-  if (!isNonEmptyString(m.from_agent)) errors.push('from_agent is required');
-  if (!isNonEmptyString(m.to_agent)) errors.push('to_agent is required');
+  if (!nonEmpty(m.from_agent)) errors.push('from_agent is required');
+  if (!nonEmpty(m.to_agent)) errors.push('to_agent is required');
   if (!MESSAGE_TYPES.includes(m.type)) {
     errors.push(`type must be one of ${MESSAGE_TYPES.join(', ')}`);
   }
-  if (!isNonEmptyString(m.body)) errors.push('body is required');
+  if (!nonEmpty(m.body)) errors.push('body is required');
   else if (m.body.length > 8000) errors.push('body exceeds 8000 characters');
   else if (looksExecutable(m.body)) {
     errors.push('body looks like a command rather than a message: a coordination '
       + 'channel that carries executable text is a remote shell nobody audited');
   }
-  if (m.task_id != null && !isNonEmptyString(m.task_id)) errors.push('task_id must be a string when present');
+  if (m.task_id != null && !nonEmpty(m.task_id)) errors.push('task_id must be a string when present');
 
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Resolve a DURABLE agent id to its one live session.
+ *
+ * ONE IMPLEMENTATION, SHARED BY THE CLI AND THE EDGE. laneRegistry.resolveWorker
+ * answers the same question for a registry parsed from a YAML FILE, and its
+ * input shape is different; bundling it to the edge would also drag a 188-line
+ * YAML parser somewhere no file exists. So LIVE-registry resolution lives here,
+ * where both callers already load it, rather than being written twice and
+ * drifting the first time one is fixed.
+ *
+ * The three outcomes are the ones this system turns on everywhere: exactly one
+ * live session resolves, none refuses, several refuse as ambiguous AND name the
+ * candidates. Silently picking the newest would "work" and send the contract to
+ * the wrong runtime, which is the failure the registry exists to prevent.
+ *
+ * @param {Array}  sessions  rows from registryFromSessions — capacity is already
+ *                           staleness-adjusted there, so a stale row reads
+ *                           'offline' and is excluded without a second clock.
+ * @param {string} agent_id  the durable identity a person types
+ */
+export function resolveLiveAgent(sessions, agent_id) {
+  if (!nonEmpty(agent_id)) return { ok: false, reason: 'no-agent-named', candidates: [] };
+  const all = arr(sessions);
+
+  // "Unknown" and "known but not running" are different answers, and a
+  // coordinator needs to tell a typo from a worker that has gone away.
+  if (!all.some((s) => s?.agent_id === agent_id)) {
+    return { ok: false, reason: 'unknown-agent', candidates: [] };
+  }
+
+  const candidates = all.filter((s) => s?.agent_id === agent_id && s?.capacity !== 'offline');
+  if (candidates.length === 0) return { ok: false, reason: 'no-live-session', candidates: [] };
+  if (candidates.length > 1) {
+    return { ok: false, reason: 'ambiguous-session', candidates: candidates.map((s) => s.session_id) };
+  }
+
+  const s = candidates[0];
+  return {
+    ok: true,
+    agent_id,
+    session_id: s.session_id,
+    repo_id: s.repo_id ?? null,
+    worktree_id: s.worktree_id ?? null,
+    lane_id: s.lane_id ?? null,
+    capacity: s.capacity ?? null,
+    heartbeat_at: s.heartbeat_at ?? null,
+  };
 }
 
 /**
@@ -105,10 +154,10 @@ export function canAssign(task, worker, context = {}) {
   const tasks = arr(context.tasks);
   const assignments = arr(context.assignments);
 
-  if (!task || !isNonEmptyString(task.task_id)) {
+  if (!task || !nonEmpty(task.task_id)) {
     return { ok: false, errors: ['no such task'] };
   }
-  if (!worker || !isNonEmptyString(worker.session_id) || !isNonEmptyString(worker.agent_id)) {
+  if (!worker || !nonEmpty(worker.session_id) || !nonEmpty(worker.agent_id)) {
     return { ok: false, errors: ['no resolved worker: the target must come from the live registry, not a typed name'] };
   }
 
@@ -128,11 +177,11 @@ export function canAssign(task, worker, context = {}) {
   if (worker.capacity === 'offline') errors.push(`worker ${worker.session_id} declared itself offline`);
 
   // Repo and lane must match where the work actually is.
-  if (isNonEmptyString(task.repo_id) && isNonEmptyString(worker.repo_id)
+  if (nonEmpty(task.repo_id) && nonEmpty(worker.repo_id)
       && task.repo_id !== worker.repo_id) {
     errors.push(`task is in repo "${task.repo_id}" but ${worker.session_id} is in "${worker.repo_id}"`);
   }
-  if (isNonEmptyString(task.lane_id) && isNonEmptyString(worker.lane_id)
+  if (nonEmpty(task.lane_id) && nonEmpty(worker.lane_id)
       && task.lane_id !== worker.lane_id) {
     errors.push(`task is in lane "${task.lane_id}" but ${worker.session_id} holds lane "${worker.lane_id}"`);
   }
@@ -155,7 +204,7 @@ export function canAssign(task, worker, context = {}) {
    * refuses the return because head equals base. Catching it here is the
    * difference between a refusal now and a wasted session.
    */
-  if (isNonEmptyString(task.supersededBy)) {
+  if (nonEmpty(task.supersededBy)) {
     errors.push(`already satisfied by "${task.supersededBy}"`);
   }
 
@@ -185,7 +234,7 @@ export function canAssign(task, worker, context = {}) {
   }
 
   // ── base freshness ──────────────────────────────────────────────────────
-  if (isNonEmptyString(context.headSha) && isNonEmptyString(task.base_sha)
+  if (nonEmpty(context.headSha) && nonEmpty(task.base_sha)
       && task.base_sha !== context.headSha) {
     errors.push(`base ${task.base_sha.slice(0, 12)} is stale; the tree is at ${context.headSha.slice(0, 12)}. `
       + 're-resolve the base rather than assigning work from a commit the tree has moved past');

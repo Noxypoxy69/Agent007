@@ -230,3 +230,32 @@ test('a message needs a known type and a real body', () => {
     assert.equal(validateMessage({ ...base, type }).ok, true, `type ${type} rejected`);
   }
 });
+
+// ── live-agent resolution, shared by the CLI and the edge ──────────────────
+test('resolveLiveAgent: one live session resolves, and names the runtime', async () => {
+  const { resolveLiveAgent } = await import('../src/coordination.mjs');
+  const r = resolveLiveAgent([
+    { agent_id: 'code-b', session_id: 'danny-win-f1', repo_id: 'agentbridge', capacity: 'idle' },
+  ], 'code-b');
+  assert.equal(r.ok, true, r.reason);
+  // A person names the durable agent; the ledger needs the runtime.
+  assert.equal(r.session_id, 'danny-win-f1');
+});
+
+test('resolveLiveAgent: unknown, offline and ambiguous are DIFFERENT refusals', async () => {
+  const { resolveLiveAgent } = await import('../src/coordination.mjs');
+  const one = { agent_id: 'code-b', session_id: 's1', capacity: 'idle' };
+
+  // A typo and a departed worker must not read the same to a coordinator.
+  assert.equal(resolveLiveAgent([one], 'code-zzz').reason, 'unknown-agent');
+  assert.equal(resolveLiveAgent([{ ...one, capacity: 'offline' }], 'code-b').reason, 'no-live-session');
+  assert.equal(resolveLiveAgent([], 'code-b').reason, 'unknown-agent');
+  assert.equal(resolveLiveAgent([one], '').reason, 'no-agent-named');
+
+  const amb = resolveLiveAgent([one, { ...one, session_id: 's2' }], 'code-b');
+  assert.equal(amb.ok, false);
+  assert.equal(amb.reason, 'ambiguous-session');
+  // Naming the candidates is what makes an ambiguity actionable rather than a
+  // dead end; silently picking one would send work to the wrong runtime.
+  assert.deepEqual(amb.candidates.sort(), ['s1', 's2']);
+});

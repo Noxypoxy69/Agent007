@@ -447,10 +447,21 @@ try {
 
       const liveReg = LR.registryFromSessions(live, { now: new Date().toISOString() });
       if (liveReg.sessions.length) {
-        const R = await import('../src/laneRegistry.mjs');
+        /*
+         * resolveLiveAgent, NOT laneRegistry.resolveWorker.
+         *
+         * Both answer "which runtime is this agent", but resolveWorker takes a
+         * registry parsed from a YAML file and this path has live rows. The
+         * hosted coordinator needs the same answer and cannot load a YAML
+         * parser, so the live-registry resolution lives in src/coordination.mjs
+         * and BOTH callers use it. Two implementations of identity disagree the
+         * first time one is fixed, and this project has already paid for that
+         * once.
+         */
+        const CO = await import('../src/coordination.mjs');
         const asSession = liveReg.sessions.find((s) => s.session_id === args.to);
         const agentId = asSession ? asSession.agent_id : args.to;
-        const r = R.resolveWorker(liveReg, { agent_id: agentId });
+        const r = CO.resolveLiveAgent(liveReg.sessions, agentId);
         if (!r.ok) {
           console.error(`error: --to "${args.to}" did not resolve against the LIVE registry: ${r.reason}`);
           if (r.candidates?.length) console.error(`       candidates: ${r.candidates.join(', ')}`);

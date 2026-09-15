@@ -5,6 +5,7 @@ import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hermeticEnv } from './helpers/hermeticEnv.mjs';
 
 /**
  * THE LOOP CLOSED: registration writes, delegation resolves against it.
@@ -26,7 +27,7 @@ const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
 function run(args, env, cwd) {
   return new Promise((resolve) => {
     execFile(process.execPath, [CLI, ...args], {
-      env: { ...process.env, ...env }, cwd, windowsHide: true, timeout: 120000,
+      env: hermeticEnv(env), cwd, windowsHide: true, timeout: 120000,
     }, (err, stdout, stderr) => {
       resolve({ code: err?.code ?? 0, stdout: String(stdout), stderr: String(stderr) });
     });
@@ -292,7 +293,7 @@ test('--watch KEEPS RUNNING and actually refreshes the heartbeat', async (t) => 
   const child = spawn(process.execPath, [
     CLI, 'register-session', '--agent', 'code-w', '--session', 'watch-probe',
     '--watch', '--interval', '5',
-  ], { env: { ...process.env, ...env }, cwd: repo, windowsHide: true });
+  ], { env: hermeticEnv(env), cwd: repo, windowsHide: true });
 
   let out = '';
   child.stdout.on('data', (d) => { out += String(d); });

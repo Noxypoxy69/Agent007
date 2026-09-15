@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hermeticEnv } from './helpers/hermeticEnv.mjs';
 
 /**
  * THE REFUSAL CONTRACT.
@@ -33,7 +34,7 @@ const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
 function run(args, env) {
   return new Promise((resolve) => {
     execFile(process.execPath, [CLI, ...args], {
-      env: { ...process.env, ...env }, windowsHide: true, timeout: 120000,
+      env: hermeticEnv(env), windowsHide: true, timeout: 120000,
     }, (err, stdout, stderr) => {
       resolve({ code: err?.code ?? 0, stdout: String(stdout), stderr: String(stderr) });
     });
