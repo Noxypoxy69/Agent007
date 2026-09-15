@@ -2,7 +2,7 @@
 import {
   toolDefs, INSTRUCTIONS, canAssign, validateMessage, assignmentRecord, negotiateProtocol,
   messagesQuery, canReturn, returnRecord, canAccept, acceptRecord, canCancel, cancelRecord,
-  eventsFor, nextCursor,
+  eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
 } from './_shared.js';
 
@@ -292,6 +292,92 @@ function coordinatorStore(label) {
       }
 
       return { ok: true, task: row };
+    },
+
+    async listProposals({ state } = {}) {
+      const want = typeof state === 'string' && state.trim() ? state.trim() : 'open';
+      return get(`proposals?select=*&state=eq.${encodeURIComponent(want)}&order=prepared_at.desc&limit=200`);
+    },
+
+    /**
+     * CONFIRM A PROPOSAL, RE-VERIFYING IT FIRST.
+     *
+     * The recorded would_be_accepted is NOT consulted. canConfirm re-runs the
+     * guard against live rows, because the proposal was formed against a world
+     * that has since moved -- the worker may have gone offline, taken other
+     * work, or restarted under a new session; the task may have been cancelled
+     * or returned by somebody else.
+     *
+     * Trusting the stored verdict is how "supervised" becomes "autonomous with
+     * an hour of lag", which is the one thing this design exists to prevent.
+     */
+    async confirmProposal({ proposal_id, note }) {
+      const rows = await get(
+        `proposals?select=*&proposal_id=eq.${encodeURIComponent(proposal_id)}&limit=1`);
+      const p = rows[0];
+      if (!p) return { ok: false, errors: [`no such proposal: ${proposal_id}`] };
+      if (p.state !== 'open') {
+        return { ok: false, errors: [`proposal is "${p.state}", not open`], state: p.state };
+      }
+
+      const now = new Date().toISOString();
+      const [tasks, regs] = await Promise.all([
+        get('tasks?select=*'),
+        get('session_registrations?select=*'),
+      ]);
+      const task = tasks.find((t) => t.task_id === p.task_id) ?? null;
+
+      const reg = registryFromSessions(regs.map((r) => ({
+        agent_id: r.agent_id, session_id: r.session_id, repo_id: r.repo_id,
+        worktree_id: r.worktree_id, lane_id: r.lane_id, capacity: r.capacity,
+        head_sha: r.head_sha, heartbeat_at: r.heartbeat_at,
+      })), { now });
+      const resolved = p.kind === 'assign' ? resolveLiveAgent(reg.sessions, p.agent_id) : null;
+
+      const verdict = canConfirm(p, {
+        task,
+        worker: resolved?.ok ? resolved : null,
+        tasks,
+        now,
+        isLive: (row) => isLive(row, { now }),
+      });
+      if (!verdict.ok) {
+        return {
+          ok: false,
+          errors: verdict.errors,
+          // What the dispatcher thought, shown BESIDE the live refusal so the
+          // difference between then and now is visible rather than implied.
+          prepared_verdict: { would_be_accepted: p.would_be_accepted, reasons: p.reasons },
+        };
+      }
+
+      const done = p.kind === 'assign'
+        ? await this.assignTask({ task_id: p.task_id, agent_id: p.agent_id })
+        : await this.acceptTask({ task_id: p.task_id, note });
+
+      if (!done.ok) return { ok: false, errors: done.errors, stage: 'apply' };
+
+      await patch(`proposals?proposal_id=eq.${encodeURIComponent(proposal_id)}`,
+        { state: 'confirmed', confirmed_at: now, confirmed_by: label });
+
+      return { ok: true, kind: p.kind, task: done.task };
+    },
+
+    async supervisoryReport() {
+      const now = new Date().toISOString();
+      const [tasks, regs, open] = await Promise.all([
+        get('tasks?select=*'),
+        get('session_registrations?select=*'),
+        get('proposals?select=*&state=eq.open&limit=200'),
+      ]);
+      const sessions = regs.map((r) => ({
+        agent_id: r.agent_id, session_id: r.session_id, lane_id: r.lane_id,
+        repo_id: r.repo_id, capacity: r.capacity, heartbeat_at: r.heartbeat_at,
+      }));
+      const { idle, blocked } = proposeWork({
+        tasks, sessions, now, isLive: (row) => isLive(row, { now }),
+      });
+      return supervisoryReport({ proposals: open, idle, blocked, tasks, now });
     },
 
     async sendMessage(m) {
@@ -655,6 +741,91 @@ Deno.serve(async (request) => {
     }, 'return=minimal');
 
     return json({ ok: true, task: updated });
+  }
+
+  // ── the DISPATCHER: prepares, never decides ────────────────────────────
+  /*
+   * THE ONLY ENDPOINT A DISPATCHER TOKEN OPENS.
+   *
+   * The owner ruled that the dispatcher prepares an assignment and the
+   * coordinator confirms it. That ruling is enforced by CAPABILITY, not by
+   * convention: a dispatcher token is in neither coordinator_tokens nor
+   * reader_tokens, so every MCP tool is 401 to it and this path is all it has.
+   * If it held a coordinator token it could assign work, and the only thing
+   * stopping it would be that it chooses not to -- which is a habit, not a
+   * control.
+   *
+   * WHAT IT WRITES IS A NOTEBOOK, NOT A WARRANT. Proposals record what the
+   * guard said at preparation time so a coordinator can read the reasoning.
+   * confirm_proposal re-runs that guard against live rows and ignores the
+   * stored verdict entirely.
+   */
+  if (path === '/dispatch') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let dispatchLabel = null;
+    try {
+      dispatchLabel = await tokenLabel('dispatcher_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    // A coordinator or reader token lands here and fails: neither is in this
+    // table, and a dispatcher token opens nothing else.
+    if (!dispatchLabel) return json({ error: 'unauthorized' }, 401);
+
+    const now = new Date().toISOString();
+    const [tasks, regs] = await Promise.all([
+      get('tasks?select=*'),
+      get('session_registrations?select=*'),
+    ]);
+
+    const sessions = regs.map((r) => ({
+      agent_id: r.agent_id, session_id: r.session_id, lane_id: r.lane_id,
+      repo_id: r.repo_id, capacity: r.capacity, heartbeat_at: r.heartbeat_at,
+    }));
+
+    const { proposals, idle, blocked } = proposeWork({
+      tasks, sessions, now, isLive: (row) => isLive(row, { now }),
+    });
+
+    /*
+     * THE OPEN SET IS REPLACED, NOT APPENDED TO.
+     *
+     * An old proposal left open beside a fresh one lets a coordinator confirm a
+     * suggestion the dispatcher has already replaced -- the stale-authority
+     * problem in a different hat. Superseding first also means `open` always
+     * means "what the dispatcher thinks now".
+     *
+     * Confirmed rows are never touched: they are the record of what was
+     * actually done.
+     */
+    await patch('proposals?state=eq.open', { state: 'superseded', superseded_at: now });
+
+    let written = [];
+    if (proposals.length) {
+      written = await write('proposals', proposals.map((p) => ({
+        kind: p.kind,
+        task_id: p.task_id,
+        agent_id: p.agent_id ?? null,
+        session_id: p.session_id ?? null,
+        lane_id: p.lane_id ?? null,
+        returned_by: p.returned_by ?? null,
+        head_sha: p.head_sha ?? null,
+        notes: p.notes ?? null,
+        would_be_accepted: p.would_be_accepted,
+        reasons: p.reasons ?? [],
+        prepared_at: p.prepared_at,
+        prepared_by: dispatchLabel,
+      })));
+    }
+
+    return json({
+      ok: true,
+      prepared: written.length,
+      // The dispatcher answers with the report too, so a cron run has something
+      // worth logging without a second authenticated call.
+      report: supervisoryReport({ proposals, idle, blocked, tasks, now }),
+    });
   }
 
   // ── the WAIT path: event-driven, without an outbound capability ─────────

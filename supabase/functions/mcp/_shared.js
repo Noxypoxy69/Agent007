@@ -726,6 +726,270 @@ export function cancelRecord(task, { by, at, reason }) {
 }
 
 /**
+ * THE SUPERVISED DISPATCHER: it PREPARES, it does not decide.
+ *
+ * The coordinator polls hourly at best, so every handoff waited on a human to
+ * relay it. An always-running dispatcher fixes the latency and raises an
+ * obvious question: may it assign work by itself?
+ *
+ * The owner's answer was no. It prepares an assignment; the coordinator
+ * confirms on its pass. So this module produces PROPOSALS, and a proposal is a
+ * suggestion with a timestamp -- never a stored permission.
+ *
+ * THAT DISTINCTION IS THE WHOLE DESIGN, and it is easy to lose.
+ *
+ * The tempting shortcut is to record the verdict at proposal time and let
+ * confirmation trust it. Then the dispatcher's judgment, formed minutes or an
+ * hour earlier against a world that has since moved, becomes the authority --
+ * and "supervised" degrades into "autonomous, with a delay". The worker may
+ * have gone offline, taken other work, or had its lane reassigned; the task may
+ * have been cancelled or already returned.
+ *
+ * So canConfirm RE-RUNS the guard against live state and ignores the recorded
+ * verdict entirely. The stored reasoning exists to be READ by whoever confirms,
+ * not to be relied on by the code.
+ *
+ * ROUTING IS BY LANE, NOT BY A CHAIN. A fixed C -> B -> D -> A rotation was
+ * proposed; it describes today's roster rather than a rule, and canAssign
+ * already refuses on lane and repo mismatch, so most hops in such a chain would
+ * produce refusals instead of handoffs. The registry records which lane a
+ * session holds. That is the routing table.
+ *
+ * PURE. Rows and the clock arrive as arguments.
+ */
+
+/** How long a proposal is worth looking at before the world has moved. */
+export const PROPOSAL_STALE_AFTER_MS = 60 * 60 * 1000;
+
+export const PROPOSAL_KINDS = ['assign', 'review'];
+
+/**
+ * What the dispatcher would suggest, given the world as it is now.
+ *
+ * @returns {{proposals: object[], idle: object[], blocked: object[]}}
+ */
+export function proposeWork({ tasks = [], sessions = [], now, isLive }) {
+  if (!nonEmpty(now)) throw new TypeError('proposeWork requires a `now` timestamp');
+  if (typeof isLive !== 'function') {
+    /*
+     * Liveness is INJECTED, as it is everywhere else in this system. A
+     * dispatcher that decided for itself whether a worker was alive would be
+     * the second opinion on the question the registry exists to answer.
+     */
+    throw new TypeError('proposeWork requires an isLive predicate');
+  }
+
+  const live = arr(sessions).filter((s) => s && isLive(s) && s.capacity !== 'offline');
+  const taken = new Set(
+    arr(tasks).filter((t) => t?.state === 'assigned').map((t) => t.assigned_session),
+  );
+
+  const proposals = [];
+  const idle = live
+    .filter((s) => !taken.has(s.session_id))
+    .map((s) => ({ agent_id: s.agent_id, session_id: s.session_id, lane_id: s.lane_id ?? null }));
+
+  const blocked = [];
+
+  for (const task of arr(tasks)) {
+    if (!task || !nonEmpty(task.task_id)) continue;
+
+    /*
+     * RETURNED WORK IS A REVIEW, NOT A REASSIGNMENT.
+     *
+     * The dispatcher must never propose handing returned work to somebody
+     * else: it has been done, and what it needs is a coordinator to look at
+     * the commit. Proposing a reassignment here would quietly discard a
+     * worker's finished contract.
+     */
+    if (task.state === 'returned') {
+      const verdict = canAccept(task, { at: now });
+      proposals.push({
+        kind: 'review',
+        task_id: task.task_id,
+        // Who did it, and what to look at. The dispatcher forms no opinion on
+        // whether the work is GOOD -- it cannot read a diff.
+        returned_by: task.returned_by ?? null,
+        head_sha: task.returned_head_sha ?? null,
+        notes: task.returned_notes ?? null,
+        would_be_accepted: verdict.ok,
+        reasons: verdict.ok ? [] : verdict.errors,
+        prepared_at: now,
+      });
+      continue;
+    }
+
+    if (task.state === 'blocked') {
+      blocked.push({ task_id: task.task_id, reason: task.blocked_reason ?? null });
+      continue;
+    }
+
+    if (task.state !== 'runnable') continue;
+
+    // ── routing, by lane ────────────────────────────────────────────────────
+    const lane = task.lane_id ?? null;
+    const candidates = live.filter((s) => {
+      if (taken.has(s.session_id)) return false;
+      if (nonEmpty(lane) && nonEmpty(s.lane_id) && s.lane_id !== lane) return false;
+      if (nonEmpty(task.repo_id) && nonEmpty(s.repo_id) && s.repo_id !== task.repo_id) return false;
+      return true;
+    });
+
+    if (candidates.length === 0) {
+      blocked.push({
+        task_id: task.task_id,
+        reason: nonEmpty(lane)
+          ? `no idle live worker holds lane "${lane}"`
+          : 'no idle live worker is available',
+      });
+      continue;
+    }
+
+    /*
+     * AMBIGUITY IS REPORTED, NOT BROKEN BY A TIE-RULE.
+     *
+     * Picking "the first" would be a decision about who does the work, made by
+     * the component explicitly told not to make those. Two eligible workers is
+     * something a supervisor should see.
+     */
+    if (candidates.length > 1) {
+      blocked.push({
+        task_id: task.task_id,
+        reason: `${candidates.length} idle workers are eligible; choose one`,
+        candidates: candidates.map((s) => s.agent_id),
+      });
+      continue;
+    }
+
+    const worker = candidates[0];
+    const verdict = canAssign(task, worker, {
+      tasks,
+      assignments: arr(tasks).filter((t) => t?.task_id !== task.task_id),
+      isLive,
+    });
+
+    proposals.push({
+      kind: 'assign',
+      task_id: task.task_id,
+      agent_id: worker.agent_id,
+      session_id: worker.session_id,
+      lane_id: lane,
+      // RECORDED TO BE READ, NOT TRUSTED. canConfirm re-runs this against live
+      // state; a stale ok here confirms nothing.
+      would_be_accepted: verdict.ok,
+      reasons: verdict.ok ? [] : verdict.errors,
+      prepared_at: now,
+    });
+  }
+
+  return { proposals, idle, blocked };
+}
+
+/**
+ * MAY THIS PROPOSAL BE CONFIRMED, RIGHT NOW?
+ *
+ * Re-runs the guard against live rows. The proposal's own `would_be_accepted`
+ * is deliberately ignored: it was formed against a world that has since moved,
+ * and trusting it would turn a supervised dispatcher into an autonomous one
+ * with an hour of lag.
+ */
+export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, staleAfterMs = PROPOSAL_STALE_AFTER_MS } = {}) {
+  const errors = [];
+
+  if (!proposal || !PROPOSAL_KINDS.includes(proposal.kind)) {
+    return { ok: false, errors: ['no such proposal'] };
+  }
+  if (!nonEmpty(now)) return { ok: false, errors: ['a timestamp is required'] };
+
+  /*
+   * A PROPOSAL GOES STALE.
+   *
+   * An hour-old suggestion confirmed without a fresh look is the dispatcher
+   * deciding late rather than the supervisor deciding now. Past the window it
+   * must be re-prepared, which costs nothing and forces the guard to run
+   * against the present.
+   */
+  const prepared = Date.parse(proposal.prepared_at);
+  const t = Date.parse(now);
+  if (Number.isNaN(prepared) || Number.isNaN(t)) {
+    errors.push('the proposal cannot be dated, so its age cannot be checked');
+  } else if (t - prepared > staleAfterMs) {
+    errors.push(`prepared ${Math.round((t - prepared) / 60000)} minutes ago and is stale; re-prepare it`);
+  } else if (t < prepared) {
+    errors.push('the proposal is dated in the future');
+  }
+
+  if (!task) {
+    errors.push(`no such task: ${proposal.task_id}`);
+    return { ok: false, errors };
+  }
+
+  if (proposal.kind === 'review') {
+    const verdict = canAccept(task, { at: now });
+    if (!verdict.ok) errors.push(...verdict.errors);
+    return { ok: errors.length === 0, errors };
+  }
+
+  // kind === 'assign'
+  if (!worker) {
+    errors.push(`${proposal.agent_id} has no live session now; it may have gone offline since`);
+    return { ok: false, errors };
+  }
+  if (worker.session_id !== proposal.session_id) {
+    /*
+     * The session is part of the proposal. A worker that restarted has a new
+     * runtime, and confirming onto it would be assigning to something nobody
+     * proposed -- the same session/agent confusion the registry exists to
+     * prevent.
+     */
+    errors.push(`proposed for session "${proposal.session_id}" but ${proposal.agent_id} is now "${worker.session_id}"`);
+  }
+
+  const verdict = canAssign(task, worker, {
+    tasks,
+    assignments: arr(tasks).filter((t) => t?.task_id !== task.task_id),
+    isLive,
+  });
+  if (!verdict.ok) errors.push(...verdict.errors);
+
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * The hourly supervisory report: what a person or a coordinator needs to see.
+ *
+ * Counts first so a quiet hour reads as quiet, then the things that need a
+ * decision. A report that buries two blocked tasks in a list of forty healthy
+ * ones is a report nobody finishes reading.
+ */
+export function supervisoryReport({ proposals = [], idle = [], blocked = [], tasks = [], now }) {
+  if (!nonEmpty(now)) throw new TypeError('supervisoryReport requires a `now` timestamp');
+
+  const byState = {};
+  for (const t of arr(tasks)) {
+    if (!t?.state) continue;
+    byState[t.state] = (byState[t.state] ?? 0) + 1;
+  }
+
+  return {
+    at: now,
+    counts: {
+      proposals: arr(proposals).length,
+      awaiting_review: arr(proposals).filter((p) => p.kind === 'review').length,
+      idle_workers: arr(idle).length,
+      blocked: arr(blocked).length,
+      tasks: byState,
+    },
+    // Everything below needs somebody to act. Nothing here is a status update.
+    awaiting_review: arr(proposals).filter((p) => p.kind === 'review'),
+    ready_to_assign: arr(proposals).filter((p) => p.kind === 'assign' && p.would_be_accepted),
+    would_refuse: arr(proposals).filter((p) => p.kind === 'assign' && !p.would_be_accepted),
+    blocked: arr(blocked),
+    idle_workers: arr(idle),
+  };
+}
+
+/**
  * WHAT IS NEW FOR ONE WORKER, SINCE IT LAST LOOKED.
  *
  * THE SHAPE, AND WHY IT IS INVERTED.
@@ -1162,6 +1426,7 @@ export function toolDefs(store) {
 
   const {
     listTasks, assignTask, sendMessage, recordOwnerDecision, acceptTask, cancelTask,
+    listProposals, confirmProposal, supervisoryReport: report,
   } = store;
 
   if (typeof listTasks === 'function') {
@@ -1233,6 +1498,72 @@ export function toolDefs(store) {
         reason: { type: 'string', description: 'why this is being withdrawn' },
       }, ['task_id', 'reason']),
       run: async (a) => jsonResult(await cancelTask(a)),
+    });
+  }
+
+  if (typeof listProposals === 'function') {
+    defs.push({
+      name: 'list_proposals',
+      title: 'List proposals',
+      description:
+        'What the dispatcher has PREPARED for you to confirm. A proposal is a suggestion, '
+        + 'never a permission: `would_be_accepted` and `reasons` record what the guard said '
+        + 'WHEN IT WAS PREPARED, and confirm_proposal re-runs that guard against live state '
+        + 'before doing anything. Read them; do not rely on them. '
+        + 'kind=assign names a task and the worker whose lane it matches. kind=review means a '
+        + 'worker RETURNED work and it needs looking at — head_sha is the commit to read. '
+        + 'The dispatcher forms no opinion on whether work is good; it cannot read a diff.',
+      input: obj({ state: { type: 'string', description: 'open (default) | confirmed | superseded' } }),
+      run: async (a = {}) => jsonResult((await listProposals(a)).map((p) => ({
+        proposal_id: p.proposal_id,
+        kind: p.kind,
+        task_id: p.task_id,
+        agent_id: p.agent_id ?? null,
+        session_id: p.session_id ?? null,
+        lane_id: p.lane_id ?? null,
+        returned_by: p.returned_by ?? null,
+        head_sha: p.head_sha ?? null,
+        notes: p.notes ?? null,
+        prepared_at: p.prepared_at,
+        would_be_accepted_when_prepared: p.would_be_accepted,
+        reasons_when_prepared: p.reasons ?? [],
+      }))),
+    });
+  }
+
+  if (typeof confirmProposal === 'function') {
+    defs.push({
+      name: 'confirm_proposal',
+      title: 'Confirm proposal',
+      description:
+        'Act on a prepared proposal. THE GUARD IS RE-RUN AGAINST LIVE STATE FIRST and the '
+        + 'recorded verdict is ignored — the worker may have gone offline, taken other work, '
+        + 'or restarted under a new session, and the task may have been cancelled or returned '
+        + 'by somebody else since. A refusal shows the live reasons NEXT TO what the '
+        + 'dispatcher thought, so the difference between then and now is visible. '
+        + 'Proposals older than an hour are refused as stale and must be re-prepared. '
+        + 'kind=assign performs the assignment; kind=review performs the acceptance.',
+      input: obj({
+        proposal_id: { type: 'string' },
+        note: { type: 'string', description: 'for a review: what you checked' },
+      }, ['proposal_id']),
+      run: async (a) => jsonResult(await confirmProposal(a)),
+    });
+  }
+
+  if (typeof report === 'function') {
+    defs.push({
+      name: 'get_supervisory_report',
+      title: 'Get supervisory report',
+      description:
+        'The state of the production line in one call: counts first, then only what needs a '
+        + 'decision. awaiting_review is work a worker has handed back. ready_to_assign would '
+        + 'be accepted right now. would_refuse means the dispatcher found work and something '
+        + 'is STOPPING it — that is the most interesting section, not the least. blocked names '
+        + 'tasks with no eligible worker, or more than one. idle_workers are live and holding '
+        + 'nothing.',
+      input: obj(),
+      run: async () => jsonResult(await report()),
     });
   }
 

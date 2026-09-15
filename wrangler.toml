@@ -43,9 +43,23 @@ DATA_PLANE_URL = "https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp"
 binding = "OAUTH"
 id = "ca7371ea5ae946e6bf2b9607d70b3b18"
 
+# THE DISPATCHER TICK.
+#
+# Every minute the Worker asks the data plane to prepare proposals. One minute
+# is the finest granularity Cron Triggers offer and it is plenty: /wait already
+# gives a waiting worker a sub-two-second wake-up, so this cadence bounds how
+# stale the COORDINATOR's view is, not how fast work starts.
+#
+# It carries BRIDGE_DISPATCHER_TOKEN, which opens exactly one endpoint and
+# cannot assign anything. That is the owner's "prepare, do not decide" ruling
+# enforced by capability rather than by the dispatcher's good behaviour.
+[triggers]
+crons = ["* * * * *"]
+
 # Uploaded out of band, never committed:
 #   npx wrangler secret put BRIDGE_READER_TOKEN
 #   npx wrangler secret put BRIDGE_COORDINATOR_TOKEN
+#   npx wrangler secret put BRIDGE_DISPATCHER_TOKEN
 #
 # If the coordinator secret is absent the Worker REFUSES a write grant rather
 # than falling back to the reader -- a silent downgrade would surface as write

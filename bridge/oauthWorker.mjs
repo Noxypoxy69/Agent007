@@ -591,8 +591,77 @@ export function createOAuthHandler(env) {
   };
 }
 
+/**
+ * THE DISPATCHER TICK.
+ *
+ * The coordinator is awake at most once an hour, so every handoff used to wait
+ * on a person to relay it. This runs on a cron and prepares what the
+ * coordinator will confirm on its next pass.
+ *
+ * IT CARRIES A DISPATCHER TOKEN, WHICH OPENS EXACTLY ONE ENDPOINT. That is the
+ * owner's ruling -- prepare, do not decide -- enforced by capability rather
+ * than convention. If this held the coordinator token it COULD assign work, and
+ * the only thing stopping it would be that it chooses not to.
+ *
+ * A FAILED TICK IS LOUD AND HARMLESS. It writes proposals and nothing else, so
+ * the worst case is that the coordinator's next pass sees a stale open set --
+ * which confirm_proposal refuses as stale anyway. There is no partial state to
+ * repair, so this neither retries nor alerts: the next tick is the retry.
+ */
+export async function dispatchTick(env) {
+  if (!env.BRIDGE_DISPATCHER_TOKEN || !env.DATA_PLANE_URL) {
+    console.error('dispatch: not configured (need BRIDGE_DISPATCHER_TOKEN and DATA_PLANE_URL)');
+    return { ok: false, reason: 'not-configured' };
+  }
+
+  const url = env.DATA_PLANE_URL.replace(/\/+$/, '') + '/dispatch';
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.BRIDGE_DISPATCHER_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      console.error(`dispatch: http ${res.status} ${text.slice(0, 300)}`);
+      return { ok: false, status: res.status };
+    }
+
+    const body = JSON.parse(text);
+    const c = body?.report?.counts ?? {};
+    /*
+     * ONE LINE PER TICK, AND IT LEADS WITH WHAT NEEDS A DECISION.
+     *
+     * A log that prints a healthy roster every minute is a log nobody reads,
+     * and the two blocked tasks in it are the reason anyone would have looked.
+     */
+    console.log(
+      `dispatch: prepared=${body?.prepared ?? 0} review=${c.awaiting_review ?? 0} `
+      + `blocked=${c.blocked ?? 0} idle=${c.idle_workers ?? 0}`,
+    );
+    return { ok: true, prepared: body?.prepared ?? 0, report: body?.report ?? null };
+  } catch (e) {
+    console.error(`dispatch: unreachable (${String(e?.message ?? e)})`);
+    return { ok: false, reason: 'unreachable' };
+  }
+}
+
 export default {
   fetch(request, env) {
     return createOAuthHandler(env)(request);
+  },
+
+  /*
+   * waitUntil keeps the isolate alive for the request rather than letting the
+   * platform tear it down mid-fetch -- a tick that is killed halfway leaves the
+   * open proposal set superseded and nothing to replace it, which reads as "the
+   * dispatcher found no work" when it found plenty.
+   */
+  scheduled(event, env, ctx) {
+    ctx.waitUntil(dispatchTick(env));
   },
 };
