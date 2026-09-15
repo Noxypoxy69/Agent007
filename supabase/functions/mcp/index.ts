@@ -386,10 +386,45 @@ function coordinatorStore(label) {
 
       if (!done.ok) return { ok: false, errors: done.errors, stage: 'apply' };
 
-      await patch(`proposals?proposal_id=eq.${encodeURIComponent(proposal_id)}`,
+      /*
+       * THE FIFTH SITE OF THE SAME SHAPE, on proposals rather than tasks.
+       *
+       * code-d found this while verifying the four task writes. The read above
+       * checked `state === 'open'`; this write was pinned to the proposal id
+       * alone, so a proposal the dispatcher SUPERSEDED between the read and the
+       * write could still be flipped to confirmed -- a transition no guard
+       * admits. The predicate makes the write refuse it.
+       *
+       * LOWER SEVERITY THAN THE TASK WRITES, and worth being accurate about
+       * why: the task write now serialises the real damage. A second confirmer
+       * is refused at the apply stage above and never reaches this line, so
+       * what remains is a RECORD that disagrees with what happened, not two
+       * assignments.
+       *
+       * WHICH IS EXACTLY WHY A LOST RACE HERE MUST NOT FAIL THE CALL. The
+       * assignment or acceptance ALREADY HAPPENED and already landed. Returning
+       * ok:false now would report failure for work that completed -- the same
+       * defect as the 204 empty-body bug documented in write(), where the
+       * retry is what corrupts the picture. So the action is reported as the
+       * success it was, with the bookkeeping discrepancy named beside it.
+       */
+      const marked = await patch(
+        `proposals?proposal_id=eq.${encodeURIComponent(proposal_id)}&state=eq.open`,
         { state: 'confirmed', confirmed_at: now, confirmed_by: label });
 
-      return { ok: true, kind: p.kind, task: done.task };
+      const recorded = Array.isArray(marked) && marked.length > 0;
+
+      return {
+        ok: true,
+        kind: p.kind,
+        task: done.task,
+        ...(recorded ? {} : {
+          proposal_record: 'stale',
+          note: `the ${p.kind} was applied, but proposal ${proposal_id} was no longer open `
+            + 'when the confirmation was recorded -- the dispatcher superseded it, or another '
+            + 'coordinator confirmed it first. The work is done; only the proposal row is behind.',
+        }),
+      };
     },
 
     async supervisoryReport() {
