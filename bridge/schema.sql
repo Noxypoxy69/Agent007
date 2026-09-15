@@ -100,12 +100,81 @@ create table if not exists reader_tokens (
 alter table reader_tokens enable row level security;
 
 -- ── retention ───────────────────────────────────────────────────────────────
-create or replace function prune(retain_hours int default 48) returns void
-language sql as $$
-  delete from heartbeats where received_at < now() - make_interval(hours => retain_hours);
-  delete from nonces     where seen_at     < now() - interval '10 minutes';
-  delete from rate_windows where window_start < now() - interval '1 hour';
+-- search_path is pinned to empty and every name is qualified. Unqualified names
+-- inside a function resolve against the CALLER's search_path, which is a hazard
+-- nobody should have to reason about at call time (Supabase linter 0011).
+create or replace function agentbridge.prune(retain_hours int default 48)
+returns void
+language sql
+set search_path = ''
+as $$
+  delete from agentbridge.heartbeats   where received_at  < now() - make_interval(hours => retain_hours);
+  delete from agentbridge.nonces       where seen_at      < now() - interval '10 minutes';
+  delete from agentbridge.rate_windows where window_start < now() - interval '1 hour';
 $$;
+
+-- A REVOKE BINDS TO A SIGNATURE, NOT A NAME, and Postgres grants EXECUTE on
+-- every newly created function to PUBLIC. Keep this in the same file as the
+-- signature above; an old revoke does not follow a changed argument list.
+revoke all on function agentbridge.prune(int) from public, anon, authenticated;
+grant execute on function agentbridge.prune(int) to service_role;
 
 -- Schedule with pg_cron if available:
 --   select cron.schedule('agentbridge-prune', '*/15 * * * *', $$select agentbridge.prune(48)$$);
+
+-- ── the REST projection the Worker reads ────────────────────────────────────
+-- bridge/httpStore.mjs reads sessions_latest, lanes_latest and reader_tokens
+-- over PostgREST. For a long time this file defined NONE of them: only the base
+-- tables above, in a schema PostgREST does not even expose. The hosted surface
+-- was written against a projection that did not exist, and nothing said so,
+-- because a missing relation is a 404 and no code path had ever met a real
+-- database. test/restProjection.test.mjs pins the shapes below.
+--
+-- WHY VIEWS IN public RATHER THAN EXPOSING THE agentbridge SCHEMA. PostgREST
+-- serves `public` by default; exposing a second schema is a dashboard setting
+-- that lives outside this file and outside review.
+--
+-- WHY security_invoker. A view runs as its OWNER by default, which would make
+-- these a hole straight through the RLS above -- reader_tokens included,
+-- readable by anon. With security_invoker the caller's own RLS applies, and
+-- since the base tables have RLS on with NO policies, only service_role (which
+-- holds BYPASSRLS) sees anything. Verified with has_table_privilege, not by
+-- reading this text.
+
+create or replace view public.sessions_latest
+with (security_invoker = true) as
+select
+  s.agent_id,
+  s.lane,
+  m.label                                       as machine_label,
+  s.worktree,
+  s.state -> 'git'                              as git,
+  coalesce(s.state -> 'locks',     '[]'::jsonb) as locks,
+  coalesce(s.state -> 'processes', '[]'::jsonb) as processes,
+  -- Null when the probe never reported. httpStore reads `!== false`, matching
+  -- the node store spreading an absent key as undefined. Do NOT coalesce to
+  -- true here, or the two surfaces disagree about an unknown probe.
+  (s.state ->> 'processProbeOk')::boolean       as process_probe_ok,
+  s.last_seen_at
+from agentbridge.sessions s
+join agentbridge.machines m on m.id = s.machine_id
+order by s.lane, s.agent_id;
+
+-- One row, one jsonb object: name -> globs, matching Object.fromEntries in
+-- store.mjs. Over an empty table this yields a single NULL row, which
+-- httpStore turns into {} -- "no lanes file" and "lanes unknown" must not
+-- render the same to a caller iterating lanes.
+create or replace view public.lanes_latest
+with (security_invoker = true) as
+select jsonb_object_agg(l.name, l.globs) as lanes
+from agentbridge.lanes l;
+
+create or replace view public.reader_tokens
+with (security_invoker = true) as
+select r.token_sha256, r.label, r.disabled
+from agentbridge.reader_tokens r;
+
+revoke all on public.sessions_latest, public.lanes_latest, public.reader_tokens
+  from public, anon, authenticated;
+grant select on public.sessions_latest, public.lanes_latest, public.reader_tokens
+  to service_role;
