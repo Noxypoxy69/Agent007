@@ -166,7 +166,15 @@ async function withClient(over = {}) {
   return env;
 }
 
-const authorizePost = (bridge_token, scope) => new Request('https://bridge.invalid/authorize', {
+/**
+ * Submit the consent form.
+ *
+ * `scope` is what the CLIENT asked for; `grant_write` is the operator ticking
+ * the box. Either can ask for write, and both are exercised, because the
+ * tickbox is the only route that works with a client like ChatGPT that requests
+ * no scope at all.
+ */
+const authorizePost = (bridge_token, scope, grant_write = false) => new Request('https://bridge.invalid/authorize', {
   method: 'POST',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams({
@@ -176,6 +184,7 @@ const authorizePost = (bridge_token, scope) => new Request('https://bridge.inval
     code_challenge: 'x'.repeat(43),
     code_challenge_method: 'S256',
     scope,
+    ...(grant_write ? { grant_write: 'on' } : {}),
     bridge_token,
   }),
 });
@@ -201,6 +210,50 @@ test('the COORDINATOR token approves a write grant, and the code carries the sco
   const codes = [...env.OAUTH._map.entries()].filter(([k]) => k.startsWith('code:'));
   assert.equal(codes.length, 1);
   assert.equal(JSON.parse(codes[0][1]).scope, 'agentbridge:read agentbridge:write');
+});
+
+test('THE TICKBOX: a client that asks for NO scope can still be granted write', async () => {
+  /*
+   * The route that matters in practice. ChatGPT does not let anyone choose a
+   * scope when adding a connector -- it requests nothing, this server defaults
+   * to read, and without the operator's tickbox a write grant is unobtainable
+   * through the only client that was ever going to want one.
+   *
+   * The client asks for nothing here, exactly as ChatGPT does.
+   */
+  const env = await withClient();
+  const res = await createOAuthHandler(env)(authorizePost(COORD, '', true));
+
+  assert.equal(res.status, 302);
+  const codes = [...env.OAUTH._map.entries()].filter(([k]) => k.startsWith('code:'));
+  assert.equal(codes.length, 1);
+  assert.equal(JSON.parse(codes[0][1]).scope, 'agentbridge:read agentbridge:write',
+    'the tickbox was ignored: the stored grant records what was REQUESTED, not what was granted');
+});
+
+test('the tickbox still demands the coordinator token', async () => {
+  // Ticking a box must not be authority on its own. It selects which secret is
+  // required; the secret is still what grants.
+  const env = await withClient();
+  const res = await createOAuthHandler(env)(authorizePost(READER, '', true));
+
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /not the coordinator token/);
+  // And the box comes back TICKED, or the retry silently downgrades to
+  // read-only and succeeds with the wrong scope for no visible reason.
+  assert.match(html, /name="grant_write"[^>]*checked/);
+  assert.equal([...env.OAUTH._map.keys()].filter((k) => k.startsWith('code:')).length, 0);
+});
+
+test('an unticked box grants read even when the operator holds the coordinator token', async () => {
+  // Read is the default and the path of least resistance; write is deliberate.
+  const env = await withClient();
+  const res = await createOAuthHandler(env)(authorizePost(READER, ''));
+
+  assert.equal(res.status, 302);
+  const codes = [...env.OAUTH._map.entries()].filter(([k]) => k.startsWith('code:'));
+  assert.equal(JSON.parse(codes[0][1]).scope, 'agentbridge:read');
 });
 
 test('the reader token still approves a read grant, unchanged', async () => {
@@ -395,21 +448,31 @@ test('client_name is escaped: registration is unauthenticated and the name is at
 });
 
 test('the consent page tells the operator which authority it is granting', async () => {
-  // A page that says "Nothing here can write to the database" while granting
-  // write is worse than no page at all.
+  /*
+   * A page that says "nothing here can write" while granting write is worse
+   * than no page at all. The wording now follows the TICKBOX rather than the
+   * requested scope, because the tickbox is what actually decides.
+   */
   const env = await withClient();
   const handler = createOAuthHandler(env);
-  const page = async (scope) => (await handler(new Request(
+
+  const fresh = await (await handler(new Request(
     'https://bridge.invalid/authorize?client_id=c1&redirect_uri=https%3A%2F%2Fapp.invalid%2Fcb'
     + '&response_type=code&code_challenge=' + 'x'.repeat(43)
-    + '&code_challenge_method=S256&scope=' + encodeURIComponent(scope)))).text();
+    + '&code_challenge_method=S256'))).text();
 
-  const read = await page('agentbridge:read');
-  assert.match(read, /read-only/);
-  assert.match(read, /Nothing here can write/);
+  // Default is read. The box is offered, unticked, and names what it would add.
+  assert.match(fresh, /name="grant_write"/);
+  assert.doesNotMatch(fresh, /name="grant_write"[^>]*checked/);
+  assert.match(fresh, /assign work, send messages and record owner decisions/);
+  assert.match(fresh, /needs the <strong>coordinator<\/strong> token/);
+  assert.match(fresh, /unticked for read-only/);
+  assert.match(fresh, /placeholder="the reader token/);
 
-  const write = await page('agentbridge:write');
-  assert.match(write, /assign work to your agents/);
-  assert.match(write, /coordinator/);
-  assert.doesNotMatch(write, /Nothing here can write/);
+  // Ticked, the page must stop claiming read-only and ask for the other secret.
+  const ticked = await (await handler(authorizePost('wrong-token', '', true))).text();
+  assert.match(ticked, /name="grant_write"[^>]*checked/);
+  assert.match(ticked, /READ AND WRITE/);
+  assert.doesNotMatch(ticked, /unticked for read-only/);
+  assert.match(ticked, /placeholder="the COORDINATOR token/);
 });

@@ -96,7 +96,25 @@ export const scopeGrantsWrite = (scope) =>
   String(scope ?? '').split(/\s+/).filter(Boolean).includes('agentbridge:write');
 
 /** Minimal HTML consent page. No framework, no external assets, no script. */
-const consentPage = (params, error = '') => new Response(
+/**
+ * THE OPERATOR ELECTS WRITE. THE CLIENT DOES NOT GET TO ASK FOR IT.
+ *
+ * ChatGPT does not let anyone choose an OAuth scope when adding a connector --
+ * it requests nothing, this server defaults to agentbridge:read, and a write
+ * grant becomes unobtainable through the only interface that was ever going to
+ * request one. A capability nobody can reach is not a security boundary, it is
+ * a dead branch.
+ *
+ * So the client asks for what it likes and the OPERATOR decides, at the consent
+ * page, holding a secret. That is the right place for the decision and it is
+ * how a consent screen is supposed to work: RFC 6749 §3.3 explicitly allows the
+ * server to issue a scope other than the one requested, and the token response
+ * already returns the granted scope so the client is told what it actually got.
+ *
+ * The box is unchecked by default and ticking it changes which secret the page
+ * demands. Read stays the path of least resistance; write is a deliberate act.
+ */
+const consentPage = (params, error = '', wantWrite = false) => new Response(
   `<!doctype html><meta charset="utf-8"><title>Agent Bridge — authorize</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -108,34 +126,34 @@ const consentPage = (params, error = '') => new Response(
  button{margin-top:.9rem;padding:.6rem 1.1rem;border:0;border-radius:7px;background:#111;color:#fff;font:inherit;cursor:pointer}
  .e{color:#b00020;font-weight:600}
  code{background:#f4f4f4;padding:.1rem .3rem;border-radius:4px}
+ .ck{display:flex;gap:.55rem;align-items:flex-start;font-weight:400;margin:0 0 1rem;
+     background:#fbf7e8;border:1px solid #e6d9a8;border-radius:7px;padding:.7rem .8rem}
+ .ck input{width:auto;margin-top:.15rem;flex:none}
 </style>
 <h1>Authorize access to Agent Bridge</h1>
-${scopeGrantsWrite(params.scope) ? `
-<p><strong>${esc(params.client_name || 'An application')}</strong> is requesting
-<code>read and write</code> access. As well as reading coordination state, it will be able to
-<strong>assign work to your agents, send them messages, and record owner decisions</strong>.</p>
-<p>This needs the <strong>coordinator</strong> token, not the reader token. If you only meant to
-let it look, close this page and authorize again without <code>agentbridge:write</code>.</p>`
-: `
-<p><strong>${esc(params.client_name || 'An application')}</strong> is requesting <code>read-only</code>
-access to live coordination state: agents, lanes, branches, worktrees, locks and owner decisions.
-It cannot assign work, send messages, or change anything.</p>`}
+<p><strong>${esc(params.client_name || 'An application')}</strong> is asking to connect to live
+coordination state: agents, lanes, branches, worktrees, locks and owner decisions.</p>
 <div class="c">
   <form method="POST">
     ${Object.entries(params).map(([k, v]) =>
     `<input type="hidden" name="${k}" value="${esc(v)}">`).join('')}
+
+    <label class="ck"><input type="checkbox" name="grant_write" value="on"${wantWrite ? ' checked' : ''}>
+      <span>Also let it <strong>assign work, send messages and record owner decisions</strong>
+      &mdash; needs the <strong>coordinator</strong> token</span></label>
+
     <label for="t">Bridge token</label>
     <input id="t" name="bridge_token" type="password" autocomplete="off" autofocus
-           placeholder="${scopeGrantsWrite(params.scope)
+           placeholder="${wantWrite
              ? 'the COORDINATOR token from agentbridge-secrets'
              : 'the reader token from agentbridge-secrets'}">
     ${error ? `<p class="e">${esc(error)}</p>` : ''}
     <button type="submit">Authorize</button>
   </form>
 </div>
-<p style="color:#777;font-size:13px">${scopeGrantsWrite(params.scope)
-  ? 'Approving grants this client read AND write access until you revoke it. It will be able to change coordination state.'
-  : 'Approving grants this client read access until you revoke it. Nothing here can write to the database.'}</p>`,
+<p style="color:#777;font-size:13px">${wantWrite
+  ? 'Approving grants READ AND WRITE until you revoke it. This client will be able to change coordination state.'
+  : 'Leave the box unticked for read-only. Nothing read-only can write to the database.'}</p>`,
   { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
 );
 
@@ -316,7 +334,18 @@ export function createOAuthHandler(env) {
        * matters: a caller who POSTs directly asking for write is asking to be
        * held to the HIGHER bar, not a lower one.
        */
-      const wantsWrite = scopeGrantsWrite(params.scope);
+      /*
+       * WRITE COMES FROM THE OPERATOR'S TICKBOX, OR FROM A CLIENT THAT ASKED.
+       *
+       * The tickbox is the one that matters in practice: ChatGPT requests no
+       * scope at all, so without it a write grant is unreachable through the
+       * only client that was ever going to want one. scopeGrantsWrite is still
+       * honoured for a client that does ask properly.
+       *
+       * Neither route grants anything by itself -- both land on the coordinator
+       * secret below.
+       */
+      const wantsWrite = scopeGrantsWrite(params.scope) || q.grant_write === 'on';
       const expected = wantsWrite ? env.BRIDGE_COORDINATOR_TOKEN : env.BRIDGE_READER_TOKEN;
 
       /*
@@ -336,14 +365,17 @@ export function createOAuthHandler(env) {
       if (!expected) {
         return consentPage(params, wantsWrite
           ? 'This deployment has no coordinator token configured, so write access cannot be granted.'
-          : 'This deployment has no bridge token configured, so nothing can be authorized.');
+          : 'This deployment has no bridge token configured, so nothing can be authorized.', wantsWrite);
       }
       if (!timingSafeEqual(q.bridge_token ?? '', expected)) {
         // Re-render rather than redirect. A wrong token is the operator
         // mistyping, not the client misbehaving.
+        // The tickbox state is carried back too: re-rendering it unticked would
+        // silently downgrade the operator's choice to read-only, and the retry
+        // would succeed with the wrong scope and no indication why.
         return consentPage(params, wantsWrite
           ? 'That is not the coordinator token. Write access needs the coordinator token, not the reader one.'
-          : 'That token does not match. Check agentbridge-secrets.');
+          : 'That token does not match. Check agentbridge-secrets.', wantsWrite);
       }
 
       /*
@@ -361,7 +393,17 @@ export function createOAuthHandler(env) {
         redirect_uri: params.redirect_uri,
         code_challenge: params.code_challenge,
         code_challenge_method: params.code_challenge_method,
-        scope: params.scope,
+        /*
+         * THE GRANTED SCOPE, WHICH IS NOT NECESSARILY THE REQUESTED ONE.
+         *
+         * RFC 6749 3.3 allows the server to issue a different scope, and this
+         * is where that happens: the client asked for whatever it asked for,
+         * the operator decided, and what is recorded is the DECISION. Writing
+         * params.scope here would have stored the request and thrown away the
+         * answer -- so a ticked box would have issued a read token and the
+         * write tools would have gone missing all over again, one layer down.
+         */
+        scope: wantsWrite ? 'agentbridge:read agentbridge:write' : (params.scope || 'agentbridge:read'),
       }), { expirationTtl: CODE_TTL });
 
       const to = new URL(params.redirect_uri);
