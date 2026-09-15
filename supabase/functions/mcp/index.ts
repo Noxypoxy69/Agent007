@@ -9,12 +9,18 @@ import {
 /**
  * THE DATA PLANE: a read surface, a narrow registration write, and coordination.
  *
- * THREE TOKEN CLASSES, IN THREE TABLES, NONE INTERCHANGEABLE.
+ * FOUR TOKEN CLASSES, IN FOUR TABLES, NONE INTERCHANGEABLE.
  *
  *   reader_tokens        read coordination state. ChatGPT-the-observer.
- *   registration_tokens  a worker publishes its OWN liveness. Nothing else.
- *   coordinator_tokens   assign tasks, send structured messages, record owner
- *                        decisions. NOT deploy, NOT shell, NOT SQL.
+ *   registration_tokens  a worker publishes its OWN liveness, returns its OWN
+ *                        work, and waits for its OWN events. Nothing else.
+ *   coordinator_tokens   assign, accept, cancel, message, record owner
+ *                        decisions, confirm proposals. NOT deploy, NOT shell,
+ *                        NOT SQL.
+ *   dispatcher_tokens    PREPARE PROPOSALS, via POST /dispatch. Nothing else.
+ *                        It cannot assign what it proposes -- that is the
+ *                        owner's "prepare, do not decide" ruling enforced by
+ *                        capability rather than by good behaviour.
  *
  * Separate tables rather than one with a scope column, because a scope column
  * is one typo away from promoting a reader to a coordinator, and a promotion
@@ -370,14 +376,17 @@ function coordinatorStore(label) {
         get('session_registrations?select=*'),
         get('proposals?select=*&state=eq.open&limit=200'),
       ]);
+      // head_sha travels with the row: wentStale reports the commit a lost
+      // worker was last publishing, and a frozen one is the tell.
       const sessions = regs.map((r) => ({
         agent_id: r.agent_id, session_id: r.session_id, lane_id: r.lane_id,
         repo_id: r.repo_id, capacity: r.capacity, heartbeat_at: r.heartbeat_at,
+        head_sha: r.head_sha,
       }));
       const { idle, blocked } = proposeWork({
         tasks, sessions, now, isLive: (row) => isLive(row, { now }),
       });
-      return supervisoryReport({ proposals: open, idle, blocked, tasks, now });
+      return supervisoryReport({ proposals: open, idle, blocked, tasks, sessions, now });
     },
 
     async sendMessage(m) {
@@ -782,6 +791,7 @@ Deno.serve(async (request) => {
     const sessions = regs.map((r) => ({
       agent_id: r.agent_id, session_id: r.session_id, lane_id: r.lane_id,
       repo_id: r.repo_id, capacity: r.capacity, heartbeat_at: r.heartbeat_at,
+      head_sha: r.head_sha,
     }));
 
     const { proposals, idle, blocked } = proposeWork({
@@ -824,7 +834,7 @@ Deno.serve(async (request) => {
       prepared: written.length,
       // The dispatcher answers with the report too, so a cron run has something
       // worth logging without a second authenticated call.
-      report: supervisoryReport({ proposals, idle, blocked, tasks, now }),
+      report: supervisoryReport({ proposals, idle, blocked, tasks, sessions, now }),
     });
   }
 
@@ -942,7 +952,8 @@ Deno.serve(async (request) => {
   } catch (e) {
     return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
   }
-  // A REGISTRATION token lands here and fails: it is in neither table.
+  // A REGISTRATION or DISPATCHER token lands here and fails: neither is in
+  // either table, which is what bounds the dispatcher to /dispatch alone.
   if (!scope) return json({ error: 'unauthorized' }, 401);
 
   if (request.method !== 'POST') {

@@ -2,6 +2,9 @@ import { detectCollisions } from '../bridge/collisions.mjs';
 // Pure: no node builtins, no clock, no filesystem. Safe on the edge, which is
 // why the resolution rules live in their own module rather than in the CLI.
 import { resolveOwnerDecision, activeDecisions } from '../src/ownerDecisions.mjs';
+// The SHARED staleness window. Imported rather than restated so this surface
+// cannot answer "is this agent alive" differently from the rest of the system.
+import { STALE_AFTER_MS } from '../src/liveRegistry.mjs';
 
 /**
  * THE TOOLS, ONCE, FOR EVERY TRANSPORT.
@@ -165,11 +168,34 @@ export function toolDefs(store) {
       description:
         'Derived findings: shared worktrees, duplicate lanes, lock contention, cross-lane ' +
         'uncommitted writes, unpushed work, main divergence, stale sessions. Each finding ' +
-        'carries the evidence it was derived from.',
+        'carries the evidence it was derived from. ' +
+        'A finding whose code ends in -dormant is a real registry conflict in which fewer ' +
+        'than two of the parties could be acting, so it is reported as info rather than ' +
+        'critical: two offline sessions cannot contend. It is DEMOTED, NEVER HIDDEN, and ' +
+        'carries the state of each party, so it still tells you what to clean up.',
       input: obj(),
       run: async () => {
         const [sessions, lanes] = await Promise.all([listSessions(), getLanes()]);
-        return jsonResult(detectCollisions(sessions, { lanes }));
+        /*
+         * ONE QUESTION, ONE ANSWER: the staleness window is the SHARED one.
+         *
+         * detectCollisions defaults to 90 seconds, which predates both the
+         * 120-second heartbeat interval and the 600-second liveness window the
+         * rest of this system uses. Left at the default, a perfectly healthy
+         * worker is reported stale for a quarter of every heartbeat cycle --
+         * and it was: get_supervisory_report called code-c an idle live worker
+         * while get_collision_summary called the same agent stale, in the same
+         * second, on the same rows.
+         *
+         * Worse, that wrong arithmetic reached a real conclusion: lane
+         * "agentbridge" was demoted to dormant because the guard believed all
+         * three claimants were stale, when one of them was live. The verdict
+         * happened to be right; the reasoning was not, which is the kind of
+         * agreement that stops being lucky at the worst moment.
+         */
+        return jsonResult(detectCollisions(sessions, {
+          lanes, staleAfterSeconds: STALE_AFTER_MS / 1000,
+        }));
       },
     },
   ];

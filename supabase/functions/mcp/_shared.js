@@ -34,6 +34,41 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   const add = (severity, code, message, evidence) => findings.push({ severity, code, message, evidence });
   const live = sessions.filter((s) => s.git?.ok !== false);
 
+  /*
+   * WHO COULD ACTUALLY BE COLLIDING RIGHT NOW.
+   *
+   * A "collision" between two sessions that are both dead is not an incident,
+   * it is two gravestones in the same plot. Two offline probe sessions sharing
+   * lane "probe" raised a CRITICAL nobody could act on, and so did three agents
+   * holding lane "agentbridge" of which exactly one was alive. A critical that
+   * cannot be acted on is how a reader learns to skim the criticals -- which
+   * costs you the one that mattered.
+   *
+   * So severity follows whether the parties could be acting AT THE SAME TIME.
+   *
+   * NOTHING IS DROPPED. A dormant collision keeps every agent it named and
+   * gains each one's state, so the raw evidence is richer after the demotion
+   * than before it. Filtering these out entirely would destroy the record of a
+   * misconfiguration that is still sitting in the registry waiting to matter
+   * again the moment somebody restarts one of them.
+   *
+   * DEMOTION REQUIRES POSITIVE EVIDENCE OF ABSENCE. A session that declared
+   * itself offline, or whose heartbeat is provably past the window, is known to
+   * be out. A session carrying no heartbeat information at all is NOT: absence
+   * of evidence is not evidence of death, and guessing in that direction would
+   * silently downgrade real, live contention.
+   */
+  const stateOf = (s) => {
+    if (s?.capacity === 'offline') return 'offline';
+    const seen = s?.lastSeenAt ? Date.parse(s.lastSeenAt) : null;
+    if (seen === null || Number.isNaN(seen)) return 'unknown';
+    return (now - seen) / 1000 > staleAfterSeconds ? 'stale' : 'operational';
+  };
+  const couldBeActing = (s) => ['operational', 'unknown'].includes(stateOf(s));
+  // Two dead agents cannot contend for anything. Two live ones can.
+  const contendingNow = (group) => group.filter(couldBeActing).length > 1;
+  const withState = (group) => group.map((s) => ({ agent: s.agentId, state: stateOf(s) }));
+
   const byWorktree = new Map();
   for (const s of sessions) {
     const k = String(s.worktree).replace(/[\\/]+$/, '').toLowerCase();
@@ -41,25 +76,37 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   }
   for (const [wt, group] of byWorktree) {
     if (group.length > 1) {
-      add('critical', 'shared-worktree',
-        `${group.length} agents registered to the same worktree`,
-        { worktree: wt, agents: group.map((s) => s.agentId) });
+      if (contendingNow(group)) {
+        add('critical', 'shared-worktree',
+          `${group.length} agents registered to the same worktree`,
+          { worktree: wt, agents: group.map((s) => s.agentId) });
+      } else {
+        add('info', 'shared-worktree-dormant',
+          `${group.length} agents share a worktree, but fewer than two could be acting`,
+          { worktree: wt, agents: withState(group) });
+      }
     }
   }
 
   const byLane = new Map();
-  for (const s of sessions) byLane.set(s.lane, [...(byLane.get(s.lane) ?? []), s.agentId]);
-  for (const [lane, agents] of byLane) {
-    if (agents.length > 1) {
-      add('critical', 'duplicate-lane', `lane "${lane}" claimed by ${agents.length} agents`,
-        { lane, agents });
+  for (const s of sessions) byLane.set(s.lane, [...(byLane.get(s.lane) ?? []), s]);
+  for (const [lane, group] of byLane) {
+    if (group.length > 1) {
+      if (contendingNow(group)) {
+        add('critical', 'duplicate-lane', `lane "${lane}" claimed by ${group.length} agents`,
+          { lane, agents: group.map((s) => s.agentId) });
+      } else {
+        add('info', 'duplicate-lane-dormant',
+          `lane "${lane}" is claimed by ${group.length} agents, but fewer than two could be acting`,
+          { lane, agents: withState(group) });
+      }
     }
   }
 
   const byResource = new Map();
   for (const s of sessions) {
     for (const l of s.locks ?? []) {
-      byResource.set(l.resource, [...(byResource.get(l.resource) ?? []), { agentId: s.agentId, ...l }]);
+      byResource.set(l.resource, [...(byResource.get(l.resource) ?? []), { agentId: s.agentId, owner: s, ...l }]);
       if (l.heldBy && l.heldBy !== s.agentId) {
         add('critical', 'foreign-lock',
           `lock "${l.resource}" in ${s.agentId}'s worktree is held by ${l.heldBy}`,
@@ -69,10 +116,25 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   }
   for (const [resource, holders] of byResource) {
     if (holders.length > 1) {
-      add('critical', 'lock-contention', `resource "${resource}" locked in ${holders.length} worktrees`,
-        { resource, holders: holders.map((h) => ({ agent: h.agentId, ageSeconds: h.ageSeconds })) });
+      if (contendingNow(holders.map((h) => h.owner))) {
+        add('critical', 'lock-contention', `resource "${resource}" locked in ${holders.length} worktrees`,
+          { resource, holders: holders.map((h) => ({ agent: h.agentId, ageSeconds: h.ageSeconds })) });
+      } else {
+        add('info', 'lock-contention-dormant',
+          `resource "${resource}" is locked in ${holders.length} worktrees, but fewer than two could be acting`,
+          { resource,
+            holders: holders.map((h) => ({
+              agent: h.agentId, state: stateOf(h.owner), ageSeconds: h.ageSeconds,
+            })) });
+      }
     }
   }
+  /*
+   * foreign-lock IS DELIBERATELY NOT DEMOTED. It does not describe two parties
+   * contending; it records that a lock in one agent's worktree is held under
+   * another agent's name. That is evidence of something that already happened,
+   * and it stays true and worth reading whether or not either party is running.
+   */
 
   if (lanes && Object.keys(lanes).length) {
     for (const s of live) {
@@ -955,6 +1017,64 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
   return { ok: errors.length === 0, errors };
 }
 
+/** How long a worker may be silent before its absence is a finding, not a gap. */
+export const WORKER_STALE_AFTER_MS = 10 * 60 * 1000;
+
+/**
+ * WHICH WORKERS STOPPED, AS DISTINCT FROM WHICH WERE NEVER THERE.
+ *
+ * Nothing here could previously tell those apart. Both surfaced only as an
+ * absence: the dispatcher reported "no idle live worker holds lane X", which
+ * reads as "that lane was never staffed" rather than "the worker on it died".
+ *
+ * That is precisely what happened on 2026-09-15. Three of four watchers were
+ * killed by the host for memory, at unrelated times, and the production line
+ * reported itself as merely idle -- a roster that looked healthy because most
+ * of it was gone. A worker that STOPS is a failure. A lane nobody staffed is a
+ * plan. They need different words.
+ *
+ * A DECLARED SHUTDOWN IS NOT AN ALERT. capacity 'offline' is a worker saying so
+ * on its way out, which is the behaviour we want rather than a fault. Neither
+ * is a session that never heartbeated at all: that never started, and reporting
+ * it as lost would invent a worker in order to mourn it.
+ */
+export function wentStale({ sessions = [], now, staleAfterMs = WORKER_STALE_AFTER_MS } = {}) {
+  if (!nonEmpty(now)) throw new TypeError('wentStale requires a `now` timestamp');
+  const t = Date.parse(now);
+  if (Number.isNaN(t)) throw new TypeError(`now is not a timestamp: ${now}`);
+
+  const out = [];
+  for (const s of arr(sessions)) {
+    if (!s || !nonEmpty(s.session_id)) continue;
+    if (s.capacity === 'offline') continue;
+
+    const seen = s.heartbeat_at ? Date.parse(s.heartbeat_at) : NaN;
+    if (Number.isNaN(seen)) continue;
+
+    const silent = t - seen;
+    if (silent <= staleAfterMs) continue;
+
+    out.push({
+      agent_id: s.agent_id ?? null,
+      session_id: s.session_id,
+      lane_id: s.lane_id ?? null,
+      last_heartbeat_at: s.heartbeat_at,
+      silent_for_seconds: Math.round(silent / 1000),
+      /*
+       * THE COMMIT IT WAS LAST PUBLISHING. A head_sha frozen at an old commit
+       * is how you tell a worker that died mid-task from one that finished and
+       * went quiet -- and it is the field that gave the memory kills away.
+       */
+      last_head_sha: s.head_sha ?? null,
+      capacity_when_last_seen: s.capacity ?? null,
+    });
+  }
+
+  // Most recently lost first: that is the one still worth chasing.
+  out.sort((a, b) => a.silent_for_seconds - b.silent_for_seconds);
+  return out;
+}
+
 /**
  * The hourly supervisory report: what a person or a coordinator needs to see.
  *
@@ -962,7 +1082,10 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
  * decision. A report that buries two blocked tasks in a list of forty healthy
  * ones is a report nobody finishes reading.
  */
-export function supervisoryReport({ proposals = [], idle = [], blocked = [], tasks = [], now }) {
+export function supervisoryReport({
+  proposals = [], idle = [], blocked = [], tasks = [], sessions = [], now,
+  staleAfterMs = WORKER_STALE_AFTER_MS,
+}) {
   if (!nonEmpty(now)) throw new TypeError('supervisoryReport requires a `now` timestamp');
 
   const byState = {};
@@ -971,6 +1094,8 @@ export function supervisoryReport({ proposals = [], idle = [], blocked = [], tas
     byState[t.state] = (byState[t.state] ?? 0) + 1;
   }
 
+  const lost = wentStale({ sessions, now, staleAfterMs });
+
   return {
     at: now,
     counts: {
@@ -978,8 +1103,17 @@ export function supervisoryReport({ proposals = [], idle = [], blocked = [], tas
       awaiting_review: arr(proposals).filter((p) => p.kind === 'review').length,
       idle_workers: arr(idle).length,
       blocked: arr(blocked).length,
+      workers_went_stale: lost.length,
       tasks: byState,
     },
+    /*
+     * LOST WORKERS COME FIRST, BECAUSE THEY EXPLAIN THE REST.
+     *
+     * A blocked task under a dead worker is one fact, not two, and reading them
+     * in the other order invites the wrong fix -- re-routing work around a lane
+     * whose only problem is that nobody is standing on it.
+     */
+    worker_went_stale: lost,
     // Everything below needs somebody to act. Nothing here is a status update.
     awaiting_review: arr(proposals).filter((p) => p.kind === 'review'),
     ready_to_assign: arr(proposals).filter((p) => p.kind === 'assign' && p.would_be_accepted),
@@ -1308,11 +1442,34 @@ export function toolDefs(store) {
       description:
         'Derived findings: shared worktrees, duplicate lanes, lock contention, cross-lane ' +
         'uncommitted writes, unpushed work, main divergence, stale sessions. Each finding ' +
-        'carries the evidence it was derived from.',
+        'carries the evidence it was derived from. ' +
+        'A finding whose code ends in -dormant is a real registry conflict in which fewer ' +
+        'than two of the parties could be acting, so it is reported as info rather than ' +
+        'critical: two offline sessions cannot contend. It is DEMOTED, NEVER HIDDEN, and ' +
+        'carries the state of each party, so it still tells you what to clean up.',
       input: obj(),
       run: async () => {
         const [sessions, lanes] = await Promise.all([listSessions(), getLanes()]);
-        return jsonResult(detectCollisions(sessions, { lanes }));
+        /*
+         * ONE QUESTION, ONE ANSWER: the staleness window is the SHARED one.
+         *
+         * detectCollisions defaults to 90 seconds, which predates both the
+         * 120-second heartbeat interval and the 600-second liveness window the
+         * rest of this system uses. Left at the default, a perfectly healthy
+         * worker is reported stale for a quarter of every heartbeat cycle --
+         * and it was: get_supervisory_report called code-c an idle live worker
+         * while get_collision_summary called the same agent stale, in the same
+         * second, on the same rows.
+         *
+         * Worse, that wrong arithmetic reached a real conclusion: lane
+         * "agentbridge" was demoted to dormant because the guard believed all
+         * three claimants were stale, when one of them was live. The verdict
+         * happened to be right; the reasoning was not, which is the kind of
+         * agreement that stops being lucky at the worst moment.
+         */
+        return jsonResult(detectCollisions(sessions, {
+          lanes, staleAfterSeconds: STALE_AFTER_MS / 1000,
+        }));
       },
     },
   ];
@@ -1557,7 +1714,14 @@ export function toolDefs(store) {
       title: 'Get supervisory report',
       description:
         'The state of the production line in one call: counts first, then only what needs a '
-        + 'decision. awaiting_review is work a worker has handed back. ready_to_assign would '
+        + 'decision. '
+        + 'READ worker_went_stale FIRST — it lists workers that were heartbeating and STOPPED, '
+        + 'which is different from a lane nobody staffed and usually explains everything under '
+        + 'it. Each entry carries how long the worker has been silent and the commit it was '
+        + 'last publishing; a head_sha frozen at an old commit means it died mid-task. A worker '
+        + 'that declared itself offline is NOT listed — that is an orderly shutdown, not a '
+        + 'fault. '
+        + 'awaiting_review is work a worker has handed back. ready_to_assign would '
         + 'be accepted right now. would_refuse means the dispatcher found work and something '
         + 'is STOPPING it — that is the most interesting section, not the least. blocked names '
         + 'tasks with no eligible worker, or more than one. idle_workers are live and holding '

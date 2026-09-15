@@ -13,6 +13,41 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   const add = (severity, code, message, evidence) => findings.push({ severity, code, message, evidence });
   const live = sessions.filter((s) => s.git?.ok !== false);
 
+  /*
+   * WHO COULD ACTUALLY BE COLLIDING RIGHT NOW.
+   *
+   * A "collision" between two sessions that are both dead is not an incident,
+   * it is two gravestones in the same plot. Two offline probe sessions sharing
+   * lane "probe" raised a CRITICAL nobody could act on, and so did three agents
+   * holding lane "agentbridge" of which exactly one was alive. A critical that
+   * cannot be acted on is how a reader learns to skim the criticals -- which
+   * costs you the one that mattered.
+   *
+   * So severity follows whether the parties could be acting AT THE SAME TIME.
+   *
+   * NOTHING IS DROPPED. A dormant collision keeps every agent it named and
+   * gains each one's state, so the raw evidence is richer after the demotion
+   * than before it. Filtering these out entirely would destroy the record of a
+   * misconfiguration that is still sitting in the registry waiting to matter
+   * again the moment somebody restarts one of them.
+   *
+   * DEMOTION REQUIRES POSITIVE EVIDENCE OF ABSENCE. A session that declared
+   * itself offline, or whose heartbeat is provably past the window, is known to
+   * be out. A session carrying no heartbeat information at all is NOT: absence
+   * of evidence is not evidence of death, and guessing in that direction would
+   * silently downgrade real, live contention.
+   */
+  const stateOf = (s) => {
+    if (s?.capacity === 'offline') return 'offline';
+    const seen = s?.lastSeenAt ? Date.parse(s.lastSeenAt) : null;
+    if (seen === null || Number.isNaN(seen)) return 'unknown';
+    return (now - seen) / 1000 > staleAfterSeconds ? 'stale' : 'operational';
+  };
+  const couldBeActing = (s) => ['operational', 'unknown'].includes(stateOf(s));
+  // Two dead agents cannot contend for anything. Two live ones can.
+  const contendingNow = (group) => group.filter(couldBeActing).length > 1;
+  const withState = (group) => group.map((s) => ({ agent: s.agentId, state: stateOf(s) }));
+
   // 1. Two agents registered to the same worktree.
   const byWorktree = new Map();
   for (const s of sessions) {
@@ -21,19 +56,31 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   }
   for (const [wt, group] of byWorktree) {
     if (group.length > 1) {
-      add('critical', 'shared-worktree',
-        `${group.length} agents registered to the same worktree`,
-        { worktree: wt, agents: group.map((s) => s.agentId) });
+      if (contendingNow(group)) {
+        add('critical', 'shared-worktree',
+          `${group.length} agents registered to the same worktree`,
+          { worktree: wt, agents: group.map((s) => s.agentId) });
+      } else {
+        add('info', 'shared-worktree-dormant',
+          `${group.length} agents share a worktree, but fewer than two could be acting`,
+          { worktree: wt, agents: withState(group) });
+      }
     }
   }
 
   // 2. Multiple agents claiming the same lane.
   const byLane = new Map();
-  for (const s of sessions) byLane.set(s.lane, [...(byLane.get(s.lane) ?? []), s.agentId]);
-  for (const [lane, agents] of byLane) {
-    if (agents.length > 1) {
-      add('critical', 'duplicate-lane', `lane "${lane}" claimed by ${agents.length} agents`,
-        { lane, agents });
+  for (const s of sessions) byLane.set(s.lane, [...(byLane.get(s.lane) ?? []), s]);
+  for (const [lane, group] of byLane) {
+    if (group.length > 1) {
+      if (contendingNow(group)) {
+        add('critical', 'duplicate-lane', `lane "${lane}" claimed by ${group.length} agents`,
+          { lane, agents: group.map((s) => s.agentId) });
+      } else {
+        add('info', 'duplicate-lane-dormant',
+          `lane "${lane}" is claimed by ${group.length} agents, but fewer than two could be acting`,
+          { lane, agents: withState(group) });
+      }
     }
   }
 
@@ -42,7 +89,7 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   const byResource = new Map();
   for (const s of sessions) {
     for (const l of s.locks ?? []) {
-      byResource.set(l.resource, [...(byResource.get(l.resource) ?? []), { agentId: s.agentId, ...l }]);
+      byResource.set(l.resource, [...(byResource.get(l.resource) ?? []), { agentId: s.agentId, owner: s, ...l }]);
       if (l.heldBy && l.heldBy !== s.agentId) {
         add('critical', 'foreign-lock',
           `lock "${l.resource}" in ${s.agentId}'s worktree is held by ${l.heldBy}`,
@@ -52,10 +99,25 @@ export function detectCollisions(sessions, { lanes = null, staleAfterSeconds = 9
   }
   for (const [resource, holders] of byResource) {
     if (holders.length > 1) {
-      add('critical', 'lock-contention', `resource "${resource}" locked in ${holders.length} worktrees`,
-        { resource, holders: holders.map((h) => ({ agent: h.agentId, ageSeconds: h.ageSeconds })) });
+      if (contendingNow(holders.map((h) => h.owner))) {
+        add('critical', 'lock-contention', `resource "${resource}" locked in ${holders.length} worktrees`,
+          { resource, holders: holders.map((h) => ({ agent: h.agentId, ageSeconds: h.ageSeconds })) });
+      } else {
+        add('info', 'lock-contention-dormant',
+          `resource "${resource}" is locked in ${holders.length} worktrees, but fewer than two could be acting`,
+          { resource,
+            holders: holders.map((h) => ({
+              agent: h.agentId, state: stateOf(h.owner), ageSeconds: h.ageSeconds,
+            })) });
+      }
     }
   }
+  /*
+   * foreign-lock IS DELIBERATELY NOT DEMOTED. It does not describe two parties
+   * contending; it records that a lock in one agent's worktree is held under
+   * another agent's name. That is evidence of something that already happened,
+   * and it stays true and worth reading whether or not either party is running.
+   */
 
   // 4. Cross-lane dirty files. Requires a lanes map; without one we say so
   //    rather than silently reporting "no collisions".

@@ -258,7 +258,10 @@ test('a would-refuse proposal is surfaced separately, not silently dropped', () 
 
 test('a quiet hour reads as quiet', () => {
   const r = supervisoryReport({ now: NOW });
+  // workers_went_stale joined this shape when a dead worker stopped being
+  // indistinguishable from a lane nobody staffed. A quiet hour has none.
   assert.deepEqual(r.counts, {
-    proposals: 0, awaiting_review: 0, idle_workers: 0, blocked: 0, tasks: {},
+    proposals: 0, awaiting_review: 0, idle_workers: 0, blocked: 0,
+    workers_went_stale: 0, tasks: {},
   });
 });

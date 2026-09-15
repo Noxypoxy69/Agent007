@@ -233,6 +233,64 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
   return { ok: errors.length === 0, errors };
 }
 
+/** How long a worker may be silent before its absence is a finding, not a gap. */
+export const WORKER_STALE_AFTER_MS = 10 * 60 * 1000;
+
+/**
+ * WHICH WORKERS STOPPED, AS DISTINCT FROM WHICH WERE NEVER THERE.
+ *
+ * Nothing here could previously tell those apart. Both surfaced only as an
+ * absence: the dispatcher reported "no idle live worker holds lane X", which
+ * reads as "that lane was never staffed" rather than "the worker on it died".
+ *
+ * That is precisely what happened on 2026-09-15. Three of four watchers were
+ * killed by the host for memory, at unrelated times, and the production line
+ * reported itself as merely idle -- a roster that looked healthy because most
+ * of it was gone. A worker that STOPS is a failure. A lane nobody staffed is a
+ * plan. They need different words.
+ *
+ * A DECLARED SHUTDOWN IS NOT AN ALERT. capacity 'offline' is a worker saying so
+ * on its way out, which is the behaviour we want rather than a fault. Neither
+ * is a session that never heartbeated at all: that never started, and reporting
+ * it as lost would invent a worker in order to mourn it.
+ */
+export function wentStale({ sessions = [], now, staleAfterMs = WORKER_STALE_AFTER_MS } = {}) {
+  if (!nonEmpty(now)) throw new TypeError('wentStale requires a `now` timestamp');
+  const t = Date.parse(now);
+  if (Number.isNaN(t)) throw new TypeError(`now is not a timestamp: ${now}`);
+
+  const out = [];
+  for (const s of arr(sessions)) {
+    if (!s || !nonEmpty(s.session_id)) continue;
+    if (s.capacity === 'offline') continue;
+
+    const seen = s.heartbeat_at ? Date.parse(s.heartbeat_at) : NaN;
+    if (Number.isNaN(seen)) continue;
+
+    const silent = t - seen;
+    if (silent <= staleAfterMs) continue;
+
+    out.push({
+      agent_id: s.agent_id ?? null,
+      session_id: s.session_id,
+      lane_id: s.lane_id ?? null,
+      last_heartbeat_at: s.heartbeat_at,
+      silent_for_seconds: Math.round(silent / 1000),
+      /*
+       * THE COMMIT IT WAS LAST PUBLISHING. A head_sha frozen at an old commit
+       * is how you tell a worker that died mid-task from one that finished and
+       * went quiet -- and it is the field that gave the memory kills away.
+       */
+      last_head_sha: s.head_sha ?? null,
+      capacity_when_last_seen: s.capacity ?? null,
+    });
+  }
+
+  // Most recently lost first: that is the one still worth chasing.
+  out.sort((a, b) => a.silent_for_seconds - b.silent_for_seconds);
+  return out;
+}
+
 /**
  * The hourly supervisory report: what a person or a coordinator needs to see.
  *
@@ -240,7 +298,10 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
  * decision. A report that buries two blocked tasks in a list of forty healthy
  * ones is a report nobody finishes reading.
  */
-export function supervisoryReport({ proposals = [], idle = [], blocked = [], tasks = [], now }) {
+export function supervisoryReport({
+  proposals = [], idle = [], blocked = [], tasks = [], sessions = [], now,
+  staleAfterMs = WORKER_STALE_AFTER_MS,
+}) {
   if (!nonEmpty(now)) throw new TypeError('supervisoryReport requires a `now` timestamp');
 
   const byState = {};
@@ -249,6 +310,8 @@ export function supervisoryReport({ proposals = [], idle = [], blocked = [], tas
     byState[t.state] = (byState[t.state] ?? 0) + 1;
   }
 
+  const lost = wentStale({ sessions, now, staleAfterMs });
+
   return {
     at: now,
     counts: {
@@ -256,8 +319,17 @@ export function supervisoryReport({ proposals = [], idle = [], blocked = [], tas
       awaiting_review: arr(proposals).filter((p) => p.kind === 'review').length,
       idle_workers: arr(idle).length,
       blocked: arr(blocked).length,
+      workers_went_stale: lost.length,
       tasks: byState,
     },
+    /*
+     * LOST WORKERS COME FIRST, BECAUSE THEY EXPLAIN THE REST.
+     *
+     * A blocked task under a dead worker is one fact, not two, and reading them
+     * in the other order invites the wrong fix -- re-routing work around a lane
+     * whose only problem is that nobody is standing on it.
+     */
+    worker_went_stale: lost,
     // Everything below needs somebody to act. Nothing here is a status update.
     awaiting_review: arr(proposals).filter((p) => p.kind === 'review'),
     ready_to_assign: arr(proposals).filter((p) => p.kind === 'assign' && p.would_be_accepted),
