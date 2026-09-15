@@ -49,6 +49,27 @@ alter table public.tasks
   add column if not exists lease_expires_at timestamptz,
   add column if not exists attempt integer not null default 0;
 
+/*
+ * A REVIEW IS ALSO A LEASE, AND IT GETS ITS OWN FIELDS.
+ *
+ * Returned work is not finished; it is waiting for somebody who did not write
+ * it. If a review were not leased, a reviewer that died would take the work out
+ * of circulation silently -- the same failure as a worker dying, and one of the
+ * behaviours this runtime is required to survive.
+ *
+ * SEPARATE FROM lease_token ON PURPOSE. The worker's lease is CONSUMED by the
+ * return (set null, so it cannot return the same work twice). Reusing that
+ * field for the reviewer would make "who holds this" ambiguous at exactly the
+ * handover point, which is the one moment it has to be unambiguous.
+ *
+ * The guards over these columns are pure and already tested:
+ * reviewerQueue() and canReview() in src/runtime.mjs.
+ */
+alter table public.tasks
+  add column if not exists reviewer text,
+  add column if not exists review_lease_token uuid,
+  add column if not exists review_lease_expires_at timestamptz;
+
 -- Events that MUST NOT be lost if the process publishing them dies.
 create table if not exists public.outbox (
   event_id     bigserial primary key,
