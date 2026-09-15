@@ -183,7 +183,34 @@ const readStore = {
  * WHO may call; it does not get its own opinion about WHAT is allowed.
  */
 function coordinatorStore(label) {
-  return {
+  /*
+   * NAMED, NOT ANONYMOUS, AND THAT IS A BUG FIX RATHER THAN A STYLE CHOICE.
+   *
+   * confirmProposal has to call assignTask and acceptTask. It used `this`, and
+   * `this` was ALWAYS undefined at the point it ran: toolDefs DESTRUCTURES the
+   * store --
+   *
+   *     const { listProposals, confirmProposal, ... } = store;
+   *     run: async (a) => jsonResult(await confirmProposal(a))
+   *
+   * -- which detaches every method from its object. So confirm_proposal threw
+   * "Cannot read properties of undefined (reading 'assignTask')" on EVERY CALL
+   * IT HAS EVER RECEIVED.
+   *
+   * That is why 393 proposals had been prepared and ZERO ever confirmed. It was
+   * read all day as the coordinator not doing its job. It was this.
+   *
+   * Nothing caught it because nothing called it: index.ts cannot be imported by
+   * the suite, the tool was present in tools/list and correctly described, and
+   * every test that touched it checked the DEFINITION rather than an
+   * invocation. A tool can be listed, documented, scope-gated and completely
+   * broken at the same time.
+   *
+   * Binding to the object by name removes the dependence on the call site
+   * entirely -- a destructured reference and a method call now behave
+   * identically, which is the only version that survives toolDefs.
+   */
+  const store = {
     ...readStore,
 
     async listTasks() { return get('tasks?select=*'); },
@@ -381,8 +408,8 @@ function coordinatorStore(label) {
       }
 
       const done = p.kind === 'assign'
-        ? await this.assignTask({ task_id: p.task_id, agent_id: p.agent_id })
-        : await this.acceptTask({ task_id: p.task_id, note });
+        ? await store.assignTask({ task_id: p.task_id, agent_id: p.agent_id })
+        : await store.acceptTask({ task_id: p.task_id, note });
 
       if (!done.ok) return { ok: false, errors: done.errors, stage: 'apply' };
 
@@ -521,6 +548,8 @@ function coordinatorStore(label) {
       return { ok: true, decision: row };
     },
   };
+
+  return store;
 }
 
 const SHA40 = /^[0-9a-f]{40}$/i;
