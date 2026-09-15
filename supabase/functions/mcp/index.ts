@@ -2,6 +2,7 @@
 import {
   toolDefs, INSTRUCTIONS, canAssign, validateMessage, assignmentRecord, negotiateProtocol,
   messagesQuery, canReturn, returnRecord, canAccept, acceptRecord, canCancel, cancelRecord,
+  eventsFor, nextCursor,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
 } from './_shared.js';
 
@@ -654,6 +655,106 @@ Deno.serve(async (request) => {
     }, 'return=minimal');
 
     return json({ ok: true, task: updated });
+  }
+
+  // ── the WAIT path: event-driven, without an outbound capability ─────────
+  /*
+   * THE CLIENT WAITS. THE BRIDGE NEVER CALLS OUT.
+   *
+   * The coordinator polls hourly at best, so work assigned at 14:00 sat until a
+   * worker's next heartbeat -- up to two minutes, or forever with no watcher.
+   * The obvious fix is a webhook, and it is wrong twice over: the workers are
+   * local sessions with no inbound address, so there is nothing to POST to; and
+   * a data plane that POSTs to a URL supplied with a registration token is an
+   * SSRF engine aimed wherever that token holder names.
+   *
+   * Inverting it costs nothing and gives the same latency. The worker holds a
+   * request open; this answers the moment something is addressed to it.
+   *
+   * THE ANSWER IS A DOORBELL. Events carry ids and timestamps, never the
+   * instruction itself -- the worker reads the task or the message through the
+   * path it already has, so nothing here can be mistaken for a command.
+   *
+   * BOUNDED ON PURPOSE. A held connection is a function invocation; 25 seconds
+   * is long enough that a waiting worker is effectively instant and short
+   * enough that a wedged client releases it without anyone intervening.
+   */
+  if (path === '/wait') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let waitLabel = null;
+    try {
+      waitLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!waitLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const claimed = typeof body?.session_id === 'string' ? body.session_id.trim() : '';
+    if (!claimed) return json({ error: 'invalid_request', detail: 'session_id is required' }, 400);
+
+    // The agent is resolved from the REGISTRY, never taken from the body: a
+    // session that never checked in has no events to be woken for.
+    const regs = await get('session_registrations?select=*');
+    const me = regs.find((r) => r?.session_id === claimed);
+    if (!me) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${claimed}" is not registered; register before waiting`,
+      }, 409);
+    }
+
+    const MAX_WAIT_MS = 25000;
+    const POLL_MS = 2000;
+    const asked = Number.parseInt(body?.timeout_ms ?? MAX_WAIT_MS, 10);
+    const budget = Math.min(Math.max(Number.isFinite(asked) ? asked : MAX_WAIT_MS, 1000), MAX_WAIT_MS);
+
+    const started = Date.now();
+    let cursor = typeof body?.since === 'string' && body.since.trim() ? body.since.trim() : null;
+
+    for (;;) {
+      const [tasks, messages] = await Promise.all([
+        get('tasks?select=*'),
+        get(`messages?select=*&order=created_at.desc&limit=200`),
+      ]);
+
+      let events;
+      try {
+        events = eventsFor({
+          tasks, messages, agent_id: me.agent_id, session_id: me.session_id, since: cursor,
+        });
+      } catch (e) {
+        // An unparseable cursor is the caller's bug and must not be rounded
+        // down to "send everything" -- that replays history as new work.
+        return json({ error: 'invalid_request', detail: String(e?.message ?? e) }, 400);
+      }
+
+      if (events.length) {
+        return json({
+          ok: true,
+          events,
+          cursor: nextCursor(events, cursor),
+          waited_ms: Date.now() - started,
+        });
+      }
+
+      if (Date.now() - started + POLL_MS > budget) {
+        /*
+         * NOTHING HAPPENED, AND THE CURSOR DOES NOT MOVE.
+         *
+         * Advancing it to "now" on an empty wait would step over anything
+         * written between the last read and this reply. The caller passes the
+         * same cursor back and loses nothing.
+         */
+        return json({ ok: true, events: [], cursor, waited_ms: Date.now() - started });
+      }
+
+      await new Promise((r) => setTimeout(r, POLL_MS));
+    }
   }
 
   // ── the MCP surface, at whichever scope the token carries ────────────────

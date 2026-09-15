@@ -49,6 +49,16 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         the head SHA of the delivered work
   agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
                                         recorded audit held. both, not either
+  agentbridge wait-for-work --session <session_id> [--since <iso>]
+             [--once] [--timeout <seconds>]
+                                        WAIT to be woken instead of polling. The
+                                        Bridge never calls out to this machine;
+                                        this holds a request open and returns
+                                        the moment work is assigned, cancelled,
+                                        or a message arrives for you. Events are
+                                        ids and times, NOT instructions: read
+                                        the task or message yourself.
+                                        exit 0 something happened, 3 nothing did
   agentbridge return-task --task <task_id> --session <session_id>
              [--notes <text>] [--repo <dir>]
                                         HAND YOUR OWN WORK BACK. The head SHA is
@@ -723,6 +733,93 @@ try {
    * for the same reason: a return carrying a typed commit is a claim, and every
    * unverifiable status update in this project has had that shape.
    */
+  /*
+   * wait-for-work — EVENT-DRIVEN, WITHOUT GIVING THE BRIDGE A WAY IN.
+   *
+   * The coordinator polls hourly at best, so work assigned at 14:00 sat until a
+   * worker's next heartbeat. The fix is not a webhook -- a local session has no
+   * inbound address, and a data plane that POSTs wherever a token holder points
+   * it is an SSRF engine. So the worker waits and the Bridge answers.
+   *
+   * WHAT COMES BACK IS A DOORBELL. Ids and timestamps, never the instruction:
+   * the worker reads the task or the message through the path it already has.
+   */
+  if (cmd === 'wait-for-work') {
+    if (!args.session || typeof args.session !== 'string') {
+      console.error('error: --session <session_id> is required');
+      process.exit(2);
+    }
+
+    const Hw = await import('../src/hostedRegistry.mjs');
+    const seconds = Number(args.timeout ?? 25);
+    if (!Number.isFinite(seconds) || seconds < 1) {
+      console.error('error: --timeout must be at least 1 second');
+      process.exit(2);
+    }
+
+    let cursor = typeof args.since === 'string' && args.since.trim() ? args.since.trim() : null;
+    let woke = false;
+
+    for (;;) {
+      const res = await Hw.waitForEvents(process.env, {
+        session_id: args.session,
+        since: cursor,
+        timeout_ms: Math.round(seconds * 1000),
+      // The client waits LONGER than the server: otherwise every quiet period
+      // ends as a client abort and "nothing happened" is indistinguishable
+      // from a broken connection.
+      }, { timeoutMs: Math.round(seconds * 1000) + 15000 });
+
+      if (res.state === Hw.HOSTED.NOT_CONFIGURED) {
+        console.error('error: no registration token, so there is nothing to wait on');
+        console.error('       set AGENTBRIDGE_REGISTRATION_TOKEN (a scoped token, NOT a database key)');
+        process.exitCode = 2;
+        break;
+      }
+      if (res.state === Hw.HOSTED.REFUSED) {
+        console.error(`error: the Bridge refused the wait: ${res.detail}`);
+        process.exitCode = 2;
+        break;
+      }
+      if (res.state !== Hw.HOSTED.OK) {
+        console.error(`error: the Bridge is unreachable (${res.detail})`);
+        console.error('       nothing was missed; the cursor has not moved');
+        process.exitCode = 2;
+        break;
+      }
+
+      cursor = res.cursor ?? cursor;
+
+      for (const e of res.events) {
+        woke = true;
+        if (e.kind === 'assigned') {
+          console.log(`assigned  ${e.task_id}${e.lane_id ? `  lane ${e.lane_id}` : ''}  at ${e.at}`);
+        } else if (e.kind === 'cancelled') {
+          console.log(`cancelled ${e.task_id}  at ${e.at}`);
+        } else {
+          console.log(`message   from ${e.from ?? '?'} [${e.type ?? '?'}]  at ${e.at}`);
+        }
+      }
+      if (res.events.length) {
+        // The ids are the whole payload. Reading the content is a separate,
+        // deliberate act through the authenticated path.
+        console.log(`  cursor  ${cursor}`);
+        console.log('  read the details with `agentbridge workers` or the coordination log');
+      }
+
+      if (args.once) {
+        // exit 3 = nothing happened. Distinct from 0, so a shell loop can tell
+        // "woken" from "waited and nothing came" without parsing stdout.
+        if (!woke) process.exitCode = 3;
+        break;
+      }
+      if (res.events.length) break;
+    }
+
+    await Hw.closeHttp();
+    handled = true;
+  }
+
   if (cmd === 'return-task') {
     if (!args.task || typeof args.task !== 'string') {
       console.error('error: --task <task_id> is required');

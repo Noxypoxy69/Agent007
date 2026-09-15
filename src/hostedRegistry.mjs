@@ -142,6 +142,82 @@ export function returnConfig(env = {}) {
 }
 
 /**
+ * Where a worker WAITS to be woken.
+ *
+ * Derived from the registration endpoint on the same rule as returnConfig: one
+ * environment variable for a worker, and a refusal rather than a guess when the
+ * base URL is not the shape this expects. A wait posted to the wrong path hangs
+ * until it times out and reports "nothing happened", which is the most
+ * expensive possible way to be wrong.
+ */
+export function waitConfig(env = {}) {
+  const reg = registrationConfig(env);
+  if (!reg) return null;
+
+  const override = env.AGENTBRIDGE_WAIT_URL;
+  if (typeof override === 'string' && override.trim()) {
+    return { url: override.trim(), token: reg.token };
+  }
+  if (!/\/register$/.test(reg.url)) return null;
+  return { url: reg.url.replace(/\/register$/, '/wait'), token: reg.token };
+}
+
+/**
+ * Hold a request open until something is addressed to this session.
+ *
+ * The timeout here is the CLIENT's patience and must exceed the server's, or
+ * every wait ends as a client-side abort and the worker can never tell "nothing
+ * happened" from "the connection broke".
+ */
+export async function waitForEvents(env = {}, body, { fetchImpl, timeoutMs = 40000 } = {}) {
+  const cfg = waitConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') {
+    return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        connection: 'close',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 401) {
+      return { state: HOSTED.UNREACHABLE, detail: 'registration token rejected (401)' };
+    }
+    if (res.status === 409 || res.status === 400) {
+      let detail = `http ${res.status}`;
+      try { detail = (await res.json())?.detail ?? detail; } catch { /* keep it */ }
+      return { state: HOSTED.REFUSED, detail };
+    }
+    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+
+    const b = await res.json().catch(() => null);
+    if (!b || !Array.isArray(b.events)) {
+      // A malformed answer must not read as "nothing happened": that is the one
+      // interpretation that makes a worker sleep through its own work.
+      return { state: HOSTED.MALFORMED, detail: 'no events array in the reply' };
+    }
+    return { state: HOSTED.OK, events: b.events, cursor: b.cursor ?? null, waited_ms: b.waited_ms ?? null };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Return one assigned task, with the commit that carries the work.
  *
  * @returns {{state: string, detail?: string, task?: object, errors?: string[]}}
