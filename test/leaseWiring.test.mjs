@@ -1,0 +1,411 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * THE SAFE IMPLEMENTATION EXISTED AND WAS UNREACHABLE.
+ *
+ * claim_task, claim_review, renew_lease, renew_review_lease, return_with_lease,
+ * expire_dead_leases and release_review_lease are applied and LIVE in Postgres.
+ * They do a row lock, a fencing token, an expiry, an attempt counter and an
+ * outbox write in one transaction. Until this change they appeared in three
+ * migrations, one document, and NOWHERE ELSE IN THE TREE. Meanwhile the
+ * reachable surface did read-decide-write over HTTP, and the state predicate
+ * added later closed the double-assignment race and nothing else -- it could
+ * refuse a stale decision, but it could not mint a token, could not count an
+ * attempt, and could not put the assignment and its event in one transaction.
+ *
+ * code-d's `wiringIsReal.test.mjs` names that shape as this repository's
+ * recurring defect: a pure, correct, well-tested module invoked by nothing.
+ * A module's own tests pass whether or not anything calls it. This file is the
+ * same question asked of the lease layer.
+ *
+ * WHY IT READS SOURCE TEXT. index.ts is a Deno edge entrypoint and cannot be
+ * imported by this suite -- which is precisely why anything left in it is
+ * untested by construction. `theWritesAreWired.test.mjs` reaches the same
+ * conclusion for the same reason and says so.
+ *
+ * WHY EVERY ASSERTION IS SLICE-SCOPED. "The file contains the string
+ * claim_task" is satisfied by a comment. Each check below cuts the specific
+ * function or route handler out of the file first and asserts INSIDE it, so a
+ * mention somewhere else cannot stand in for a call on the live path. The
+ * ordering checks compare indices within one slice for the same reason: the
+ * announcement being present proves nothing about whether it runs after the
+ * claim, and announcing an assignment that did not land is the original defect
+ * wearing a different coat.
+ *
+ * WHAT THIS FILE DELIBERATELY DOES NOT ASSERT. Not the transport. A helper, a
+ * direct fetch or anything else is the implementer's call; what matters is that
+ * the site names the function carrying the lock. Pinning the transport here
+ * would be designing the change under cover of testing it.
+ *
+ * IT ALSO DOES NOT ASSERT attempt > 0 OR AN OUTBOX ROW. Those are properties of
+ * a live database after a real assignment, not of source, and manufacturing
+ * them by writing to a live ledger to satisfy a test would be worse than the
+ * gap. They come free from claim_task's own transaction once this ships.
+ */
+
+const INDEX = fileURLToPath(new URL('../supabase/functions/mcp/index.ts', import.meta.url));
+
+const raw = await readFile(INDEX, 'utf8');
+
+/**
+ * Blank every comment, keeping the file the same length.
+ *
+ * THE FIRST VERSION OF THIS FILE PASSED ITS OWN MUTATION. Renaming the call
+ * from `claim_task` to something else left the suite green, because the block
+ * comment directly above the call EXPLAINS claim_task by name. The test was
+ * reading the justification rather than the code, and would have gone on
+ * agreeing with itself through the exact regression it exists to catch. Four of
+ * the twelve assertions had the same hole; `/return` kept passing with its
+ * token requirement deleted for the same reason.
+ *
+ * Blanking rather than deleting keeps every index and line number aligned with
+ * the real file, which the ordering assertions depend on.
+ */
+function codeOnly(src) {
+  const out = src.split('');
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k += 1) {
+      if (out[k] !== '\n' && out[k] !== '\r') out[k] = ' ';
+    }
+  };
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    const next = src[i + 1];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      // Skip string bodies, so a quoted "//" is not mistaken for a comment.
+      let j = i + 1;
+      while (j < src.length && src[j] !== ch) {
+        if (src[j] === '\\') j += 1;
+        j += 1;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      const nl = src.indexOf('\n', i);
+      const end = nl === -1 ? src.length : nl;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      const close = src.indexOf('*/', i + 2);
+      const end = close === -1 ? src.length : close + 2;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
+/** Every assertion below reads CODE. Nothing here may be satisfied by prose. */
+const source = codeOnly(raw);
+
+/**
+ * Cut one region out of the file.
+ *
+ * Returns null rather than an empty string when an anchor is missing, so a
+ * renamed function fails loudly at the anchor check below instead of quietly
+ * handing every later assertion an empty haystack to not-find things in.
+ */
+function slice(from, to) {
+  const start = source.indexOf(from);
+  if (start === -1) return null;
+  const end = to ? source.indexOf(to, start + from.length) : -1;
+  return source.slice(start, end === -1 ? source.length : end);
+}
+
+const ANCHORS = {
+  assign: ['async assignTask({ task_id, agent_id }) {', 'async acceptTask({ task_id, note }) {'],
+  accept: ['async acceptTask({ task_id, note }) {', 'async cancelTask({ task_id, reason }) {'],
+  cancel: ['async cancelTask({ task_id, reason }) {', '\n    async '],
+  ret: ["if (path === '/return') {", "if (path === '/dispatch') {"],
+};
+
+/* ── the file can be read, and the anchors still exist ────────────────── */
+
+test('POSITIVE CONTROL: the shipped file is readable and non-trivial', () => {
+  /*
+   * Without this, every "X appears in slice Y" below passes vacuously the
+   * moment the path is wrong or the file is empty -- a negative needs the
+   * positive first, and this suite is almost all negatives.
+   */
+  assert.ok(source.length > 5000, `index.ts is ${source.length} bytes; that is not the real file`);
+  assert.ok(source.includes('coordinatorStore'), 'this is not the coordinator entrypoint');
+});
+
+test('POSITIVE CONTROL: every anchor this file slices on still exists', () => {
+  /*
+   * A rename is the way a source-scanning suite dies quietly: the slice comes
+   * back empty, nothing is found, and "no forbidden pattern present" reads as
+   * a pass. Fail on the rename instead, and say which one.
+   */
+  const missing = [];
+  for (const [name, [from]] of Object.entries(ANCHORS)) {
+    if (!source.includes(from)) missing.push(`${name}: ${from}`);
+  }
+  assert.deepEqual(missing, [], `anchors gone -- re-point this file rather than deleting it:\n  ${missing.join('\n  ')}`);
+});
+
+/* ── the claim is reached on the live assign path ─────────────────────── */
+
+test('assignTask reaches claim_task', () => {
+  const body = slice(...ANCHORS.assign);
+  assert.ok(body, 'assignTask not found');
+  assert.match(
+    body,
+    /rpc\(\s*'claim_task'/,
+    'assignTask does not name claim_task. The atomic claim exists in Postgres and is '
+      + 'reached by nothing -- which is the defect this change exists to close.',
+  );
+});
+
+test('assignTask no longer writes the assignment through a state predicate', () => {
+  /*
+   * The predicate was the patch over the race, not the answer. Leaving it in
+   * place beside the claim would mean two writers for one transition, and the
+   * one that ran first would decide -- with no way to tell from outside which
+   * of them did.
+   */
+  const body = slice(...ANCHORS.assign);
+  assert.doesNotMatch(
+    body,
+    /TASK_WRITE_EXPECTS\.assign/,
+    'assignTask still performs the predicate PATCH as well as the claim',
+  );
+});
+
+test('a refused claim surfaces its reason AND its detail', () => {
+  const body = slice(...ANCHORS.assign);
+  assert.match(body, /reason:\s*claim\.reason/, 'the refusal does not carry the reason code');
+  assert.match(
+    body,
+    /detail:\s*claim\.detail/,
+    'the refusal drops `detail`. The reason codes are deliberately coarse -- not-claimable '
+      + 'merges "no such task" with "another transaction holds it" -- so detail is where the '
+      + 'actionable part lives, and without it the caller is staring at a slug.',
+  );
+});
+
+test('THE LEASE TOKEN REACHES THE CALLER', () => {
+  /*
+   * The whole fencing property rests on this one field. renew_lease and
+   * return_with_lease accept nothing else, so a worker never told its token can
+   * neither renew nor return: it is either reaped mid-flight or refused at
+   * submission after doing all the work. An atomic claim whose token is
+   * discarded is a lock with the key thrown away.
+   */
+  const body = slice(...ANCHORS.assign);
+  assert.match(
+    body,
+    /claim\.lease_token/,
+    'assignTask never reads lease_token off the claim',
+  );
+  /*
+   * Scoped to the RETURNED OBJECT, not the function. The first version of this
+   * line just searched the whole slice for `token: claim.lease_token`, which is
+   * the same thing the assertion above already checks -- so it could only fail
+   * when that one had failed first, and it guarded nothing of its own. Reading
+   * the token and then not handing it back is precisely the failure mode worth
+   * catching here.
+   */
+  // `[\s,{]` before the key is load-bearing: a bare `lease:` also matches the
+  // tail of `unused_lease:`, and `\b` does not help because `_` is a word
+  // character. Without the delimiter, renaming the field away still passed.
+  const returnsIt =
+    /return\s*\{[\s\S]{0,400}?[\s,{]lease:\s*\{[\s\S]{0,200}?token:\s*claim\.lease_token/
+      .test(body);
+  assert.ok(returnsIt, 'assignTask reads the lease token but does not return it to the caller');
+});
+
+test('the announcement runs AFTER the claim, and not at all if it was refused', () => {
+  /*
+   * Announcing an assignment that did not land is the same defect as reporting
+   * success for a lost race -- the caller believes a worker was told, and the
+   * worker was not. Ordering is the assertion; presence is not.
+   */
+  const body = slice(...ANCHORS.assign);
+  const refusal = body.indexOf('if (!claim.ok)');
+  const announce = body.indexOf("type: 'assignment'");
+  assert.notEqual(refusal, -1, 'there is no early return on a refused claim');
+  assert.notEqual(announce, -1, 'the assignment announcement is gone');
+  assert.ok(
+    refusal < announce,
+    'the announcement is not behind the refusal check -- a refused claim would still announce',
+  );
+});
+
+/* ── the return is fenced by the token ────────────────────────────────── */
+
+test('/return reaches return_with_lease', () => {
+  const body = slice(...ANCHORS.ret);
+  assert.ok(body, '/return handler not found');
+  assert.match(body, /rpc\(\s*'return_with_lease'/, '/return does not reach return_with_lease');
+});
+
+test('/return REQUIRES a lease token and offers no way around it', () => {
+  /*
+   * The token comparison IS the zombie catch: a worker whose lease expired
+   * while it kept working is stopped here, before its commit is recorded as the
+   * answer to a task somebody else now holds. A fallback to the old predicate
+   * write when the token is absent would be a path every zombie can take by
+   * simply not sending one -- a control that can be skipped by omitting a field
+   * cannot be distinguished from its own absence.
+   */
+  const body = slice(...ANCHORS.ret);
+  assert.match(body, /body\?\.lease_token/, '/return never reads a lease token from the body');
+  assert.doesNotMatch(
+    body,
+    /TASK_WRITE_EXPECTS\.return/,
+    '/return still has the predicate write available as a fallback, so a return with no '
+      + 'lease token can still land and the fencing property is optional',
+  );
+});
+
+/* ── the two sites with no RPC counterpart keep their predicates ──────── */
+
+test('acceptTask keeps its state predicate', () => {
+  /*
+   * There is no accept_with_lease. Removing the predicate here because the
+   * other sites lost theirs would take a guard away and replace it with
+   * nothing -- the predicate is still the only thing standing between accept
+   * and a stale decision.
+   */
+  const body = slice(...ANCHORS.accept);
+  assert.ok(body, 'acceptTask not found');
+  // The FILTER, not the bare constant: `TASK_WRITE_EXPECTS.accept` also appears
+  // in the writeLanded call beside it, so asserting the name alone stays green
+  // while the predicate is stripped off the query that actually writes.
+  assert.match(
+    body,
+    /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.accept\s*\)/,
+    'acceptTask lost its state predicate',
+  );
+  assert.match(body, /writeLanded/, 'acceptTask no longer treats an empty result as a lost race');
+});
+
+test('cancelTask keeps its state predicate', () => {
+  const body = slice(...ANCHORS.cancel);
+  assert.ok(body, 'cancelTask not found');
+  assert.match(
+    body,
+    /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.cancel\s*\)/,
+    'cancelTask lost its state predicate',
+  );
+  assert.match(body, /writeLanded/, 'cancelTask no longer treats an empty result as a lost race');
+});
+
+/* ── the reviewer eviction this change must not make reachable ────────── */
+
+test('WIRING claim_review WITHOUT GATING claim_task ON THE REVIEW LEASE', async () => {
+  /*
+   * THE DEFECT, found by code-d and confirmed independently here by reading the
+   * shipped definitions:
+   *
+   *   claim_task contains the string "review" ZERO times. It gates on the work
+   *   lease, on state in (runnable, returned), and on dependencies.
+   *
+   *   release_review_lease is a BEFORE UPDATE trigger that nulls `reviewer`,
+   *   `review_lease_token` and `review_lease_expires_at` whenever a row leaves
+   *   the `returned` state.
+   *
+   * claim_task admits `returned` and sets `assigned`. So a worker claiming a
+   * task a reviewer is holding SUCCEEDS -- no refusal, no reason -- and the
+   * trigger destroys the reviewer's live lease as a side effect. Reviewers are
+   * protected from each other by claim_review's `under-review` refusal and not
+   * at all from workers, and the design reads as though they are protected from
+   * both. Worse, nothing is addressed to the evicted reviewer: the reaper emits
+   * review_lease_expired on a timeout, this path emits an ordinary `assigned`
+   * row. The reviewer finds out at submission, when fencing refuses a token
+   * that was superseded half an hour earlier.
+   *
+   * WHY THIS IS A TEST AND NOT A FIX. Whether a worker may EVER evict a live
+   * reviewer is a design decision, and it should not arrive as a side effect of
+   * a trigger nobody was thinking about. It is with Danny and code-c. Inventing
+   * an answer inside the wiring is exactly what would bury it.
+   *
+   * WHY IT IS NOT REACHABLE TODAY, and why this file says so rather than
+   * printing a green tick over it: `claim_review` and `renew_review_lease` have
+   * NO CALLER anywhere outside migrations and tests, and nothing writes
+   * `review_lease_token` -- src/hostedRegistry.mjs calls it "the reviewer lease
+   * whose columns nothing wrote". A lease that cannot be taken cannot be
+   * evicted. Routing assign through claim_task does not change that.
+   *
+   * So this assertion is VACUOUS TODAY BY CONSTRUCTION, and it fires the moment
+   * somebody wires claim_review while claim_task still ignores the review
+   * lease. That pairing is the release where the eviction goes live, and it is
+   * the one thing about this that must not happen quietly.
+   */
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const { readdir } = await import('node:fs/promises');
+
+  const files = [];
+  const walk = async (dir) => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name === '.git' || e.name === 'test') continue;
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory()) await walk(p);
+      else if (/\.(ts|mjs|js)$/.test(e.name)) files.push(p);
+    }
+  };
+  await walk(root.replace(/[/\\]$/, ''));
+
+  const callers = [];
+  for (const p of files) {
+    const text = codeOnly(await readFile(p, 'utf8'));
+    if (/claim_review/.test(text)) callers.push(p.slice(root.length));
+  }
+
+  if (callers.length === 0) return; // vacuous, and that is the honest state
+
+  // claim_review is now reachable. The only thing that makes that safe is
+  // claim_task refusing, or deliberately permitting, a live review lease --
+  // and today it does not mention one.
+  const migrations = fileURLToPath(new URL('../supabase/migrations', import.meta.url));
+  const { readdir: listDir } = await import('node:fs/promises');
+  let claimTaskBody = '';
+  for (const name of await listDir(migrations)) {
+    const text = await readFile(`${migrations}/${name}`, 'utf8');
+    const at = text.indexOf('create or replace function public.claim_task');
+    if (at === -1) continue;
+    const end = text.indexOf('$fn$;', at);
+    claimTaskBody = text.slice(at, end === -1 ? text.length : end);
+  }
+
+  assert.notEqual(claimTaskBody, '', 'claim_task is not defined in any migration');
+  assert.match(
+    claimTaskBody,
+    /review/,
+    `claim_review is now reached from ${callers.join(', ')}, but claim_task still does not `
+      + 'mention the review lease. In that combination a worker claiming returned work '
+      + 'silently destroys a live reviewer lease through the release_review_lease trigger, '
+      + 'and nothing is addressed to the reviewer -- it finds out when submission refuses a '
+      + 'token superseded half an hour earlier. Decide whether a worker may evict a live '
+      + 'reviewer before shipping both halves.',
+  );
+});
+
+/* ── the RPC answer is checked before it is believed ──────────────────── */
+
+test('an RPC answer that is not the documented shape is refused, not believed', () => {
+  /*
+   * A `revoke` binds to a signature, and any migration that drops one of these
+   * functions and recreates it with different arguments gets a brand-new
+   * function. PostgREST then answers 404 -- or worse, resolves a different
+   * overload and returns something that is not the { ok } object. Without an
+   * explicit shape check a null body reads as falsy and every claim silently
+   * "fails", or an unexpected object reads as truthy and every claim silently
+   * "succeeds". The second hands out work nobody holds.
+   */
+  assert.match(
+    source,
+    /typeof\s+\w+\.ok\s*!==\s*'boolean'/,
+    'nothing verifies that an RPC answer actually carries a boolean `ok`',
+  );
+});

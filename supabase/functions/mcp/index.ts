@@ -1,7 +1,11 @@
 // @ts-nocheck
 import {
-  toolDefs, INSTRUCTIONS, canAssign, validateMessage, assignmentRecord, negotiateProtocol,
-  messagesQuery, canReturn, returnRecord, canAccept, acceptRecord, canCancel, cancelRecord,
+  // assignmentRecord and returnRecord are gone from here on purpose: claim_task
+  // and return_with_lease set every column those two built, and more, inside one
+  // transaction. Both still exist in _shared.js and are still tested there; they
+  // are simply no longer how this file writes those two transitions.
+  toolDefs, INSTRUCTIONS, canAssign, validateMessage, negotiateProtocol,
+  messagesQuery, canReturn, canAccept, acceptRecord, canCancel, cancelRecord,
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
@@ -115,6 +119,54 @@ async function patch(pathAndQuery, body) {
   return res.json();
 }
 
+/**
+ * CALL ONE OF THE SECURITY DEFINER FUNCTIONS, AND REFUSE TO INVENT AN ANSWER.
+ *
+ * These functions do in ONE TRANSACTION what this file used to do in three
+ * round trips: lock the row, check the state, mint a fencing token, bump the
+ * attempt counter and write the outbox event. That is why the call moved here
+ * -- a read-decide-write over HTTP cannot be atomic no matter how carefully
+ * the predicate is written, and the predicate was only ever a patch over the
+ * window.
+ *
+ * THE SHAPE CHECK IS NOT PARANOIA. A `revoke` binds to a signature, and any
+ * migration that drops one of these and recreates it with different arguments
+ * gets a brand-new function -- PostgREST then answers 404, or worse, resolves a
+ * DIFFERENT overload and returns something that is not our { ok } object.
+ * `out.ok !== boolean` catches both. Without it a null body reads as falsy and
+ * every claim silently "fails", or an unexpected object reads as truthy and
+ * every claim silently "succeeds"; the second one hands out work nobody holds.
+ */
+async function rpc(fn, args) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: restHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    throw new Error(`supabase-rpc-failed:${fn}:${res.status}:${(await res.text()).slice(0, 200)}`);
+  }
+  const text = await res.text();
+  const out = text ? JSON.parse(text) : null;
+  if (!out || typeof out !== 'object' || Array.isArray(out) || typeof out.ok !== 'boolean') {
+    throw new Error(`supabase-rpc-failed:${fn}:unreadable-answer`);
+  }
+  return out;
+}
+
+/**
+ * Turn a refusal into one line a human can act on.
+ *
+ * The reason codes are deliberately coarse -- 'not-claimable' merges "no such
+ * task" and "another transaction holds it" because retrying is right for both
+ * -- so the `detail` is where the actionable part lives and dropping it would
+ * leave the caller staring at a slug. One refusal carries no detail at all:
+ * the lease_seconds bounds check returns a whole sentence AS the reason, so
+ * this must not assume a slug plus a detail.
+ */
+const rpcRefusal = (out) =>
+  out?.detail ? `${out.reason}: ${out.detail}` : String(out?.reason ?? 'refused');
+
 const sha256Hex = async (s) => {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -226,23 +278,45 @@ function coordinatorStore(label) {
       if (!verdict.ok) return { ok: false, errors: verdict.errors };
 
       /*
-       * THE WRITE REVALIDATES WHAT THE GUARD JUDGED.
+       * THE CLAIM IS THE WRITE, AND THE WRITE IS ATOMIC.
        *
-       * canAssign ran against rows fetched in an EARLIER request. Without a
-       * state predicate here, two coordinators both read "runnable", both
-       * pass, and both write -- last writer wins, silently, across a window as
-       * wide as a network round trip. Raised by code-d; structural, not
-       * probabilistic, because a write with no predicate cannot refuse a stale
-       * decision under any interleaving.
+       * This was a read-decide-PATCH with a state predicate bolted on. The
+       * predicate closed the double-assignment race and nothing more: it could
+       * refuse a stale decision, but it could not mint a fencing token, could
+       * not bump the attempt counter, and could not put the assignment and its
+       * outbox event in the same transaction.
+       *
+       * claim_task does all of that under `for update skip locked`, and it has
+       * been applied and live in Postgres the whole time with nothing calling
+       * it -- the safe implementation existing and unreachable while the
+       * reachable one was unguarded. canAssign still runs first, because it
+       * checks things Postgres cannot see from a row: whether the target
+       * session is LIVE in the registry, and lane collisions across tasks.
+       * claim_task is the authority on the row; canAssign is the authority on
+       * the world around it.
        */
-      const rec = assignmentRecord(task, resolved, { by: label, at: now });
-      const landed = writeLanded(
-        await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.assign), rec),
-        { task_id, expected: TASK_WRITE_EXPECTS.assign },
-      );
-      // An empty result is a LOST RACE, not a success with an absent task.
-      if (!landed.ok) return { ok: false, errors: landed.errors };
-      const row = landed.row;
+      const claim = await rpc('claim_task', {
+        p_task_id: task_id,
+        p_agent_id: resolved.agent_id,
+        p_session_id: resolved.session_id,
+        p_by: label,
+      });
+      if (!claim.ok) {
+        // Surface the reason AND the detail. A caller that only sees
+        // "assignment failed" cannot tell "retry, somebody else had it for a
+        // moment" from "this task is cancelled and never coming back".
+        return {
+          ok: false,
+          errors: [rpcRefusal(claim)],
+          reason: claim.reason ?? null,
+          detail: claim.detail ?? null,
+        };
+      }
+
+      // claim_task returns the lease, not the row. Read the row back so the
+      // response keeps the shape callers already parse.
+      const claimed = await get(`tasks?select=*&task_id=eq.${encodeURIComponent(task_id)}&limit=1`);
+      const row = claimed[0] ?? null;
 
       // The assignment is announced on the message log too, so a worker sees it
       // in one place rather than having to poll the task table.
@@ -252,7 +326,26 @@ function coordinatorStore(label) {
         body: `Assigned ${task_id}: ${task.title}`,
       }, 'return=minimal');
 
-      return { ok: true, task: row, resolved_session: resolved.session_id };
+      /*
+       * THE LEASE TOKEN HAS TO REACH THE WORKER OR NONE OF THIS IS REAL.
+       *
+       * It is a fencing token, minted fresh on every claim, and it is the only
+       * credential that renew_lease and return_with_lease accept. A worker that
+       * is never told its token cannot renew and cannot return -- so it would
+       * either be reaped mid-flight or be refused at submission after doing all
+       * the work. The atomic claim without this field is a lock whose key was
+       * thrown away.
+       */
+      return {
+        ok: true,
+        task: row,
+        resolved_session: resolved.session_id,
+        lease: {
+          token: claim.lease_token,
+          expires_at: claim.lease_expires_at,
+          attempt: claim.attempt,
+        },
+      };
     },
 
     /**
@@ -789,20 +882,64 @@ Deno.serve(async (request) => {
       return json({ error: 'return-refused', errors: verdict.errors, state: task.state }, 409);
     }
 
-    const at = new Date().toISOString();
-    // THE FOURTH SITE. code-d's finding named assign, accept and cancel; the
-    // return path has the identical shape and the identical race, so it gets
-    // the identical fix rather than waiting to be reported separately.
-    const returned = writeLanded(
-      await patch(taskWriteFilter(taskId, TASK_WRITE_EXPECTS.return),
-        returnRecord(task, { agent_id: row.agent_id, session_id: row.session_id },
-          { headSha: body.head_sha, notes: body?.notes, at })),
-      { task_id: taskId, expected: TASK_WRITE_EXPECTS.return },
-    );
-    if (!returned.ok) {
-      return json({ error: 'return-refused', errors: returned.errors }, 409);
+    /*
+     * THE TOKEN IS REQUIRED, AND THAT IS THE POINT.
+     *
+     * return_with_lease compares the token against the row and refuses a stale
+     * one -- that refusal IS the zombie catch: a worker whose lease expired
+     * while it kept working is stopped here, before its commit is recorded as
+     * the answer to a task somebody else now holds.
+     *
+     * So there is deliberately NO fallback to the old predicate write when the
+     * token is absent. A path that accepts a return without a token is a path
+     * every zombie can take by simply not sending one, and a control that can
+     * be skipped by omitting a field cannot be distinguished from its own
+     * absence.
+     */
+    const leaseToken = typeof body?.lease_token === 'string' ? body.lease_token.trim() : '';
+    if (!leaseToken) {
+      return json({
+        error: 'invalid_request',
+        detail: 'lease_token is required. It is the fencing token handed back by assign_task '
+          + 'as lease.token; without it a return cannot be told apart from one by a worker '
+          + 'whose lease already expired.',
+      }, 400);
     }
-    const updated = returned.row;
+
+    /*
+     * A task assigned BEFORE this wiring holds no token at all, so every token
+     * fails the comparison and return_with_lease answers 'stale-lease' -- which
+     * reads as "you lost the race" when the truth is "this task predates
+     * leases". Name it, because the remedy is different: re-assign it to mint
+     * one, rather than retry.
+     */
+    if (!task.lease_token) {
+      return json({
+        error: 'no-lease',
+        detail: `${taskId} was assigned before the lease wiring and carries no lease token, `
+          + 'so it cannot be returned through the lease path. Re-assign it to mint one.',
+        state: task.state,
+      }, 409);
+    }
+
+    const submitted = await rpc('return_with_lease', {
+      p_task_id: taskId,
+      p_lease_token: leaseToken,
+      p_head_sha: body.head_sha,
+      p_notes: typeof body?.notes === 'string' ? body.notes : null,
+    });
+    if (!submitted.ok) {
+      return json({
+        error: 'return-refused',
+        reason: submitted.reason ?? null,
+        detail: submitted.detail ?? null,
+        errors: [rpcRefusal(submitted)],
+      }, 409);
+    }
+
+    // As with the claim: the function returns a verdict, not the row.
+    const after = await get(`tasks?select=*&task_id=eq.${encodeURIComponent(taskId)}&limit=1`);
+    const updated = after[0] ?? null;
 
     // The return announces itself, so a coordinator sees it in list_messages
     // rather than having to poll the task table for a state change.
