@@ -150,6 +150,27 @@ const args = parseArgs(process.argv.slice(3));
  */
 let handled = false;
 
+/**
+ * Stop a command the way process.exit() used to, without calling it.
+ *
+ * WHY A THROW. Only `process.exitCode` + a natural exit survives a preceding
+ * fetch; process.exit() trips the libuv assertion above however carefully the
+ * sockets are drained (measured: destroying undici's dispatcher and deferring
+ * through setImmediate both still die with 127). But `process.exitCode = n`
+ * alone does NOT stop execution the way exit did, and a refusal that carries on
+ * is worse than a crash -- it would record the contract it just refused.
+ *
+ * So the sentinel throws, which halts exactly where exit halted, and the block
+ * boundary converts it into an exit code. Control flow is unchanged; only the
+ * mechanism is.
+ *
+ * `return` is not available: this is module top level, not a function body.
+ */
+class Done extends Error {
+  constructor(code) { super(`done:${code}`); this.exitCode = code; }
+}
+const done = (code) => { throw new Done(code); };
+
 try {
   if (!cmd || cmd === 'help' || args.help) { console.log(HELP); process.exit(0); }
 
@@ -233,6 +254,21 @@ try {
    */
   if (cmd === 'delegate' || cmd === 'delegations' || cmd === 'audit-delegation'
       || cmd === 'delegation-state' || cmd === 'may-integrate') {
+    /*
+     * EVERY EXIT IN THIS BLOCK GOES THROUGH done(), WHICH THROWS.
+     *
+     * These commands consult the hosted registry, and process.exit() after a
+     * fetch dies with a libuv assertion (exit 127) on node 24 / Windows -- the
+     * command does its work and then reports a failure that did not happen,
+     * which for `delegate` means a caller re-records a contract that already
+     * exists. Measured before choosing this: destroying undici's dispatcher and
+     * deferring through setImmediate both still die. Only exitCode plus a
+     * natural exit survives.
+     *
+     * The throw halts exactly where exit did, so control flow is unchanged.
+     * This boundary turns it back into an exit code.
+     */
+    try {
     const { readDelegations, writeDelegations } = await import('../src/provenanceStore.mjs');
     const P = await import('../src/provenance.mjs');
 
@@ -254,7 +290,7 @@ try {
       all = await readDelegations();
     } catch (e) {
       console.error(`error: cannot read the delegation store: ${e.message}`);
-      process.exit(2);
+      done(2);
     }
 
     if (cmd === 'delegations') {
@@ -269,17 +305,17 @@ try {
       if (forSession !== undefined) {
         if (typeof forSession !== 'string' || !forSession.length) {
           console.error('usage: agentbridge delegations --for <session-id> [--all] [--json]');
-          process.exit(2);
+          done(2);
         }
         const mine = P.delegationsForSession(all, forSession, { includeAll: args.all === true });
-        if (args.json) { console.log(JSON.stringify(mine, null, 2)); process.exit(0); }
+        if (args.json) { console.log(JSON.stringify(mine, null, 2)); done(0); }
         if (!mine.length) {
           // Exit 0. An agent with an empty queue is the normal, healthy case;
           // making absence an error would have every clean startup look broken.
           console.log(args.all === true
             ? `no delegations recorded for ${forSession}`
             : `no outstanding delegations for ${forSession}`);
-          process.exit(0);
+          done(0);
         }
         for (const d of mine) {
           console.log(`${d.id}  [${d.state}]  from ${d.assigning_session}`);
@@ -288,11 +324,11 @@ try {
           console.log(`  allowed  ${d.allowed_paths?.length ? d.allowed_paths.join(', ') : '(none)'}`);
           console.log(`  forbidden ${d.forbidden_paths?.length ? d.forbidden_paths.join(', ') : '(none)'}`);
         }
-        process.exit(0);
+        done(0);
       }
 
-      if (args.json) { console.log(JSON.stringify(all, null, 2)); process.exit(0); }
-      if (!all.length) { console.log('no delegations recorded'); process.exit(0); }
+      if (args.json) { console.log(JSON.stringify(all, null, 2)); done(0); }
+      if (!all.length) { console.log('no delegations recorded'); done(0); }
       for (const d of all) {
         console.log(`${d.id}  [${d.state}]  ${d.assigning_session} -> ${d.assigned_session}`);
         console.log(`  task     ${d.task}`);
@@ -301,7 +337,7 @@ try {
         if (d.forbidden_paths.length) console.log(`  forbidden ${d.forbidden_paths.join(', ')}`);
         if (d.audit) console.log(`  audit    ${d.audit.ok ? 'clean' : `${d.audit.violations.length} violation(s)`}`);
       }
-      process.exit(0);
+      done(0);
     }
 
     if (cmd === 'delegate') {
@@ -325,7 +361,7 @@ try {
       const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
       if (args.base !== undefined && typeof args.base !== 'string') {
         console.error('--base needs a value: a commit-ish this repository can resolve');
-        process.exit(2);
+        done(2);
       }
       const resolved = await resolveCommit(repo, args.base);
       if (!resolved.ok) {
@@ -333,7 +369,7 @@ try {
           ? `error: ${repo} is not a git worktree; pass --repo <dir>`
           : `error: base "${resolved.rev}" does not resolve to a commit in ${repo}`);
         console.error('the Bridge resolves the base itself — do not type a SHA from memory');
-        process.exit(2);
+        done(2);
       }
       if (typeof args.base === 'string' && args.base !== resolved.sha) {
         console.log(`base ${args.base} -> ${resolved.sha}`);
@@ -387,7 +423,7 @@ try {
         // A corrupt registration file must not silently downgrade to the
         // unverified path -- that turns a broken machine into a permissive one.
         console.error(`error: cannot read the registration store: ${e.message}`);
-        process.exit(2);
+        done(2);
       }
 
       /*
@@ -405,7 +441,7 @@ try {
         console.error(`error: the hosted registry is configured but ${hosted.state}: ${hosted.detail ?? ''}`);
         console.error('       refusing rather than recording this target as unverified —');
         console.error('       an outage must not quietly downgrade a verified delegation.');
-        process.exit(2);
+        done(2);
       }
       if (hosted.state === H.HOSTED.OK) live = H.mergeRegistrations(live, hosted.rows);
 
@@ -419,7 +455,7 @@ try {
           console.error(`error: --to "${args.to}" did not resolve against the LIVE registry: ${r.reason}`);
           if (r.candidates?.length) console.error(`       candidates: ${r.candidates.join(', ')}`);
           console.error('       workers register with: agentbridge register-session --agent <a> --session <s>');
-          process.exit(2);
+          done(2);
         }
         /*
          * AN INDEPENDENT LIVENESS RE-CHECK, AND IT IS NOT DECORATION.
@@ -441,7 +477,7 @@ try {
         if (!chosen || !LR.isLive(chosen, { now: new Date().toISOString() })) {
           console.error(`error: --to "${args.to}" resolved to session ${r.session_id}, which is not live`);
           console.error('       the resolver and the liveness check disagree — refusing rather than guessing');
-          process.exit(2);
+          done(2);
         }
 
         bound = r;
@@ -449,7 +485,7 @@ try {
         if (r.session_id !== args.to) console.log(`to ${args.to} -> session ${r.session_id} (agent ${r.agent_id})`);
       } else {
         try { registry = await loadLaneRegistry(args['registry-file']); }
-        catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
+        catch (e) { console.error(`error: ${e.message}`); done(2); }
       }
 
       if (bound) {
@@ -470,7 +506,7 @@ try {
           console.error(`error: --to "${args.to}" did not resolve: ${r.reason}`);
           if (r.candidates?.length) console.error(`       candidates: ${r.candidates.join(', ')}`);
           console.error('       the Bridge resolves the target — do not type a session id from memory');
-          process.exit(2);
+          done(2);
         }
         bound = r;
         /*
@@ -511,16 +547,30 @@ try {
       rec.target_verification = verification;
 
       const v = P.validateDelegation(rec);
-      if (!v.ok) { for (const e of v.errors) console.error(`  - ${e}`); process.exit(2); }
-      if (all.some((d) => d.id === rec.id)) { console.error(`delegation "${rec.id}" already exists`); process.exit(2); }
+      if (!v.ok) { for (const e of v.errors) console.error(`  - ${e}`); done(2); }
+      if (all.some((d) => d.id === rec.id)) { console.error(`delegation "${rec.id}" already exists`); done(2); }
       await writeDelegations([...all, rec]);
       console.log(`recorded delegation ${rec.id}: ${rec.assigning_session} -> ${rec.assigned_session} from ${rec.base_sha.slice(0, 12)}`);
       console.log(`  target ${verification}`);
-      process.exit(0);
+      /*
+       * NO done() — this branch consults the hosted registry, and
+       * exiting after a fetch trips a libuv assertion on node 24 / Windows that
+       * kills the process with 127 AFTER it has done the work. The delegation
+       * was written; reporting a failure at that point is the worst possible
+       * lie, because a caller would re-record a contract that already exists.
+       * See `handled` at the top of this file.
+       */
+      handled = true;
     }
 
-    const d = all.find((x) => x.id === args.id);
-    if (!d) { console.error(`no delegation "${args.id}"`); process.exit(2); }
+    /*
+     * Guarded, because `delegate` above no longer exits. Without this, a
+     * successful delegation ran straight on into the lookup for a DIFFERENT
+     * subcommand and reported `no delegation "<id>"` immediately after
+     * recording it -- a contradiction in consecutive lines of output.
+     */
+    const d = handled ? null : all.find((x) => x.id === args.id);
+    if (!handled && !d) { console.error(`no delegation "${args.id}"`); done(2); }
 
     // delegation-state --id <id> --to returned|accepted|rejected|withdrawn [--head <sha>]
     if (cmd === 'delegation-state') {
@@ -529,10 +579,10 @@ try {
         audit: d.audit,
         now: new Date().toISOString(),
       });
-      if (!t.ok) { for (const e of t.errors) console.error(`  - ${e}`); process.exit(2); }
+      if (!t.ok) { for (const e of t.errors) console.error(`  - ${e}`); done(2); }
       await writeDelegations(all.map((x) => (x.id === d.id ? t.record : x)));
       console.log(`${d.id}: ${d.state} -> ${t.record.state}${t.record.head_sha ? ` @ ${t.record.head_sha.slice(0, 12)}` : ''}`);
-      process.exit(0);
+      done(0);
     }
 
     /*
@@ -556,19 +606,23 @@ try {
       if (reasons.length) {
         console.log(`INTEGRATION REFUSED — ${d.id}`);
         for (const r of reasons) console.log(`  - ${r}`);
-        process.exit(1);
+        done(1);
       }
       console.log(`integration permitted — ${d.id} accepted at ${d.head_sha.slice(0, 12)}, audit clean`);
-      process.exit(0);
+      done(0);
     }
 
+    // audit-delegation's tail. `handled` means `delegate` already finished and
+    // declined to exit; without this guard it falls through to auditing a
+    // delegation it never asked about, with d null.
+    if (!handled) {
     let files = split(args.files);
     if (!files.length) {
       const head = args.head ?? d.head_sha;
-      if (!head) { console.error('need --head <sha> or --files'); process.exit(2); }
+      if (!head) { console.error('need --head <sha> or --files'); done(2); }
       const { run } = await import('../src/exec.mjs');
       const r = await run('git', ['diff', '--name-only', `${d.base_sha}..${head}`], { cwd: args.repo ?? process.cwd() });
-      if (!r.ok) { console.error(`cannot diff ${d.base_sha}..${head}: ${r.error}`); process.exit(2); }
+      if (!r.ok) { console.error(`cannot diff ${d.base_sha}..${head}: ${r.error}`); done(2); }
       files = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
     }
 
@@ -590,7 +644,16 @@ try {
       if (result.shared.length) console.log(`  shared touched: ${result.shared.join(', ')}`);
       console.log(result.ok ? '  contract held' : `  ${result.violations.length} violation(s)`);
     }
-    process.exit(result.ok ? 0 : 1);
+    done(result.ok ? 0 : 1);
+    }
+    } catch (e) {
+      // done() landing here is a deliberate stop, not a fault. Anything else is
+      // a real error and must keep its stack rather than being flattened into
+      // an exit code.
+      if (!(e instanceof Done)) throw e;
+      process.exitCode = e.exitCode;
+    }
+    handled = true;
   }
 
   /*
