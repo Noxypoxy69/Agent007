@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# Agent Bridge collision guard — SAMPLE. Not installed by anything.
+#
+# It is a sample on purpose. A tool that silently writes .git/hooks on your
+# machine has taken a decision about every future commit in that repository
+# without asking, and the first thing anyone does when a hook surprises them is
+# delete it. Copy it deliberately, or wire it through core.hooksPath:
+#
+#   cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# or, for a whole machine:
+#
+#   git config --global core.hooksPath ~/.githooks
+#
+# WHAT IT DOES. Reads the staged file list and refuses a commit that reaches
+# into another lane's files, or that is being made from the wrong branch or
+# worktree, or with no declared lane at all. It never modifies anything.
+#
+# EXIT CODES — the only thing git consumes:
+#
+#   0  allow (clean, or warnings only)
+#   1  refuse
+#   2  cannot run: no registry, unreadable git, no resolvable lane identity
+#
+# Note that git treats ANY non-zero as "stop", so 2 blocks as well. That is
+# deliberate: a guard that cannot read its own rules must not wave commits
+# through. If you would rather a broken configuration did not stop you working,
+# change the last line to exit 0 on 2 — and understand you have turned the
+# guard off for exactly the case where something unusual is happening.
+#
+# THE SAME REASONING APPLIES TO A CRASH, and it bit during development: if the
+# guard fails to start, node exits 1, which reads as a refusal. That is the safe
+# direction, but the message will be a stack trace rather than a lane name. If
+# you see one, the guard is broken, not your commit.
+#
+# IDENTITY, in precedence order:
+#
+#   AGENTBRIDGE_LANE=messaging git commit ...
+#   the unique lane whose branch_patterns match the current branch
+#
+# There is no third fallback. A guard that guesses your lane and guesses wrong
+# blocks correct work, so an ambiguous branch refuses rather than picking.
+#
+# OPTIONS worth knowing:
+#
+#   --strict-shared   make shared paths blocking instead of warning. Off by
+#                     default because shared files are precisely the ones two
+#                     lanes reconcile independently — package.json, verify.mjs —
+#                     and a hook that fires on those constantly gets uninstalled.
+#
+# BYPASS. `git commit --no-verify` skips this, as it skips every hook. That is a
+# feature, not a hole: the guard exists to stop an accident, not an intention.
+# The record of who committed what is the handoff's job, not this file's.
+
+set -e
+
+# Adjust if Agent Bridge lives elsewhere on your machine.
+AGENTBRIDGE_DIR="${AGENTBRIDGE_DIR:-$HOME/Documents/agentbridge/agentbridge}"
+GUARD="$AGENTBRIDGE_DIR/bin/agentbridge-precommit.mjs"
+
+if [ ! -f "$GUARD" ]; then
+  echo "agentbridge: guard not found at $GUARD" >&2
+  echo "             set AGENTBRIDGE_DIR, or remove this hook." >&2
+  exit 2
+fi
+
+exec node "$GUARD" "$@"
