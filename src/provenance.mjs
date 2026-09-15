@@ -53,6 +53,52 @@ export const TRANSITIONS = {
   withdrawn: [],
 };
 
+/**
+ * States in which the DELEGATE still owes work.
+ *
+ * `assigned` is the obvious one. `rejected` is the one that is easy to leave
+ * out and is the whole reason this is a named list rather than an inline
+ * equality: rejected is not terminal (see TRANSITIONS above -- it goes back to
+ * `returned`), so it means "handed back, found wanting, still yours". A pull
+ * that omitted it would tell an agent with rework outstanding that it had
+ * nothing to do, which is the exact failure this command exists to prevent.
+ *
+ * `returned` is NOT here. The work is with the lead at that point, and showing
+ * it would have the delegate redo something already handed over.
+ */
+export const OUTSTANDING_STATES = ['assigned', 'rejected'];
+
+/**
+ * What one session is on the hook for — the pull half of coordination.
+ *
+ * Until this existed, a delegation only reached its delegate if both sessions
+ * happened to be alive at the same moment and one of them said so. A freeze, a
+ * reboot or a context handoff lost it. This lets an agent ask on startup
+ * instead, so the store is the durable thing and liveness is not a dependency.
+ *
+ * STILL NOT DISPATCH, and the distinction is load-bearing for this project's
+ * threat model: nothing is pushed, nothing is instructed, nothing executes. An
+ * agent reads a contract it was already given and decides for itself. The
+ * read-only boundary in the CLI header stays exactly where it was.
+ *
+ * MATCHES `assigned_session` ONLY. Never `assigning_session` -- a lead who
+ * hands work out has not thereby given it to themselves, and a pull that
+ * matched either field would hand one agent another's contract, which is the
+ * collision the delegation record exists to prevent.
+ */
+export function delegationsForSession(rows, sessionId, { includeAll = false } = {}) {
+  // A non-string sessionId is a caller bug, not an empty result. `--for` with
+  // no value parses to boolean true in the CLI, and filtering on that would
+  // quietly return nothing -- reporting "no work" to an agent that has some.
+  if (typeof sessionId !== 'string' || !sessionId.length) {
+    throw new TypeError('delegationsForSession requires a session id');
+  }
+  if (!Array.isArray(rows)) throw new TypeError('delegationsForSession requires an array');
+
+  const mine = rows.filter((d) => d?.assigned_session === sessionId);
+  return includeAll ? mine : mine.filter((d) => OUTSTANDING_STATES.includes(d?.state));
+}
+
 const SHA = /^[0-9a-f]{7,40}$/i;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 

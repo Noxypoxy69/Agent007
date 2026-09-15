@@ -34,6 +34,9 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
              --base <sha> [--allow a,b] [--forbid a,b] [--shared a,b]
                                         record a bounded task handoff as a contract
   agentbridge delegations [--json]      list recorded handoffs and their state
+  agentbridge delegations --for <session> [--all] [--json]
+                                        what THIS session still owes: outstanding
+                                        work only, or --all for its whole history
   agentbridge audit-delegation --id <id> [--head <sha>] [--files a,b] [--repo <dir>]
                                         exit 1 if the delegate went outside the contract
   agentbridge doctor                    verify secret sealing and file permissions
@@ -134,9 +137,62 @@ try {
       || cmd === 'delegation-state' || cmd === 'may-integrate') {
     const { readDelegations, writeDelegations } = await import('../src/provenanceStore.mjs');
     const P = await import('../src/provenance.mjs');
-    const all = await readDelegations();
+
+    /*
+     * A STORE THAT CANNOT BE READ IS "CANNOT RUN", NOT "NOTHING TO DO".
+     *
+     * readDelegations throws on a corrupt file rather than returning [] -- see
+     * provenanceStore.mjs, which is deliberate so a bad parse never silently
+     * discards every record on the next write. The top-level catch would turn
+     * that into exit 1, which in this CLI means "a finding" and is what a hook
+     * reads as a real refusal. 2 is the code the rest of the tool already uses
+     * for a precondition that makes the command impossible.
+     *
+     * This matters most for --for: an agent asking "what do I owe?" must be
+     * able to tell "nothing" from "I could not find out".
+     */
+    let all;
+    try {
+      all = await readDelegations();
+    } catch (e) {
+      console.error(`error: cannot read the delegation store: ${e.message}`);
+      process.exit(2);
+    }
 
     if (cmd === 'delegations') {
+      /*
+       * `--for` with no value parses to boolean true. Filtering on that would
+       * match no record and print "nothing outstanding" to an agent that has
+       * work -- a wrong answer delivered confidently, which is worse here than
+       * an error, because the whole point of the command is to be trusted on
+       * startup. Refuse instead.
+       */
+      const forSession = args['for'];
+      if (forSession !== undefined) {
+        if (typeof forSession !== 'string' || !forSession.length) {
+          console.error('usage: agentbridge delegations --for <session-id> [--all] [--json]');
+          process.exit(2);
+        }
+        const mine = P.delegationsForSession(all, forSession, { includeAll: args.all === true });
+        if (args.json) { console.log(JSON.stringify(mine, null, 2)); process.exit(0); }
+        if (!mine.length) {
+          // Exit 0. An agent with an empty queue is the normal, healthy case;
+          // making absence an error would have every clean startup look broken.
+          console.log(args.all === true
+            ? `no delegations recorded for ${forSession}`
+            : `no outstanding delegations for ${forSession}`);
+          process.exit(0);
+        }
+        for (const d of mine) {
+          console.log(`${d.id}  [${d.state}]  from ${d.assigning_session}`);
+          console.log(`  task     ${d.task}`);
+          console.log(`  base     ${d.base_sha}${d.head_sha ? `   head ${d.head_sha}` : ''}`);
+          console.log(`  allowed  ${d.allowed_paths?.length ? d.allowed_paths.join(', ') : '(none)'}`);
+          console.log(`  forbidden ${d.forbidden_paths?.length ? d.forbidden_paths.join(', ') : '(none)'}`);
+        }
+        process.exit(0);
+      }
+
       if (args.json) { console.log(JSON.stringify(all, null, 2)); process.exit(0); }
       if (!all.length) { console.log('no delegations recorded'); process.exit(0); }
       for (const d of all) {
