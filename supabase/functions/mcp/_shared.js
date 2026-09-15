@@ -561,6 +561,30 @@ export function assignmentRecord(task, worker, { by, at }) {
   };
 }
 
+/**
+ * PROTOCOL VERSIONS, NEWEST FIRST, AND WHY THIS IS NEGOTIATED RATHER THAN FIXED.
+ *
+ * This answered '2024-11-05' to every client regardless of what it asked for.
+ * That is legal but it is the wrong answer, and it is a trap: 2024-11-05
+ * predates Streamable HTTP, so a modern client that asks for 2025-06-18 and is
+ * told 2024-11-05 can reasonably conclude this server speaks the LEGACY
+ * HTTP+SSE transport -- and go looking for an SSE endpoint that deliberately
+ * does not exist here, because GET /mcp answers 405 by design.
+ *
+ * The client then connects, authorizes, and lists no tools. Which is exactly
+ * what ChatGPT did: a live read+write grant, a server returning all thirteen
+ * tools to a plain POST, and "No app actions available yet" on screen.
+ *
+ * This server really does speak Streamable HTTP -- POST returns JSON, there is
+ * no stream -- so it should say so. Echo the client's version when it is one we
+ * speak; otherwise answer with the newest we speak and let the client decide.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+export const PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+export const negotiateProtocol = (asked) =>
+  (SUPPORTED_PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSION);
+
 export const jsonResult = (data) => ({
   content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
 });

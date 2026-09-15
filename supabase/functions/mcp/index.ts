@@ -1,6 +1,6 @@
 // @ts-nocheck
 import {
-  toolDefs, INSTRUCTIONS, canAssign, validateMessage, assignmentRecord,
+  toolDefs, INSTRUCTIONS, canAssign, validateMessage, assignmentRecord, negotiateProtocol,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
 } from './_shared.js';
 
@@ -29,7 +29,6 @@ import {
  * merge, command execution. Their absence is the control.
  */
 
-const PROTOCOL_VERSION = '2024-11-05';
 const JSON_HEADERS = {
   'content-type': 'application/json',
   'cache-control': 'no-store',
@@ -345,7 +344,7 @@ async function handleRpc(msg, defs) {
       jsonrpc: '2.0',
       id: id ?? null,
       result: {
-        protocolVersion: PROTOCOL_VERSION,
+        protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'agentbridge', version: '0.2.0' },
         instructions: INSTRUCTIONS,
