@@ -57,6 +57,16 @@ export const HOSTED = {
   OK: 'ok',
   UNREACHABLE: 'unreachable',
   MALFORMED: 'malformed',
+  /*
+   * REFUSED is not UNREACHABLE, and the difference is the whole point.
+   *
+   * The Bridge answered, understood the request, and said no -- the task is not
+   * yours, or it is not in a state that can be returned. Collapsing that into
+   * "unreachable" would send a worker to check its network for a decision the
+   * server made deliberately, and it would invite a retry that can only ever
+   * be refused again.
+   */
+  REFUSED: 'refused',
 };
 
 /*
@@ -103,6 +113,106 @@ export function registrationConfig(env = {}) {
     ?? 'https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp/register',
   );
   return { url, token };
+}
+
+/**
+ * Where a worker HANDS ITS OWN WORK BACK.
+ *
+ * Same credential as a heartbeat: a worker already holds a registration token,
+ * and returning its own assigned task is the same class of act as publishing
+ * its own liveness -- a statement about itself, verified against the registry
+ * rather than trusted.
+ *
+ * The URL is DERIVED from the registration endpoint so a worker still needs
+ * exactly one environment variable. If the register URL has been overridden to
+ * something that does not end in /register, this REFUSES rather than guessing:
+ * posting a return to whatever path happened to be there is how a worker
+ * reports success into a void.
+ */
+export function returnConfig(env = {}) {
+  const reg = registrationConfig(env);
+  if (!reg) return null;
+
+  const override = env.AGENTBRIDGE_RETURN_URL;
+  if (typeof override === 'string' && override.trim()) {
+    return { url: override.trim(), token: reg.token };
+  }
+  if (!/\/register$/.test(reg.url)) return null;
+  return { url: reg.url.replace(/\/register$/, '/return'), token: reg.token };
+}
+
+/**
+ * Return one assigned task, with the commit that carries the work.
+ *
+ * @returns {{state: string, detail?: string, task?: object, errors?: string[]}}
+ */
+export async function returnWork(env = {}, body, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = returnConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') {
+    return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        // See closeHttp: a pooled socket outliving the process trips a libuv
+        // assertion on Windows.
+        connection: 'close',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 401) {
+      return { state: HOSTED.UNREACHABLE, detail: 'registration token rejected (401)' };
+    }
+
+    /*
+     * 409 IS AN ANSWER, NOT A FAILURE TO REACH.
+     *
+     * The guard refused: wrong session, wrong state, no commit. Those reasons
+     * are the useful part of the response and are passed through verbatim
+     * rather than flattened into a status line -- a worker that is told only
+     * "refused" will retry, and a worker told "this is assigned to
+     * danny-win-10, not you" will stop.
+     */
+    if (res.status === 409) {
+      let errors = [];
+      let detail = 'refused';
+      try {
+        const b = await res.json();
+        if (Array.isArray(b?.errors)) errors = b.errors;
+        if (typeof b?.detail === 'string') detail = b.detail;
+      } catch { /* keep the default */ }
+      return { state: HOSTED.REFUSED, errors, detail };
+    }
+
+    if (!res.ok) {
+      let detail = `http ${res.status}`;
+      try {
+        const b = await res.json();
+        if (b?.errors?.length) detail = b.errors.join('; ');
+        else if (b?.detail) detail = String(b.detail).slice(0, 200);
+      } catch { /* keep the status */ }
+      return { state: HOSTED.UNREACHABLE, detail };
+    }
+
+    const b = await res.json().catch(() => ({}));
+    return { state: HOSTED.OK, task: b?.task ?? null };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

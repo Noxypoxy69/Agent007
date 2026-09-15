@@ -49,6 +49,15 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         the head SHA of the delivered work
   agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
                                         recorded audit held. both, not either
+  agentbridge return-task --task <task_id> --session <session_id>
+             [--notes <text>] [--repo <dir>]
+                                        HAND YOUR OWN WORK BACK. The head SHA is
+                                        DERIVED FROM GIT, never a flag: a return
+                                        with a typed commit is a claim, not
+                                        evidence. Only the session the task was
+                                        assigned to may return it.
+                                        exit 0 returned, 1 refused (the Bridge
+                                        answered and said no), 2 could not run
   agentbridge register-session --agent <agent_id> --session <session_id>
              [--lane <l>] [--capacity idle|busy|blocked|offline] [--repo <dir>]
              [--watch] [--interval <seconds>]
@@ -703,6 +712,76 @@ try {
    * the registration path and demanded an --agent the caller had no reason to
    * pass. Two commands in one block only worked while one of them could exit.
    */
+  /*
+   * return-task — A WORKER HANDS ITS OWN WORK BACK.
+   *
+   * The counterpart to assign_task, and deliberately NOT a coordinator tool.
+   * `returned` has to be written by the party that did the work, or the accept
+   * that follows is the same actor on both sides of a review.
+   *
+   * The head SHA is resolved from git exactly as register-session resolves it,
+   * for the same reason: a return carrying a typed commit is a claim, and every
+   * unverifiable status update in this project has had that shape.
+   */
+  if (cmd === 'return-task') {
+    if (!args.task || typeof args.task !== 'string') {
+      console.error('error: --task <task_id> is required');
+      process.exit(2);
+    }
+    if (!args.session || typeof args.session !== 'string') {
+      // NOT defaulted from the registry. A worker that returns work under
+      // whichever session happens to be registered is exactly the confusion
+      // the session check on the far end exists to catch.
+      console.error('error: --session <session_id> is required (the session the task was assigned to)');
+      process.exit(2);
+    }
+
+    const { resolveCommit: resolveForReturn } = await import('../src/git.mjs');
+    const cwdR = args.repo ?? process.cwd();
+    const gR = await resolveForReturn(cwdR, 'HEAD');
+    if (!gR.ok) {
+      console.error(`error: cannot read HEAD in ${cwdR}: ${gR.reason}`);
+      console.error('       the returned commit is derived from git, never accepted as a flag');
+      process.exit(2);
+    }
+
+    const Hr = await import('../src/hostedRegistry.mjs');
+    const res = await Hr.returnWork(process.env, {
+      task_id: args.task,
+      session_id: args.session,
+      head_sha: gR.sha,
+      notes: typeof args.notes === 'string' ? args.notes : null,
+    });
+
+    if (res.state === Hr.HOSTED.OK) {
+      console.log(`returned ${args.task}`);
+      console.log(`  commit   ${gR.sha.slice(0, 12)}`);
+      console.log(`  session  ${args.session}`);
+      if (args.notes) console.log(`  notes    ${args.notes}`);
+      console.log('  the coordinator sees this in its inbox; acceptance is theirs, not yours');
+    } else if (res.state === Hr.HOSTED.REFUSED) {
+      // The Bridge answered and said no. Every reason at once, because the
+      // worker can usually fix exactly one of them and needs to know which.
+      console.error(`refused: ${args.task} was not returned`);
+      for (const e of res.errors ?? []) console.error(`  - ${e}`);
+      if (!(res.errors ?? []).length) console.error(`  - ${res.detail}`);
+      process.exitCode = 1;
+    } else if (res.state === Hr.HOSTED.NOT_CONFIGURED) {
+      console.error('error: no registration token, so there is nowhere to return work to');
+      console.error('       set AGENTBRIDGE_REGISTRATION_TOKEN (a scoped token, NOT a database key)');
+      process.exitCode = 2;
+    } else {
+      console.error(`error: the Bridge is unreachable (${res.detail})`);
+      console.error('       the work is NOT returned; nothing was recorded');
+      process.exitCode = 2;
+    }
+
+    // Same exit discipline as register-session: this just made a request, and
+    // exiting explicitly after one trips the libuv assertion on Windows.
+    await Hr.closeHttp();
+    handled = true;
+  }
+
   if (cmd === 'unregister-session') {
     const R = await import('../src/registrationStore.mjs');
 
