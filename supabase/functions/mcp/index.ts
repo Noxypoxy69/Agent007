@@ -1,6 +1,7 @@
 // @ts-nocheck
 import {
   toolDefs, INSTRUCTIONS, canAssign, validateMessage, assignmentRecord, negotiateProtocol,
+  messagesQuery, canReturn, returnRecord, canAccept, acceptRecord, canCancel, cancelRecord,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
 } from './_shared.js';
 
@@ -146,6 +147,24 @@ const readStore = {
     return lanes && typeof lanes === 'object' ? lanes : {};
   },
   async listDecisions() { return get('owner_decisions?select=*'); },
+
+  /**
+   * THE INBOX. A COORDINATOR THAT CAN ONLY SPEAK IS A MEGAPHONE.
+   *
+   * send_message existed from the start and nothing could read the log back, so
+   * the command centre could issue instructions to four agents and had no way
+   * to see a single reply. One-way command is not coordination; it is
+   * broadcasting with extra steps.
+   *
+   * This is a READ tool and lives on the read store, so a reader gets it too.
+   * Reading the coordination log is the same kind of act as reading the roster
+   * or the decision ledger, and withholding it from readers would leave the
+   * observer role able to see who exists but not what anyone said.
+   *
+   * The query itself is built by messagesQuery() in _shared.js, where a test
+   * can reach it.
+   */
+  async listMessages(args = {}) { return get(messagesQuery(args)); },
 };
 
 /**
@@ -210,6 +229,68 @@ function coordinatorStore(label) {
       }, 'return=minimal');
 
       return { ok: true, task: row, resolved_session: resolved.session_id };
+    },
+
+    /**
+     * ACCEPT WHAT A WORKER RETURNED. Never what it did not.
+     *
+     * canAccept refuses on any state but `returned`, so this cannot sign off
+     * work nobody handed in, and the accepted sha is pinned from the RETURN
+     * rather than re-read -- the reviewer accepted a specific commit.
+     */
+    async acceptTask({ task_id, note }) {
+      const tasks = await get(`tasks?select=*&task_id=eq.${encodeURIComponent(task_id)}&limit=1`);
+      const task = tasks[0];
+      if (!task) return { ok: false, errors: [`no such task: ${task_id}`] };
+
+      const at = new Date().toISOString();
+      const verdict = canAccept(task, { at });
+      if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
+
+      const [row] = await patch(
+        `tasks?task_id=eq.${encodeURIComponent(task_id)}`,
+        acceptRecord(task, { by: label, at }),
+      );
+
+      // Announced on the log, so the worker learns its work landed without
+      // polling the task table.
+      await write('messages', {
+        task_id,
+        from_agent: label,
+        to_agent: task.assigned_agent ?? task.returned_by,
+        type: 'review',
+        body: `Accepted ${task_id} at ${String(task.returned_head_sha).slice(0, 12)}`
+          + (note ? `: ${note}` : ''),
+      }, 'return=minimal');
+
+      return { ok: true, task: row };
+    },
+
+    async cancelTask({ task_id, reason }) {
+      const tasks = await get(`tasks?select=*&task_id=eq.${encodeURIComponent(task_id)}&limit=1`);
+      const task = tasks[0];
+      if (!task) return { ok: false, errors: [`no such task: ${task_id}`] };
+
+      const verdict = canCancel(task, { reason });
+      if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
+
+      const at = new Date().toISOString();
+      const [row] = await patch(
+        `tasks?task_id=eq.${encodeURIComponent(task_id)}`,
+        cancelRecord(task, { by: label, at, reason }),
+      );
+
+      if (task.assigned_agent) {
+        await write('messages', {
+          task_id,
+          from_agent: label,
+          to_agent: task.assigned_agent,
+          type: 'status',
+          body: `Cancelled ${task_id}: ${reason}`,
+        }, 'return=minimal');
+      }
+
+      return { ok: true, task: row };
     },
 
     async sendMessage(m) {
@@ -489,6 +570,90 @@ Deno.serve(async (request) => {
       }
       return json({ error: 'registration-rejected', detail: detail.slice(0, 400) }, 400);
     }
+  }
+
+  // ── the worker's RETURN path ─────────────────────────────────────────────
+  /*
+   * A WORKER HANDS ITS OWN WORK BACK. NOBODY HANDS IT BACK FOR THEM.
+   *
+   * This is the only write a worker has besides its own liveness, and it exists
+   * so that `returned` is written by the party that did the work. A coordinator
+   * tool that marked tasks returned would let the same actor author the
+   * evidence and then sign it off, which is one party on both sides of a review
+   * and makes the whole state meaningless.
+   *
+   * It takes a REGISTRATION token -- the same credential a worker already holds
+   * for heartbeats -- and the return is bound to the session the task was
+   * assigned to. The token is shared across workers, exactly as it is for
+   * /register, so the identity check that matters is the one below: the task
+   * must already be assigned to this session, which only the coordinator could
+   * have arranged.
+   */
+  if (path === '/return') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let regLabel = null;
+    try {
+      regLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!regLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const taskId = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+    if (!taskId) return json({ error: 'invalid_request', detail: 'task_id is required' }, 400);
+
+    const [tasks, regs] = await Promise.all([
+      get(`tasks?select=*&task_id=eq.${encodeURIComponent(taskId)}&limit=1`),
+      get('session_registrations?select=*'),
+    ]);
+    const task = tasks[0];
+    if (!task) return json({ error: 'no-such-task', detail: taskId }, 404);
+
+    /*
+     * THE WORKER IS RESOLVED FROM THE REGISTRY, NOT TAKEN FROM THE BODY.
+     *
+     * A session that is not registered cannot return anything: the row is what
+     * ties a claimed session id to a machine that actually checked in.
+     */
+    const claimed = typeof body?.session_id === 'string' ? body.session_id.trim() : '';
+    const row = regs.find((r) => r?.session_id === claimed);
+    if (!row) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${claimed}" is not registered; register before returning work`,
+      }, 409);
+    }
+
+    const verdict = canReturn(task, { agent_id: row.agent_id, session_id: row.session_id },
+      { headSha: body?.head_sha });
+    if (!verdict.ok) {
+      return json({ error: 'return-refused', errors: verdict.errors, state: task.state }, 409);
+    }
+
+    const at = new Date().toISOString();
+    const [updated] = await patch(
+      `tasks?task_id=eq.${encodeURIComponent(taskId)}`,
+      returnRecord(task, { agent_id: row.agent_id, session_id: row.session_id },
+        { headSha: body.head_sha, notes: body?.notes, at }),
+    );
+
+    // The return announces itself, so a coordinator sees it in list_messages
+    // rather than having to poll the task table for a state change.
+    await write('messages', {
+      task_id: taskId,
+      from_agent: row.agent_id,
+      to_agent: task.assigned_by ?? 'coordinator',
+      type: 'review',
+      body: `Returned ${taskId} at ${String(body.head_sha).slice(0, 12)}`
+        + (typeof body?.notes === 'string' && body.notes.trim() ? `: ${body.notes.trim()}` : ''),
+    }, 'return=minimal');
+
+    return json({ ok: true, task: updated });
   }
 
   // ── the MCP surface, at whichever scope the token carries ────────────────

@@ -260,3 +260,167 @@ export function assignmentRecord(task, worker, { by, at }) {
     assigned_at: at,
   };
 }
+
+/**
+ * ═══ CLOSING THE LOOP: RETURN, THEN ACCEPT ═══════════════════════════════════
+ *
+ * assign_task shipped alone, so the hosted plane could hand work out and had no
+ * way to take it back. A coordinator that can only assign is a dispatcher with
+ * no idea whether anything was done.
+ *
+ * WHO MAY MOVE A TASK, AND WHY IT MATTERS THAT THEY ARE DIFFERENT PEOPLE.
+ *
+ *   assign   coordinator   "do this"
+ *   return   THE WORKER    "I did this, here is the commit"
+ *   accept   coordinator   "I looked, it counts"
+ *
+ * The middle one is the worker's OWN testimony about its OWN work, and it is
+ * the reason this is not simply three coordinator tools. A coordinator that
+ * could record a return would be writing the worker's evidence for it, and the
+ * accept that followed would be the same party on both sides of a review. The
+ * whole point of a returned state is that somebody else put it there.
+ *
+ * That was the temptation worth naming: the quickest way to give a coordinator
+ * an accept button is to let it mark work returned first. It would have closed
+ * the loop on screen and proved nothing at all.
+ */
+
+/** Only work a worker has RETURNED can be accepted. */
+export const ACCEPTABLE_FROM = ['returned'];
+
+/** Terminal states. Nothing moves out of these. */
+export const TERMINAL = ['accepted', 'cancelled'];
+
+/**
+ * MAY THIS WORKER RETURN THIS TASK?
+ *
+ * The worker names itself; the caller supplies the registry row it resolved to.
+ * A return is only accepted for the session the task was ASSIGNED to, so a
+ * worker cannot return somebody else's work -- by accident or otherwise.
+ */
+export function canReturn(task, worker, { headSha } = {}) {
+  const errors = [];
+
+  if (!task || !nonEmpty(task.task_id)) return { ok: false, errors: ['no such task'] };
+  if (!worker || !nonEmpty(worker.session_id)) {
+    return { ok: false, errors: ['no resolved worker: a return must come from a registered session'] };
+  }
+
+  if (task.state !== 'assigned') {
+    errors.push(`task is "${task.state}"; only assigned work can be returned`);
+  }
+
+  /*
+   * THE SESSION MUST MATCH, NOT THE AGENT.
+   *
+   * Matching on agent_id alone would let any session claiming to be code-b
+   * return code-b's work, and sessions are exactly what this registry exists to
+   * tell apart. The agent is checked too, so a session id reused under a new
+   * identity cannot inherit the assignment.
+   */
+  if (nonEmpty(task.assigned_session) && task.assigned_session !== worker.session_id) {
+    errors.push(`task is assigned to session "${task.assigned_session}", not "${worker.session_id}"`);
+  }
+  if (nonEmpty(task.assigned_agent) && nonEmpty(worker.agent_id)
+      && task.assigned_agent !== worker.agent_id) {
+    errors.push(`task is assigned to agent "${task.assigned_agent}", not "${worker.agent_id}"`);
+  }
+
+  /*
+   * A RETURN CARRIES A COMMIT OR IT IS NOT A RETURN.
+   *
+   * "Done" with no sha is a claim nobody can check, and it is the shape every
+   * unverifiable status update in this project has taken. The reviewer needs
+   * something to look at.
+   */
+  if (!nonEmpty(headSha)) {
+    errors.push('a return requires the head sha of the work, resolved through git and never typed');
+  } else if (!/^[0-9a-f]{40}$/i.test(headSha)) {
+    errors.push('head sha must be a full 40-character sha');
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+/** The record written when a return is permitted. */
+export function returnRecord(task, worker, { headSha, notes = null, at }) {
+  return {
+    task_id: task.task_id,
+    state: 'returned',
+    returned_by: worker.session_id,
+    returned_at: at,
+    returned_head_sha: headSha,
+    returned_notes: nonEmpty(notes) ? notes : null,
+  };
+}
+
+/**
+ * MAY THIS BE ACCEPTED?
+ *
+ * Acceptance is the coordinator's own act and needs no worker, but it refuses
+ * on a task nobody returned -- accepting straight from `assigned` would be
+ * signing off work that was never handed in.
+ */
+export function canAccept(task, { at } = {}) {
+  const errors = [];
+
+  if (!task || !nonEmpty(task.task_id)) return { ok: false, errors: ['no such task'] };
+
+  if (TERMINAL.includes(task.state)) {
+    errors.push(`task is already "${task.state}"`);
+  } else if (!ACCEPTABLE_FROM.includes(task.state)) {
+    errors.push(`task is "${task.state}"; only returned work can be accepted`
+      + ' — accepting unreturned work signs off something nobody handed in');
+  }
+
+  // The sha the worker returned is what is being accepted. Without it there is
+  // nothing to point at afterwards and "accepted" means only that somebody said so.
+  if (task.state === 'returned' && !nonEmpty(task.returned_head_sha)) {
+    errors.push('the return carries no head sha, so there is nothing to accept');
+  }
+
+  if (!nonEmpty(at)) errors.push('a timestamp is required');
+
+  return { ok: errors.length === 0, errors };
+}
+
+export function acceptRecord(task, { by, at }) {
+  return {
+    task_id: task.task_id,
+    state: 'accepted',
+    accepted_by: by,
+    accepted_at: at,
+    // The accepted sha is pinned from the RETURN, never re-read at accept time:
+    // the reviewer accepted a specific commit, and the branch may have moved on
+    // between the review and the click.
+    accepted_head_sha: task.returned_head_sha ?? null,
+  };
+}
+
+/**
+ * MAY THIS BE CANCELLED?
+ *
+ * Cancelling accepted work would erase a completed contract rather than
+ * withdraw an outstanding one, so it is refused; supersede it instead.
+ */
+export function canCancel(task, { reason } = {}) {
+  const errors = [];
+  if (!task || !nonEmpty(task.task_id)) return { ok: false, errors: ['no such task'] };
+  if (TERMINAL.includes(task.state)) {
+    errors.push(`task is already "${task.state}" and cannot be cancelled`);
+  }
+  if (!nonEmpty(reason)) {
+    errors.push('a reason is required: a task that vanishes without one is indistinguishable from a bug');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+export function cancelRecord(task, { by, at, reason }) {
+  return {
+    task_id: task.task_id,
+    state: 'cancelled',
+    cancelled_by: by,
+    cancelled_at: at,
+    cancelled_reason: reason,
+  };
+}
