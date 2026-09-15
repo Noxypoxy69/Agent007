@@ -1,4 +1,7 @@
 import { detectCollisions } from '../bridge/collisions.mjs';
+// Pure: no node builtins, no clock, no filesystem. Safe on the edge, which is
+// why the resolution rules live in their own module rather than in the CLI.
+import { resolveOwnerDecision } from '../src/ownerDecisions.mjs';
 
 /**
  * THE TOOLS, ONCE, FOR EVERY TRANSPORT.
@@ -72,7 +75,7 @@ export function toolDefs(store) {
   if (!store || typeof store.listSessions !== 'function' || typeof store.getLanes !== 'function') {
     throw new TypeError('toolDefs(store): store must provide listSessions() and getLanes()');
   }
-  const { listSessions, getLanes, listDelegations } = store;
+  const { listSessions, getLanes, listDelegations, listDecisions } = store;
 
   const defs = [
     {
@@ -208,6 +211,51 @@ export function toolDefs(store) {
       run: async ({ id }) => {
         const d = (await listDelegations()).find((x) => x.id === id);
         return jsonResult(d ?? { error: 'no such delegation', id });
+      },
+    });
+  }
+
+  /*
+   * THE OWNER DECISION LEDGER — call this BEFORE putting a question to the
+   * builder.
+   *
+   * Registered only when the store carries the ledger, for the same reason as
+   * the contract tools above: a tool that exists but fails for half its callers
+   * is worse than one that is honestly absent.
+   *
+   * WHY THERE IS NO WRITE TOOL HERE, AND WHY THERE MUST NEVER BE ONE. A
+   * decision is the builder's authority. If an agent could record one, an agent
+   * could grant itself permission, and the ledger would certify precisely the
+   * thing it exists to constrain. Writing goes through `agentbridge
+   * owner-decide` on the machine, where validateDecision refuses any record
+   * whose created_by is not the owner. Two locks -- a read-only surface, and an
+   * authorship check behind it -- because one lock on this is not enough.
+   */
+  if (typeof listDecisions === 'function') {
+    defs.push({
+      name: 'resolve_owner_decision',
+      title: 'Resolve owner decision',
+      description:
+        'ASK THIS BEFORE ASKING THE BUILDER ANYTHING. Returns what the owner has already '
+        + 'decided about an action in this context, so the same question is never put to them '
+        + 'twice. Outcomes: "allowed" (proceed, do not ask), "denied" (refuse, do not ask), '
+        + '"owner_required" (escalate), "no_decision" (ask ONCE, then record the answer with '
+        + '`agentbridge owner-decide`). Narrower scope wins: task > lane > repo > project > '
+        + 'bridge. A narrow approval NEVER widens — approval to deploy staging for one task is '
+        + 'not approval to deploy production, nor to deploy for another task.',
+      input: obj({
+        action: {
+          type: 'string',
+          description: 'the classified action, e.g. "deploy.production", "commit", "spend.cloudflare"',
+        },
+        project: { type: 'string', description: 'project scope, if known' },
+        repo: { type: 'string', description: 'repository scope, if known' },
+        lane: { type: 'string', description: 'lane scope, if known' },
+        task: { type: 'string', description: 'task or delegation id, if known' },
+      }, ['action']),
+      run: async ({ action, project, repo, lane, task } = {}) => {
+        const rows = await listDecisions();
+        return jsonResult(resolveOwnerDecision(rows, action, { project, repo, lane, task }));
       },
     });
   }

@@ -22,6 +22,14 @@ import { HOME } from './config.mjs';
 const DELEGATIONS = () => path.join(HOME, 'delegations.json');
 const ATTRIBUTIONS = () => path.join(HOME, 'attributions.json');
 
+/*
+ * The Owner Decision Ledger. Append-only by discipline rather than by file
+ * format: nothing here deletes a record, and the only field that changes after
+ * creation is revoked_at. See src/ownerDecisions.mjs for why a superseded
+ * decision stays readable forever.
+ */
+const DECISIONS = () => path.join(HOME, 'ownerDecisions.json');
+
 async function readJsonArray(file) {
   try {
     const parsed = JSON.parse(await readFile(file, 'utf8'));
@@ -44,3 +52,5 @@ export const readDelegations = () => readJsonArray(DELEGATIONS());
 export const writeDelegations = (rows) => writeJsonArray(DELEGATIONS(), rows);
 export const readAttributions = () => readJsonArray(ATTRIBUTIONS());
 export const writeAttributions = (rows) => writeJsonArray(ATTRIBUTIONS(), rows);
+export const readDecisions = () => readJsonArray(DECISIONS());
+export const writeDecisions = (rows) => writeJsonArray(DECISIONS(), rows);

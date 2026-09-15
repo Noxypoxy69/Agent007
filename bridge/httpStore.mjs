@@ -93,6 +93,40 @@ export function createHttpStore(env, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS
       }));
     },
 
+    /**
+     * The Owner Decision Ledger, whole — dead records included.
+     *
+     * Revoked and superseded rows are NOT filtered here. Resolution lives in
+     * src/ownerDecisions.mjs, shared by every transport; filtering in the store
+     * would put the precedence rules in two places, and the hosted copy would
+     * be the one nobody could attach a debugger to when they drifted.
+     *
+     * READ ONLY, and there is no write counterpart in this file or on the tool
+     * surface. An agent that could record a decision could grant itself
+     * permission. Recording happens on the machine, through `agentbridge
+     * owner-decide`, behind an authorship check.
+     */
+    async listDecisions() {
+      const rows = await get('owner_decisions?select=*');
+      return rows.map((r) => ({
+        decision_id: r.decision_id,
+        owner_id: r.owner_id,
+        decision_type: r.decision_type ?? 'policy',
+        statement: r.statement,
+        scope_type: r.scope_type,
+        scope_id: r.scope_id ?? null,
+        effect: r.effect,
+        capabilities: r.capabilities ?? [],
+        constraints: r.constraints ?? {},
+        created_at: r.created_at,
+        created_by: r.created_by,
+        supersedes: r.supersedes ?? null,
+        revoked_at: r.revoked_at ?? null,
+        revoked_by: r.revoked_by ?? null,
+        history: r.history ?? [],
+      }));
+    },
+
     async getLanes() {
       const rows = await get('lanes_latest?select=lanes&limit=1');
       const lanes = rows[0]?.lanes;

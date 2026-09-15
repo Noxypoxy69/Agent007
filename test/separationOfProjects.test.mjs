@@ -144,7 +144,19 @@ test('the schema creates nothing outside its own two namespaces', async () => {
   // place product data lands". Every relation the schema creates must be in
   // agentbridge.*, or be one of the three public views PostgREST needs.
   const sql = await readFile(path.join(ROOT, 'bridge', 'schema.sql'), 'utf8');
-  const allowedPublic = new Set(['sessions_latest', 'lanes_latest', 'reader_tokens']);
+  /*
+   * The REST projection, and nothing else. Every name here is a deliberate
+   * decision to expose something to PostgREST, which is why adding one has to
+   * fail this test first -- `owner_decisions` was added on 2026-09-15 and this
+   * gate caught it, which is the whole point of the list being closed.
+   *
+   * All four are security_invoker views over RLS-enabled tables with no
+   * policies, so only service_role reads them. A new entry that is NOT
+   * security_invoker would be a hole straight through that.
+   */
+  const allowedPublic = new Set([
+    'sessions_latest', 'lanes_latest', 'reader_tokens', 'owner_decisions',
+  ]);
 
   const created = [...sql.matchAll(/create\s+(?:or\s+replace\s+)?(?:table|view)\s+(?:if\s+not\s+exists\s+)?([A-Za-z0-9_.]+)/gi)]
     .map((m) => m[1]);

@@ -122,6 +122,53 @@ grant execute on function agentbridge.prune(int) to service_role;
 -- Schedule with pg_cron if available:
 --   select cron.schedule('agentbridge-prune', '*/15 * * * *', $$select agentbridge.prune(48)$$);
 
+-- ── the Owner Decision Ledger ───────────────────────────────────────────────
+-- "Tell your AI team once." What the builder has already decided, so no worker
+-- puts a question to them that another worker already asked.
+--
+-- APPEND-ONLY BY CONSTRUCTION, not by convention. There is no UPDATE path for
+-- statement, scope, effect or capabilities, and no DELETE path at all. A
+-- decision changes by being superseded (a new row naming it) or revoked
+-- (revoked_at, the single mutable field). The builder must always be able to
+-- see what they originally said and what changed it; a ledger that can be
+-- edited into agreeing with the present is not an audit trail.
+--
+-- created_by MUST equal owner_id, enforced here as a CHECK rather than only in
+-- application code. An agent that could write a decision could grant itself
+-- permission, which would make this table certify the exact thing it exists to
+-- constrain. The MCP surface carries no write tool for the same reason -- two
+-- locks, because one lock on this is not enough.
+create table if not exists owner_decisions (
+  decision_id   text primary key,
+  owner_id      text not null,
+  decision_type text not null default 'policy',
+  statement     text not null,
+  scope_type    text not null check (scope_type in ('bridge','project','repo','lane','task')),
+  scope_id      text,
+  effect        text not null check (effect in ('allow','deny','require_owner')),
+  capabilities  jsonb not null default '[]'::jsonb,
+  constraints   jsonb not null default '{}'::jsonb,
+  created_at    timestamptz not null default now(),
+  created_by    text not null,
+  supersedes    text references owner_decisions(decision_id),
+  revoked_at    timestamptz,
+  revoked_by    text,
+  history       jsonb not null default '[]'::jsonb,
+
+  -- A keyed scope with no scope_id would apply everywhere, which is precisely
+  -- how a narrow approval silently becomes a broad one.
+  constraint scope_id_required_unless_bridge
+    check ((scope_type = 'bridge' and scope_id is null)
+        or (scope_type <> 'bridge' and scope_id is not null)),
+  -- A decision about nothing must not read as a decision about everything.
+  constraint capabilities_not_empty
+    check (jsonb_array_length(capabilities) > 0),
+  -- The worker may not speak for the owner.
+  constraint authored_by_owner check (created_by = owner_id)
+);
+create index if not exists owner_decisions_scope_idx on owner_decisions (scope_type, scope_id);
+alter table owner_decisions enable row level security;
+
 -- ── the REST projection the Worker reads ────────────────────────────────────
 -- bridge/httpStore.mjs reads sessions_latest, lanes_latest and reader_tokens
 -- over PostgREST. For a long time this file defined NONE of them: only the base
@@ -174,7 +221,20 @@ with (security_invoker = true) as
 select r.token_sha256, r.label, r.disabled
 from agentbridge.reader_tokens r;
 
-revoke all on public.sessions_latest, public.lanes_latest, public.reader_tokens
+-- The whole ledger, dead records included. Resolution filters revoked and
+-- superseded rows in src/ownerDecisions.mjs, which is shared by every
+-- transport; doing it in SQL would put the precedence rules in two places and
+-- the two would drift.
+create or replace view public.owner_decisions
+with (security_invoker = true) as
+select d.decision_id, d.owner_id, d.decision_type, d.statement,
+       d.scope_type, d.scope_id, d.effect, d.capabilities, d.constraints,
+       d.created_at, d.created_by, d.supersedes, d.revoked_at, d.revoked_by, d.history
+from agentbridge.owner_decisions d;
+
+revoke all on public.sessions_latest, public.lanes_latest, public.reader_tokens,
+              public.owner_decisions
   from public, anon, authenticated;
-grant select on public.sessions_latest, public.lanes_latest, public.reader_tokens
+grant select on public.sessions_latest, public.lanes_latest, public.reader_tokens,
+                public.owner_decisions
   to service_role;

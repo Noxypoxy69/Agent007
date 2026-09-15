@@ -49,6 +49,23 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         the head SHA of the delivered work
   agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
                                         recorded audit held. both, not either
+  agentbridge ask --action <action> [--question <q>] [--json]
+             [--project <p>] [--repo <r>] [--lane <l>] [--task <t>]
+                                        ASK THE LEDGER BEFORE ASKING THE OWNER.
+                                        exit 0 allowed, 1 denied, 3 owner_required,
+                                        4 no_decision (ask once, then record it)
+  agentbridge owner-decide --id <id> --owner <who> --statement <text>
+             --scope bridge|project|repo|lane|task [--scope-id <x>]
+             --effect allow|deny|require_owner --capabilities a,b
+             [--constraints <json>] [--supersedes <id>]
+                                        record what the owner decided, once, for
+                                        every worker present and future
+  agentbridge owner-decisions [--all] [--json]
+                                        decisions in force, or --all for the
+                                        whole history including superseded
+  agentbridge owner-revoke --id <id> --owner <who> [--reason <text>]
+                                        stop a decision applying, without
+                                        erasing what the owner originally said
   agentbridge workers [--registry-file <f>] [--json]
                                         the worker pool: agents, their live
                                         sessions, where each is, and capacity
@@ -416,6 +433,141 @@ try {
       console.log(result.ok ? '  contract held' : `  ${result.violations.length} violation(s)`);
     }
     process.exit(result.ok ? 0 : 1);
+  }
+
+  /*
+   * THE OWNER DECISION LEDGER — "tell your AI team once".
+   *
+   *   agentbridge ask --action <a> [--question <q>] [--project/--repo/--lane/--task]
+   *   agentbridge owner-decide --id <id> --owner <who> --statement <text> ...
+   *   agentbridge owner-decisions [--all] [--json]
+   *   agentbridge owner-revoke --id <id> --owner <who> [--reason <text>]
+   *
+   * `ask` IS THE ENFORCEMENT POINT, and its exit code is the whole interface.
+   * A worker runs it before putting any question in front of the builder:
+   *
+   *   0  allowed         proceed. do NOT ask.
+   *   1  denied          refuse. do NOT ask.
+   *   3  owner_required  escalate to the builder.
+   *   4  no_decision     ask ONCE, then record the answer with owner-decide.
+   *
+   * Exit 2 keeps its existing meaning across this CLI: the command could not
+   * run at all. It is deliberately NOT one of the four outcomes, because "I
+   * could not read the ledger" must never be mistaken for "nothing covers
+   * this" -- the second sends a worker off to bother the builder, and the first
+   * means the worker has no idea what it is allowed to do.
+   */
+  if (cmd === 'ask' || cmd === 'owner-decide' || cmd === 'owner-decisions' || cmd === 'owner-revoke') {
+    const { readDecisions, writeDecisions } = await import('../src/provenanceStore.mjs');
+    const D = await import('../src/ownerDecisions.mjs');
+
+    let rows;
+    try {
+      rows = await readDecisions();
+    } catch (e) {
+      console.error(`error: cannot read the owner decision ledger: ${e.message}`);
+      process.exit(2);
+    }
+
+    const context = {
+      project: args.project ?? null,
+      repo: args.repo ?? null,
+      lane: args.lane ?? null,
+      task: args.task ?? null,
+    };
+
+    if (cmd === 'ask') {
+      if (typeof args.action !== 'string' || !args.action.trim()) {
+        console.error('error: --action <action> is required, e.g. --action deploy.production');
+        console.error('       an unclassified action cannot be matched against a decision');
+        process.exit(2);
+      }
+      const r = D.resolveOwnerDecision(rows, args.action, context);
+      if (args.json) {
+        console.log(JSON.stringify({ action: args.action, context, ...r }, null, 2));
+      } else {
+        console.log(`${r.outcome.toUpperCase()}  ${args.action}`);
+        console.log(`  ${r.reason}`);
+        if (r.decision_id) console.log(`  decision ${r.decision_id} at ${r.matched_scope} scope`);
+        if (r.candidates.length > 1) console.log(`  candidates: ${r.candidates.join(', ')}`);
+        if (Object.keys(r.constraints ?? {}).length) {
+          console.log(`  constraints: ${JSON.stringify(r.constraints)}`);
+        }
+        // The question is printed ONLY when nothing answers it. This is the
+        // behaviour the whole feature exists for, so it is one branch, here.
+        if (r.outcome === 'no_decision' && typeof args.question === 'string') {
+          console.log(`\nASK THE OWNER ONCE:\n  ${args.question}`);
+        }
+      }
+      process.exit({ allowed: 0, denied: 1, owner_required: 3, no_decision: 4 }[r.outcome]);
+    }
+
+    if (cmd === 'owner-decisions') {
+      const live = new Set(D.activeDecisions(rows).map((d) => d.decision_id));
+      const shown = args.all ? rows : rows.filter((d) => live.has(d.decision_id));
+      if (args.json) { console.log(JSON.stringify(shown, null, 2)); process.exit(0); }
+      if (!shown.length) { console.log('no owner decisions recorded'); process.exit(0); }
+      for (const d of shown) {
+        // A dead decision is shown as dead, never hidden. The builder must be
+        // able to see what they originally said and what replaced it.
+        const state = d.revoked_at ? 'revoked' : (live.has(d.decision_id) ? 'active' : 'superseded');
+        console.log(`${d.decision_id}  [${state}]  ${d.effect}  ${d.scope_type}${d.scope_id ? `:${d.scope_id}` : ''}`);
+        console.log(`  "${d.statement}"`);
+        console.log(`  covers   ${d.capabilities.join(', ')}`);
+        console.log(`  by       ${d.created_by} at ${d.created_at}`);
+        if (d.supersedes) console.log(`  replaces ${d.supersedes}`);
+        if (d.revoked_at) console.log(`  revoked  ${d.revoked_at} by ${d.revoked_by}`);
+      }
+      process.exit(0);
+    }
+
+    if (cmd === 'owner-decide') {
+      const rec = D.createDecision({
+        decision_id: args.id,
+        owner_id: args.owner,
+        decision_type: args['type'] ?? 'policy',
+        statement: args.statement,
+        scope_type: args.scope,
+        scope_id: args['scope-id'] ?? null,
+        effect: args.effect,
+        capabilities: split(args.capabilities),
+        constraints: args.constraints ? JSON.parse(args.constraints) : {},
+        // created_by defaults to the owner. validateDecision REFUSES a record
+        // where they differ, which is what stops a worker writing its own
+        // permission slip; --by exists so that forgery is expressible in a
+        // test rather than only in theory.
+        created_by: args.by ?? args.owner,
+        created_at: new Date().toISOString(),
+        supersedes: args.supersedes ?? null,
+      });
+      const v = D.validateDecision(rec);
+      if (!v.ok) { for (const e of v.errors) console.error(`  - ${e}`); process.exit(2); }
+      if (rows.some((d) => d.decision_id === rec.decision_id)) {
+        console.error(`decision "${rec.decision_id}" already exists — decisions are append-only; supersede it instead`);
+        process.exit(2);
+      }
+      if (rec.supersedes && !rows.some((d) => d.decision_id === rec.supersedes)) {
+        console.error(`cannot supersede "${rec.supersedes}": no such decision`);
+        process.exit(2);
+      }
+      await writeDecisions([...rows, rec]);
+      console.log(`recorded ${rec.decision_id}: ${rec.effect} ${rec.capabilities.join(', ')} at ${rec.scope_type}${rec.scope_id ? `:${rec.scope_id}` : ''}`);
+      if (rec.supersedes) console.log(`  supersedes ${rec.supersedes} (which stays in the ledger)`);
+      process.exit(0);
+    }
+
+    // owner-revoke
+    const target = rows.find((d) => d.decision_id === args.id);
+    if (!target) { console.error(`no decision "${args.id}"`); process.exit(2); }
+    const r = D.revokeDecision(target, {
+      at: new Date().toISOString(),
+      by: args.owner,
+      reason: args.reason ?? null,
+    });
+    if (!r.ok) { for (const e of r.errors) console.error(`  - ${e}`); process.exit(2); }
+    await writeDecisions(rows.map((d) => (d.decision_id === target.decision_id ? r.record : d)));
+    console.log(`revoked ${target.decision_id} — it stops applying now and stays in the ledger`);
+    process.exit(0);
   }
 
   /*

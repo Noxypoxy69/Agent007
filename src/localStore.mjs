@@ -70,6 +70,24 @@ export function createLocalStore({ redactHomePaths = false } = {}) {
       return readDelegations();
     },
 
+    /**
+     * The Owner Decision Ledger — what the builder has already decided.
+     *
+     * Read-only here, and there is no write counterpart anywhere on the tool
+     * surface. An agent that could record a decision could grant itself
+     * permission, which would make the ledger certify the exact thing it exists
+     * to constrain. Recording goes through `agentbridge owner-decide`, where
+     * validateDecision refuses any record whose created_by is not the owner.
+     *
+     * Lazy import for the same reason as listDelegations: the state tools must
+     * keep answering when the ledger file is unreadable, because that is
+     * precisely when somebody is looking into it.
+     */
+    async listDecisions() {
+      const { readDecisions } = await import('./provenanceStore.mjs');
+      return readDecisions();
+    },
+
     async getLanes() {
       const payload = await snapshot();
       if (payload.lanes && typeof payload.lanes === 'object') return payload.lanes;
