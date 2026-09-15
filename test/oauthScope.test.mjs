@@ -274,6 +274,91 @@ test('an EMPTY expected secret approves nothing, on either path', async () => {
   }
 });
 
+// ── revocation: making the consent page's promise true ─────────────────────
+test('the operator can revoke a client, and its live token stops working', async (t) => {
+  /*
+   * The page has always said a grant lasts "until you revoke it" and there was
+   * no way to revoke it. Access tokens expire but refresh rotates forever, so
+   * the only lever was rotating the bridge secret -- which cuts off every
+   * client at once. Tolerable while every grant was read-only; not once a
+   * grant can carry write.
+   */
+  const env = await withClient();
+  const calls = captureFetch(t);
+  const bearer = await grant(env, 'agentbridge:read agentbridge:write');
+  const handler = createOAuthHandler(env);
+
+  // Positive control first: the grant works before it is revoked, or the
+  // assertion below proves nothing.
+  assert.equal((await handler(mcpCall(bearer))).status, 200);
+  assert.equal(calls.length, 1);
+
+  const rev = await handler(new Request('https://bridge.invalid/revoke', {
+    method: 'POST',
+    body: new URLSearchParams({ client_id: 'c1', bridge_token: COORD }),
+  }));
+  assert.equal(rev.status, 200);
+
+  const after = await handler(mcpCall(bearer));
+  assert.equal(after.status, 401, 'a revoked client must not still be served');
+  assert.equal(calls.length, 1, 'nothing may be forwarded on behalf of a revoked client');
+});
+
+test('revoking someone else\'s client needs a bridge secret', async () => {
+  const env = await withClient();
+  const res = await createOAuthHandler(env)(new Request('https://bridge.invalid/revoke', {
+    method: 'POST',
+    body: new URLSearchParams({ client_id: 'c1', bridge_token: 'guess' }),
+  }));
+  assert.equal(res.status, 401);
+  assert.equal(await env.OAUTH.get('revoked:c1'), null);
+});
+
+test('authorizing a revoked client lets it back in', async (t) => {
+  // Otherwise the operator re-approves a client, it gets a token, and it is
+  // refused at /mcp with no explanation anywhere.
+  const env = await withClient();
+  const handler = createOAuthHandler(env);
+  await env.OAUTH.put('revoked:c1', new Date().toISOString());
+
+  assert.equal((await handler(authorizePost(READER, 'agentbridge:read'))).status, 302);
+  assert.equal(await env.OAUTH.get('revoked:c1'), null);
+
+  const calls = captureFetch(t);
+  const bearer = await grant(env, 'agentbridge:read');
+  assert.equal((await handler(mcpCall(bearer))).status, 200);
+  assert.equal(calls.length, 1);
+});
+
+test('RFC 7009: a client retires its own token, and an unknown token still answers 200', async () => {
+  /*
+   * The spec is explicit that revocation answers 200 for a token it does not
+   * recognise. Answering differently turns this endpoint into an oracle for
+   * guessing valid tokens.
+   */
+  const env = envWith();
+  const handler = createOAuthHandler(env);
+  const bearer = await grant(env, 'agentbridge:read');
+
+  const res = await handler(new Request('https://bridge.invalid/revoke', {
+    method: 'POST', body: new URLSearchParams({ token: bearer }),
+  }));
+  assert.equal(res.status, 200);
+  assert.equal(await env.OAUTH.get(`tok:${await sha256Hex(bearer)}`), null);
+
+  const unknown = await handler(new Request('https://bridge.invalid/revoke', {
+    method: 'POST', body: new URLSearchParams({ token: 'never-issued' }),
+  }));
+  assert.equal(unknown.status, 200, 'an unknown token must not be distinguishable');
+});
+
+test('the revocation endpoint is advertised', async () => {
+  const res = await createOAuthHandler(envWith())(
+    new Request('https://bridge.invalid/.well-known/oauth-authorization-server'));
+  const doc = await res.json();
+  assert.equal(doc.revocation_endpoint, 'https://bridge.invalid/revoke');
+});
+
 // ── the page that now guards the coordinator secret ────────────────────────
 test('client_name is escaped: registration is unauthenticated and the name is attacker-chosen', async () => {
   /*

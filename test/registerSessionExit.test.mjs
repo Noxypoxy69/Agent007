@@ -123,7 +123,10 @@ test('THE GATE: register-session must not call process.exit() after it has publi
    */
   const src = await readFile(CLI, 'utf8');
 
-  const start = src.indexOf("if (cmd === 'register-session' || cmd === 'unregister-session')");
+  // The anchor moved once already, when unregister-session was split out into
+  // its own command. The gate refused to pass rather than quietly matching
+  // nothing, which is the only reason that was noticed.
+  const start = src.indexOf("if (cmd === 'register-session') {");
   assert.notEqual(start, -1, 'cannot find the register-session block — this gate needs rewriting, not deleting');
   const end = src.indexOf('\n  if (cmd === ', start + 10);
   assert.notEqual(end, -1, 'cannot find the end of the register-session block');
@@ -234,6 +237,53 @@ test('a refusal still exits 2, and refusals happen before anything is published'
   assert.equal(r.code, 2);
   assert.match(r.stderr, /--session <session_id> is required/);
   assert.equal(posts.length, 0, 'a refused registration must not have published anything');
+});
+
+test('unregister-session tells the HOSTED registry too, not just the local file', async (t) => {
+  /*
+   * It removed the local row and stopped. Hosted kept the session, so a worker
+   * that deregistered deliberately went on looking idle to every other machine
+   * until it aged out ten minutes later -- and a worker machine has no reader
+   * token, so `workers` cannot see hosted state and nobody could notice.
+   *
+   * Observed on a real agent: code-d ran this, reported itself gone, and was
+   * still in the hosted roster 36 minutes later. It was telling the truth about
+   * what it had done; the command was not doing all of it.
+   */
+  const { repo, home } = await fixture(t);
+  const { posts, url } = await registrar(t);
+  const env = { AGENTBRIDGE_HOME: home, AGENTBRIDGE_REGISTRATION_TOKEN: 'test-token', AGENTBRIDGE_REGISTER_URL: url };
+
+  const reg = await run(
+    ['register-session', '--agent', 'code-x', '--session', 'sess-x', '--lane', 'probe'], env, repo);
+  assert.equal(reg.code, 0);
+  assert.equal(posts.length, 1, 'the registration must have published');
+
+  const un = await run(['unregister-session', '--session', 'sess-x'], env, repo);
+
+  assert.equal(un.code, 0, `unregister exited ${un.code}\n${un.stdout}\n${un.stderr}`);
+  assert.match(un.stdout, /unregistered sess-x/);
+  assert.equal(posts.length, 2, 'deregistering published nothing to the hosted registry');
+  assert.equal(JSON.parse(posts[1].body).capacity, 'offline',
+    'the hosted row must be marked offline, or other machines still see a live worker');
+  assert.match(un.stdout, /hosted\s+marked offline/);
+  // It must not have fallen through into the registration path looking for an
+  // --agent the caller had no reason to pass.
+  assert.doesNotMatch(un.stderr, /--agent/);
+});
+
+test('unregister-session with no local row publishes nothing and still exits 0', async (t) => {
+  // Nothing to say and nobody to say it about. Publishing a fabricated offline
+  // row for a session this machine never held would be inventing state.
+  const { repo, home } = await fixture(t);
+  const { posts, url } = await registrar(t);
+
+  const r = await run(['unregister-session', '--session', 'never-existed'],
+    { AGENTBRIDGE_HOME: home, AGENTBRIDGE_REGISTRATION_TOKEN: 'test-token', AGENTBRIDGE_REGISTER_URL: url }, repo);
+
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /no registration for never-existed/);
+  assert.equal(posts.length, 0);
 });
 
 test('a bad --interval is refused BEFORE the row is published, not after', async (t) => {

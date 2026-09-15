@@ -346,6 +346,15 @@ export function createOAuthHandler(env) {
           : 'That token does not match. Check agentbridge-secrets.');
       }
 
+      /*
+       * AUTHORIZING A CLIENT CLEARS ITS REVOCATION.
+       *
+       * Otherwise a revoked client that the operator deliberately lets back in
+       * would authorize successfully, receive a token, and be refused at /mcp
+       * with no explanation anywhere. Revoked means "until you let it back in".
+       */
+      await KV.delete(`revoked:${params.client_id}`);
+
       const code = randomToken('abg', 32);
       await KV.put(`code:${await sha256Hex(code)}`, JSON.stringify({
         client_id: params.client_id,
@@ -424,6 +433,60 @@ export function createOAuthHandler(env) {
       return json({ error: 'unsupported_grant_type' }, 400, CORS);
     }
 
+    /*
+     * ── revocation ────────────────────────────────────────────────────────
+     *
+     * The consent page has always said a grant lasts "until you revoke it".
+     * There was no way to revoke it. Access tokens expire, but refresh rotates
+     * indefinitely, so a client that keeps refreshing keeps its grant forever
+     * and the only lever was rotating the bridge secret -- which cuts off every
+     * client at once and is nobody's idea of revocation.
+     *
+     * That was tolerable while every grant was read-only. It stopped being
+     * tolerable the moment a grant could carry write.
+     *
+     * TWO CALLERS, TWO SHAPES:
+     *
+     *   token=<access or refresh>     RFC 7009. The token is its own credential;
+     *                                 a client retires its own grant. Always
+     *                                 200, even for an unknown token -- the
+     *                                 spec is explicit, and answering
+     *                                 differently turns this into an oracle for
+     *                                 guessing valid tokens.
+     *
+     *   client_id + bridge_token      The operator cutting a client off, which
+     *                                 is the one that makes the page honest.
+     *                                 Needs a bridge secret because it acts on
+     *                                 somebody else's grant.
+     *
+     * Operator revocation is a BLOCK, not a delete: a client's live tokens are
+     * not enumerable from KV, so the mark is checked at /mcp instead. It is
+     * cleared when that client is authorized again, so "revoked" means "until
+     * you let it back in", not "banned forever".
+     */
+    if (path === '/revoke' && request.method === 'POST') {
+      let form;
+      try { form = Object.fromEntries(await request.formData()); }
+      catch { return json({ error: 'invalid_request' }, 400, CORS); }
+
+      if (form.client_id) {
+        const secrets = [env.BRIDGE_COORDINATOR_TOKEN, env.BRIDGE_READER_TOKEN].filter(Boolean);
+        const ok = secrets.some((s) => timingSafeEqual(form.bridge_token ?? '', s));
+        if (!ok) return json({ error: 'invalid_request' }, 401, CORS);
+
+        await KV.put(`revoked:${form.client_id}`, new Date().toISOString());
+        return json({ revoked: form.client_id }, 200, CORS);
+      }
+
+      if (form.token) {
+        const h = await sha256Hex(form.token);
+        // The hint is advisory; delete both rather than trust it.
+        await KV.delete(`tok:${h}`);
+        await KV.delete(`ref:${h}`);
+      }
+      return json({}, 200, CORS);
+    }
+
     // ── the MCP resource itself ────────────────────────────────────────────
     if (path === '/mcp') {
       const bearer = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
@@ -447,6 +510,19 @@ export function createOAuthHandler(env) {
        */
       let granted;
       try { granted = JSON.parse(grant); } catch { return unauthorized(origin, 'invalid_token'); }
+
+      /*
+       * A REVOKED CLIENT IS CHECKED HERE, not at the token endpoint.
+       *
+       * Its outstanding access tokens are not enumerable from KV, so deleting
+       * the grant is not available; the mark has to be consulted on use. This
+       * is the cost of revocation actually working -- one extra KV read per
+       * call -- and it is what makes the consent page's promise true.
+       */
+      if (granted?.client_id && await KV.get(`revoked:${granted.client_id}`)) {
+        return unauthorized(origin, 'invalid_token');
+      }
+
       const write = scopeGrantsWrite(granted?.scope);
 
       if (!env.BRIDGE_READER_TOKEN || !env.DATA_PLANE_URL) {

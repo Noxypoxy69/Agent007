@@ -442,6 +442,20 @@ Deno.serve(async (request) => {
     const v = validateRegistration(body);
     if (!v.ok) return json({ error: 'invalid_registration', errors: v.errors }, 400);
 
+    /*
+     * PROVENANCE, NOT AUTHORIZATION.
+     *
+     * registered_by is the authenticated token label, taken from the bearer and
+     * never from the payload -- a worker does not get to say who wrote its row.
+     *
+     * It is NOT what stops one agent overwriting another's session. There is a
+     * single registration token shared by every worker, so this value is the
+     * same for all of them and a check against it would pass for every accident
+     * it looks like it prevents. Ownership is enforced in the database, by
+     * guard_session_owner, on (agent_id, machine_id).
+     */
+    v.row.registered_by = label;
+
     try {
       const [row] = await write(
         'session_registrations?on_conflict=session_id', v.row,
@@ -456,7 +470,25 @@ Deno.serve(async (request) => {
         verification_state: row?.verification_state,
       });
     } catch (e) {
-      return json({ error: 'registration-rejected', detail: String(e?.message ?? e).slice(0, 400) }, 400);
+      const detail = String(e?.message ?? e);
+      /*
+       * A REFUSED TAKEOVER IS NOT A MALFORMED REQUEST.
+       *
+       * guard_session_owner refuses an update that would move a session to a
+       * different agent or machine. Reporting that as a generic 400 would tell
+       * the worker its payload was wrong -- it was not; the payload was fine
+       * and the session simply belongs to somebody else. 409 plus the hint the
+       * trigger raises is the difference between "fix your JSON" and
+       * "deregister it first, then register under the new identity".
+       */
+      if (detail.includes('session_owned_by_another_agent')) {
+        return json({
+          error: 'session-owned-by-another-agent',
+          detail: detail.slice(0, 400),
+          hint: 'deregister the session first, then register it under the new identity',
+        }, 409);
+      }
+      return json({ error: 'registration-rejected', detail: detail.slice(0, 400) }, 400);
     }
   }
 

@@ -95,6 +95,9 @@ export const authorizationServerMetadata = (origin) => ({
   authorization_endpoint: `${origin}/authorize`,
   token_endpoint: `${origin}/token`,
   registration_endpoint: `${origin}/register`,
+  // RFC 7009. Advertised so a client can retire its own grant, and so the
+  // endpoint is discoverable rather than folklore.
+  revocation_endpoint: `${origin}/revoke`,
   scopes_supported: SCOPES,
   response_types_supported: ['code'],
   grant_types_supported: ['authorization_code', 'refresh_token'],

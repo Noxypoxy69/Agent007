@@ -694,15 +694,67 @@ try {
    * heartbeat_at is stamped here rather than accepted, for the same reason. A
    * worker that could send its own timestamp could keep a dead session live.
    */
-  if (cmd === 'register-session' || cmd === 'unregister-session') {
+  /*
+   * unregister-session IS ITS OWN COMMAND, not a branch inside register-session.
+   *
+   * It used to share that block and exit from inside it. When it stopped
+   * exiting -- because it now makes a request, and exiting after one trips the
+   * libuv assertion -- sharing the block meant execution fell straight on into
+   * the registration path and demanded an --agent the caller had no reason to
+   * pass. Two commands in one block only worked while one of them could exit.
+   */
+  if (cmd === 'unregister-session') {
     const R = await import('../src/registrationStore.mjs');
 
-    if (cmd === 'unregister-session') {
+    {
       if (!args.session) { console.error('error: --session <session_id> is required'); process.exit(2); }
+
+      /*
+       * DEREGISTERING HAS TO REACH THE HOSTED REGISTRY TOO.
+       *
+       * This removed the LOCAL row and stopped there. Hosted kept the session,
+       * so a worker that deregistered deliberately went on looking idle to
+       * every other machine until it aged out ten minutes later -- and on a
+       * worker machine there is no way to notice, because `workers` has no
+       * reader token and cannot see hosted state at all.
+       *
+       * Observed: code-d ran this, reported itself gone, and was still in the
+       * hosted roster 36 minutes later. It was telling the truth about what it
+       * had done. The command was not doing all of it.
+       *
+       * The row is read BEFORE removal because publishing "offline" needs the
+       * identity that is about to be deleted: machine_id and a full 40-char
+       * head_sha are required by the write path and cannot be reconstructed
+       * from a session id.
+       */
+      const mine = (await R.readRegistrations()).find((r) => r?.session_id === args.session) ?? null;
       const { removed } = await R.removeRegistration(args.session);
       console.log(removed ? `unregistered ${args.session}` : `no registration for ${args.session}`);
-      process.exit(0);
+
+      if (mine) {
+        const Hu = await import('../src/hostedRegistry.mjs');
+        const pub = await Hu.publishRegistration(process.env, { ...mine, capacity: 'offline' });
+        if (pub.state === Hu.HOSTED.OK) {
+          console.log('  hosted   marked offline — other machines will stop seeing this session');
+        } else if (pub.state === Hu.HOSTED.NOT_CONFIGURED) {
+          console.log('  hosted   NOT CONFIGURED — local only; a hosted row, if any, will age out');
+        } else {
+          // Loud, because the consequence is a session other machines still
+          // believe is alive, which is what gets work addressed to nobody.
+          console.error(`  hosted   UNREACHABLE (${pub.detail}) — it may still appear live elsewhere`);
+        }
+        await Hu.closeHttp();
+      }
+
+      // Same exit discipline as the registration path below: this may have just
+      // made a request, and exiting explicitly after one trips the libuv
+      // assertion on Windows.
+      handled = true;
     }
+  }
+
+  if (cmd === 'register-session') {
+    const R = await import('../src/registrationStore.mjs');
 
     if (!args.agent || typeof args.agent !== 'string') {
       console.error('error: --agent <agent_id> is required (your durable identity)');
