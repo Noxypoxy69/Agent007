@@ -171,6 +171,36 @@ test('release-risk: an unknown remote shape is treated as local, not as safe', (
   assert.equal(isLocalRemote('https://example.com/x.git'), false);
 });
 
+test('release-risk: the rule works off upstreamKind, with no url present at all', () => {
+  // The transmitted payload no longer carries upstreamUrl -- it published the
+  // account name and a private repository name. A hosted reader evaluating
+  // stored state has only the classification, so the rule must run on that
+  // alone or it silently stops working the moment it is hosted.
+  const local = evaluateReleaseRisk({ ...CLEAN, upstreamUrl: undefined, upstreamKind: 'local' });
+  assert.ok(codes(local).includes('LOCAL_ONLY_REMOTE'), 'kind "local" did not fire the rule');
+  assert.equal(local.ok, false);
+
+  const net = evaluateReleaseRisk({ ...CLEAN, upstreamUrl: undefined, upstreamKind: 'network' });
+  assert.equal(codes(net).includes('LOCAL_ONLY_REMOTE'), false, 'kind "network" fired the rule');
+  assert.equal(net.ok, true);
+});
+
+test('release-risk: upstreamKind wins over a url that disagrees', () => {
+  // Precedence stated explicitly so a stale url in old stored state cannot
+  // override a classification computed at collection time.
+  const r = evaluateReleaseRisk({
+    ...CLEAN, upstreamKind: 'local', upstreamUrl: 'https://github.com/x/y.git',
+  });
+  assert.ok(codes(r).includes('LOCAL_ONLY_REMOTE'));
+});
+
+test('release-risk: an unknown upstreamKind does not claim the remote is local', () => {
+  // "unknown" means git could not report the url. Treating it as local would
+  // block every release on a machine where `remote get-url` failed.
+  const r = evaluateReleaseRisk({ ...CLEAN, upstreamUrl: undefined, upstreamKind: 'unknown' });
+  assert.equal(codes(r).includes('LOCAL_ONLY_REMOTE'), false);
+});
+
 test('release-risk: no upstream url means no claim either way', () => {
   // gitState leaves upstreamUrl null when it cannot read the remote. That must
   // not silently become "local" and stack a second finding on NO_UPSTREAM.

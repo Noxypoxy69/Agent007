@@ -50,6 +50,20 @@ export async function collect(cfg, registry) {
         ? {
             ...g,
             worktree: redactHome(g.worktree, home, hideHome),
+            /*
+             * The remote URL never leaves the machine.
+             *
+             * It published the account name and a PRIVATE REPOSITORY NAME --
+             * somebody's inventory, not just their identity -- and it was found
+             * by the payload guard's author, not by me, after I had already
+             * fixed three leaks in this same payload and believed it clean.
+             *
+             * upstreamKind carries everything any rule needs: local, network,
+             * unknown, or null. Set to undefined rather than null so the field
+             * is ABSENT from the JSON: a null would still assert that the
+             * concept exists and invite somebody to populate it again.
+             */
+            upstreamUrl: hideHome ? undefined : g.upstreamUrl,
             staged: redactPaths(g.staged, redact),
             dirty: redactPaths(g.dirty, redact),
             untracked: redactPaths(g.untracked, redact),

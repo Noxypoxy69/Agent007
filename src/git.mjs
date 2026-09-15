@@ -1,4 +1,5 @@
 import { run } from './exec.mjs';
+import { isLocalRemote } from './releaseRisk.mjs';
 
 const GIT = 'git';
 
@@ -102,6 +103,28 @@ export async function gitState(cwd, { mainRef = 'origin/main' } = {}) {
     upstreamUrl = urlR.ok ? (line(urlR) || null) : null;
   }
 
+  /*
+   * The CLASSIFICATION, which is all any rule actually needs.
+   *
+   * upstreamUrl was added to answer one question -- does this remote reach
+   * another machine -- and then published the answer along with the account
+   * name and the private repository name:
+   *
+   *   "upstreamUrl": "https://github.com/<account>/<private-repo>.git"
+   *
+   * That is the fourth identity leak found in this payload, after the home path
+   * in two spellings and the machine label, and it is the first one that
+   * discloses somebody's private inventory rather than their name. It arrived
+   * the same way as the others: as a side effect of collecting something else.
+   *
+   * `upstreamKind` carries the entire coordination value in one word. Rules
+   * consume this; the URL stays local for evidence and for the operator's own
+   * output, and collect.mjs strips it from anything transmitted.
+   */
+  const upstreamKind = upstream
+    ? (upstreamUrl ? (isLocalRemote(upstreamUrl) ? 'local' : 'network') : 'unknown')
+    : null;
+
   let baseSha = null;
   if (mainSha) baseSha = line(await git(cwd, ['merge-base', 'HEAD', mainRef]));
 
@@ -141,6 +164,7 @@ export async function gitState(cwd, { mainRef = 'origin/main' } = {}) {
     mainSha,
     upstream,
     upstreamUrl,
+    upstreamKind,
     unpushed,
     unpushedReason,
     aheadOfMain,

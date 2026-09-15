@@ -162,10 +162,13 @@ export function evaluateReleaseRisk(state, opts = {}) {
    * letters: ssh, git, http(s) and scp-style `user@host:path` all reach another
    * machine; `C:\...`, `/srv/...`, `../mirror` and `file://` do not.
    */
-  if (!state.detached && state.upstream && state.upstreamUrl && isLocalRemote(state.upstreamUrl)) {
+  const remoteIsLocal = state.upstreamKind
+    ? state.upstreamKind === 'local'
+    : (state.upstreamUrl ? isLocalRemote(state.upstreamUrl) : false);
+  if (!state.detached && state.upstream && remoteIsLocal) {
     findings.push(finding('LOCAL_ONLY_REMOTE', sev,
       'the upstream is a path on this machine, so pushing does not put the work anywhere else',
-      { upstream: state.upstream, url: state.upstreamUrl }));
+      { upstream: state.upstream, kind: state.upstreamKind ?? null }));
   }
 
   /*
