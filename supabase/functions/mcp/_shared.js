@@ -1323,6 +1323,89 @@ export function messagesQuery({ to_agent, from_agent, task_id, type, since, limi
   return `messages?${q.join('&')}`;
 }
 
+/**
+ * CHECK-THEN-ACT ACROSS A NETWORK ROUND TRIP IS NOT A GUARD.
+ *
+ * Found by code-d verifying Autonomous Runtime v1. The coordinator's lifecycle
+ * writes read rows over HTTP, evaluate a guard in JavaScript, and then PATCH
+ * with `task_id=eq.<id>` AND NOTHING ELSE. The guard judges a snapshot fetched
+ * in an earlier request and nothing revalidates at write time, so two
+ * coordinators acting on one task both read "runnable", both pass, and both
+ * write. Last writer wins, silently.
+ *
+ * This is STRUCTURAL, NOT PROBABILISTIC. The write carries no predicate, so it
+ * cannot refuse a stale decision under ANY interleaving. It does not need a
+ * demonstration to be real, and the window is a full network round trip --
+ * wider than the transaction the lease layer was built to protect.
+ *
+ * WHY THIS AND NOT THE LEASE LAYER. claim_task already does this properly, with
+ * a row lock and a fencing token. It also has no caller anywhere in the tree:
+ * the safe implementation exists and is unreachable, while the reachable one is
+ * unguarded. Moving the live surface onto leases is a much larger change; the
+ * predicate is the small fix that closes the race on the path that runs today,
+ * and it is worth doing whatever happens to the lease layer.
+ */
+
+/** What state a row must still be in for each write to be legitimate. */
+export const TASK_WRITE_EXPECTS = Object.freeze({
+  // canAssign admits both, so the predicate must admit both or it would refuse
+  // legitimate re-assignment of returned work.
+  assign: ['runnable', 'returned'],
+  accept: ['returned'],
+  // canCancel refuses only the terminal states; everything else may be withdrawn.
+  cancel: ['runnable', 'assigned', 'returned', 'blocked'],
+  // A return is only ever from assigned, and canReturn already says so.
+  return: ['assigned'],
+});
+
+/**
+ * Build a PATCH filter that pins the row to the state the guard judged.
+ *
+ * The state values come from the frozen table above and are never caller
+ * supplied, but they are escaped anyway: the day one of these becomes a
+ * parameter is the day the escaping matters, and that day will not announce
+ * itself.
+ */
+export function taskWriteFilter(task_id, expected) {
+  if (!nonEmpty(task_id)) throw new TypeError('taskWriteFilter requires a task_id');
+  const states = arr(expected).filter(nonEmpty);
+  if (!states.length) {
+    // A write with no expectation is the bug this function exists to prevent.
+    // Defaulting to "any state" would reintroduce it quietly.
+    throw new TypeError('taskWriteFilter requires at least one expected state');
+  }
+  const inList = states.map((x) => encodeURIComponent(x)).join(',');
+  return `tasks?task_id=eq.${encodeURIComponent(task_id)}&state=in.(${inList})`;
+}
+
+/**
+ * DID THE WRITE ACTUALLY LAND?
+ *
+ * THE HALF THAT IS EASY TO MISS, and it matters more than the predicate itself.
+ * Once a predicate is present, a LOST RACE is answered by PostgREST with 200
+ * and an EMPTY ARRAY. Call sites that destructure the first element get
+ * undefined and go on to report `ok: true` with an absent task -- so a lost
+ * race reports SUCCESS and returns nothing.
+ *
+ * Without this half, adding the predicate makes the failure QUIETER RATHER THAN
+ * SAFER: before, the second writer clobbered the first and at least the row
+ * changed; after, it silently does nothing and says it worked.
+ */
+export function writeLanded(rows, { task_id, expected } = {}) {
+  const list = arr(rows);
+  if (list.length && list[0]) return { ok: true, row: list[0] };
+
+  const states = arr(expected).filter(nonEmpty);
+  return {
+    ok: false,
+    errors: [
+      `the write did not land: "${task_id}" was no longer ${states.join(' or ')} `
+      + 'when it reached the database. Somebody else moved it between the check and '
+      + 'the write; re-read it and decide again.',
+    ],
+  };
+}
+
 export const jsonResult = (data) => ({
   content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
 });

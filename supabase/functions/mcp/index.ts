@@ -4,6 +4,7 @@ import {
   messagesQuery, canReturn, returnRecord, canAccept, acceptRecord, canCancel, cancelRecord,
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
+  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
 } from './_shared.js';
 
 /**
@@ -224,8 +225,24 @@ function coordinatorStore(label) {
       });
       if (!verdict.ok) return { ok: false, errors: verdict.errors };
 
+      /*
+        * THE WRITE REVALIDATES WHAT THE GUARD JUDGED.
+        *
+        * canAssign ran against rows fetched in an EARLIER request. Without a
+        * state predicate here, two coordinators both read "runnable", both
+        * pass, and both write -- last writer wins, silently, across a window as
+        * wide as a network round trip. Raised by code-d; structural, not
+        * probabilistic, because a write with no predicate cannot refuse a stale
+        * decision under any interleaving.
+        */
       const rec = assignmentRecord(task, resolved, { by: label, at: now });
-      const [row] = await patch(`tasks?task_id=eq.${encodeURIComponent(task_id)}`, rec);
+      const landed = writeLanded(
+        await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.assign), rec),
+        { task_id, expected: TASK_WRITE_EXPECTS.assign },
+      );
+      // An empty result is a LOST RACE, not a success with an absent task.
+      if (!landed.ok) return { ok: false, errors: landed.errors };
+      const row = landed.row;
 
       // The assignment is announced on the message log too, so a worker sees it
       // in one place rather than having to poll the task table.
@@ -254,10 +271,13 @@ function coordinatorStore(label) {
       const verdict = canAccept(task, { at });
       if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
 
-      const [row] = await patch(
-        `tasks?task_id=eq.${encodeURIComponent(task_id)}`,
-        acceptRecord(task, { by: label, at }),
+      const landed = writeLanded(
+        await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.accept),
+          acceptRecord(task, { by: label, at })),
+        { task_id, expected: TASK_WRITE_EXPECTS.accept },
       );
+      if (!landed.ok) return { ok: false, errors: landed.errors };
+      const row = landed.row;
 
       // Announced on the log, so the worker learns its work landed without
       // polling the task table.
@@ -282,10 +302,13 @@ function coordinatorStore(label) {
       if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
 
       const at = new Date().toISOString();
-      const [row] = await patch(
-        `tasks?task_id=eq.${encodeURIComponent(task_id)}`,
-        cancelRecord(task, { by: label, at, reason }),
+      const landed = writeLanded(
+        await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.cancel),
+          cancelRecord(task, { by: label, at, reason })),
+        { task_id, expected: TASK_WRITE_EXPECTS.cancel },
       );
+      if (!landed.ok) return { ok: false, errors: landed.errors };
+      const row = landed.row;
 
       if (task.assigned_agent) {
         await write('messages', {
@@ -732,11 +755,19 @@ Deno.serve(async (request) => {
     }
 
     const at = new Date().toISOString();
-    const [updated] = await patch(
-      `tasks?task_id=eq.${encodeURIComponent(taskId)}`,
-      returnRecord(task, { agent_id: row.agent_id, session_id: row.session_id },
-        { headSha: body.head_sha, notes: body?.notes, at }),
+    // THE FOURTH SITE. code-d's finding named assign, accept and cancel; the
+    // return path has the identical shape and the identical race, so it gets
+    // the identical fix rather than waiting to be reported separately.
+    const returned = writeLanded(
+      await patch(taskWriteFilter(taskId, TASK_WRITE_EXPECTS.return),
+        returnRecord(task, { agent_id: row.agent_id, session_id: row.session_id },
+          { headSha: body.head_sha, notes: body?.notes, at })),
+      { task_id: taskId, expected: TASK_WRITE_EXPECTS.return },
     );
+    if (!returned.ok) {
+      return json({ error: 'return-refused', errors: returned.errors }, 409);
+    }
+    const updated = returned.row;
 
     // The return announces itself, so a coordinator sees it in list_messages
     // rather than having to poll the task table for a state change.
