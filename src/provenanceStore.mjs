@@ -80,3 +80,13 @@ export const writeMeasurements = (rows) => writeJsonArray(MEASUREMENTS(), rows);
 const LEAD_WORK = () => path.join(HOME, 'leadWork.json');
 export const readLeadWork = () => readJsonArray(LEAD_WORK());
 export const writeLeadWork = (rows) => writeJsonArray(LEAD_WORK(), rows);
+
+/*
+ * Open questions to the builder. Append-only like the ledgers beside it: an
+ * escalation is closed by setting answered_at and a decision id, never by
+ * deletion. The record that a question WAS asked is the thing that stops the
+ * next worker asking it again, so erasing it would undo the point.
+ */
+const ESCALATIONS = () => path.join(HOME, 'escalations.json');
+export const readEscalations = () => readJsonArray(ESCALATIONS());
+export const writeEscalations = (rows) => writeJsonArray(ESCALATIONS(), rows);

@@ -74,11 +74,17 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge token-budget --record --handoff <file> [--tier <t>] [--task <id>]
   agentbridge token-budget [--json]     verified work per token. DESCRIPTIVE ONLY —
                                         never rewrites a handoff, never gates
-  agentbridge ask --action <action> [--question <q>] [--json]
+  agentbridge ask --action <action> [--question <q>] [--by <agent>] [--json]
              [--project <p>] [--repo <r>] [--lane <l>] [--task <t>]
                                         ASK THE LEDGER BEFORE ASKING THE OWNER.
                                         exit 0 allowed, 1 denied, 3 owner_required,
-                                        4 no_decision (ask once, then record it)
+                                        4 escalate (ask ONCE — passing --question
+                                        records it), 5 already_escalated (somebody
+                                        already asked; do NOT ask again)
+  agentbridge answered --id <escalation_id> --decision <decision_id>
+                                        close an open question with the decision
+                                        that answers it, so the next worker is
+                                        answered by the ledger instead of you
   agentbridge owner-decide --id <id> --owner <who> --statement <text>
              --scope bridge|project|repo|lane|task [--scope-id <x>]
              --effect allow|deny|require_owner --capabilities a,b
@@ -1147,7 +1153,16 @@ try {
    * this" -- the second sends a worker off to bother the builder, and the first
    * means the worker has no idea what it is allowed to do.
    */
-  if (cmd === 'ask' || cmd === 'owner-decide' || cmd === 'owner-decisions' || cmd === 'owner-revoke') {
+  if (cmd === 'ask' || cmd === 'answered' || cmd === 'owner-decide' || cmd === 'owner-decisions' || cmd === 'owner-revoke') {
+    /*
+     * Same done()/Done boundary as the delegation block. `ask` does not fetch
+     * today, so process.exit would be safe here -- but these exit codes ARE the
+     * command's interface (0 allowed, 1 denied, 3 owner_required, 4 ask once,
+     * 5 already asked), and leaving two different stopping mechanisms in one
+     * binary is how the next person adds a fetch to `ask` and gets 127 for a
+     * refusal.
+     */
+    try {
     const { readDecisions, writeDecisions } = await import('../src/provenanceStore.mjs');
     const D = await import('../src/ownerDecisions.mjs');
 
@@ -1172,24 +1187,142 @@ try {
         console.error('       an unclassified action cannot be matched against a decision');
         process.exit(2);
       }
-      const r = D.resolveOwnerDecision(rows, args.action, context);
+      /*
+       * THE PRE-FLIGHT, NOT JUST THE LOOKUP.
+       *
+       * The ledger stops the same question being asked twice across TIME. It
+       * does nothing about five agents starting at once and all reaching
+       * no_decision on the same question within a minute, which is the shape
+       * that actually happens. So an escalation is itself recorded, and a
+       * worker asking something already open is told so and does NOT ask.
+       *
+       * Exit 5 is that case, distinct from 4: 4 means "ask once", 5 means
+       * "somebody already did". Collapsing them would put the duplicate
+       * question in front of the builder anyway.
+       */
+      const E = await import('../src/escalation.mjs');
+      const { readEscalations, writeEscalations } = await import('../src/provenanceStore.mjs');
+
+      let escalations;
+      try {
+        escalations = await readEscalations();
+      } catch (e) {
+        // A ledger that cannot be read must not be treated as empty: empty
+        // means "nobody has asked", which is exactly the wrong answer here.
+        console.error(`error: cannot read the escalation ledger: ${e.message}`);
+        done(2);
+      }
+
+      const now = new Date().toISOString();
+      const pre = E.preflight({
+        decisions: rows,
+        escalations,
+        action: args.action,
+        context,
+        now,
+        resolve: D.resolveOwnerDecision,
+      });
+      const r = pre.decision;
+
+      /*
+       * RECORDING THE ESCALATION IS WHAT MAKES THE NEXT WORKER SILENT.
+       *
+       * Only when a question is actually being put to the builder, and only
+       * when --question was supplied: a bare `ask` is a query about policy, not
+       * an escalation, and recording those would suppress real questions
+       * nobody ever asked.
+       */
+      let opened = null;
+      if (pre.outcome === 'escalate' && typeof args.question === 'string' && args.question.trim()) {
+        const built = E.createEscalation({
+          escalation_id: `e-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+          action: args.action,
+          context,
+          question: args.question,
+          asked_by: args.by ?? args.from ?? 'unknown-worker',
+          asked_at: now,
+        });
+        if (!built.ok) { for (const err of built.errors) console.error(`  - ${err}`); done(2); }
+        await writeEscalations([...escalations, built.record]);
+        opened = built.record;
+      }
+
       if (args.json) {
-        console.log(JSON.stringify({ action: args.action, context, ...r }, null, 2));
+        console.log(JSON.stringify({
+          action: args.action, context, outcome: pre.outcome,
+          decision: r, escalation: pre.escalation ?? opened, reason: pre.reason ?? r.reason,
+        }, null, 2));
       } else {
-        console.log(`${r.outcome.toUpperCase()}  ${args.action}`);
-        console.log(`  ${r.reason}`);
+        console.log(`${pre.outcome.toUpperCase()}  ${args.action}`);
+        console.log(`  ${pre.reason ?? r.reason}`);
         if (r.decision_id) console.log(`  decision ${r.decision_id} at ${r.matched_scope} scope`);
         if (r.candidates.length > 1) console.log(`  candidates: ${r.candidates.join(', ')}`);
         if (Object.keys(r.constraints ?? {}).length) {
           console.log(`  constraints: ${JSON.stringify(r.constraints)}`);
         }
-        // The question is printed ONLY when nothing answers it. This is the
-        // behaviour the whole feature exists for, so it is one branch, here.
-        if (r.outcome === 'no_decision' && typeof args.question === 'string') {
+
+        if (pre.outcome === 'already_escalated') {
+          console.log(`\n  asked by ${pre.escalation.asked_by} at ${pre.escalation.asked_at}`);
+          console.log(`  their wording: ${pre.escalation.question}`);
+          console.log('  DO NOT ASK AGAIN. Wait for the answer; it will arrive as an owner decision.');
+        }
+
+        // The question is printed ONLY when this worker is the one asking.
+        if (pre.outcome === 'escalate' && typeof args.question === 'string') {
           console.log(`\nASK THE OWNER ONCE:\n  ${args.question}`);
+          if (opened) {
+            console.log(`\n  recorded as ${opened.escalation_id} — other workers will be told this is open.`);
+            console.log('  close it with: agentbridge answered --id '
+              + `${opened.escalation_id} --decision <decision_id>`);
+          } else {
+            console.log('\n  NOT recorded: pass --question to open an escalation other workers can see.');
+          }
         }
       }
-      process.exit({ allowed: 0, denied: 1, owner_required: 3, no_decision: 4 }[r.outcome]);
+
+      done({
+        allowed: 0, denied: 1, owner_required: 3, escalate: 4, already_escalated: 5,
+      }[pre.outcome]);
+    }
+
+    /*
+     * answered — close an open question with the decision that answers it.
+     *
+     *   agentbridge answered --id <escalation_id> --decision <decision_id>
+     *
+     * The answer is a DECISION ID, not prose. Closing with free text would
+     * leave the next worker to interpret it; closing with a decision id means
+     * the next worker gets `allowed` from the ledger and never asks at all.
+     * That is the loop actually closing rather than the question merely going
+     * quiet.
+     */
+    if (cmd === 'answered') {
+      const E = await import('../src/escalation.mjs');
+      const { readEscalations, writeEscalations } = await import('../src/provenanceStore.mjs');
+
+      let escalations;
+      try { escalations = await readEscalations(); }
+      catch (e) { console.error(`error: cannot read the escalation ledger: ${e.message}`); done(2); }
+
+      const target = escalations.find((e) => e.escalation_id === args.id);
+      if (!target) { console.error(`no open escalation "${args.id}"`); done(2); }
+
+      // The decision must EXIST. Closing an escalation with an id nobody
+      // recorded would leave the next worker resolving to no_decision and
+      // asking again -- the question would look closed and behave open.
+      if (!rows.some((d) => d.decision_id === args.decision)) {
+        console.error(`no owner decision "${args.decision}": record it first with owner-decide`);
+        done(2);
+      }
+
+      const res = E.answerEscalation(target, { decision_id: args.decision, at: new Date().toISOString() });
+      if (!res.ok) { for (const err of res.errors) console.error(`  - ${err}`); done(2); }
+
+      await writeEscalations(escalations.map((e) => (e.escalation_id === target.escalation_id ? res.record : e)));
+      console.log(`closed ${target.escalation_id} with decision ${args.decision}`);
+      console.log(`  "${target.question}"`);
+      console.log('  the next worker to ask this will be answered by the ledger, not by you.');
+      done(0);
     }
 
     if (cmd === 'owner-decisions') {
@@ -1258,6 +1391,13 @@ try {
     await writeDecisions(rows.map((d) => (d.decision_id === target.decision_id ? r.record : d)));
     console.log(`revoked ${target.decision_id} — it stops applying now and stays in the ledger`);
     process.exit(0);
+    } catch (e) {
+      // done() landing here is a deliberate stop carrying an exit code, not a
+      // fault. Anything else keeps its stack rather than being flattened.
+      if (!(e instanceof Done)) throw e;
+      process.exitCode = e.exitCode;
+    }
+    handled = true;
   }
 
   /*

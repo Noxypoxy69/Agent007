@@ -55,13 +55,79 @@ const decideArgs = (over = {}) => {
   return out;
 };
 
-test('an empty ledger answers no_decision and prints the question ONCE', async (t) => {
+test('an empty ledger ESCALATES and prints the question ONCE', async (t) => {
+  /*
+   * The outcome is now `escalate`, not `no_decision`. no_decision is what the
+   * DECISION ledger says; escalate is what a worker should DO about it, and
+   * those stopped being the same thing when the escalation ledger landed:
+   * no_decision now means either "ask" or "somebody already asked and you must
+   * not". Collapsing them would put the duplicate in front of the builder
+   * anyway, which is the whole thing being prevented. Exit 4 is unchanged.
+   */
   const { env } = await fixture(t);
   const r = await run(['ask', '--action', 'deploy.production', '--question', 'may I deploy?'], env);
   assert.equal(r.code, 4, `${r.stdout}${r.stderr}`);
-  assert.match(r.stdout, /NO_DECISION/);
+  assert.match(r.stdout, /ESCALATE/);
   assert.match(r.stdout, /ASK THE OWNER ONCE/);
   assert.match(r.stdout, /may I deploy\?/);
+});
+
+test('a SECOND worker asking the same thing is refused, and does not ask', async (t) => {
+  // The gap the escalation ledger closes: five agents starting at once all
+  // reach no_decision on the same question and all interrupt the builder.
+  const { env } = await fixture(t);
+  const first = await run(['ask', '--action', 'deploy.production',
+    '--question', 'May I deploy production?', '--by', 'code-a'], env);
+  assert.equal(first.code, 4);
+  assert.match(first.stdout, /recorded as e-/);
+
+  // Deliberately worded differently. Matching is on action and scope, never on
+  // prose, because two agents never phrase a question the same way.
+  const second = await run(['ask', '--action', 'deploy.production',
+    '--question', 'can i push to prod', '--by', 'code-b'], env);
+  assert.equal(second.code, 5, `a duplicate question reached the builder: ${second.stdout}`);
+  assert.match(second.stdout, /ALREADY_ESCALATED/);
+  assert.match(second.stdout, /asked by code-a/);
+  assert.doesNotMatch(second.stdout, /ASK THE OWNER ONCE/);
+});
+
+test('answering an escalation closes the loop: the next worker never asks', async (t) => {
+  const { env } = await fixture(t);
+  await run(['ask', '--action', 'deploy.production', '--question', 'deploy?', '--by', 'code-a'], env);
+
+  const rows = JSON.parse(await readFile(path.join(env.AGENTBRIDGE_HOME, 'escalations.json'), 'utf8'));
+  const id = rows[0].escalation_id;
+
+  // An escalation is closed with a DECISION ID, and the decision must exist --
+  // closing with an id nobody recorded would leave the next worker resolving
+  // to no_decision and asking again. The question would look closed and behave
+  // open.
+  const ghost = await run(['answered', '--id', id, '--decision', 'd-nope'], env);
+  assert.equal(ghost.code, 2);
+
+  await run(decideArgs({
+    id: 'd-prod', statement: 'Never deploy production without me.',
+    effect: 'require_owner', capabilities: 'deploy.production',
+  }), env);
+  const closed = await run(['answered', '--id', id, '--decision', 'd-prod'], env);
+  assert.equal(closed.code, 0, `${closed.stdout}${closed.stderr}`);
+
+  // The next worker is answered by the LEDGER, not by the builder.
+  const next = await run(['ask', '--action', 'deploy.production', '--question', 'deploy?', '--by', 'code-c'], env);
+  assert.equal(next.code, 3, `expected owner_required, got: ${next.stdout}`);
+  assert.match(next.stdout, /OWNER_REQUIRED/);
+  assert.doesNotMatch(next.stdout, /ASK THE OWNER ONCE/);
+});
+
+test('a bare ask records nothing — it is a query, not an escalation', async (t) => {
+  // Recording policy lookups would suppress real questions nobody ever asked.
+  const { env } = await fixture(t);
+  const r = await run(['ask', '--action', 'deploy.production'], env);
+  assert.equal(r.code, 4);
+  await assert.rejects(
+    () => readFile(path.join(env.AGENTBRIDGE_HOME, 'escalations.json'), 'utf8'),
+    'a bare ask opened an escalation',
+  );
 });
 
 test('once recorded, the SAME question is never put to the owner again', async (t) => {
@@ -220,10 +286,17 @@ test('--json carries decision_id, matched_scope and reason', async (t) => {
   const r = await run(['ask', '--action', 'spend.cloudflare', '--json'], env);
   assert.equal(r.code, 3);
   const out = JSON.parse(r.stdout);
+  /*
+   * The JSON now nests the resolver's answer under `decision`, because the
+   * top level carries the PRE-FLIGHT outcome -- which can be `already_escalated`,
+   * something the decision resolver has no concept of. Flattening the two would
+   * have made "the ledger decided this" indistinguishable from "somebody else
+   * already asked", and those call for opposite behaviour.
+   */
   assert.equal(out.outcome, 'owner_required');
-  assert.equal(out.decision_id, 'd-j');
-  assert.equal(out.matched_scope, 'bridge');
-  assert.deepEqual(out.constraints, { max_usd: 0 });
+  assert.equal(out.decision.decision_id, 'd-j');
+  assert.equal(out.decision.matched_scope, 'bridge');
+  assert.deepEqual(out.decision.constraints, { max_usd: 0 });
   assert.match(out.reason, /Do not spend money/);
 });
 
