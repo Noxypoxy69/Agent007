@@ -1065,13 +1065,52 @@ try {
     console.log(`registered ${row.agent_id} as session ${row.session_id}`);
     console.log(`  repo     ${row.repo_id} @ ${row.head_sha.slice(0, 12)}`);
     console.log(`  capacity ${row.capacity}${row.lane_id ? `   lane ${row.lane_id}` : ''}`);
+    /*
+     * THE EXIT CODE IS PART OF THE REPORT, AND IT WAS LYING.
+     *
+     * Found by b6 probing live: with a REJECTED token this printed
+     * "registered", wrote the local roster row, reported the hosted half as
+     * unreachable, and exited 0. Anything scripting the CLI reads exit 0 as
+     * success, so the one machine-readable signal said the opposite of what
+     * happened.
+     *
+     * NOT_CONFIGURED IS NOT A FAILURE. Running without a registration token is
+     * a legitimate mode -- local-only, useful, and chosen. It exits 0 and says
+     * plainly that other machines cannot see this session.
+     *
+     * EVERYTHING ELSE IS. The command's central act did not happen, so the exit
+     * code says so.
+     */
     if (first.state === H.HOSTED.OK) {
       console.log('  hosted   published — other machines can resolve this session');
     } else if (first.state === H.HOSTED.NOT_CONFIGURED) {
       console.log('  hosted   NOT CONFIGURED — local only, not visible to other machines');
       console.log('           set AGENTBRIDGE_REGISTRATION_TOKEN (a scoped token, NOT a database key)');
+    } else if (first.state === H.HOSTED.REJECTED) {
+      /*
+       * A REFUSAL IS PERMANENT UNTIL A CREDENTIAL CHANGES, so --watch is not
+       * entered: re-sending a token the Bridge has already refused, every two
+       * minutes, forever, is a retry loop that cannot succeed and hides the one
+       * fact the operator needs.
+       */
+      console.error(`  hosted   REJECTED (${first.detail})`);
+      console.error('           The Bridge answered and refused this credential. This is NOT a');
+      console.error('           network problem and retrying will not fix it — check the token.');
+      console.error('           The local roster row was written; this session is LOCAL ONLY and');
+      console.error('           no other machine can resolve it.');
+      await H.closeHttp();
+      done(1);
     } else {
       console.error(`  hosted   UNREACHABLE (${first.detail}) — registered LOCALLY ONLY`);
+      /*
+       * Unreachable is transient, so --watch DOES continue: surviving a network
+       * blip is the entire point of a watcher. A one-shot still exits non-zero,
+       * because the hosted publish it reported did not happen.
+       */
+      if (!args.watch) {
+        await H.closeHttp();
+        done(1);
+      }
     }
 
     /*
@@ -1150,7 +1189,12 @@ try {
        */
       timer = setInterval(async () => {
         const r = await beat(capacity);
-        if (r.state !== H.HOSTED.OK && r.state !== H.HOSTED.NOT_CONFIGURED) {
+        if (r.state === H.HOSTED.REJECTED) {
+          // A credential refused mid-watch will be refused every time. Say so
+          // in the words that describe it rather than blaming the network.
+          console.error(`  heartbeat: hosted REJECTED (${r.detail}) — the token is being refused,`);
+          console.error('             this session is no longer visible to other machines');
+        } else if (r.state !== H.HOSTED.OK && r.state !== H.HOSTED.NOT_CONFIGURED) {
           console.error(`  heartbeat: hosted unreachable (${r.detail})`);
         }
       }, everyMs);

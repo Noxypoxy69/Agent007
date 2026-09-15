@@ -136,16 +136,35 @@ test('an OUTAGE fails closed and is NOT reported as absent', async () => {
    * and none may read as "not configured" -- that is what would silently
    * downgrade a verified target to accepted-on-trust.
    */
+  /*
+   * THE ASSERTION USED TO PIN THE ENUM AND NOT THE PROPERTY.
+   *
+   * It required all three to be UNREACHABLE. But 401 is now REJECTED -- b6
+   * found that reporting a refused credential as a transport failure sends an
+   * operator to restart a network they cannot fix -- and that change broke this
+   * test while satisfying every word of its own stated reason above.
+   *
+   * So it now asserts the property AND the specific state for each cause, which
+   * is stricter than before rather than looser: the old version would have
+   * passed if 500 and a network error had ALSO become REJECTED, which is the
+   * over-reach that would undo the distinction.
+   */
   const cases = [
-    ['http 500', async () => ({ ok: false, status: 500, json: async () => ({}) })],
-    ['http 401', async () => ({ ok: false, status: 401, json: async () => ({}) })],
-    ['network', async () => { throw new Error('ECONNREFUSED'); }],
+    ['http 500', HOSTED.UNREACHABLE, async () => ({ ok: false, status: 500, json: async () => ({}) })],
+    ['http 401', HOSTED.REJECTED, async () => ({ ok: false, status: 401, json: async () => ({}) })],
+    ['network', HOSTED.UNREACHABLE, async () => { throw new Error('ECONNREFUSED'); }],
   ];
-  for (const [label, fetchImpl] of cases) {
+  for (const [label, expected, fetchImpl] of cases) {
     const r = await fetchHostedRegistrations(ENV, { fetchImpl });
-    assert.equal(r.state, HOSTED.UNREACHABLE, `${label} did not report unreachable`);
+
+    // The property: a configured registry that FAILED must never read as absent,
+    // and must never hand back rows.
     assert.notEqual(r.state, HOSTED.NOT_CONFIGURED, `${label} read as "no hosted registry"`);
+    assert.notEqual(r.state, HOSTED.OK, `${label} reported success`);
     assert.equal(r.rows, undefined, `${label} returned rows anyway`);
+
+    // And the cause is named correctly, so the reader is sent to the right thing.
+    assert.equal(r.state, expected, `${label} was reported as ${r.state}`);
   }
 });
 

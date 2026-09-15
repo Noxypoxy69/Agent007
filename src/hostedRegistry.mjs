@@ -67,6 +67,30 @@ export const HOSTED = {
    * be refused again.
    */
   REFUSED: 'refused',
+  /*
+   * REJECTED is not UNREACHABLE either, and this one was WRONG IN THE CODE
+   * WHILE THE COMMENT NEXT TO IT SAID OTHERWISE.
+   *
+   * Found by b6 probing live: `register-session` with a reader token printed
+   * "registered", wrote a local roster row, reported the hosted half as
+   * "UNREACHABLE (401)", and EXITED 0. Anything scripting the CLI reads exit 0
+   * as success.
+   *
+   * Two separate wrongs. A 401 means somebody answered and said no -- it is a
+   * decision, not a transport failure -- so calling it unreachable sends the
+   * reader to check a network they cannot fix instead of a credential they can.
+   * And a command whose central act was refused must not exit 0.
+   *
+   * The comment at the 401 branch already said "a rejected credential is NOT
+   * the same as an unreachable service". It then returned UNREACHABLE. Prose
+   * describing an intention as though it were a behaviour, which is the same
+   * failure as the reviewer lease whose columns nothing wrote.
+   *
+   * REJECTED IS PERMANENT UNTIL SOMEBODY CHANGES A CREDENTIAL. That is the
+   * operational difference that matters: unreachable is worth retrying, and
+   * rejected is not. A watcher should survive the first and stop on the second.
+   */
+  REJECTED: 'rejected',
 };
 
 /*
@@ -193,7 +217,7 @@ export async function waitForEvents(env = {}, body, { fetchImpl, timeoutMs = 400
     });
 
     if (res.status === 401) {
-      return { state: HOSTED.UNREACHABLE, detail: 'registration token rejected (401)' };
+      return { state: HOSTED.REJECTED, detail: 'registration token rejected (401)' };
     }
     if (res.status === 409 || res.status === 400) {
       let detail = `http ${res.status}`;
@@ -248,7 +272,7 @@ export async function returnWork(env = {}, body, { fetchImpl, timeoutMs = DEFAUL
     });
 
     if (res.status === 401) {
-      return { state: HOSTED.UNREACHABLE, detail: 'registration token rejected (401)' };
+      return { state: HOSTED.REJECTED, detail: 'registration token rejected (401)' };
     }
 
     /*
@@ -351,7 +375,7 @@ export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs 
       // A rejected credential is not an unreachable service. Collapsing them
       // has somebody restarting a network they cannot fix instead of rotating
       // a token they can.
-      return { state: HOSTED.UNREACHABLE, detail: 'reader token rejected (401)' };
+      return { state: HOSTED.REJECTED, detail: 'reader token rejected (401)' };
     }
     if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
 
@@ -460,8 +484,9 @@ export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs 
     if (res.status === 401) {
       // A rejected credential is NOT the same as an unreachable service, and
       // collapsing them would have somebody restarting a network they cannot
-      // fix instead of rotating a token they can.
-      return { state: HOSTED.UNREACHABLE, detail: 'registration token rejected (401)' };
+      // fix instead of rotating a token they can. This comment said so while
+      // the line below returned UNREACHABLE; b6 found it by probing live.
+      return { state: HOSTED.REJECTED, detail: 'registration token rejected (401)' };
     }
     if (!res.ok) {
       let detail = `http ${res.status}`;
