@@ -841,8 +841,45 @@ try {
      * reported loudly instead, and the row keeps origin 'local' -- which is
      * what stops it being mistaken for something another machine has confirmed.
      */
+    /*
+     * HEAD IS RE-RESOLVED ON EVERY BEAT, NOT CAPTURED ONCE.
+     *
+     * --watch republished the ORIGINAL row with nothing but a fresh timestamp,
+     * so head_sha froze at whatever the tree was when the watcher started.
+     * Measured on this machine: the registry advertised code-c at d564569
+     * while its worktree was thirteen commits further on, and had done for
+     * hours. The heartbeat said "I am alive", which was true, and the head said
+     * "I am at d564569", which was false, and nothing in the row distinguished
+     * the two.
+     *
+     * That is the confidently-wrong shape this registry exists to replace.
+     * canAssign compares a task's base_sha against the tree it is going to, so
+     * a frozen head does not merely mislead a reader -- it is an input to a
+     * decision about whether work may be handed out.
+     *
+     * Found because code-d re-registered cleanly and its head was RIGHT, which
+     * is what made everyone else's visibly wrong.
+     *
+     * WHEN GIT CANNOT ANSWER, PUBLISH NULL. The liveness claim is still true --
+     * the process is plainly running -- so the beat continues; but the previous
+     * sha is not re-sent, because a stale value presented as current is the bug
+     * being fixed, and re-sending it on failure would reintroduce it exactly
+     * when the tree is in the least knowable state. null reads as "unknown",
+     * which is what the server instructions already tell every client to do
+     * with a null, and it is loud on stderr besides.
+     */
     async function beat(capacityNow) {
-      const r = { ...row, capacity: capacityNow, heartbeat_at: new Date().toISOString() };
+      const fresh = await resolveCommit(cwd, 'HEAD');
+      if (!fresh.ok) {
+        console.error(`  heartbeat: cannot read HEAD in ${cwd} (${fresh.reason})`);
+        console.error('             publishing head_sha as null rather than a stale one');
+      }
+      const r = {
+        ...row,
+        head_sha: fresh.ok ? fresh.sha : null,
+        capacity: capacityNow,
+        heartbeat_at: new Date().toISOString(),
+      };
       await R.upsertRegistration(r);
       const pub = await H.publishRegistration(process.env, r);
       return pub;

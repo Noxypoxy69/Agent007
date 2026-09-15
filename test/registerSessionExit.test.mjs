@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -81,19 +81,64 @@ function run(args, env, cwd) {
 /** A stand-in for the Edge Function: records what arrived, answers 200. */
 async function registrar(t) {
   const posts = [];
+  const waiters = [];
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       posts.push({ method: req.method, auth: req.headers.authorization, body });
+      /*
+       * ANSWER ONLY AFTER THE BODY IS READ. Ending the response outside this
+       * handler sends it before the request has been consumed, and 'end' may
+       * then never fire -- so nothing is ever recorded and every waiter hangs.
+       * That was a self-inflicted hang during this file's refactor, and it is
+       * the same shape as the bugs being tested here: the observable part
+       * (a 200 went out) looked right while the part that mattered never ran.
+       */
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"ok":true}');
+      // Wake anything waiting for an Nth publish, so a --watch test reacts to
+      // the beat rather than sleeping for a guessed interval.
+      for (const w of waiters.splice(0)) w();
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => new Promise((r) => server.close(r)));
-  return { posts, url: `http://127.0.0.1:${server.address().port}/register` };
+
+  const waitFor = (n, ms = 30000) => new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error(`only ${posts.length} publish(es) after ${ms}ms`)), ms);
+    const check = () => {
+      if (posts.length >= n) { clearTimeout(deadline); resolve(); }
+      else waiters.push(check);
+    };
+    check();
+  });
+
+  return { posts, waitFor, url: `http://127.0.0.1:${server.address().port}/register` };
 }
+
+/**
+ * Stop a spawned watcher AND WAIT FOR IT TO BE GONE.
+ *
+ * On Windows a running process holds a lock on its own cwd, so removing the
+ * fixture repo while the child is still dying fails with EBUSY:
+ *
+ *   EBUSY: resource busy or locked, rmdir '...\ab-exit-XXXX\agentbridge-x'
+ *
+ * kill() only ASKS. This waits for the answer, and each watcher test awaits it
+ * in the body so the child is confirmed gone before any cleanup hook runs --
+ * which is what actually fixes it, because fixture() registers its rm first and
+ * hooks do not run in the order that would save us.
+ *
+ * It is also registered as an after-hook, for the case where an assertion
+ * throws before the body reaches the await and the child would otherwise be
+ * left running.
+ */
+const stopper = (child) => () => new Promise((resolve) => {
+  if (child.exitCode !== null || child.signalCode !== null) return resolve();
+  child.once('exit', () => resolve());
+  try { child.kill(); } catch { resolve(); }
+});
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'ab-exit-'));
@@ -284,6 +329,170 @@ test('unregister-session with no local row publishes nothing and still exits 0',
   assert.equal(r.code, 0);
   assert.match(r.stdout, /no registration for never-existed/);
   assert.equal(posts.length, 0);
+});
+
+test('every heartbeat re-resolves HEAD, so the published sha follows the tree', async (t) => {
+  /*
+   * --watch republished the ORIGINAL row with nothing but a fresh timestamp, so
+   * head_sha froze at whatever the tree was when the watcher started. Measured
+   * live: the registry advertised code-c at d564569 while its worktree was
+   * thirteen commits further on, and had been for hours. The heartbeat said "I
+   * am alive" -- true -- and the head said "I am at d564569" -- false -- and
+   * nothing in the row distinguished them.
+   *
+   * It matters beyond tidiness: canAssign compares a task's base_sha against
+   * the tree it is going to, so a frozen head is an input to whether work may
+   * be handed out at all.
+   *
+   * This test commits BETWEEN two beats, which is the only way to tell a sha
+   * that is re-read from one that merely happens to still be correct.
+   */
+  const { repo, home } = await fixture(t);
+  const { posts, waitFor, url } = await registrar(t);
+
+  const before = (await git(repo, ['rev-parse', 'HEAD'])).out;
+
+  const child = spawn(process.execPath, [
+    CLI, 'register-session', '--agent', 'code-x', '--session', 'sess-x',
+    '--watch', '--interval', '5',
+  ], {
+    env: hermeticEnv({
+      AGENTBRIDGE_HOME: home,
+      AGENTBRIDGE_REGISTRATION_TOKEN: 'test-token',
+      AGENTBRIDGE_REGISTER_URL: url,
+    }),
+    cwd: repo,
+    windowsHide: true,
+    // 'ignore', not the default 'pipe'. An unread pipe to a child that never
+    // exits keeps the test runner alive after the assertions are done, which
+    // looks exactly like a hung test and is not one.
+    stdio: 'ignore',
+  });
+  const stop = stopper(child);
+  t.after(stop);
+
+  await waitFor(1);
+  assert.equal(JSON.parse(posts[0].body).head_sha, before, 'the first publish should carry the tree as it was');
+
+  // Move the tree while the watcher is running.
+  await writeFile(path.join(repo, 'second.txt'), 'moved\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-q', '-m', 'second']);
+  const after = (await git(repo, ['rev-parse', 'HEAD'])).out;
+  assert.notEqual(after, before, 'the fixture must actually have moved, or this test proves nothing');
+
+  await waitFor(2);
+  await stop();
+
+  assert.equal(JSON.parse(posts[1].body).head_sha, after,
+    'the second heartbeat published a stale head: --watch is re-sending the sha it started with');
+});
+
+test('when git cannot answer, the heartbeat publishes NULL rather than the last known sha', async (t) => {
+  /*
+   * The other half of the same fix, and the one that is easy to get wrong in a
+   * way that looks careful: on failure, re-sending the sha from startup is
+   * "keeping the last known good value", which is precisely the frozen head
+   * being fixed -- reintroduced at the exact moment the tree is least knowable.
+   *
+   * null reads as unknown, which is what the server instructions already tell
+   * every client to do with a null, and the worker is still plainly alive so
+   * the beat itself must continue.
+   */
+  const { repo, home } = await fixture(t);
+  const { posts, waitFor, url } = await registrar(t);
+
+  const child = spawn(process.execPath, [
+    CLI, 'register-session', '--agent', 'code-x', '--session', 'sess-x',
+    '--watch', '--interval', '5',
+  ], {
+    env: hermeticEnv({
+      AGENTBRIDGE_HOME: home,
+      AGENTBRIDGE_REGISTRATION_TOKEN: 'test-token',
+      AGENTBRIDGE_REGISTER_URL: url,
+    }),
+    cwd: repo,
+    windowsHide: true,
+    // stderr is PIPED here, unlike the other watcher tests: the warning is half
+    // of the behaviour under test, not incidental output.
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const stop = stopper(child);
+  t.after(stop);
+
+  let errors = '';
+  child.stderr.on('data', (c) => { errors += c; });
+
+  await waitFor(1);
+  assert.ok(JSON.parse(posts[0].body).head_sha, 'the first publish must carry a real sha, or this proves nothing');
+
+  // Take git away underneath the running watcher.
+  await rm(path.join(repo, '.git'), { recursive: true, force: true });
+
+  await waitFor(2);
+  await stop();
+
+  assert.equal(JSON.parse(posts[1].body).head_sha, null,
+    'a heartbeat that cannot read HEAD re-sent the startup sha instead of admitting it does not know');
+
+  // AND IT MUST SAY SO. Publishing null silently leaves the operator with a
+  // registry that has quietly stopped knowing where a worker is, and no moment
+  // at which anyone could have noticed.
+  assert.match(errors, /cannot read HEAD/);
+  assert.match(errors, /rather than a stale one/);
+});
+
+test('--repo decides which tree is published, not the directory the CLI was run from', async (t) => {
+  /*
+   * NOT HYPOTHETICAL. code-d runs the CLI out of code-c's worktree with --repo
+   * pointing at social-sparks-app, which is what --repo is for. If the
+   * heartbeat re-resolved process.cwd() instead of the registered repo, its row
+   * would advertise the sha of a repository it is not working in -- and it
+   * would look perfectly healthy while doing it.
+   *
+   * The two-repo fixture is the point: with one repo, cwd and --repo are the
+   * same directory and the bug is invisible.
+   */
+  const { root, repo, home } = await fixture(t);
+  const { posts, waitFor, url } = await registrar(t);
+
+  // A second, DIFFERENT repository to run the command from.
+  const elsewhere = path.join(root, 'somewhere-else');
+  await git(root, ['init', '-q', 'somewhere-else']);
+  await git(elsewhere, ['config', 'user.email', 't@e.com']);
+  await git(elsewhere, ['config', 'user.name', 'T']);
+  await writeFile(path.join(elsewhere, 'other.txt'), 'different\n');
+  await git(elsewhere, ['add', '-A']);
+  await git(elsewhere, ['commit', '-q', '-m', 'elsewhere']);
+
+  const wanted = (await git(repo, ['rev-parse', 'HEAD'])).out;
+  const notWanted = (await git(elsewhere, ['rev-parse', 'HEAD'])).out;
+  assert.notEqual(wanted, notWanted, 'the two fixtures must differ, or this proves nothing');
+
+  const child = spawn(process.execPath, [
+    CLI, 'register-session', '--agent', 'code-x', '--session', 'sess-x',
+    '--repo', repo, '--watch', '--interval', '5',
+  ], {
+    env: hermeticEnv({
+      AGENTBRIDGE_HOME: home,
+      AGENTBRIDGE_REGISTRATION_TOKEN: 'test-token',
+      AGENTBRIDGE_REGISTER_URL: url,
+    }),
+    cwd: elsewhere,          // run from the OTHER repository
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  const stop = stopper(child);
+  t.after(stop);
+
+  // Both the first publish and a later heartbeat must name the registered repo.
+  await waitFor(2);
+  await stop();
+
+  for (const [i, p] of posts.slice(0, 2).entries()) {
+    assert.equal(JSON.parse(p.body).head_sha, wanted,
+      `publish ${i} carried the sha of the directory the CLI was run from, not --repo`);
+  }
 });
 
 test('a bad --interval is refused BEFORE the row is published, not after', async (t) => {
