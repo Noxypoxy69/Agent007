@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { initConfig, loadConfig, loadRegistry, registerAgent, unregisterAgent, CONFIG_FILE, VERSION } from '../src/config.mjs';
+import { initConfig, loadConfig, loadRegistry, registerAgent, unregisterAgent, localMachineLabel, CONFIG_FILE, VERSION } from '../src/config.mjs';
 import { protectSecret, unprotectSecret, isWindows } from '../src/secretstore.mjs';
 import { collect } from '../src/collect.mjs';
 import { runDaemon } from '../src/daemon.mjs';
@@ -103,7 +103,7 @@ try {
     }
     if (args.json || cmd === 'heartbeat') { console.log(JSON.stringify(payload, null, 2)); process.exit(0); }
 
-    console.log(`machine ${payload.machine.label} (${payload.machine.platform})  ${payload.sentAt}`);
+    console.log(`machine ${localMachineLabel(cfg)} [${payload.machine.name}] (${payload.machine.platform})  ${payload.sentAt}`);
     if (!payload.processProbe.ok) console.log(`  ! process probe failed: ${payload.processProbe.error}`);
     for (const s of payload.sessions) {
       const g = s.git;
@@ -334,7 +334,7 @@ try {
     if (args.json) {
       console.log(JSON.stringify({ machine: payload.machine, checkedAt: payload.sentAt, results }, null, 2));
     } else {
-      console.log(`release-risk on ${payload.machine.label}  ${payload.sentAt}\n`);
+      console.log(`release-risk on ${localMachineLabel(cfg)} [${payload.machine.name}]  ${payload.sentAt}\n`);
       for (const r of results) console.log(formatReleaseRisk(r.label, r.result));
     }
 

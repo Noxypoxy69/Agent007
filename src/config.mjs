@@ -122,12 +122,49 @@ export async function unregisterAgent(agentId) {
   await saveRegistry(reg);
 }
 
+/**
+ * A stable, opaque name for this machine.
+ *
+ * Derived from the machineId, which is already a random uuid generated at init
+ * and never transmitted in full. Stable across restarts because it is a pure
+ * function of that id, so a reader watching the bridge sees one continuous
+ * machine rather than a new one each boot -- which a random-per-run name would
+ * produce, quietly breaking every "is this the same box" comparison.
+ *
+ * Six hex characters. Enough to distinguish the machines one person runs;
+ * short enough to read aloud. It is not a secret and is not required to be
+ * unguessable -- it just must not be a person.
+ */
+export function opaqueMachineName(machineId) {
+  const hex = String(machineId ?? '').replace(/[^0-9a-f]/gi, '').toLowerCase();
+  return `machine-${(hex || '000000').slice(0, 6)}`;
+}
+
+/**
+ * What identifies this machine TO THE BRIDGE.
+ *
+ * `hostname` and the operator's chosen label are deliberately absent. Both
+ * carried a person: the label was "danny-win" and the hostname
+ * "DESKTOP-VPIUDEF", and neither earns anything for coordination that
+ * `machine-7f3c2a` does not. The friendly label still exists in config and is
+ * shown in LOCAL output -- an operator should see their own machine named the
+ * way they named it. It simply does not leave the box.
+ *
+ * This is the third identity leak in the same payload, after the home path in
+ * two spellings. They keep arriving as side effects of reporting something
+ * else, which is why the test asserts on the SHAPE of the payload rather than
+ * on the three fields known to have been wrong.
+ */
 export function machineInfo(cfg) {
   return {
     id: cfg.machineId,
-    label: cfg.machineLabel,
+    name: opaqueMachineName(cfg.machineId),
     platform: platform(),
-    hostname: hostname(),
     agentbridgeVersion: VERSION,
   };
+}
+
+/** Local-only view: the friendly name the operator chose, for their own eyes. */
+export function localMachineLabel(cfg) {
+  return cfg.machineLabel || hostname();
 }
