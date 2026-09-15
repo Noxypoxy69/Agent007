@@ -71,3 +71,4 @@ Thumbs.db
 .idea/
 
 # NOTE: package-lock.json is deliberately NOT ignored. It is the lockfile.
+supabase/.temp/

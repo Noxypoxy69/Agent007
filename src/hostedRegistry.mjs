@@ -41,6 +41,32 @@ export function hostedConfig(env = {}) {
 }
 
 /**
+ * Where a worker PUBLISHES its own liveness.
+ *
+ * NO SERVICE KEY ON WORKER MACHINES. The previous design needed
+ * AGENTBRIDGE_SUPABASE_KEY -- a full read/write database credential on every
+ * laptop, to write one row about itself. The blast radius of that was the whole
+ * database; the need was one row.
+ *
+ * Now the worker holds a scoped REGISTRATION token and posts to the Edge
+ * Function, which performs the write with the key Supabase injects into it. The
+ * service key never leaves Supabase, a compromised worker can publish liveness
+ * and nothing else, and revoking one machine is flipping one column.
+ *
+ * The endpoint defaults to the deployed function, so a worker needs exactly one
+ * environment variable rather than three.
+ */
+export function registrationConfig(env = {}) {
+  const token = env.AGENTBRIDGE_REGISTRATION_TOKEN ?? '';
+  if (!token) return null;
+  const url = String(
+    env.AGENTBRIDGE_REGISTER_URL
+    ?? 'https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp/register',
+  );
+  return { url, token };
+}
+
+/**
  * Fetch hosted registrations.
  *
  * @returns {{state: string, rows?: Array, detail?: string}}
@@ -96,7 +122,7 @@ export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs 
  * tell an outage from a misconfiguration by inspecting an error string.
  */
 export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const cfg = hostedConfig(env);
+  const cfg = registrationConfig(env);
   if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
 
   const doFetch = fetchImpl ?? globalThis.fetch;
@@ -104,6 +130,14 @@ export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs 
     return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
   }
 
+  /*
+   * WHAT IS SENT AND WHAT IS NOT. heartbeat_at, created_at and updated_at are
+   * absent deliberately: a database trigger stamps all three, and sending one
+   * would be sending a value the server discards. That is not merely redundant
+   * -- a caller who believes its timestamp matters will eventually be written
+   * to depend on it, and a worker able to set its own heartbeat could keep a
+   * dead session live forever.
+   */
   const body = {
     session_id: row.session_id,
     agent_id: row.agent_id,
@@ -113,26 +147,36 @@ export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs 
     lane_id: row.lane_id ?? null,
     capacity: row.capacity ?? 'idle',
     head_sha: row.head_sha ?? null,
-    verification_state: 'runtime-self-registration',
   };
 
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await doFetch(`${cfg.url}/rest/v1/session_registrations?on_conflict=session_id`, {
+    const res = await doFetch(cfg.url, {
       method: 'POST',
       signal: ac.signal,
       headers: {
-        apikey: cfg.key,
-        authorization: `Bearer ${cfg.key}`,
+        authorization: `Bearer ${cfg.token}`,
         'content-type': 'application/json',
-        // Upsert on session_id: a heartbeat REPLACES this session's row and
-        // touches nobody else's.
-        prefer: 'resolution=merge-duplicates,return=minimal',
       },
       body: JSON.stringify(body),
     });
-    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+
+    if (res.status === 401) {
+      // A rejected credential is NOT the same as an unreachable service, and
+      // collapsing them would have somebody restarting a network they cannot
+      // fix instead of rotating a token they can.
+      return { state: HOSTED.UNREACHABLE, detail: 'registration token rejected (401)' };
+    }
+    if (!res.ok) {
+      let detail = `http ${res.status}`;
+      try {
+        const body = await res.json();
+        if (body?.errors?.length) detail = body.errors.join('; ');
+        else if (body?.detail) detail = String(body.detail).slice(0, 200);
+      } catch { /* keep the status */ }
+      return { state: HOSTED.UNREACHABLE, detail };
+    }
     return { state: HOSTED.OK };
   } catch (e) {
     if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };

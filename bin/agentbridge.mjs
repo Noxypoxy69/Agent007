@@ -685,7 +685,7 @@ try {
       console.log('  hosted   published — other machines can resolve this session');
     } else if (first.state === H.HOSTED.NOT_CONFIGURED) {
       console.log('  hosted   NOT CONFIGURED — local only, not visible to other machines');
-      console.log('           set AGENTBRIDGE_SUPABASE_URL and AGENTBRIDGE_SUPABASE_KEY');
+      console.log('           set AGENTBRIDGE_REGISTRATION_TOKEN (a scoped token, NOT a database key)');
     } else {
       console.error(`  hosted   UNREACHABLE (${first.detail}) — registered LOCALLY ONLY`);
     }

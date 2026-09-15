@@ -1,0 +1,33 @@
+name = "agentbridge"
+main = "bridge/oauthWorker.mjs"
+compatibility_date = "2026-09-15"
+workers_dev = true
+
+# THE PUBLIC FRONT DOOR: OAuth 2.1 discovery + the MCP resource.
+#
+# WHY THE WORKER SERVES OAUTH AND SUPABASE SERVES THE DATA. Discovery is defined
+# at the ORIGIN ROOT -- /.well-known/oauth-protected-resource and
+# /.well-known/oauth-authorization-server. A Supabase Edge Function is served
+# under /functions/v1/<name>/ and can never answer at a root, so a compliant
+# client looking there finds nothing. The Worker owns its whole origin.
+#
+#   this Worker              OAuth + MCP facade, public
+#   Supabase Edge Function   data plane, reached with the reader token
+#
+# This Worker holds exactly ONE credential: BRIDGE_READER_TOKEN, the same
+# least-privilege token any other client would be issued. The database service
+# key stays inside Supabase and is never copied here, so compromising this
+# Worker yields read access to coordination state and nothing more.
+[vars]
+DATA_PLANE_URL = "https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp"
+
+# OAuth clients, authorization codes and tokens. Everything is stored as a
+# SHA-256 digest, never as the value, so a dump of this namespace yields no
+# usable credential. Codes carry a 5-minute TTL and are deleted on redemption;
+# refresh tokens rotate, so a stolen one is usable at most once.
+[[kv_namespaces]]
+binding = "OAUTH"
+id = "ca7371ea5ae946e6bf2b9607d70b3b18"
+
+# Uploaded out of band, never committed:
+#   npx wrangler secret put BRIDGE_READER_TOKEN
