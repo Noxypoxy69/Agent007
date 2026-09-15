@@ -67,19 +67,81 @@ test('NO TASK WRITE REACHES THE DATABASE WITHOUT A STATE PREDICATE', () => {
   );
 });
 
-test('all four lifecycle writes are guarded, and there are exactly four', () => {
-  const found = guardedWrites().map((m) => m[1]);
+/**
+ * EACH SITE IS GUARDED IN THE WAY THAT SITE SHOULD BE.
+ *
+ * WHY THIS IS NOT "there are exactly four guarded writes" ANY MORE, and why the
+ * change was made BEFORE the implementation that needs it rather than after.
+ *
+ * d-lease-wiring moves assign and return onto claim_task and return_with_lease
+ * -- the RPCs that do the same job inside one transaction, with a row lock and a
+ * fencing token, and which have been the most expensive dead code in this tree
+ * all day. When that lands, two of the four writes STOP being predicate-guarded
+ * and become RPC calls. A flat count of four would then be unsatisfiable by
+ * correct work, which is the definition of a gate that has to be edited to let
+ * the truth through.
+ *
+ * The obvious fix is to narrow it when the change arrives. That is the trap. A
+ * guard relaxed to fit an implementation is shaped by the implementation, and
+ * the shaping is invisible afterwards because the suite is green either way. So
+ * this is written NOW, against the CONTRACT, before the code exists -- which is
+ * the only ordering in which the assertion can constrain the work rather than
+ * describe it.
+ *
+ * It is green in both worlds and refuses both wrong ones: guarding the wrong two
+ * fails, and an unguarded write fails whichever transport it uses.
+ *
+ * It deliberately does NOT dictate HOW the RPC is reached -- helper, fetch, or
+ * anything else. It requires only that the site names the function that carries
+ * the lock. Specifying the transport would be me designing somebody else's
+ * change under cover of testing it.
+ */
+const PERMITTED = Object.freeze({
+  accept: { predicate: true, rpc: null },
+  cancel: { predicate: true, rpc: null },
+  assign: { predicate: true, rpc: 'claim_task' },
+  return: { predicate: true, rpc: 'return_with_lease' },
+});
 
-  assert.equal(
-    found.length, 4,
-    `expected four guarded task writes (assign, accept, cancel, return), found ${found.length}: ${found.join(', ')}. `
-    + 'Fewer means a site lost its guard; more means a new write appeared that this file has not been taught about.',
+/** The text following each `const x = writeLanded(`, where its expectation is named. */
+const guardedRegions = () => guardedWrites().map((m) => ({
+  name: m[1],
+  region: source.slice(m.index, m.index + 600),
+}));
+
+test('EACH WRITE IS GUARDED IN THE SPECIFIC WAY THAT WRITE SHOULD BE', () => {
+  const regions = guardedRegions();
+
+  for (const [key, allowed] of Object.entries(PERMITTED)) {
+    const byPredicate = regions.some((r) => r.region.includes(`TASK_WRITE_EXPECTS.${key}`));
+    const byRpc = allowed.rpc ? new RegExp(`\\b${allowed.rpc}\\b`).test(source) : false;
+
+    if (allowed.rpc) {
+      assert.ok(
+        byPredicate || byRpc,
+        `the ${key} write is neither predicate-guarded nor routed through ${allowed.rpc}. `
+        + 'Those are the only two ways this write may be made safe; having neither is the original race.',
+      );
+    } else {
+      assert.ok(
+        byPredicate,
+        `the ${key} write is not predicate-guarded. accept and cancel have no RPC counterpart, `
+        + 'so a predicate is the only thing standing between them and a stale decision.',
+      );
+    }
+  }
+
+  assert.ok(
+    regions.length >= 2,
+    `only ${regions.length} predicate-guarded write(s) remain. accept and cancel must always be among them; `
+    + 'if this has dropped below two, a site lost its guard rather than gaining a better one.',
   );
 
-  // Each expectation is named at its site, twice: once building the filter and
-  // once telling the refusal what state it expected.
-  for (const key of Object.keys(TASK_WRITE_EXPECTS)) {
+  // Each surviving expectation is named at its site twice: once building the
+  // filter, once telling the refusal what state it expected.
+  for (const [key, allowed] of Object.entries(PERMITTED)) {
     const uses = source.match(new RegExp(`TASK_WRITE_EXPECTS\\.${key}\\b`, 'g')) ?? [];
+    if (uses.length === 0 && allowed.rpc) continue; // moved to the RPC; nothing to name
     assert.ok(
       uses.length >= 2,
       `TASK_WRITE_EXPECTS.${key} is referenced ${uses.length} time(s); the filter and the refusal each need it, `
