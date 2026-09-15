@@ -71,6 +71,30 @@ const unauthorized = (origin, detail = 'invalid_token') => json(
   },
 );
 
+/**
+ * HTML-escape. Everything interpolated into the consent page goes through this.
+ *
+ * `client_name` arrives from RFC 7591 dynamic client registration, which is
+ * UNAUTHENTICATED -- anyone may register a client and choose its name. It was
+ * being written into the page raw. That was already a stored XSS; it became a
+ * serious one the moment this page started gating WRITE authority, because the
+ * thing an injected script sits next to is the operator typing the coordinator
+ * token into a password field.
+ */
+const esc = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/**
+ * Does this scope string ask for write?
+ *
+ * Scope is space-delimited per RFC 6749. Matching on exact membership rather
+ * than a substring test, so `agentbridge:write-nothing` or a scope that merely
+ * CONTAINS the word cannot promote a reader.
+ */
+export const scopeGrantsWrite = (scope) =>
+  String(scope ?? '').split(/\s+/).filter(Boolean).includes('agentbridge:write');
+
 /** Minimal HTML consent page. No framework, no external assets, no script. */
 const consentPage = (params, error = '') => new Response(
   `<!doctype html><meta charset="utf-8"><title>Agent Bridge — authorize</title>
@@ -86,31 +110,63 @@ const consentPage = (params, error = '') => new Response(
  code{background:#f4f4f4;padding:.1rem .3rem;border-radius:4px}
 </style>
 <h1>Authorize access to Agent Bridge</h1>
-<p><strong>${params.client_name || 'An application'}</strong> is requesting <code>read-only</code>
+${scopeGrantsWrite(params.scope) ? `
+<p><strong>${esc(params.client_name || 'An application')}</strong> is requesting
+<code>read and write</code> access. As well as reading coordination state, it will be able to
+<strong>assign work to your agents, send them messages, and record owner decisions</strong>.</p>
+<p>This needs the <strong>coordinator</strong> token, not the reader token. If you only meant to
+let it look, close this page and authorize again without <code>agentbridge:write</code>.</p>`
+: `
+<p><strong>${esc(params.client_name || 'An application')}</strong> is requesting <code>read-only</code>
 access to live coordination state: agents, lanes, branches, worktrees, locks and owner decisions.
-It cannot assign work, send messages, or change anything.</p>
+It cannot assign work, send messages, or change anything.</p>`}
 <div class="c">
   <form method="POST">
     ${Object.entries(params).map(([k, v]) =>
-    `<input type="hidden" name="${k}" value="${String(v ?? '').replace(/"/g, '&quot;')}">`).join('')}
+    `<input type="hidden" name="${k}" value="${esc(v)}">`).join('')}
     <label for="t">Bridge token</label>
     <input id="t" name="bridge_token" type="password" autocomplete="off" autofocus
-           placeholder="the reader token from agentbridge-secrets">
-    ${error ? `<p class="e">${error}</p>` : ''}
+           placeholder="${scopeGrantsWrite(params.scope)
+             ? 'the COORDINATOR token from agentbridge-secrets'
+             : 'the reader token from agentbridge-secrets'}">
+    ${error ? `<p class="e">${esc(error)}</p>` : ''}
     <button type="submit">Authorize</button>
   </form>
 </div>
-<p style="color:#777;font-size:13px">Approving grants this client read access until you revoke it.
-Nothing here can write to the database.</p>`,
+<p style="color:#777;font-size:13px">${scopeGrantsWrite(params.scope)
+  ? 'Approving grants this client read AND write access until you revoke it. It will be able to change coordination state.'
+  : 'Approving grants this client read access until you revoke it. Nothing here can write to the database.'}</p>`,
   { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } },
 );
 
-/** Proxy one MCP JSON-RPC call to the Supabase data plane. */
-async function callDataPlane(env, body) {
+/**
+ * Proxy one MCP JSON-RPC call to the Supabase data plane, AT THE GRANTED SCOPE.
+ *
+ * THE BEARER FORWARDED HERE IS WHAT DECIDES WHICH TOOLS EXIST. The data plane
+ * resolves scope by looking the token up in coordinator_tokens, then
+ * reader_tokens, and toolDefs registers a tool only when its method exists for
+ * that scope -- so a reader is not refused `assign_task`, it never sees it.
+ *
+ * This function used to hardcode the reader token. Every OAuth caller was
+ * therefore forwarded as a reader no matter what scope it had been granted, and
+ * the write tools were invisible to a correctly authorized coordinator. It read
+ * as a stale tool list, and no amount of redeploying or refreshing the client
+ * could have changed it: the list was correct for the credential being sent.
+ */
+async function callDataPlane(env, body, write) {
+  /*
+   * `write` arrives already DECIDED. It used to be a scope string that this
+   * function re-evaluated, which meant the write-ness of a request was computed
+   * in two places -- here, and again at the 503 guard in the /mcp handler. They
+   * read the same field so they agreed, but nothing made them agree, and a
+   * mutation test proved it: breaking the handler's copy left the forwarding
+   * untouched. Two answers to one question is one bug away from forwarding a
+   * credential the guard above already refused.
+   */
   const res = await fetch(env.DATA_PLANE_URL, {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${env.BRIDGE_READER_TOKEN}`,
+      authorization: `Bearer ${write ? env.BRIDGE_COORDINATOR_TOKEN : env.BRIDGE_READER_TOKEN}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify(body),
@@ -246,11 +302,35 @@ export function createOAuthHandler(env) {
 
       if (request.method === 'GET') return consentPage(params);
 
-      // POST: the operator submitted the consent form.
-      if (!timingSafeEqual(q.bridge_token ?? '', env.BRIDGE_READER_TOKEN)) {
+      /*
+       * POST: the operator submitted the consent form.
+       *
+       * WHICH SECRET APPROVES WHICH SCOPE. A read grant is approved with the
+       * reader token; a WRITE grant requires the coordinator token. The two are
+       * different secrets on purpose -- approving "this client may direct my
+       * agents" must not be possible with the credential that only ever meant
+       * "this client may look".
+       *
+       * The scope is re-derived from the submitted form here rather than
+       * trusted from the GET, and that is safe in the only direction that
+       * matters: a caller who POSTs directly asking for write is asking to be
+       * held to the HIGHER bar, not a lower one.
+       */
+      const wantsWrite = scopeGrantsWrite(params.scope);
+      if (wantsWrite && !env.BRIDGE_COORDINATOR_TOKEN) {
+        // Refuse rather than quietly issuing a read grant. A silent downgrade
+        // would surface later as missing tools -- indistinguishable from the
+        // bug this whole change exists to fix.
+        return consentPage(params,
+          'This deployment has no coordinator token configured, so write access cannot be granted.');
+      }
+      const expected = wantsWrite ? env.BRIDGE_COORDINATOR_TOKEN : env.BRIDGE_READER_TOKEN;
+      if (!timingSafeEqual(q.bridge_token ?? '', expected)) {
         // Re-render rather than redirect. A wrong token is the operator
         // mistyping, not the client misbehaving.
-        return consentPage(params, 'That token does not match. Check agentbridge-secrets.');
+        return consentPage(params, wantsWrite
+          ? 'That is not the coordinator token. Write access needs the coordinator token, not the reader one.'
+          : 'That token does not match. Check agentbridge-secrets.');
       }
 
       const code = randomToken('abg', 32);
@@ -344,16 +424,35 @@ export function createOAuthHandler(env) {
         return json({ error: 'method-not-allowed' }, 405, CORS);
       }
 
+      /*
+       * THE SCOPE COMES FROM THE STORED GRANT, never from the request.
+       *
+       * It is what the operator approved at the consent page with the matching
+       * secret. A client cannot widen its own access by asking differently on a
+       * later call -- the only way to hold a write grant is to have had one
+       * issued.
+       */
+      let granted;
+      try { granted = JSON.parse(grant); } catch { return unauthorized(origin, 'invalid_token'); }
+      const write = scopeGrantsWrite(granted?.scope);
+
       if (!env.BRIDGE_READER_TOKEN || !env.DATA_PLANE_URL) {
         // Misconfiguration must not read as an auth failure.
         return json({ error: 'not-configured' }, 503, CORS);
+      }
+      if (write && !env.BRIDGE_COORDINATOR_TOKEN) {
+        // A write grant with no coordinator token to forward. Refusing loudly
+        // beats falling back to the reader, which would answer every write tool
+        // with "no such tool" and send whoever is debugging it back to the
+        // client's tool list -- where there is nothing to find.
+        return json({ error: 'not-configured', detail: 'write grant but no coordinator token' }, 503, CORS);
       }
 
       let body;
       try { body = await request.json(); }
       catch { return json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }, 400, CORS); }
 
-      return callDataPlane(env, body);
+      return callDataPlane(env, body, write);
     }
 
     // Unknown paths answer identically and reveal no route map.
