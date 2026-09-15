@@ -342,6 +342,225 @@ export function revokeDecision(d, { at, by, reason = null }) {
   };
 }
 
+export const STALE_AFTER_MS = 10 * 60 * 1000;
+
+export const CAPACITIES = ['idle', 'busy', 'blocked', 'offline'];
+
+const str = (v) => (typeof v === 'string' && v.trim().length ? v.trim() : null);
+
+export function heartbeatAgeMs(row, now) {
+  const at = row?.heartbeat_at ?? row?.lastSeenAt ?? row?.last_seen_at ?? null;
+  if (!at) return null;
+  const t = Date.parse(at);
+  const n = Date.parse(now);
+  if (Number.isNaN(t) || Number.isNaN(n)) return null;
+  return n - t;
+}
+
+export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  if (row?.capacity === 'offline') return false;
+  const age = heartbeatAgeMs(row, now);
+  if (age === null) return false;
+  return age >= 0 && age <= staleAfterMs;
+}
+
+export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  if (!Array.isArray(rows)) throw new TypeError('registryFromSessions requires an array');
+  if (!str(now)) throw new TypeError('registryFromSessions requires a `now` timestamp');
+
+  const sessions = [];
+  const agentIds = new Set();
+
+  for (const r of rows) {
+    const agent_id = str(r?.agent_id);
+    const session_id = str(r?.session_id);
+    if (!agent_id || !session_id) continue;
+
+    agentIds.add(agent_id);
+    sessions.push({
+      session_id,
+      agent_id,
+      repo_id: str(r?.repo_id),
+      worktree_id: str(r?.worktree_id),
+      lane_id: str(r?.lane_id),
+      head_sha: str(r?.head_sha),
+      heartbeat_at: r?.heartbeat_at ?? r?.lastSeenAt ?? r?.last_seen_at ?? null,
+      capacity: isLive(r, { now, staleAfterMs })
+        ? (CAPACITIES.includes(r?.capacity) ? r.capacity : 'idle')
+        : 'offline',
+    });
+  }
+
+  return {
+    agents: [...agentIds].sort().map((agent_id) => ({ agent_id, display_name: agent_id })),
+    sessions,
+    lanes: [],
+    assignments: [],
+  };
+}
+
+export const VERIFICATION = {
+  VERIFIED: 'verified',
+  LEGACY: 'legacy-unverified',
+};
+
+export function verificationOf(delegation) {
+  const v = str(delegation?.target_verification);
+  return v === VERIFICATION.VERIFIED ? VERIFICATION.VERIFIED : VERIFICATION.LEGACY;
+}
+
+const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
+const arr = (v) => (Array.isArray(v) ? v : []);
+
+export const MESSAGE_TYPES = ['assignment', 'question', 'answer', 'status', 'blocker', 'handoff', 'review'];
+
+export const ASSIGNABLE_FROM = ['runnable', 'returned'];
+
+export function looksExecutable(text) {
+  if (typeof text !== 'string') return false;
+  const t = text.trim();
+
+  const patterns = [
+    /(^|[\s;&|`])(rm|curl|wget|chmod|chown|kill|sudo|scp|ssh|nc|eval|exec)\s+-?\w/i,
+    /(^|[\s;&|`])(git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd)\s+\S/i,
+    /\$\(|\bbacktick\b|`[^`]*`/,
+    /\|\s*(sh|bash|zsh|pwsh|powershell)\b/i,
+    /\b(drop|delete|truncate|alter|insert|update)\s+(table|from|into)\b/i,
+    /<script\b/i,
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+export function validateMessage(m = {}) {
+  const errors = [];
+
+  if (!nonEmpty(m.from_agent)) errors.push('from_agent is required');
+  if (!nonEmpty(m.to_agent)) errors.push('to_agent is required');
+  if (!MESSAGE_TYPES.includes(m.type)) {
+    errors.push(`type must be one of ${MESSAGE_TYPES.join(', ')}`);
+  }
+  if (!nonEmpty(m.body)) errors.push('body is required');
+  else if (m.body.length > 8000) errors.push('body exceeds 8000 characters');
+  else if (looksExecutable(m.body)) {
+    errors.push('body looks like a command rather than a message: a coordination '
+      + 'channel that carries executable text is a remote shell nobody audited');
+  }
+  if (m.task_id != null && !nonEmpty(m.task_id)) errors.push('task_id must be a string when present');
+
+  return { ok: errors.length === 0, errors };
+}
+
+export function resolveLiveAgent(sessions, agent_id) {
+  if (!nonEmpty(agent_id)) return { ok: false, reason: 'no-agent-named', candidates: [] };
+  const all = arr(sessions);
+
+  if (!all.some((s) => s?.agent_id === agent_id)) {
+    return { ok: false, reason: 'unknown-agent', candidates: [] };
+  }
+
+  const candidates = all.filter((s) => s?.agent_id === agent_id && s?.capacity !== 'offline');
+  if (candidates.length === 0) return { ok: false, reason: 'no-live-session', candidates: [] };
+  if (candidates.length > 1) {
+    return { ok: false, reason: 'ambiguous-session', candidates: candidates.map((s) => s.session_id) };
+  }
+
+  const s = candidates[0];
+  return {
+    ok: true,
+    agent_id,
+    session_id: s.session_id,
+    repo_id: s.repo_id ?? null,
+    worktree_id: s.worktree_id ?? null,
+    lane_id: s.lane_id ?? null,
+    capacity: s.capacity ?? null,
+    heartbeat_at: s.heartbeat_at ?? null,
+  };
+}
+
+export function canAssign(task, worker, context = {}) {
+  const errors = [];
+  const tasks = arr(context.tasks);
+  const assignments = arr(context.assignments);
+
+  if (!task || !nonEmpty(task.task_id)) {
+    return { ok: false, errors: ['no such task'] };
+  }
+  if (!worker || !nonEmpty(worker.session_id) || !nonEmpty(worker.agent_id)) {
+    return { ok: false, errors: ['no resolved worker: the target must come from the live registry, not a typed name'] };
+  }
+
+  if (!ASSIGNABLE_FROM.includes(task.state)) {
+    errors.push(`task is "${task.state}"; only ${ASSIGNABLE_FROM.join(' or ')} work can be assigned`);
+  }
+
+  const live = typeof context.isLive === 'function' ? context.isLive(worker) : null;
+  if (live === null) errors.push('liveness was not evaluated: refusing rather than guessing');
+  else if (!live) errors.push(`worker ${worker.session_id} is not live (capacity ${worker.capacity ?? 'unknown'})`);
+
+  if (worker.capacity === 'offline') errors.push(`worker ${worker.session_id} declared itself offline`);
+
+  if (nonEmpty(task.repo_id) && nonEmpty(worker.repo_id)
+      && task.repo_id !== worker.repo_id) {
+    errors.push(`task is in repo "${task.repo_id}" but ${worker.session_id} is in "${worker.repo_id}"`);
+  }
+  if (nonEmpty(task.lane_id) && nonEmpty(worker.lane_id)
+      && task.lane_id !== worker.lane_id) {
+    errors.push(`task is in lane "${task.lane_id}" but ${worker.session_id} holds lane "${worker.lane_id}"`);
+  }
+
+  const byId = new Map(tasks.map((t) => [t?.task_id, t]));
+  for (const dep of arr(task.depends_on)) {
+    const d = byId.get(dep);
+    if (!d) {
+      errors.push(`depends on "${dep}", which does not exist`);
+    } else if (d.state !== 'accepted') {
+      errors.push(`depends on "${dep}", which is "${d.state}" and not accepted`);
+    }
+  }
+
+  if (nonEmpty(task.supersededBy)) {
+    errors.push(`already satisfied by "${task.supersededBy}"`);
+  }
+
+  const mine = new Set([...arr(task.allowed_paths), ...arr(task.shared_paths)]);
+  const forbidden = new Set(arr(task.forbidden_paths));
+  for (const p of mine) {
+    if (forbidden.has(p)) {
+      errors.push(`path "${p}" is both allowed and forbidden: ambiguous contract`);
+    }
+  }
+
+  for (const a of assignments) {
+    if (!a || a.task_id === task.task_id) continue;
+    if (!['assigned', 'returned'].includes(a.state)) continue;
+    const theirs = new Set(arr(a.allowed_paths));
+    for (const p of arr(task.allowed_paths)) {
+      if (theirs.has(p) && !arr(a.shared_paths).includes(p) && !arr(task.shared_paths).includes(p)) {
+        errors.push(`path "${p}" is already held by task "${a.task_id}" (${a.assigned_session ?? 'unassigned'})`);
+      }
+    }
+  }
+
+  if (nonEmpty(context.headSha) && nonEmpty(task.base_sha)
+      && task.base_sha !== context.headSha) {
+    errors.push(`base ${task.base_sha.slice(0, 12)} is stale; the tree is at ${context.headSha.slice(0, 12)}. `
+      + 're-resolve the base rather than assigning work from a commit the tree has moved past');
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+export function assignmentRecord(task, worker, { by, at }) {
+  return {
+    task_id: task.task_id,
+    state: 'assigned',
+    assigned_agent: worker.agent_id,
+    assigned_session: worker.session_id,
+    assigned_by: by,
+    assigned_at: at,
+  };
+}
+
 export const jsonResult = (data) => ({
   content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
 });
@@ -527,6 +746,112 @@ export function toolDefs(store) {
       run: async ({ action, project, repo, lane, task } = {}) => {
         const rows = await listDecisions();
         return jsonResult(resolveOwnerDecision(rows, action, { project, repo, lane, task }));
+      },
+    });
+  }
+
+  const { listTasks, assignTask, sendMessage, recordOwnerDecision } = store;
+
+  if (typeof listTasks === 'function') {
+    defs.push({
+      name: 'list_tasks',
+      title: 'List tasks',
+      description:
+        'Coordination tasks with state (runnable, assigned, blocked, returned, accepted, '
+        + 'cancelled), lane, repo, base commit, path contract and dependencies. Read this '
+        + 'before assigning anything: a task that is blocked or already assigned is not work '
+        + 'you can hand out.',
+      input: obj({ state: { type: 'string', description: 'filter to one state' } }),
+      run: async ({ state } = {}) => {
+        const rows = await listTasks();
+        return jsonResult(state ? rows.filter((t) => t?.state === state) : rows);
+      },
+    });
+  }
+
+  if (typeof assignTask === 'function') {
+    defs.push({
+      name: 'assign_task',
+      title: 'Assign task',
+      description:
+        'Assign an existing task to a worker, BY DURABLE AGENT ID. The Bridge resolves the '
+        + 'agent to its live session itself — never pass a session id you read somewhere. '
+        + 'REFUSES, rather than warning, when: the worker is stale, offline or ambiguous; the '
+        + 'task is not runnable or returned; a dependency is unsatisfied; the work is already '
+        + 'satisfied upstream; a path collides with another assignment; the repo or lane does '
+        + 'not match; or the base commit is stale. A refusal names every reason at once.',
+      input: obj({
+        task_id: { type: 'string', description: 'an existing task id' },
+        agent_id: { type: 'string', description: 'durable agent id, e.g. "code-b"' },
+      }, ['task_id', 'agent_id']),
+      run: async ({ task_id, agent_id }) => jsonResult(await assignTask({ task_id, agent_id })),
+    });
+  }
+
+  if (typeof sendMessage === 'function') {
+    defs.push({
+      name: 'send_message',
+      title: 'Send message',
+      description:
+        'Send a STRUCTURED coordination message to a worker. Fixed fields only: task_id, '
+        + 'from_agent, to_agent, type, body. The body is prose for a person or an agent to '
+        + 'READ — it is never executed by anything, and a body that looks like a command is '
+        + 'refused. This is not a way to run something on another machine.',
+      input: obj({
+        to_agent: { type: 'string', description: 'durable agent id of the recipient' },
+        from_agent: { type: 'string', description: 'who is speaking' },
+        type: {
+          type: 'string',
+          description: 'assignment | question | answer | status | blocker | handoff | review',
+        },
+        body: { type: 'string', description: 'plain prose, max 8000 chars' },
+        task_id: { type: 'string', description: 'the task this concerns, if any' },
+      }, ['to_agent', 'from_agent', 'type', 'body']),
+      run: async (m) => jsonResult(await sendMessage(m)),
+    });
+  }
+
+  if (typeof recordOwnerDecision === 'function') {
+    defs.push({
+      name: 'record_owner_decision',
+      title: 'Record owner decision',
+      description:
+        'Append a scoped decision the OWNER has made, so no worker asks it again. '
+        + 'Append-only: an existing decision is never edited, only superseded or revoked. '
+        + 'owner_id and created_by must be the same person — a coordinator may RECORD what '
+        + 'the owner decided, and may not decide on their behalf.',
+      input: obj({
+        decision_id: { type: 'string' },
+        owner_id: { type: 'string', description: 'the builder whose decision this is' },
+        statement: { type: 'string', description: "the owner's own words" },
+        scope_type: { type: 'string', description: 'bridge | project | repo | lane | task' },
+        scope_id: { type: 'string', description: 'required unless scope_type is bridge' },
+        effect: { type: 'string', description: 'allow | deny | require_owner' },
+        capabilities: { type: 'array', items: { type: 'string' }, description: 'e.g. ["deploy.*"]' },
+        supersedes: { type: 'string', description: 'a decision id this replaces' },
+      }, ['decision_id', 'owner_id', 'statement', 'scope_type', 'effect', 'capabilities']),
+      run: async (d) => jsonResult(await recordOwnerDecision(d)),
+    });
+  }
+
+  if (typeof listDecisions === 'function') {
+    defs.push({
+      name: 'get_owner_decisions',
+      title: 'Get owner decisions',
+      description:
+        'Every standing decision, including superseded and revoked ones, so the history of '
+        + 'what the owner said is visible and not just what is currently in force. Use '
+        + 'resolve_owner_decision to ask whether a specific action is permitted.',
+      input: obj({ includeInactive: { type: 'boolean', description: 'default true' } }),
+      run: async ({ includeInactive = true } = {}) => {
+        const rows = await listDecisions();
+        const live = new Set(activeDecisions(rows).map((d) => d.decision_id));
+        return jsonResult(rows
+          .filter((d) => includeInactive || live.has(d.decision_id))
+          .map((d) => ({
+            ...d,
+            state: d.revoked_at ? 'revoked' : (live.has(d.decision_id) ? 'active' : 'superseded'),
+          })));
       },
     });
   }
