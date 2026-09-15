@@ -116,12 +116,50 @@ function normalise(doc, source) {
   return {
     source,
     lanes,
-    agents: (doc.agents ?? []).map((a) => ({ agent_id: a?.agent_id, display_name: a?.display_name ?? a?.agent_id })),
-    sessions: (doc.sessions ?? []).map((s) => ({ session_id: s?.session_id, agent_id: s?.agent_id })),
+    /*
+     * ONE NAMESPACE FOR EVERY REPOSITORY, AND THAT IS THE POINT.
+     *
+     * An agent is a durable worker. It is not "the Bridge's code-b" and
+     * separately "the product's code-b" — those are one worker holding two
+     * assignments, and modelling them as two identities is how one session ends
+     * up with two histories that cannot be reconciled. `repo_id` is therefore
+     * ASSIGNMENT CONTEXT and never part of who somebody is: a worker moves
+     * between agentbridge and social-sparks by changing an assignment, not by
+     * becoming a different agent.
+     *
+     * Three levels, and what each is allowed to outlive:
+     *
+     *   agent_id             durable, repo-independent, survives every restart
+     *   session_id           one runtime; dies when the process does
+     *   repo/worktree/lane   where that runtime is working RIGHT NOW
+     *
+     * Today's collision came from fusing the first two. Three sessions each
+     * believed they were "Code C", and because the lane was treated as the
+     * identity, a reassignment looked like an agent changing who it was.
+     */
+    agents: (doc.agents ?? []).map((a) => ({
+      agent_id: a?.agent_id,
+      display_name: a?.display_name ?? a?.agent_id,
+    })),
+    sessions: (doc.sessions ?? []).map((s) => ({
+      session_id: s?.session_id,
+      agent_id: s?.agent_id,
+      /*
+       * Where this runtime is, not who it is. `null` means "not reported yet",
+       * which is NOT the same as "nowhere" and must never satisfy a match — an
+       * unreported worktree that compares equal to a requested one would bind a
+       * delegation to a session that is not actually there.
+       */
+      repo_id: s?.repo_id ?? null,
+      worktree_id: s?.worktree_id ?? null,
+      capacity: s?.capacity ?? 'idle',
+      last_seen: s?.last_seen ?? null,
+    })),
     assignments: (doc.assignments ?? []).map((x) => ({
       lane_id: x?.lane_id,
       agent_id: x?.agent_id ?? null,
       session_id: x?.session_id ?? null,
+      repo_id: x?.repo_id ?? null,
       worktree: x?.worktree ?? null,
       status: x?.status ?? 'active',
     })),
@@ -175,6 +213,19 @@ export function validateRegistry(reg) {
     seenSession.add(s.session_id);
     if (s.agent_id != null && !seenAgent.has(s.agent_id)) {
       errors.push(`session "${s.session_id}" belongs to unknown agent "${s.agent_id}"`);
+    }
+    /*
+     * A SESSION WITH NO AGENT IS THE 15 SEP FAILURE IN DATA FORM. It is a
+     * runtime nobody can attribute: it can commit, hold a lane and be handed
+     * work, and no later question can establish who did any of it. Four commits
+     * on one branch came from three sessions under one git identity precisely
+     * because nothing required this link.
+     */
+    if (s.agent_id == null) {
+      errors.push(`session "${s.session_id}" names no agent — a runtime that cannot be attributed`);
+    }
+    if (!CAPACITIES.includes(s.capacity)) {
+      errors.push(`session "${s.session_id}" has unknown capacity "${s.capacity}" (${CAPACITIES.join(', ')})`);
     }
   }
 
@@ -326,3 +377,138 @@ export function laneMatchesBranch(lane, branch) {
 }
 
 const unique = (a) => [...new Set(a)];
+
+// ── worker federation ───────────────────────────────────────────────────────
+
+/**
+ * WHAT A WORKER IS DOING, WHICH IS NOT THE SAME AS WHETHER IT EXISTS.
+ *
+ * `offline` is a reported state, not an absence: a session that has gone away
+ * without saying so is still `busy` in the file, and the difference between
+ * "told us it stopped" and "stopped telling us" is exactly the difference
+ * between a safe reassignment and two workers in one worktree.
+ */
+export const CAPACITIES = ['idle', 'busy', 'blocked', 'offline'];
+
+/** Capacities that can take new work. `blocked` cannot; it is waiting on someone. */
+export const AVAILABLE_CAPACITIES = ['idle'];
+
+/**
+ * Every live session belonging to one durable agent.
+ *
+ * An agent may legitimately have several: a worker running in two repositories
+ * at once is one identity holding two runtimes, which is the case that a
+ * per-repo namespace would have modelled as two different workers.
+ */
+export function sessionsOfAgent(reg, agentId) {
+  return reg.sessions.filter((s) => s.agent_id === agentId);
+}
+
+/**
+ * Resolve a durable agent to the ONE live runtime a delegation should bind to.
+ *
+ * A delegation names an agent because that is the thing that survives a
+ * restart; it has to be executed by a session, which does not. This is the
+ * join, and it REFUSES rather than guesses:
+ *
+ *   unknown agent            refuse. A delegation to a worker nobody has
+ *                            registered is a typo or a stale config, and
+ *                            inventing the agent to accept it is how a contract
+ *                            stops meaning anything.
+ *   no live session          refuse. The agent exists but is not running.
+ *   several candidates       refuse, and NAME them. This is the 15 Sep failure
+ *                            exactly: three sessions answering to one identity.
+ *                            Picking the newest would have "worked" that day and
+ *                            silently sent the work to the wrong one.
+ *   offline session          not a candidate.
+ *
+ * `repo_id` and `worktree_id` narrow the search when given. A session that has
+ * not reported its repo is never a match for a specific one — see the note in
+ * normalise: null is "unknown", not "anywhere".
+ */
+export function resolveWorker(reg, { agent_id, repo_id = null, worktree_id = null } = {}) {
+  if (!agent_id) return { ok: false, reason: 'no-agent-named', candidates: [] };
+
+  const known = reg.agents.some((a) => a.agent_id === agent_id);
+  if (!known) return { ok: false, reason: 'unknown-agent', candidates: [] };
+
+  let candidates = sessionsOfAgent(reg, agent_id).filter((s) => s.capacity !== 'offline');
+  if (repo_id !== null) candidates = candidates.filter((s) => s.repo_id === repo_id);
+  if (worktree_id !== null) candidates = candidates.filter((s) => s.worktree_id === worktree_id);
+
+  if (candidates.length === 0) return { ok: false, reason: 'no-live-session', candidates: [] };
+  if (candidates.length > 1) {
+    return { ok: false, reason: 'ambiguous-session', candidates: candidates.map((s) => s.session_id) };
+  }
+
+  const s = candidates[0];
+  return {
+    ok: true,
+    agent_id,
+    session_id: s.session_id,
+    repo_id: s.repo_id,
+    worktree_id: s.worktree_id,
+    capacity: s.capacity,
+  };
+}
+
+/**
+ * Bind a delegation to a live runtime, or say precisely why it cannot be.
+ *
+ * The delegation carries a durable `to_agent`; this supplies the ephemeral
+ * half. It deliberately does NOT mutate the delegation — a binding is a fact
+ * about right now, and writing it into a durable record would make it a claim
+ * about for ever, which is the mistake one layer down.
+ *
+ * A session that is `busy` still binds. Refusing there would mean a worker
+ * could never be given its next task while finishing the current one, and the
+ * queue is the point. `blocked` and `offline` do not bind.
+ */
+export function bindDelegation(reg, delegation, { repo_id = null, worktree_id = null } = {}) {
+  const agentId = delegation?.to_agent ?? delegation?.to ?? null;
+  const resolved = resolveWorker(reg, { agent_id: agentId, repo_id, worktree_id });
+  if (!resolved.ok) return { ok: false, reason: resolved.reason, candidates: resolved.candidates, delegation_id: delegation?.id ?? null };
+  if (resolved.capacity === 'blocked') {
+    return { ok: false, reason: 'worker-blocked', candidates: [resolved.session_id], delegation_id: delegation?.id ?? null };
+  }
+  return {
+    ok: true,
+    delegation_id: delegation?.id ?? null,
+    agent_id: resolved.agent_id,
+    session_id: resolved.session_id,
+    repo_id: resolved.repo_id,
+    worktree_id: resolved.worktree_id,
+  };
+}
+
+/**
+ * The whole worker roster, across every repository, as one list.
+ *
+ * Deliberately not grouped by repo. The moment this is presented per-repository
+ * it invites a second registry per repository, and then the same worker has two
+ * identities and today's confusion is back with tooling to enforce it.
+ */
+export function workerRoster(reg) {
+  return reg.agents.map((a) => {
+    const sessions = sessionsOfAgent(reg, a.agent_id);
+    const live = sessions.filter((s) => s.capacity !== 'offline');
+    const lanes = unique(
+      activeAssignments(reg)
+        .filter((x) => x.agent_id === a.agent_id || sessions.some((s) => s.session_id === x.session_id))
+        .map((x) => x.lane_id),
+    );
+    return {
+      agent_id: a.agent_id,
+      display_name: a.display_name,
+      lanes,
+      repos: unique(live.map((s) => s.repo_id).filter(Boolean)),
+      sessions: live.map((s) => ({
+        session_id: s.session_id,
+        repo_id: s.repo_id,
+        worktree_id: s.worktree_id,
+        capacity: s.capacity,
+      })),
+      capacity: live.length === 0 ? 'offline' : live.some((s) => s.capacity === 'idle') ? 'idle' : live.every((s) => s.capacity === 'blocked') ? 'blocked' : 'busy',
+    };
+  });
+}
