@@ -781,6 +781,12 @@ try {
         process.exitCode = 2;
         break;
       }
+      if (res.state === Hw.HOSTED.REJECTED) {
+        console.error(`error: the Bridge REFUSED this credential (${res.detail})`);
+        console.error('       check the token, not the network; the cursor has not moved');
+        process.exitCode = 2;
+        break;
+      }
       if (res.state !== Hw.HOSTED.OK) {
         console.error(`error: the Bridge is unreachable (${res.detail})`);
         console.error('       nothing was missed; the cursor has not moved');
@@ -867,6 +873,12 @@ try {
       console.error('error: no registration token, so there is nowhere to return work to');
       console.error('       set AGENTBRIDGE_REGISTRATION_TOKEN (a scoped token, NOT a database key)');
       process.exitCode = 2;
+    } else if (res.state === Hr.HOSTED.REJECTED) {
+      // Already exited non-zero before this change; what was wrong was the
+      // WORD. "Unreachable" sends a worker to check a network it cannot fix.
+      console.error(`error: the Bridge REFUSED this credential (${res.detail})`);
+      console.error('       the work is NOT returned; check the token, not the network');
+      process.exitCode = 2;
     } else {
       console.error(`error: the Bridge is unreachable (${res.detail})`);
       console.error('       the work is NOT returned; nothing was recorded');
@@ -915,9 +927,29 @@ try {
         } else if (pub.state === Hu.HOSTED.NOT_CONFIGURED) {
           console.log('  hosted   NOT CONFIGURED — local only; a hosted row, if any, will age out');
         } else {
-          // Loud, because the consequence is a session other machines still
-          // believe is alive, which is what gets work addressed to nobody.
-          console.error(`  hosted   UNREACHABLE (${pub.detail}) — it may still appear live elsewhere`);
+          /*
+           * THE SAME EXIT-0 BUG b6 FOUND IN register-session, AND THIS IS THE
+           * WORSE PLACE FOR IT.
+           *
+           * The comment here already said the consequence out loud -- "a
+           * session other machines still believe is alive, which is what gets
+           * work addressed to nobody" -- and then the command exited 0 anyway.
+           * A deregistration that did not deregister is precisely the failure
+           * that hands work to a worker who has gone home.
+           *
+           * Found by auditing the rest of the CLI after b6's finding rather
+           * than by b6 reporting it; register-session was what it probed.
+           */
+          if (pub.state === Hu.HOSTED.REJECTED) {
+            console.error(`  hosted   REJECTED (${pub.detail})`);
+            console.error('           The Bridge refused this credential. NOT a network problem.');
+          } else {
+            console.error(`  hosted   UNREACHABLE (${pub.detail})`);
+          }
+          console.error('           This session may STILL APPEAR LIVE to other machines, and');
+          console.error('           work may be addressed to it. Re-run this once it is fixed.');
+          await Hu.closeHttp();
+          done(1);
         }
         await Hu.closeHttp();
       }

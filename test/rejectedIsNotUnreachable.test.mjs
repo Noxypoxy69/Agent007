@@ -110,10 +110,21 @@ test('a 500 is unreachable, not rejected — only auth failures are refusals', a
 });
 
 // ── the exit code ──────────────────────────────────────────────────────────
-/** Run the CLI in an isolated home so no real roster is touched. */
-async function runCli(t, args, env) {
-  const home = await mkdtemp(join(tmpdir(), 'ab-exit-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
+/**
+ * Run the CLI in an isolated home so no real roster is touched.
+ *
+ * `home` IS A PARAMETER AND THAT MATTERS. The first version minted a fresh
+ * temp home per call, so a test that registered and then deregistered used two
+ * different rosters -- the second command found no local row, skipped the
+ * hosted call entirely, and the assertions guarded on it never ran. The suite
+ * was green and proving nothing, and the mutation table is what exposed it:
+ * reverting the fix under test left every assertion passing.
+ */
+async function runCli(t, args, env, home = null) {
+  if (!home) {
+    home = await mkdtemp(join(tmpdir(), 'ab-exit-'));
+    t.after(() => rm(home, { recursive: true, force: true }));
+  }
 
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], {
@@ -180,4 +191,77 @@ test('NOT CONFIGURED still exits 0 — local-only is a chosen mode, not a failur
 
   assert.equal(r.code, 0, 'running without a hosted token is legitimate and must not fail');
   assert.match(`${r.out}${r.err}`, /NOT CONFIGURED/);
+});
+
+// ── the audit b6's finding prompted ────────────────────────────────────────
+/*
+ * b6 probed register-session. I audited the other three hosted commands
+ * afterwards rather than declaring them clean, and unregister-session had the
+ * identical bug in the worse place: its own comment said the consequence was "a
+ * session other machines still believe is alive, which is what gets work
+ * addressed to nobody", and it exited 0 anyway.
+ *
+ * return-task and wait-for-work already exited non-zero; only their WORDING
+ * called a refusal unreachable. Those are covered by the wording assertions
+ * below rather than by exit codes, because their exit codes were never wrong.
+ */
+async function registerThenDeregister(t, base, session) {
+  // ONE home across both commands, or the second finds no row to remove.
+  const home = await mkdtemp(join(tmpdir(), 'ab-exit-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  const reg = await runCli(t, [
+    'register-session', '--agent', 'probe-y', '--session', session, '--lane', 'probe',
+  ], { AGENTBRIDGE_REGISTER_URL: '', AGENTBRIDGE_REGISTRATION_TOKEN: '' }, home);
+
+  // The precondition, asserted rather than assumed: if this did not register
+  // locally there is nothing to deregister and the test below proves nothing.
+  assert.equal(reg.code, 0, 'local registration failed, so the deregistration test is vacuous');
+
+  const un = await runCli(t, ['unregister-session', '--session', session], {
+    AGENTBRIDGE_REGISTER_URL: `${base}/register`,
+    AGENTBRIDGE_REGISTRATION_TOKEN: 'x'.repeat(24),
+  }, home);
+
+  const all = `${un.out}${un.err}`;
+  // The hosted half MUST have been attempted, or the assertions are decoration.
+  assert.match(all, /hosted/i, 'the hosted deregistration was never attempted');
+  return { ...un, all };
+}
+
+test('A REFUSED DEREGISTRATION EXITS NON-ZERO', async (t) => {
+  const { base } = await refusingBridge(t);
+  const r = await registerThenDeregister(t, base, 'probe-y-1');
+
+  assert.notEqual(r.code, 0,
+    'a deregistration the Bridge refused exited 0, leaving a session other machines still believe is alive');
+  assert.match(r.all, /REJECTED/i);
+});
+
+test('the deregistration failure says the session may still look alive', async (t) => {
+  /*
+   * The wording carries the consequence. "Unreachable" tells an operator a
+   * request failed; it does not tell them work may now be routed to a worker
+   * that has gone home, which is the thing they need to act on.
+   */
+  const { base } = await refusingBridge(t);
+  const r = await registerThenDeregister(t, base, 'probe-z-1');
+
+  assert.match(r.all, /STILL APPEAR LIVE/i,
+    'the operator was not told the consequence, only that a request failed');
+});
+
+test('return-task names a refusal a refusal, not a network problem', async (t) => {
+  const { base } = await refusingBridge(t);
+  const r = await runCli(t, [
+    'return-task', '--task', 't-probe', '--session', 'probe-r-1',
+  ], {
+    AGENTBRIDGE_REGISTER_URL: `${base}/register`,
+    AGENTBRIDGE_REGISTRATION_TOKEN: 'x'.repeat(24),
+  });
+
+  const all = `${r.out}${r.err}`;
+  assert.notEqual(r.code, 0, 'a refused return reported success');
+  assert.match(all, /REFUSED this credential/i,
+    'a rejected credential was reported as an unreachable network');
 });
