@@ -52,6 +52,24 @@ export function createLocalStore({ redactHomePaths = false } = {}) {
       }));
     },
 
+    /**
+     * Task contracts, so the read surface can answer "what does this agent
+     * owe" and not only "what is it doing".
+     *
+     * Read straight from the delegation store rather than through a snapshot:
+     * contracts are not observed state, they are a ledger, and collecting git
+     * across every worktree to answer a question about a JSON file would be
+     * seconds of work for nothing.
+     *
+     * Imported lazily so this module still loads where the store is absent or
+     * unreadable — the six state tools must keep working when the ledger is
+     * broken, since that is exactly when somebody is debugging it.
+     */
+    async listDelegations() {
+      const { readDelegations } = await import('./provenanceStore.mjs');
+      return readDelegations();
+    },
+
     async getLanes() {
       const payload = await snapshot();
       if (payload.lanes && typeof payload.lanes === 'object') return payload.lanes;
