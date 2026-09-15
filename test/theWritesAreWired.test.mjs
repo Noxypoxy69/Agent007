@@ -37,11 +37,11 @@ import {
  * by construction. Scanning the shipped file is ugly and is the only thing that
  * can see the wiring. It reads the file that deploys, never a copy.
  *
- * KNOWN AND DELIBERATELY NOT ASSERTED: confirmProposal writes `state:
- * confirmed` to the proposals table filtered on the proposal id alone. It is the
- * same shape, lower severity -- the task write now serialises it -- and closing
- * it is a separate change. It is named here so its absence is a decision rather
- * than an oversight.
+ * THE FIFTH SITE IS NOW COVERED TOO. This file originally named confirmProposal
+ * as a known gap: it wrote `state: confirmed` to the proposals table filtered on
+ * the proposal id alone, so a proposal the dispatcher superseded between the read
+ * and the write could still be flipped to confirmed. 3de0c59 pinned it to
+ * `state=eq.open`, and the assertions below keep it pinned.
  */
 
 const INDEX = fileURLToPath(new URL('../supabase/functions/mcp/index.ts', import.meta.url));
@@ -118,6 +118,59 @@ test('EVERY GUARDED WRITE REFUSES, AND REFUSES BEFORE IT ANNOUNCES', () => {
       );
     }
   }
+});
+
+test('EVERY PROPOSALS WRITE CARRIES A STATE PREDICATE TOO', () => {
+  /*
+   * The fifth site. Same shape as the task writes and lower severity -- the task
+   * write serialises the real damage, so a second confirmer is refused at the
+   * apply stage and never reaches the proposal row. What was left was a RECORD
+   * that could disagree with what happened: superseded, then confirmed, a
+   * transition no guard admits.
+   */
+  const paths = [...source.matchAll(/patch\(\s*[`'"](proposals\?[^`'"]*)[`'"]/g)].map((m) => m[1]);
+
+  assert.ok(paths.length > 0, 'no proposals write found at all — this assertion has stopped reading the file it guards');
+
+  for (const p of paths) {
+    assert.match(
+      p, /state=eq\./,
+      `the proposals write "${p}" is filtered without a state predicate, so it cannot refuse a stale decision`,
+    );
+  }
+
+  const confirm = paths.filter((p) => p.includes('proposal_id=eq.'));
+  assert.equal(confirm.length, 1, `expected exactly one confirm write, found ${confirm.length}`);
+  assert.match(confirm[0], /state=eq\.open/,
+    'the confirm write must be pinned to open, or a superseded proposal can still be flipped to confirmed');
+});
+
+test('A LOST RACE ON THE PROPOSAL ROW IS NAMED, NOT REPORTED AS A FAILURE', () => {
+  /*
+   * THIS ONE PINS A JUDGEMENT CALL RATHER THAN A DEFECT, deliberately.
+   *
+   * By the time the proposal row is written, the assignment or acceptance has
+   * ALREADY LANDED. Returning ok:false there would report failure for work that
+   * completed, and the caller's retry is what would corrupt the picture -- the
+   * same defect as the 204 empty-body bug in write(). So the action is reported
+   * as the success it was, with the bookkeeping discrepancy named beside it.
+   *
+   * I agree with that call. It is also the kind of decision that gets quietly
+   * "corrected" later by somebody pattern-matching it to the task writes, where
+   * ok:false IS right. So it is asserted: flipping it must be an argument, not
+   * an edit. If the reasoning ever stops holding, change this test on purpose.
+   */
+  const start = source.indexOf('const marked = await patch(');
+  assert.notEqual(start, -1, 'the pinned confirm write is gone; this test is no longer reading what it claims to');
+
+  const region = source.slice(start, start + 1200);
+
+  assert.match(region, /\bok:\s*true\b/,
+    'the confirm now reports failure for work that already landed — the caller will retry an assignment that happened');
+  assert.match(region, /proposal_record/,
+    'the lost race is no longer NAMED: ok:true with no marker is the divergence hidden rather than reported');
+  assert.match(region, /Array\.isArray\(marked\)|marked\.length/,
+    'the result of the pinned write is never inspected, so the stale case cannot be detected at all');
 });
 
 test('the expectations are DERIVED from the guards, not copied beside them', () => {
