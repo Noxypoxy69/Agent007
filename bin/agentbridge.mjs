@@ -42,6 +42,9 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         work only, or --all for its whole history
   agentbridge audit-delegation --id <id> [--head <sha>] [--files a,b] [--repo <dir>]
                                         exit 1 if the delegate went outside the contract
+  agentbridge workers [--registry-file <f>] [--json]
+                                        the worker pool: agents, their live
+                                        sessions, where each is, and capacity
   agentbridge doctor                    verify secret sealing and file permissions
   agentbridge daemon start
 
@@ -51,6 +54,30 @@ instructions from the bridge, and cannot execute anything on its behalf.
 
 /** Comma-separated CLI list -> array. Empty, absent, or a bare flag mean none. */
 const split = (v) => (typeof v === 'string' && v.length ? v.split(',').map((s) => s.trim()).filter(Boolean) : []);
+
+/**
+ * Load the lane registry, or null when none is configured.
+ *
+ * Returns null rather than throwing for "no registry", because that is a
+ * legitimate state on a machine that has not set one up. A registry that
+ * EXISTS but is malformed is a different thing and does throw -- silently
+ * treating a broken registry as an absent one would let a typo disable
+ * identity checking wholesale.
+ */
+async function loadLaneRegistry(explicitFile) {
+  const cfg = await loadConfig();
+  const file = explicitFile || cfg?.lanesFile?.[0] || cfg?.lanesFile || null;
+  if (!file) return null;
+  const { readFile } = await import('node:fs/promises');
+  const R = await import('../src/laneRegistry.mjs');
+  let text;
+  try { text = await readFile(file, 'utf8'); }
+  catch { throw new Error(`cannot read lane registry: ${file}`); }
+  const reg = R.parseLaneRegistry(text, { source: file });
+  const v = R.validateRegistry(reg);
+  if (!v.ok) throw new Error(`lane registry ${file} is invalid: ${v.errors[0]}`);
+  return { reg, file, R };
+}
 
 const cmd = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
@@ -244,10 +271,56 @@ try {
         console.log(`base ${args.base} -> ${resolved.sha}`);
       }
 
+      /*
+       * THE TARGET IS RESOLVED THROUGH THE REGISTRY, NOT TAKEN ON TRUST.
+       *
+       * Same rule as the base SHA one screen up, for the same reason: an
+       * identifier the machine can check should never be typed from memory.
+       * `--to danny-win-f1` was accepted for days as a free-floating string.
+       * It happens to be a real session -- the registry maps it to code-b --
+       * but nothing verified that, and a typo would have recorded a contract
+       * addressed to nobody, which is indistinguishable from one nobody has
+       * picked up yet.
+       *
+       * resolveWorker joins the durable agent to its live runtime and REFUSES
+       * on unknown-agent, no-live-session, or several candidates (naming them,
+       * rather than silently choosing the newest).
+       *
+       * NO REGISTRY CONFIGURED IS NOT A PASS AND NOT A FAILURE -- it is a
+       * separate, named state. Refusing outright would break every machine
+       * that has not set one up; accepting silently would make this check
+       * vanish exactly where nobody has configured anything. It warns, loudly,
+       * and says how to stop seeing the warning.
+       */
+      let bound = null;
+      let registry = null;
+      try { registry = await loadLaneRegistry(args['registry-file']); }
+      catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
+
+      if (!registry) {
+        console.error('warning: no lane registry configured, so --to was not verified.');
+        console.error('         set lanesFile in config, or pass --registry-file <path>.');
+      } else {
+        const { reg, R } = registry;
+        // Accept either the durable agent id or a live session id, and store
+        // the session. A person reads "code-b"; the ledger needs the runtime.
+        const asSession = reg.sessions?.find((s) => s.session_id === args.to);
+        const agentId = asSession ? asSession.agent_id : args.to;
+        const r = R.resolveWorker(reg, { agent_id: agentId });
+        if (!r.ok) {
+          console.error(`error: --to "${args.to}" did not resolve: ${r.reason}`);
+          if (r.candidates?.length) console.error(`       candidates: ${r.candidates.join(', ')}`);
+          console.error('       the Bridge resolves the target — do not type a session id from memory');
+          process.exit(2);
+        }
+        bound = r;
+        if (r.session_id !== args.to) console.log(`to ${args.to} -> session ${r.session_id} (agent ${r.agent_id})`);
+      }
+
       const rec = P.createDelegation({
         id: args.id,
         assigning_session: args.from,
-        assigned_session: args.to,
+        assigned_session: bound ? bound.session_id : args.to,
         task: args.task,
         lane_id: args.lane ?? null,
         base_sha: resolved.sha,
@@ -474,6 +547,37 @@ try {
 
     console.log(fail ? '\nRESULT: FAIL' : '\nRESULT: OK');
     process.exit(fail ? 1 : 0);
+  }
+
+  /*
+   * `workers` — the pool, as the machine sees it.
+   *
+   * Scheduling questions ("who is idle", "can these two run at once") were
+   * being answered by counting folders in Documents, which is how capacity got
+   * reported as 3 when 5 worktrees were sitting free. This prints what the
+   * registry actually holds, so the answer comes from state rather than from
+   * somebody's mental model of the machine.
+   */
+  if (cmd === 'workers') {
+    let registry;
+    try { registry = await loadLaneRegistry(args['registry-file']); }
+    catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
+    if (!registry) {
+      console.error('no lane registry configured. set lanesFile in config, or pass --registry-file <path>.');
+      process.exit(2);
+    }
+    const roster = registry.R.workerRoster(registry.reg);
+    if (args.json) { console.log(JSON.stringify(roster, null, 2)); process.exit(0); }
+    if (!roster.length) { console.log('no workers registered'); process.exit(0); }
+    for (const w of roster) {
+      const sessions = w.sessions ?? [];
+      console.log(`${w.agent_id}  ${sessions.length ? '' : '(no live session)'}`);
+      for (const s of sessions) {
+        console.log(`  ${s.session_id}  ${s.capacity ?? 'unknown'}  ${s.repo_id ?? '-'} / ${s.worktree_id ?? '-'}`);
+      }
+      if (w.lanes?.length) console.log(`  lanes: ${w.lanes.join(', ')}`);
+    }
+    process.exit(0);
   }
 
   if (cmd === 'daemon') {
