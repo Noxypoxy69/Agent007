@@ -83,6 +83,25 @@ export async function gitState(cwd, { mainRef = 'origin/main' } = {}) {
   const mainSha = line(mainR);                  // null => no origin/main locally
   const upstream = upstreamR.ok ? upstreamR.stdout.trim() : null;
 
+  /*
+   * WHERE the upstream actually lives, not just that it has a name.
+   *
+   * Captured because "has an upstream" is not the same claim as "exists
+   * somewhere other than this disk", and the difference is a shortcut somebody
+   * will reach for. Agent Bridge itself had no remote; the quick fix is
+   * `git init --bare ../mirror && git remote add origin ../mirror`, after which
+   * NO_UPSTREAM stops firing and the work is still on exactly one machine.
+   *
+   * A guard that can be satisfied without fixing the thing it guards is worse
+   * than no guard, so the URL is collected and releaseRisk judges it.
+   */
+  let upstreamUrl = null;
+  if (upstream) {
+    const remoteName = upstream.includes('/') ? upstream.slice(0, upstream.indexOf('/')) : upstream;
+    const urlR = await git(cwd, ['remote', 'get-url', remoteName]);
+    upstreamUrl = urlR.ok ? (line(urlR) || null) : null;
+  }
+
   let baseSha = null;
   if (mainSha) baseSha = line(await git(cwd, ['merge-base', 'HEAD', mainRef]));
 
@@ -121,6 +140,7 @@ export async function gitState(cwd, { mainRef = 'origin/main' } = {}) {
     mainRef,
     mainSha,
     upstream,
+    upstreamUrl,
     unpushed,
     unpushedReason,
     aheadOfMain,

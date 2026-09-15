@@ -130,7 +130,8 @@ try {
    * the delegate actually changed and COMPUTES whether the contract held,
    * instead of a human reading a diff and remembering what was agreed.
    */
-  if (cmd === 'delegate' || cmd === 'delegations' || cmd === 'audit-delegation') {
+  if (cmd === 'delegate' || cmd === 'delegations' || cmd === 'audit-delegation'
+      || cmd === 'delegation-state' || cmd === 'may-integrate') {
     const { readDelegations, writeDelegations } = await import('../src/provenanceStore.mjs');
     const P = await import('../src/provenance.mjs');
     const all = await readDelegations();
@@ -170,9 +171,48 @@ try {
       process.exit(0);
     }
 
-    // audit-delegation --id <id> --head <sha> [--files a,b] [--accept|--reject]
     const d = all.find((x) => x.id === args.id);
     if (!d) { console.error(`no delegation "${args.id}"`); process.exit(2); }
+
+    // delegation-state --id <id> --to returned|accepted|rejected|withdrawn [--head <sha>]
+    if (cmd === 'delegation-state') {
+      const t = P.transition(d, args.to, {
+        head_sha: args.head ?? null,
+        audit: d.audit,
+        now: new Date().toISOString(),
+      });
+      if (!t.ok) { for (const e of t.errors) console.error(`  - ${e}`); process.exit(2); }
+      await writeDelegations(all.map((x) => (x.id === d.id ? t.record : x)));
+      console.log(`${d.id}: ${d.state} -> ${t.record.state}${t.record.head_sha ? ` @ ${t.record.head_sha.slice(0, 12)}` : ''}`);
+      process.exit(0);
+    }
+
+    /*
+     * may-integrate — THE HARD GATE.
+     *
+     * Delegated work may be integrated only when the contract completed AND the
+     * computed audit held. Both, not either: an accepted delegation whose audit
+     * was never run is a human saying "looks fine", which is the thing this
+     * whole mechanism exists to replace.
+     *
+     * Exits 1 when integration is not permitted, so it can sit in front of a
+     * merge the same way release-risk sits in front of a push.
+     */
+    if (cmd === 'may-integrate') {
+      const reasons = [];
+      if (d.state !== 'accepted') reasons.push(`state is "${d.state}", not "accepted"`);
+      if (!d.head_sha) reasons.push('no head_sha was ever returned');
+      if (!d.audit) reasons.push('no audit has been recorded');
+      else if (!d.audit.ok) reasons.push(`the recorded audit found ${d.audit.violations.length} violation(s)`);
+
+      if (reasons.length) {
+        console.log(`INTEGRATION REFUSED — ${d.id}`);
+        for (const r of reasons) console.log(`  - ${r}`);
+        process.exit(1);
+      }
+      console.log(`integration permitted — ${d.id} accepted at ${d.head_sha.slice(0, 12)}, audit clean`);
+      process.exit(0);
+    }
 
     let files = split(args.files);
     if (!files.length) {
@@ -185,6 +225,16 @@ try {
     }
 
     const result = P.auditChangedPaths(d, files);
+
+    // --record persists the verdict onto the contract, which is what
+    // may-integrate later reads. Without it an audit is a console message that
+    // nothing downstream can check, and "I ran it and it was fine" is exactly
+    // the unverifiable claim this replaces.
+    if (args.record) {
+      const stamped = { ...d, audit: { ...result, head_sha: args.head ?? d.head_sha, at: new Date().toISOString() } };
+      await writeDelegations(all.map((x) => (x.id === d.id ? stamped : x)));
+    }
+
     if (args.json) console.log(JSON.stringify({ delegation: d.id, result }, null, 2));
     else {
       console.log(`audit ${d.id}: ${files.length} file(s) changed`);

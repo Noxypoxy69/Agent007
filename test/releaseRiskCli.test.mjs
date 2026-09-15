@@ -86,9 +86,23 @@ test('release-risk CLI: exits 1 on a local-only branch and 0 once it has an upst
   const pushed = await git(solo, ['push', '-q', '-u', 'origin', head]);
   assert.equal(pushed.ok, true, `push into the temp bare repo failed: ${pushed.stderr}`);
 
+  // A temp bare repo IS a local-path remote, and LOCAL_ONLY_REMOTE correctly
+  // fires on it -- pushing here moves the work nowhere. So the intermediate
+  // state is still blocked, and that is the rule working rather than a defect.
+  const local = await run(['release-risk'], env);
+  assert.equal(local.code, 1, 'a filesystem-path remote was accepted as off-machine');
+  assert.match(local.stdout, /LOCAL_ONLY_REMOTE/);
+  assert.equal(local.stdout.includes('NO_UPSTREAM'), false, 'NO_UPSTREAM should be satisfied by the push');
+  assert.equal(local.stdout.includes('LOCAL_ONLY_COMMITS'), false, 'commits are no longer unpushed');
+
+  // Now make the remote genuinely off-machine. The commits and tree are
+  // untouched; only where the upstream lives changes, which is precisely the
+  // fact the guard is about. Never fetched, so an unreachable host is fine.
+  await git(solo, ['remote', 'set-url', 'origin', 'https://example.invalid/solo.git']);
+
   const after = await run(['release-risk'], env);
   assert.equal(after.code, 0,
-    `a pushed, clean branch was still blocked (exit ${after.code})\n${after.stdout}`);
+    `a pushed branch with a network remote was still blocked (exit ${after.code})\n${after.stdout}`);
 });
 
 test('release-risk CLI: a dirty tree blocks a release branch', async (t) => {
@@ -106,6 +120,9 @@ test('release-risk CLI: a dirty tree blocks a release branch', async (t) => {
   await git(repo, ['remote', 'add', 'origin', bare]);
   await git(repo, ['checkout', '-q', '-b', 'release/x']);
   await git(repo, ['push', '-q', '-u', 'origin', 'release/x']);
+  // Point the remote somewhere off-machine after pushing, so this test isolates
+  // the dirty-tree rule instead of also tripping LOCAL_ONLY_REMOTE.
+  await git(repo, ['remote', 'set-url', 'origin', 'https://example.invalid/rel.git']);
   await run(['register', '--agent', 'rel', '--lane', 'release', '--worktree', repo], env);
 
   // Clean and pushed: must pass. Establishes the positive before the negative,

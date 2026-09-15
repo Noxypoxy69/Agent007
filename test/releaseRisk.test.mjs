@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  evaluateReleaseRisk, formatReleaseRisk, BLOCK, WARN,
+  evaluateReleaseRisk, formatReleaseRisk, isLocalRemote, BLOCK, WARN,
 } from '../src/releaseRisk.mjs';
 
 /**
@@ -34,6 +34,7 @@ const CLEAN = {
   mainRef: 'origin/main',
   mainSha: '49012be94d7731feeb119dc9eea6e146630d4b03',
   upstream: 'origin/release/integrate-2026-09-14',
+  upstreamUrl: 'https://github.com/example/repo.git',
   unpushed: 0,
   unpushedReason: 'vs-upstream',
   aheadOfMain: 9,
@@ -134,6 +135,47 @@ test('release-risk: a detached head does not also claim NO_UPSTREAM', () => {
   // would be two findings for one fact and would inflate the block count.
   const r = evaluateReleaseRisk({ ...CLEAN, branch: null, detached: true, upstream: null });
   assert.equal(codes(r).includes('NO_UPSTREAM'), false);
+});
+
+// ── LOCAL_ONLY_REMOTE: the shortcut that would defeat this guard ────────────
+
+test('release-risk: a filesystem-path upstream is still local', () => {
+  // The exact shortcut available when Agent Bridge had no remote:
+  //   git init --bare ../mirror && git remote add origin ../mirror
+  // After it, NO_UPSTREAM and LOCAL_ONLY_COMMITS both go quiet and every commit
+  // is still on one disk. The guard must not report clean on its own subject.
+  for (const url of ['C:\\Users\\x\\mirror.git', '../mirror', '/srv/git/x.git', 'file:///srv/git/x.git']) {
+    const r = evaluateReleaseRisk({ ...CLEAN, upstreamUrl: url });
+    assert.ok(codes(r).includes('LOCAL_ONLY_REMOTE'), `not flagged: ${url}`);
+    assert.equal(r.ok, false, `a local mirror satisfied a release branch: ${url}`);
+  }
+});
+
+test('release-risk: a real network upstream is silent', () => {
+  for (const url of [
+    'https://github.com/Noxypoxy69/social-sparks-app.git',
+    'git@github.com:Noxypoxy69/social-sparks-app.git',
+    'ssh://git@example.com/x.git',
+    'git://example.com/x.git',
+  ]) {
+    const r = evaluateReleaseRisk({ ...CLEAN, upstreamUrl: url });
+    assert.equal(codes(r).includes('LOCAL_ONLY_REMOTE'), false, `false positive: ${url}`);
+    assert.equal(r.ok, true, `clean pushed branch blocked on ${url}`);
+  }
+});
+
+test('release-risk: an unknown remote shape is treated as local, not as safe', () => {
+  // Fails toward the expensive-to-be-wrong side: a false "still local" costs a
+  // conversation, a false "safely remote" costs the work.
+  assert.equal(isLocalRemote('some-weird-thing'), true);
+  assert.equal(isLocalRemote('https://example.com/x.git'), false);
+});
+
+test('release-risk: no upstream url means no claim either way', () => {
+  // gitState leaves upstreamUrl null when it cannot read the remote. That must
+  // not silently become "local" and stack a second finding on NO_UPSTREAM.
+  const r = evaluateReleaseRisk({ ...CLEAN, upstream: null, upstreamUrl: null, unpushed: 0 });
+  assert.equal(codes(r).includes('LOCAL_ONLY_REMOTE'), false);
 });
 
 // ── TRUNK_AHEAD_OF_REMOTE ───────────────────────────────────────────────────

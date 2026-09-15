@@ -59,6 +59,21 @@ function finding(code, severity, message, evidence) {
 }
 
 /**
+ * Does this remote URL reach another machine?
+ *
+ * Allow-list the ways OUT rather than blocklist the ways local, so an
+ * unrecognised URL shape is treated as local and reported. A false "you are
+ * still local" costs a conversation; a false "you are safely remote" costs the
+ * work.
+ */
+export function isLocalRemote(url) {
+  const u = String(url).trim();
+  if (/^(ssh|git|https?):\/\//i.test(u)) return false;   // explicit network scheme
+  if (/^[\w.-]+@[\w.-]+:/.test(u)) return false;          // scp-style git@host:path
+  return true;                                            // paths, file://, anything else
+}
+
+/**
  * Evaluate one worktree's git state.
  *
  * @param {object} state  the object returned by gitState()
@@ -126,6 +141,31 @@ export function evaluateReleaseRisk(state, opts = {}) {
         : `${state.unpushed} commit(s) are ahead of ${state.upstream} and not pushed`,
       { count: state.unpushed, basis: state.unpushedReason, upstream: state.upstream ?? null, head: state.head },
     ));
+  }
+
+  /*
+   * AN UPSTREAM THAT IS STILL THIS MACHINE.
+   *
+   * NO_UPSTREAM asks whether a remote is configured. It does not ask whether
+   * the remote is anywhere else, and those are different claims. Agent Bridge
+   * itself had no remote today, and the one-line fix available on the spot was
+   * `git init --bare ../mirror && git remote add origin ../mirror` -- after
+   * which NO_UPSTREAM goes quiet, LOCAL_ONLY_COMMITS goes quiet once pushed,
+   * and every commit is still on exactly one disk. The guard would report clean
+   * on the precise risk it exists to catch.
+   *
+   * So a filesystem-path remote is named rather than accepted. A local mirror
+   * is a real backup against an accidental delete and a poor one against a
+   * dead machine, and the report should say which of those you have.
+   *
+   * Detected by absence of a network scheme rather than by listing drive
+   * letters: ssh, git, http(s) and scp-style `user@host:path` all reach another
+   * machine; `C:\...`, `/srv/...`, `../mirror` and `file://` do not.
+   */
+  if (!state.detached && state.upstream && state.upstreamUrl && isLocalRemote(state.upstreamUrl)) {
+    findings.push(finding('LOCAL_ONLY_REMOTE', sev,
+      'the upstream is a path on this machine, so pushing does not put the work anywhere else',
+      { upstream: state.upstream, url: state.upstreamUrl }));
   }
 
   /*
