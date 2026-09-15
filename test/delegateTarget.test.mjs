@@ -172,12 +172,20 @@ test('delegate: two live sessions for one agent refuse AND name the candidates',
 test('delegate: NO registry warns loudly but does not silently verify nothing', async (t) => {
   // Refusing outright would break every machine without a registry; accepting
   // in silence would make the check vanish exactly where none is configured.
+  // The wording moved when runtime self-registration landed: the message now
+  // names BOTH sources it tried (live registrations, then a lane file) and
+  // states the provenance it recorded. The behaviour under test is unchanged --
+  // accept, but loudly, and never silently as if verified.
   const { repo, env } = await fixture(t, null);
   const r = await run(argsFor('d-nowarn', 'whoever'), env, repo);
   assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
-  assert.match(r.stderr, /no lane registry configured/);
-  assert.match(r.stderr, /was not verified/);
-  assert.equal((await stored(env))[0].assigned_session, 'whoever');
+  assert.match(r.stderr, /no live registrations and no lane registry/);
+  assert.match(r.stderr, /NOT verified/);
+  assert.match(r.stderr, /legacy-unverified/);
+  const row = (await stored(env))[0];
+  assert.equal(row.assigned_session, 'whoever');
+  // And the contract must carry that provenance, not merely mention it.
+  assert.equal(row.target_verification, 'legacy-unverified');
 });
 
 test('delegate: a MALFORMED registry refuses — it is not treated as absent', async (t) => {
