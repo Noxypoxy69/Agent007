@@ -5,6 +5,7 @@ import {
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
+  classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
 } from './_shared.js';
 
 /**
@@ -173,7 +174,258 @@ const readStore = {
    * can reach it.
    */
   async listMessages(args = {}) { return get(messagesQuery(args)); },
+
+  /**
+   * FILING A QUESTION, AND WHY A READER MAY DO IT.
+   *
+   * The thing that is blocked on a permission is a WORKER, and a worker holds
+   * no coordinator token. If asking required coordinator scope, the tool would
+   * be unreachable by every process it exists for, and the "permission system"
+   * would be a keypress with extra steps -- which is the defect, not the fix.
+   *
+   * What makes that safe is that a filed row DOES NOTHING. It carries no grant.
+   * Crucially, `decider` and `risk` are computed HERE from the action and are
+   * never read off the request: a caller that could name its own decider would
+   * file "deploy.production" as routine and have a coordinator wave it through,
+   * which is the exact escalation this whole design exists to prevent.
+   *
+   * POLICY FIRST, AND THEN NOTHING IS FILED AT ALL. Most asks have already been
+   * answered. Filing them anyway would fill the owner's list with settled
+   * questions and teach him that the list is noise.
+   */
+  async submitPermissionRequest(a = {}) {
+    const now = new Date().toISOString();
+    if (!a.action || typeof a.action !== 'string' || !a.action.trim()) {
+      return { ok: false, errors: ['action is required'] };
+    }
+    if (!a.requested_by || typeof a.requested_by !== 'string' || !a.requested_by.trim()) {
+      // Named rather than defaulted: a question whose asker is unknown cannot
+      // be answered, because nobody knows who is waiting on the answer.
+      return {
+        ok: false,
+        errors: ['requested_by is required: an anonymous question has nobody to answer to'],
+      };
+    }
+
+    const decisions = await get('owner_decisions?select=*');
+    const verdict = classifyRequest({
+      action: a.action,
+      task_id: a.task_id ?? null,
+      scope_id: a.scope_id ?? null,
+      reversible: a.reversible,
+      project: a.project,
+      repo: a.repo,
+      lane: a.lane,
+    }, decisions, { now });
+
+    if (verdict.decider === DECIDER.POLICY) {
+      return {
+        ok: true,
+        decided: true,
+        decider: 'policy',
+        allowed: verdict.allowed,
+        risk: verdict.risk,
+        decision_id: verdict.decision_id,
+        reason: verdict.reason,
+        constraints: verdict.constraints ?? {},
+        filed: false,
+        note: 'the owner has already decided this; nothing was filed and nobody was asked',
+      };
+    }
+
+    const key = verdict.key;
+
+    /*
+     * ONE OUTSTANDING ASK PER QUESTION. The unique partial index enforces it in
+     * the database; this read is the cheap path that avoids provoking it, and
+     * the 409 handler below is what makes the enforcement real when two workers
+     * ask in the same instant.
+     */
+    const seen = await get(
+      `permission_requests?select=*&key=eq.${encodeURIComponent(key)}&decided_at=is.null&limit=1`,
+    );
+    if (seen.length) {
+      return {
+        ok: true, decided: false, filed: false, already_outstanding: true,
+        request_id: seen[0].request_id,
+        decider: seen[0].decider, risk: seen[0].risk,
+        requested_at: seen[0].requested_at,
+        reason: `this exact question is already waiting on the ${seen[0].decider}; `
+          + 'poll list_permission_requests rather than asking again',
+      };
+    }
+
+    const record = {
+      key,
+      action: a.action.trim(),
+      task_id: a.task_id ?? null,
+      scope_id: a.scope_id ?? null,
+      decider: verdict.decider,
+      risk: verdict.risk,
+      requested_by: a.requested_by.trim(),
+      arguments_summary: a.arguments_summary ?? null,
+      environment: a.environment ?? null,
+      reversible: typeof a.reversible === 'boolean' ? a.reversible : null,
+    };
+
+    let row;
+    try {
+      [row] = await write('permission_requests', record);
+    } catch (e) {
+      /*
+       * A 409 HERE IS SOMEBODY ELSE ASKING THE SAME THING, WHICH IS SUCCESS.
+       *
+       * The unique index fired, so an identical open question exists. Re-read
+       * and hand back THAT one. The re-read is ASSERTED rather than assumed: if
+       * the row is not there, the 409 meant something else, and reporting
+       * success would be inventing a request that does not exist.
+       */
+      if (!String(e?.message ?? e).includes(':409')) throw e;
+      const raced = await get(
+        `permission_requests?select=*&key=eq.${encodeURIComponent(key)}&decided_at=is.null&limit=1`,
+      );
+      if (!raced.length) {
+        return { ok: false, errors: [`permission request rejected: ${String(e?.message ?? e)}`] };
+      }
+      return {
+        ok: true, decided: false, filed: false, already_outstanding: true,
+        request_id: raced[0].request_id, decider: raced[0].decider, risk: raced[0].risk,
+        reason: 'an identical question was filed by another agent at the same moment',
+      };
+    }
+
+    if (!row) {
+      return { ok: false, errors: ['the permission request did not come back from the write'] };
+    }
+
+    return {
+      ok: true,
+      decided: false,
+      filed: true,
+      request_id: row.request_id,
+      decider: verdict.decider,
+      risk: verdict.risk,
+      paused_task: a.task_id ?? null,
+      reason: verdict.reason,
+      next: verdict.decider === DECIDER.OWNER
+        ? 'this is the owner’s to answer; he answers by recording a standing decision, '
+          + 'which also stops it being asked again'
+        : 'a coordinator may answer this with decide_permission_request',
+    };
+  },
+
+  /**
+   * WHAT IS WAITING, AND ON WHOM.
+   *
+   * pendingRequests() collapses repeats by key, so the request_id is attached
+   * back here from the newest undecided row for that key -- the pure module
+   * answers "what is outstanding", and the transport is what knows which row a
+   * decider would actually write to.
+   */
+  async listPermissionRequests({ decider = null, includeDecided = false } = {}) {
+    const now = new Date().toISOString();
+    const rows = await get('permission_requests?select=*&order=requested_at.desc&limit=500');
+
+    if (includeDecided) {
+      return { requests: rows, paused_tasks: pausedTasks(rows, { now }) };
+    }
+
+    const newestOpen = new Map();
+    for (const r of rows) {
+      if (r.decided_at) continue;
+      const prev = newestOpen.get(r.key);
+      if (!prev || String(r.requested_at) > String(prev.requested_at)) newestOpen.set(r.key, r);
+    }
+
+    let pending = pendingRequests(rows, { now }).map((p) => ({
+      request_id: newestOpen.get(p.key)?.request_id ?? null,
+      requested_by: newestOpen.get(p.key)?.requested_by ?? null,
+      arguments_summary: newestOpen.get(p.key)?.arguments_summary ?? null,
+      environment: newestOpen.get(p.key)?.environment ?? null,
+      ...p,
+    }));
+    if (decider) pending = pending.filter((p) => p.decider === decider);
+
+    return {
+      counts: {
+        waiting_on_owner: pending.filter((p) => p.decider === DECIDER.OWNER).length,
+        waiting_on_coordinator: pending.filter((p) => p.decider === DECIDER.COORDINATOR).length,
+      },
+      pending,
+      paused_tasks: pausedTasks(rows, { now }),
+    };
+  },
 };
+
+/**
+ * A STANDING DECISION SETTLES THE QUESTIONS IT ANSWERS.
+ *
+ * Without this, an owner-routed request would sit open forever: the owner
+ * answers by writing a decision into the ledger, nothing would connect that
+ * answer back to the question, and the owner's "waiting on you" list would grow
+ * monotonically with things he had already dealt with. A list like that is one
+ * people stop reading, and then the one that matters is buried in it.
+ *
+ * ONE SOURCE OF TRUTH, DELIBERATELY. The answer lives in the decision ledger and
+ * the request row is closed as a consequence -- not answered independently. A
+ * second place where permissions are granted is a second place to audit, and
+ * they would disagree the first time somebody wrote to one of them.
+ *
+ * REQUESTS ARE ONLY EVER CLOSED BY A DECISION THAT COVERS THEM. classifyRequest
+ * is re-run per row against the full ledger; only rows that come back POLICY are
+ * touched. A row that is still owner_required or unresolved stays open, which is
+ * why revoking a decision cannot close anything.
+ *
+ * The write carries `decided_at=is.null` in its filter, so a request a
+ * coordinator answered in the same instant is not overwritten here.
+ */
+async function settleOpenRequestsAgainstPolicy({ decided_by }) {
+  const [decisions, open] = await Promise.all([
+    get('owner_decisions?select=*'),
+    get('permission_requests?select=*&decided_at=is.null&limit=500'),
+  ]);
+
+  const now = new Date().toISOString();
+  const settled = [];
+
+  for (const r of open) {
+    let verdict;
+    try {
+      verdict = classifyRequest({
+        action: r.action,
+        task_id: r.task_id,
+        scope_id: r.scope_id,
+        reversible: typeof r.reversible === 'boolean' ? r.reversible : undefined,
+      }, decisions, { now });
+    } catch {
+      continue; // an unclassifiable stored row is left alone, never guessed at
+    }
+
+    if (verdict.decider !== DECIDER.POLICY) continue;
+
+    const rows = await patch(
+      `permission_requests?request_id=eq.${encodeURIComponent(r.request_id)}&decided_at=is.null`,
+      {
+        decided_at: new Date().toISOString(),
+        decided_by,
+        outcome: verdict.allowed ? 'allowed' : 'denied',
+        decision_note: `settled by standing decision ${verdict.decision_id}: ${verdict.reason}`,
+      },
+    );
+    // An empty array is a lost race -- somebody answered it first. Not recorded
+    // as settled here, because this call did not settle it.
+    if (rows.length) {
+      settled.push({
+        request_id: r.request_id,
+        action: r.action,
+        outcome: verdict.allowed ? 'allowed' : 'denied',
+        by_decision: verdict.decision_id,
+      });
+    }
+  }
+
+  return settled;
+}
 
 /**
  * The COORDINATOR store: the read store plus four write methods.
@@ -487,6 +739,79 @@ function coordinatorStore(label) {
       return { ok: true, message: row };
     },
 
+
+    /**
+     * ANSWERING A QUESTION THE COORDINATOR IS ALLOWED TO ANSWER.
+     *
+     * THE REFUSAL IS THE FEATURE. If a coordinator could answer an owner-routed
+     * request, the routing would be advisory, and "irreversible actions are the
+     * owner's" would be a sentence in a comment rather than a property of the
+     * system. Everything below this line would be decoration.
+     *
+     * THE ROUTING IS READ FROM THE ROW, NOT RECOMPUTED. The row records who it
+     * was routed to when it was asked. Recomputing from the action here would
+     * mean a later edit to the prefix table could hand the coordinator a
+     * question that was escalated to the owner at the time it was filed --
+     * silently, with no record that the routing had moved.
+     */
+    async decidePermissionRequest({ request_id, outcome, decided_by, note = null } = {}) {
+      if (typeof request_id !== 'string' || !request_id.trim()) {
+        return { ok: false, errors: ['request_id is required'] };
+      }
+
+      const rows = await get(
+        `permission_requests?select=*&request_id=eq.${encodeURIComponent(request_id)}&limit=1`,
+      );
+      const r = rows[0] ?? null;
+
+      /*
+       * THE GUARD IS canDecidePermission IN src/permissionRequest.mjs, NOT HERE.
+       *
+       * It was here first, and that was the confirm_proposal mistake repeating:
+       * index.ts cannot be imported by the test suite, so a guard written inside
+       * it is a guard nobody can watch fail. The refusal that makes this whole
+       * design worth having -- a coordinator may not answer an owner-routed
+       * request -- is the last thing that should live untested.
+       */
+      const allowed = canDecidePermission(r, { as: DECIDER.COORDINATOR, outcome, decided_by });
+      if (!allowed.ok) {
+        return {
+          ok: false,
+          errors: allowed.errors,
+          request: r
+            ? { request_id: r.request_id, action: r.action, risk: r.risk, decider: r.decider }
+            : null,
+        };
+      }
+
+      /*
+       * THE PREDICATE IS THE GUARD, NOT THE READ ABOVE.
+       *
+       * decided_at=is.null is in the filter, so a second decider writing between
+       * the read and this line loses the race and PostgREST returns 200 with an
+       * empty array. An empty array is a lost race, never a success -- the same
+       * mistake the four task writes carried until 7d908a5.
+       */
+      const updated = await patch(
+        `permission_requests?request_id=eq.${encodeURIComponent(request_id)}&decided_at=is.null`,
+        {
+          decided_at: new Date().toISOString(),
+          decided_by: decided_by.trim(),
+          outcome,
+          decision_note: note,
+        },
+      );
+
+      if (!updated.length) {
+        return {
+          ok: false,
+          errors: ['the request was decided by somebody else between reading it and answering it'],
+        };
+      }
+
+      return { ok: true, request: updated[0] };
+    },
+
     async recordOwnerDecision(d) {
       /*
        * A COORDINATOR RECORDS WHAT THE OWNER DECIDED. IT DOES NOT DECIDE.
@@ -545,7 +870,13 @@ function coordinatorStore(label) {
         supersedes: rec.supersedes,
         history: rec.history,
       });
-      return { ok: true, decision: row };
+      /*
+       * THE ANSWER CLOSES THE QUESTION. An owner-routed request that the owner
+       * has now decided must leave his list, or the list grows with things he
+       * has already handled and stops being read.
+       */
+      const settled = await settleOpenRequestsAgainstPolicy({ decided_by: rec.owner_id });
+      return { ok: true, decision: row, settled_requests: settled };
     },
   };
 

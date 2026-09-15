@@ -295,3 +295,57 @@ export function pausedTasks(requests, { now } = {}) {
   }
   return [...paused].sort();
 }
+
+/**
+ * MAY THIS CALLER ANSWER THIS REQUEST?
+ *
+ * PURE, AND IN src/ FOR A SPECIFIC REASON. The first version of this guard
+ * lived inside the edge function, where the test suite cannot import it -- the
+ * same position as confirm_proposal, which was listed, documented, scope-gated
+ * and threw on every call it ever received because nothing could invoke it.
+ * A guard that cannot be tested is a guard nobody has watched fail.
+ *
+ * THE REFUSAL IS THE FEATURE. If a coordinator could answer an owner-routed
+ * request, the routing would be advisory and "irreversible actions are the
+ * owner's" would be a sentence in a comment rather than a property of the
+ * system.
+ *
+ * THE ROUTING COMES FROM THE ROW, NOT FROM THE ACTION. Recomputing it here
+ * would let a later edit to OWNER_ONLY_PREFIXES silently hand the coordinator a
+ * question that was escalated to the owner when it was asked, with nothing
+ * recording that the routing had moved.
+ *
+ * @param row  the stored request
+ * @param by   { decider } the authority the caller is acting with
+ */
+export function canDecidePermission(row, { as = DECIDER.COORDINATOR, outcome, decided_by } = {}) {
+  const errors = [];
+
+  if (!row) return { ok: false, errors: ['no such permission request'] };
+
+  if (outcome !== 'allowed' && outcome !== 'denied') {
+    errors.push('outcome must be exactly "allowed" or "denied"');
+  }
+  if (!nonEmpty(decided_by)) {
+    // An answer nobody signed is not reviewable afterwards, and the whole point
+    // of moving off a keypress was that the record survives the moment.
+    errors.push('decided_by is required: an unsigned decision cannot be reviewed');
+  }
+  if (nonEmpty(row.decided_at)) {
+    errors.push(`already decided "${row.outcome}" by ${row.decided_by} at ${row.decided_at}`);
+  }
+  if (row.decider !== as) {
+    errors.push(
+      `"${row.action}" was routed to the ${row.decider} when it was asked, and a ${as} `
+      + 'may not answer it on their behalf',
+    );
+    if (row.decider === DECIDER.OWNER) {
+      errors.push(
+        'the owner answers by recording a standing decision, which settles this request AND '
+        + 'stops the same question being asked again',
+      );
+    }
+  }
+
+  return errors.length ? { ok: false, errors } : { ok: true, errors: [] };
+}

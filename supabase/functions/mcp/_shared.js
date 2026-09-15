@@ -474,6 +474,251 @@ export function verificationOf(delegation) {
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
 const arr = (v) => (Array.isArray(v) ? v : []);
 
+/* ─── src/permissionRequest.mjs ────────────────────────────────────────────
+ * SPLICED. The original is src/permissionRequest.mjs and the tests exercise
+ * THAT one; permissionSpliceMatches.test.mjs compares the two behaviourally,
+ * because a hand-copied module that drifts is the failure this project has
+ * already had twice.
+ *
+ * nonEmpty and arr are declared above and deliberately not repeated here --
+ * a second `const nonEmpty` is a SyntaxError that takes the whole function
+ * down at cold start, which is how the last botched splice announced itself.
+ */
+const pms = (v) => {
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
+};
+
+export const RISK = Object.freeze({
+  ROUTINE: 'routine',
+  ELEVATED: 'elevated',
+  IRREVERSIBLE: 'irreversible',
+});
+
+export const DECIDER = Object.freeze({
+  POLICY: 'policy',
+  COORDINATOR: 'coordinator',
+  OWNER: 'owner',
+});
+
+export const OWNER_ONLY_PREFIXES = Object.freeze([
+  'deploy.production',
+  'delete.',
+  'drop.',
+  'truncate.',
+  'spend.',
+  'rotate.',
+  'revoke.',
+  'customer.message',
+  'merge.main',
+]);
+
+export const ELEVATED_PREFIXES = Object.freeze([
+  'deploy.',
+  'migrate.',
+  'schema.',
+  'sql.write',
+]);
+
+const hasPrefix = (action, list) =>
+  list.some((p) => (p.endsWith('.') ? action.startsWith(p) : action === p || action.startsWith(`${p}.`)));
+
+export function riskOf(action, { reversible } = {}) {
+  if (!nonEmpty(action)) return RISK.IRREVERSIBLE;
+  const a = action.trim();
+
+  if (hasPrefix(a, OWNER_ONLY_PREFIXES)) return RISK.IRREVERSIBLE;
+  if (reversible === false) return RISK.IRREVERSIBLE;
+  if (hasPrefix(a, ELEVATED_PREFIXES)) return RISK.ELEVATED;
+  if (reversible === true) return RISK.ROUTINE;
+
+  return RISK.ELEVATED;
+}
+
+export function requestKey({ action, task_id = null, scope_id = null } = {}) {
+  if (!nonEmpty(action)) throw new TypeError('requestKey requires an action');
+  return [action.trim(), task_id ?? '-', scope_id ?? '-'].join('::');
+}
+
+export function classifyRequest(request, decisions, { now } = {}) {
+  if (pms(now) === null) throw new TypeError('classifyRequest requires a `now` timestamp');
+  if (!request || !nonEmpty(request.action)) {
+    return {
+      decider: DECIDER.OWNER,
+      risk: RISK.IRREVERSIBLE,
+      reason: 'the request names no action, so nothing about it can be classified',
+      key: null,
+      decision_id: null,
+    };
+  }
+
+  const action = request.action.trim();
+  const risk = riskOf(action, { reversible: request.reversible });
+  const key = requestKey(request);
+
+  const resolved = resolveOwnerDecision(arr(decisions), action, {
+    project: request.project,
+    repo: request.repo,
+    lane: request.lane,
+    task: request.task ?? request.task_id,
+  });
+
+  if (resolved.outcome === 'allowed') {
+    return {
+      decider: DECIDER.POLICY, risk, key,
+      decision_id: resolved.decision_id,
+      allowed: true,
+      reason: resolved.reason,
+      constraints: resolved.constraints ?? {},
+    };
+  }
+  if (resolved.outcome === 'denied') {
+    return {
+      decider: DECIDER.POLICY, risk, key,
+      decision_id: resolved.decision_id,
+      allowed: false,
+      reason: resolved.reason,
+      constraints: resolved.constraints ?? {},
+    };
+  }
+
+  if (resolved.outcome === 'owner_required') {
+    return {
+      decider: DECIDER.OWNER, risk, key,
+      decision_id: resolved.decision_id,
+      reason: `the owner's standing decision requires them personally: ${resolved.reason}`,
+    };
+  }
+
+  if (risk === RISK.IRREVERSIBLE) {
+    return {
+      decider: DECIDER.OWNER, risk, key, decision_id: null,
+      reason: `"${action}" is irreversible, destructive or spends money; `
+        + 'the coordinator may not approve it on the owner\'s behalf',
+    };
+  }
+
+  return {
+    decider: DECIDER.COORDINATOR, risk, key, decision_id: null,
+    reason: `"${action}" is ${risk} and no standing decision covers it; `
+      + 'routine approval is delegated to the coordinator',
+  };
+}
+
+export function pendingRequests(requests, { now, windowMs = 24 * 60 * 60 * 1000 } = {}) {
+  const at = pms(now);
+  if (at === null) throw new TypeError('pendingRequests requires a `now` timestamp');
+
+  const byKey = new Map();
+
+  for (const r of arr(requests)) {
+    if (!r || !nonEmpty(r.key)) continue;
+    const t = pms(r.requested_at);
+    if (t === null || at - t > windowMs) continue;
+
+    const prev = byKey.get(r.key);
+    if (!prev) {
+      byKey.set(r.key, {
+        key: r.key,
+        action: r.action ?? null,
+        task_id: r.task_id ?? null,
+        decider: r.decider ?? null,
+        risk: r.risk ?? null,
+        occurrences: 1,
+        first_at: r.requested_at,
+        last_at: r.requested_at,
+        decided: nonEmpty(r.decided_at),
+        outcome: r.outcome ?? null,
+      });
+      continue;
+    }
+    prev.occurrences += 1;
+    if (String(r.requested_at) < String(prev.first_at)) prev.first_at = r.requested_at;
+    if (String(r.requested_at) > String(prev.last_at)) prev.last_at = r.requested_at;
+    if (nonEmpty(r.decided_at)) {
+      prev.decided = true;
+      prev.outcome = r.outcome ?? prev.outcome;
+    }
+  }
+
+  return [...byKey.values()]
+    .filter((x) => !x.decided)
+    .sort((a, b) => {
+      if (a.decider !== b.decider) return a.decider === DECIDER.OWNER ? -1 : 1;
+      return String(b.last_at).localeCompare(String(a.last_at));
+    });
+}
+
+export function pausedTasks(requests, { now } = {}) {
+  const at = pms(now);
+  if (at === null) throw new TypeError('pausedTasks requires a `now` timestamp');
+
+  const paused = new Set();
+  for (const r of arr(requests)) {
+    if (!r || nonEmpty(r.decided_at)) continue;
+    if (!nonEmpty(r.task_id)) continue;
+    paused.add(r.task_id);
+  }
+  return [...paused].sort();
+}
+
+/**
+ * MAY THIS CALLER ANSWER THIS REQUEST?
+ *
+ * PURE, AND IN src/ FOR A SPECIFIC REASON. The first version of this guard
+ * lived inside the edge function, where the test suite cannot import it -- the
+ * same position as confirm_proposal, which was listed, documented, scope-gated
+ * and threw on every call it ever received because nothing could invoke it.
+ * A guard that cannot be tested is a guard nobody has watched fail.
+ *
+ * THE REFUSAL IS THE FEATURE. If a coordinator could answer an owner-routed
+ * request, the routing would be advisory and "irreversible actions are the
+ * owner's" would be a sentence in a comment rather than a property of the
+ * system.
+ *
+ * THE ROUTING COMES FROM THE ROW, NOT FROM THE ACTION. Recomputing it here
+ * would let a later edit to OWNER_ONLY_PREFIXES silently hand the coordinator a
+ * question that was escalated to the owner when it was asked, with nothing
+ * recording that the routing had moved.
+ *
+ * @param row  the stored request
+ * @param by   { decider } the authority the caller is acting with
+ */
+export function canDecidePermission(row, { as = DECIDER.COORDINATOR, outcome, decided_by } = {}) {
+  const errors = [];
+
+  if (!row) return { ok: false, errors: ['no such permission request'] };
+
+  if (outcome !== 'allowed' && outcome !== 'denied') {
+    errors.push('outcome must be exactly "allowed" or "denied"');
+  }
+  if (!nonEmpty(decided_by)) {
+    // An answer nobody signed is not reviewable afterwards, and the whole point
+    // of moving off a keypress was that the record survives the moment.
+    errors.push('decided_by is required: an unsigned decision cannot be reviewed');
+  }
+  if (nonEmpty(row.decided_at)) {
+    errors.push(`already decided "${row.outcome}" by ${row.decided_by} at ${row.decided_at}`);
+  }
+  if (row.decider !== as) {
+    errors.push(
+      `"${row.action}" was routed to the ${row.decider} when it was asked, and a ${as} `
+      + 'may not answer it on their behalf',
+    );
+    if (row.decider === DECIDER.OWNER) {
+      errors.push(
+        'the owner answers by recording a standing decision, which settles this request AND '
+        + 'stops the same question being asked again',
+      );
+    }
+  }
+
+  return errors.length ? { ok: false, errors } : { ok: true, errors: [] };
+}
+
+/* ─── end src/permissionRequest.mjs ───────────────────────────────────────── */
+
+
 export const MESSAGE_TYPES = ['assignment', 'question', 'answer', 'status', 'blocker', 'handoff', 'review'];
 
 export const ASSIGNABLE_FROM = ['runnable', 'returned'];
@@ -1661,6 +1906,112 @@ export function toolDefs(store) {
         const rows = await listDecisions();
         return jsonResult(resolveOwnerDecision(rows, action, { project, repo, lane, task }));
       },
+    });
+  }
+
+
+  /*
+   * ASKING IS NOT A WRITE PRIVILEGE, WHICH IS WHY THESE SIT ON THE READ STORE.
+   *
+   * chatgpt-work, 21:58:17Z: "interactive Claude permission prompts are a
+   * blocking defect, not an owner workflow." A worker stopped at a local
+   * keypress is a worker stopped until a person walks to that machine. The
+   * replacement has to be reachable by the thing that is blocked -- and the
+   * thing that is blocked is a WORKER, which holds no coordinator token.
+   *
+   * So filing a question is available at reader scope. That reads oddly until
+   * you notice what a filed row can do, which is nothing: it carries no grant,
+   * its decider is computed here from the action and never taken from the
+   * caller, and the unique index on (key) where undecided means a crash loop
+   * inserts one row rather than sixty. A reader may ask. Only a coordinator may
+   * answer, and only questions that are the coordinator's to answer.
+   */
+  const { submitPermissionRequest, listPermissionRequests, decidePermissionRequest } = store;
+
+  if (typeof submitPermissionRequest === 'function') {
+    defs.push({
+      name: 'request_permission',
+      title: 'Request permission',
+      description:
+        'ASK FOR PERMISSION WITHOUT STOPPING AT A KEYBOARD. Call this instead of blocking on '
+        + 'a local prompt: the question is filed durably, routed to whoever may answer it, and '
+        + 'survives the process that asked. '
+        + 'THE ANSWER MAY COME BACK IMMEDIATELY: if the owner has already decided this, the '
+        + 'reply is decider="policy" with allowed true or false and nothing is filed — the '
+        + 'same question is never put to a person twice. '
+        + 'Otherwise the reply is decider="coordinator" (routine, delegated) or "owner" '
+        + '(irreversible, destructive or spending — the coordinator may NOT answer these). '
+        + 'A repeat of a question already outstanding returns the SAME request, not a second '
+        + 'one. Poll it with list_permission_requests; do not re-ask in a loop. '
+        + 'THIS TOOL GRANTS NOTHING. It records a question and says who decides it.',
+      input: obj({
+        action: {
+          type: 'string',
+          description: 'the classified action, e.g. "deploy.production", "sql.write", "commit"',
+        },
+        requested_by: { type: 'string', description: 'durable agent id of the asker' },
+        task_id: { type: 'string', description: 'the task this blocks; omit and NOTHING is paused' },
+        scope_id: { type: 'string', description: 'repo, lane or other scope, if the action has one' },
+        reversible: {
+          type: 'boolean',
+          description:
+            'true only if the ASKER can undo it alone. This may raise the risk class and can '
+            + 'never lower an owner-only action — self-declaring reversible is not a way out.',
+        },
+        arguments_summary: {
+          type: 'string',
+          description: 'what it touches, in one line. A decider approving from a phone sees this.',
+        },
+        environment: { type: 'string', description: 'e.g. "production", "staging", "local"' },
+        project: { type: 'string' },
+        repo: { type: 'string' },
+        lane: { type: 'string' },
+      }, ['action', 'requested_by']),
+      run: async (a) => jsonResult(await submitPermissionRequest(a)),
+    });
+  }
+
+  if (typeof listPermissionRequests === 'function') {
+    defs.push({
+      name: 'list_permission_requests',
+      title: 'List permission requests',
+      description:
+        'Questions waiting on a decision, owner\'s first — a person is at the end of that list. '
+        + 'Repeats of one question collapse into a single entry carrying `occurrences`, so a '
+        + 'crash-looping worker reads as one decision to make and not sixty interruptions. '
+        + 'ANSWERED REQUESTS ARE NOT LISTED as pending: a list of things waiting on you that '
+        + 'contains things that are not is a list people stop reading. `paused_tasks` names the '
+        + 'tasks actually held — only tasks with an outstanding request, never the whole worker.',
+      input: obj({
+        decider: { type: 'string', description: 'filter: owner | coordinator' },
+        includeDecided: { type: 'boolean', description: 'default false; true returns the raw history' },
+      }),
+      run: async (a = {}) => jsonResult(await listPermissionRequests(a)),
+    });
+  }
+
+  if (typeof decidePermissionRequest === 'function') {
+    defs.push({
+      name: 'decide_permission_request',
+      title: 'Decide permission request',
+      description:
+        'Answer a question the COORDINATOR may answer. '
+        + 'REFUSES anything routed to the owner, and the refusal is the point: irreversible, '
+        + 'destructive and spending actions are the owner\'s, and a coordinator that could '
+        + 'answer them on his behalf would make every gate below it decoration. '
+        + 'The routing is re-read from the stored row rather than recomputed from the action, '
+        + 'so a later edit to the risk table cannot quietly hand you a question that was '
+        + 'escalated when it was asked. '
+        + 'THE OWNER ANSWERS BY RECORDING A DECISION (record_owner_decision), not here — that '
+        + 'way the answer is durable and the same question is never asked again, rather than '
+        + 'being settled once in a row nobody will read.',
+      input: obj({
+        request_id: { type: 'string', description: 'from list_permission_requests' },
+        outcome: { type: 'string', description: 'allowed | denied' },
+        decided_by: { type: 'string', description: 'who is answering' },
+        note: { type: 'string', description: 'why — read by the agent that asked' },
+      }, ['request_id', 'outcome', 'decided_by']),
+      run: async (a) => jsonResult(await decidePermissionRequest(a)),
     });
   }
 
