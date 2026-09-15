@@ -26,6 +26,8 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge unregister --agent code-c
   agentbridge status [--json]
   agentbridge heartbeat [--dry-run]      one-shot collect (+publish unless --dry-run)
+  agentbridge release-risk [--json] [--strict]
+                                        exit 1 if any worktree carries release risk
   agentbridge doctor                    verify secret sealing and file permissions
   agentbridge daemon start
 
@@ -104,6 +106,46 @@ try {
       if (s.processes.length) console.log(`  running  ${s.processes.map((p) => `${p.kind}:${p.pid}${p.ambiguous ? '?' : ''}`).join(', ')}${s.processes.some((p) => p.ambiguous) ? '   (? = ambiguous match, may belong to another worktree)' : ''}`);
     }
     process.exit(0);
+  }
+
+  /*
+   * release-risk — the guard half of Section A.
+   *
+   * `status` reports state and always exits 0; a human has to notice. That is
+   * exactly how release/integrate-2026-09-14 sat with nine local-only commits
+   * and no upstream until somebody read the text. This command applies the
+   * rules in src/releaseRisk.mjs and EXITS NON-ZERO on a blocking finding, so
+   * it can sit in a pre-push hook and actually refuse.
+   *
+   * Exit codes are the contract, because a hook reads the code and not the
+   * prose: 0 clean or warnings only, 1 at least one block, 2 cannot run.
+   *
+   * Read-only. It evaluates other agents' worktrees and never writes to them.
+   */
+  if (cmd === 'release-risk') {
+    const cfg = await loadConfig();
+    if (!cfg) { console.error('Not initialised. Run: agentbridge init'); process.exit(2); }
+    const { evaluateReleaseRisk, formatReleaseRisk } = await import('../src/releaseRisk.mjs');
+    const payload = await collect(cfg, await loadRegistry());
+
+    const opts = args.strict ? { strictEverywhere: true } : {};
+    const results = payload.sessions.map((s) => ({
+      label: `${s.agentId} [${s.lane}]`,
+      worktree: s.worktree,
+      result: evaluateReleaseRisk(s.git, opts),
+    }));
+
+    if (args.json) {
+      console.log(JSON.stringify({ machine: payload.machine, checkedAt: payload.sentAt, results }, null, 2));
+    } else {
+      console.log(`release-risk on ${payload.machine.label}  ${payload.sentAt}\n`);
+      for (const r of results) console.log(formatReleaseRisk(r.label, r.result));
+    }
+
+    const blocking = results.reduce((n, r) => n + r.result.blocking, 0);
+    const warnings = results.reduce((n, r) => n + r.result.warnings, 0);
+    if (!args.json) console.log(`\n${blocking} blocking, ${warnings} warning(s) across ${results.length} worktree(s)`);
+    process.exit(blocking > 0 ? 1 : 0);
   }
 
   if (cmd === 'doctor') {
