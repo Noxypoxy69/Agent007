@@ -1,7 +1,8 @@
 import { gitState } from './git.mjs';
 import { discoverLocks } from './locks.mjs';
 import { probeProcesses } from './processes.mjs';
-import { redactPaths } from './redact.mjs';
+import { redactPaths, redactHome } from './redact.mjs';
+import { homedir } from 'node:os';
 import { machineInfo } from './config.mjs';
 import { loadLanes } from './lanes.mjs';
 
@@ -27,13 +28,28 @@ export async function collect(cfg, registry) {
     const locks = await discoverLocks(a.worktree, cfg.lockDirs);
     const redact = cfg.redactSensitivePaths !== false;
 
+    /*
+     * Strip the operator's home directory from anything leaving the machine.
+     *
+     * Separate from redactSensitivePaths, which governs secret-bearing
+     * FILENAMES. This governs IDENTITY: the worktree path carries the
+     * operator's real name and is transmitted twice per session, once as
+     * `worktree` and once inside `git.worktree` -- and git spells it with
+     * forward slashes while the OS spells it with backslashes, so both
+     * spellings have to be handled or redaction covers half the occurrences
+     * and looks like it worked.
+     */
+    const hideHome = cfg.redactHomePaths !== false;
+    const home = homedir();
+
     sessions.push({
       agentId: a.agentId,
       lane: a.lane,
-      worktree: a.worktree,
+      worktree: redactHome(a.worktree, home, hideHome),
       git: g.ok
         ? {
             ...g,
+            worktree: redactHome(g.worktree, home, hideHome),
             staged: redactPaths(g.staged, redact),
             dirty: redactPaths(g.dirty, redact),
             untracked: redactPaths(g.untracked, redact),

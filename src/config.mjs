@@ -14,6 +14,9 @@ const DEFAULTS = {
   intervalSeconds: 10,
   mainRef: 'origin/main',
   redactSensitivePaths: true,
+  // Strip the operator's home directory from transmitted paths. Identity, not
+  // secrets -- see redactHome() in redact.mjs.
+  redactHomePaths: true,
   lockDirs: ['.agentbridge/locks', '.locks'],
   lanesFile: null,
 };
