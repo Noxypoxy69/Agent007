@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { listSessions, getLanes } from '../bridge/store.mjs';
 import { detectCollisions } from '../bridge/collisions.mjs';
 
 const json = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] });
@@ -12,7 +11,25 @@ const json = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data, n
  * machine. Adding a write tool here is a Step 3 decision with its own threat
  * model — not a quiet extension of this file.
  */
-export function buildMcpServer() {
+/**
+ * @param {object} store  must provide listSessions() and getLanes()
+ *
+ * REQUIRED, with no default, on purpose. A default would import
+ * bridge/store.mjs -- and therefore `pg` -- into every consumer of this file,
+ * including the Cloudflare Worker, where a node TCP driver cannot run at all.
+ * Making the caller supply the store keeps the tool DEFINITIONS free of any
+ * backing store, so the same seven tools serve stdio, node and the edge.
+ *
+ * Validated rather than assumed: a store missing a method would otherwise fail
+ * inside a tool call as "listSessions is not a function", surfacing to the
+ * model as a broken tool rather than a wiring mistake.
+ */
+export function buildMcpServer(store) {
+  if (!store || typeof store.listSessions !== 'function' || typeof store.getLanes !== 'function') {
+    throw new TypeError('buildMcpServer(store): store must provide listSessions() and getLanes()');
+  }
+  const { listSessions, getLanes } = store;
+
   const server = new McpServer(
     { name: 'agentbridge', version: '0.1.0' },
     { capabilities: { tools: {} },

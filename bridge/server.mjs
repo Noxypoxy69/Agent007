@@ -99,7 +99,10 @@ async function handleMcp(req, res) {
   // cannot observe or disturb each other's sessions.
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on('close', () => { transport.close(); });
-  const server = buildMcpServer();
+  // Postgres-backed here. The store is injected rather than imported by the
+  // tool definitions, so the same seven tools serve stdio locally, this node
+  // server, and a Worker that cannot load `pg` at all.
+  const server = buildMcpServer({ listSessions, getLanes });
   await server.connect(transport);
   await transport.handleRequest(req, res, parsed);
 }
