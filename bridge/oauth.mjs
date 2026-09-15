@@ -61,12 +61,31 @@ export function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
+/**
+ * THE SCOPES THIS SERVER SUPPORTS, and why write has to appear here.
+ *
+ * A spec-compliant client reads these documents to decide what it may ask for.
+ * ChatGPT is one -- that is the entire reason this OAuth server exists -- so a
+ * write scope the server implements but does not ADVERTISE is a write scope
+ * nobody can ever obtain.
+ *
+ * Both documents said read-only while the worker was being taught to forward a
+ * coordinator token, and the resulting symptom would have been a coordinator
+ * that completes OAuth and still sees nine read tools: identical, from the
+ * outside, to the forwarding bug that had just been fixed, and pointing at the
+ * same wrong half of the system.
+ *
+ * Advertising a scope grants nothing. The consent page still demands the
+ * coordinator token before any write grant is issued.
+ */
+const SCOPES = ['agentbridge:read', 'agentbridge:write'];
+
 /** RFC 9728 — protected resource metadata. Points the client at the AS. */
 export const protectedResourceMetadata = (origin) => ({
   resource: `${origin}/mcp`,
   authorization_servers: [origin],
   bearer_methods_supported: ['header'],
-  scopes_supported: ['agentbridge:read'],
+  scopes_supported: SCOPES,
   resource_documentation: `${origin}/v1/health`,
 });
 
@@ -76,7 +95,7 @@ export const authorizationServerMetadata = (origin) => ({
   authorization_endpoint: `${origin}/authorize`,
   token_endpoint: `${origin}/token`,
   registration_endpoint: `${origin}/register`,
-  scopes_supported: ['agentbridge:read'],
+  scopes_supported: SCOPES,
   response_types_supported: ['code'],
   grant_types_supported: ['authorization_code', 'refresh_token'],
   token_endpoint_auth_methods_supported: ['none'],

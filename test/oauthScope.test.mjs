@@ -223,6 +223,57 @@ test('the COORDINATOR token is not accepted for a read grant either', async () =
   assert.match(await res.text(), /does not match/);
 });
 
+// ── what the server tells clients it supports ──────────────────────────────
+test('BOTH metadata documents advertise the write scope', async () => {
+  /*
+   * A spec-compliant client reads these to decide what it may request, so a
+   * write scope that is implemented but not ADVERTISED is one nobody can
+   * obtain. Both documents said read-only while the worker was being taught to
+   * forward a coordinator token, and the symptom would have been a coordinator
+   * that completes OAuth and still sees only the read tools -- identical from
+   * outside to the forwarding bug that had just been fixed.
+   *
+   * Found by auditing the change rather than by running it, which is the only
+   * way this one surfaces before a deploy.
+   */
+  const env = envWith();
+  const handler = createOAuthHandler(env);
+
+  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-authorization-server']) {
+    const res = await handler(new Request(`https://bridge.invalid${path}`));
+    assert.equal(res.status, 200, path);
+    const doc = await res.json();
+    assert.ok(doc.scopes_supported.includes('agentbridge:read'), `${path} must still offer read`);
+    assert.ok(doc.scopes_supported.includes('agentbridge:write'),
+      `${path} does not advertise write, so no client will ever ask for it`);
+  }
+});
+
+// ── an unconfigured deployment approves nothing ────────────────────────────
+test('an EMPTY expected secret approves nothing, on either path', async () => {
+  /*
+   * timingSafeEqual compares after a length check, so '' === '' is a match: a
+   * blank field would approve the grant against a deployment whose secret was
+   * never set. On Workers, "never set" and "set to empty" are the same state.
+   *
+   * The guard originally covered the coordinator token only, leaving the READ
+   * path approvable by anyone on an unconfigured deployment. The weaker path is
+   * the one nobody re-reads, which is exactly why it is asserted here.
+   */
+  for (const [scope, over] of [
+    ['agentbridge:read', { BRIDGE_READER_TOKEN: '' }],
+    ['agentbridge:write', { BRIDGE_COORDINATOR_TOKEN: '' }],
+  ]) {
+    const env = await withClient(over);
+    const res = await createOAuthHandler(env)(authorizePost('', scope));
+
+    assert.equal(res.status, 200, `${scope}: must re-render, not redirect`);
+    assert.match(await res.text(), /no (coordinator|bridge) token configured/);
+    assert.equal([...env.OAUTH._map.keys()].filter((k) => k.startsWith('code:')).length, 0,
+      `${scope}: a blank submission issued a code against an unconfigured secret`);
+  }
+});
+
 // ── the page that now guards the coordinator secret ────────────────────────
 test('client_name is escaped: registration is unauthenticated and the name is attacker-chosen', async () => {
   /*

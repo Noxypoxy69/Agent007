@@ -317,14 +317,27 @@ export function createOAuthHandler(env) {
        * held to the HIGHER bar, not a lower one.
        */
       const wantsWrite = scopeGrantsWrite(params.scope);
-      if (wantsWrite && !env.BRIDGE_COORDINATOR_TOKEN) {
-        // Refuse rather than quietly issuing a read grant. A silent downgrade
-        // would surface later as missing tools -- indistinguishable from the
-        // bug this whole change exists to fix.
-        return consentPage(params,
-          'This deployment has no coordinator token configured, so write access cannot be granted.');
-      }
       const expected = wantsWrite ? env.BRIDGE_COORDINATOR_TOKEN : env.BRIDGE_READER_TOKEN;
+
+      /*
+       * AN UNCONFIGURED SECRET APPROVES NOTHING.
+       *
+       * timingSafeEqual compares byte-for-byte after a length check, so an
+       * EMPTY expected secret matches an empty submission -- a blank field
+       * would approve the grant. That is not hypothetical on a Workers
+       * deployment, where a secret that was never set and a secret set to the
+       * empty string are the same observable state.
+       *
+       * This guard originally covered only the coordinator token, which left
+       * the read path able to be approved by anyone against an unconfigured
+       * deployment. Both are checked here because the asymmetry was the bug:
+       * the weaker path is the one nobody re-reads.
+       */
+      if (!expected) {
+        return consentPage(params, wantsWrite
+          ? 'This deployment has no coordinator token configured, so write access cannot be granted.'
+          : 'This deployment has no bridge token configured, so nothing can be authorized.');
+      }
       if (!timingSafeEqual(q.bridge_token ?? '', expected)) {
         // Re-render rather than redirect. A wrong token is the operator
         // mistyping, not the client misbehaving.
