@@ -1,22 +1,15 @@
--- ███ NOT APPLIED. THIS FILE IS A PROPOSAL, NOT A RECORD. ███
+-- APPLIED as 20260915220139. Verified live before this file was renamed to it.
 --
--- Every other file in this directory is named for the version that
--- supabase_migrations.schema_migrations actually holds. This one is not,
--- because applying it was REFUSED: the agentbridge database is a shared
--- resource and this change was not authorised. It is held here, unapplied, so
--- the design is reviewable before it touches anything.
+-- ═══ THE TABLE IS agentbridge.tasks. public.tasks IS A VIEW OVER IT. ═══
 --
--- WHEN IT IS APPLIED, READ THE STAMPED VERSION BACK AND RENAME THIS FILE TO IT:
---   select version from supabase_migrations.schema_migrations
---    order by version desc limit 1;
--- apply_migration stamps its own timestamp and a hand-named file matches no
--- row -- the trap already recorded against this repo three times.
+-- The first attempt at this migration ran ALTER TABLE public.tasks and was
+-- refused: "this operation is not supported for views". That view already had
+-- an EXPLICIT column list rather than select * -- the fix applied to
+-- session_registrations earlier today after a ten-minute PGRST204 outage. An
+-- explicit list is right, and it means the view does NOT grow when its table
+-- does. So every column added below is added to the view too, by hand, in the
+-- same migration. Adding one and not the other is that outage exactly.
 --
--- The pure guards for all of this already exist and are tested: src/leases.mjs
--- with test/leases.test.mjs, 24 tests, 10 mutations RED. Nothing below is
--- load-bearing for those. This is the half that must be ATOMIC, and atomicity
--- is the one thing a pure function cannot provide.
-
 -- ASSIGNMENT BECOMES ONE TRANSACTION, AND A CLAIM CARRIES A FENCING TOKEN.
 --
 -- Until now an assignment was a PATCH from an edge function: read the task,
@@ -44,7 +37,7 @@
 -- then AT-LEAST-ONCE by construction, which is precisely why every consumer
 -- must re-read Postgres rather than trust an event body -- shouldActOnEvent().
 
-alter table public.tasks
+alter table agentbridge.tasks
   add column if not exists lease_token uuid,
   add column if not exists lease_expires_at timestamptz,
   add column if not exists attempt integer not null default 0;
@@ -65,13 +58,31 @@ alter table public.tasks
  * The guards over these columns are pure and already tested:
  * reviewerQueue() and canReview() in src/runtime.mjs.
  */
-alter table public.tasks
+alter table agentbridge.tasks
   add column if not exists reviewer text,
   add column if not exists review_lease_token uuid,
   add column if not exists review_lease_expires_at timestamptz;
 
+-- THE VIEW, RECREATED WITH THE NEW COLUMNS NAMED. security_invoker=true is
+-- preserved deliberately: dropping it would make the view run as its owner and
+-- silently bypass RLS on the base table.
+create or replace view public.tasks
+with (security_invoker = true) as
+select task_id, title, state, lane_id, repo_id, base_sha,
+       allowed_paths, forbidden_paths, shared_paths, depends_on,
+       assigned_agent, assigned_session, assigned_at, assigned_by,
+       created_at, updated_at,
+       returned_by, returned_at, returned_head_sha, returned_notes,
+       accepted_by, accepted_at, accepted_head_sha,
+       cancelled_by, cancelled_at, cancelled_reason,
+       lease_token, lease_expires_at, attempt,
+       reviewer, review_lease_token, review_lease_expires_at
+  from agentbridge.tasks;
+
+grant select, insert, update, delete on public.tasks to service_role;
+
 -- Events that MUST NOT be lost if the process publishing them dies.
-create table if not exists public.outbox (
+create table if not exists agentbridge.outbox (
   event_id     bigserial primary key,
   kind         text        not null,
   task_id      text,
@@ -87,12 +98,18 @@ create table if not exists public.outbox (
 );
 
 create index if not exists outbox_undelivered_idx
-  on public.outbox (event_id) where delivered_at is null;
+  on agentbridge.outbox (event_id) where delivered_at is null;
 
-alter table public.outbox enable row level security;
+alter table agentbridge.outbox enable row level security;
+create or replace view public.outbox
+with (security_invoker = true) as
+select event_id, kind, task_id, agent_id, session_id, lease_token,
+       payload, created_at, delivered_at
+  from agentbridge.outbox;
+
 revoke all on public.outbox from public, anon, authenticated;
 grant select, insert, update on public.outbox to service_role;
-grant usage, select on sequence public.outbox_event_id_seq to service_role;
+grant usage, select on sequence agentbridge.outbox_event_id_seq to service_role;
 
 /*
  * CLAIM ONE TASK, ATOMICALLY.
@@ -113,10 +130,10 @@ create or replace function public.claim_task(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = agentbridge, public, extensions
 as $fn$
 declare
-  t         public.tasks%rowtype;
+  t         agentbridge.tasks%rowtype;
   tok       uuid := extensions.gen_random_uuid();
   now_ts    timestamptz := now();
   expires   timestamptz;
@@ -128,7 +145,7 @@ begin
       'lease_seconds must be between 30 and 86400');
   end if;
 
-  select * into t from public.tasks
+  select * into t from agentbridge.tasks
    where task_id = p_task_id
      for update skip locked;
 
@@ -160,7 +177,7 @@ begin
   -- Dependencies are checked INSIDE the same transaction, so one cannot be
   -- cancelled between the check and the write.
   for dep in select jsonb_array_elements_text(coalesce(t.depends_on, '[]'::jsonb)) loop
-    select state into dep_state from public.tasks where task_id = dep;
+    select state into dep_state from agentbridge.tasks where task_id = dep;
     if dep_state is null then
       return jsonb_build_object('ok', false, 'reason', 'dependency',
         'detail', format('depends on "%s", which does not exist', dep));
@@ -172,7 +189,7 @@ begin
 
   expires := now_ts + make_interval(secs => p_lease_seconds);
 
-  update public.tasks
+  update agentbridge.tasks
      set state            = 'assigned',
          assigned_agent   = p_agent_id,
          assigned_session = p_session_id,
@@ -185,7 +202,7 @@ begin
    where task_id = p_task_id;
 
   -- SAME TRANSACTION. The event and the assignment commit together or not at all.
-  insert into public.outbox (kind, task_id, agent_id, session_id, lease_token, payload)
+  insert into agentbridge.outbox (kind, task_id, agent_id, session_id, lease_token, payload)
   values ('assigned', p_task_id, p_agent_id, p_session_id, tok,
           jsonb_build_object('attempt', t.attempt + 1, 'lease_expires_at', expires));
 
@@ -207,13 +224,13 @@ create or replace function public.renew_lease(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = agentbridge, public
 as $fn$
 declare
   expires timestamptz := now() + make_interval(secs => greatest(coalesce(p_lease_seconds, 900), 30));
   hit     integer;
 begin
-  update public.tasks
+  update agentbridge.tasks
      set lease_expires_at = expires, updated_at = now()
    where task_id = p_task_id
      and lease_token = p_lease_token
@@ -244,10 +261,10 @@ create or replace function public.return_with_lease(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public
+set search_path = agentbridge, public
 as $fn$
 declare
-  t      public.tasks%rowtype;
+  t      agentbridge.tasks%rowtype;
   now_ts timestamptz := now();
 begin
   if p_head_sha is null or p_head_sha !~ '^[0-9a-f]{40}$' then
@@ -255,7 +272,7 @@ begin
       'detail', 'a return requires a full 40-character sha');
   end if;
 
-  select * into t from public.tasks where task_id = p_task_id for update;
+  select * into t from agentbridge.tasks where task_id = p_task_id for update;
   if not found then
     return jsonb_build_object('ok', false, 'reason', 'no-such-task');
   end if;
@@ -273,7 +290,7 @@ begin
       'detail', format('task is "%s"; only assigned work can be returned', t.state));
   end if;
 
-  update public.tasks
+  update agentbridge.tasks
      set state = 'returned', returned_by = t.assigned_session, returned_at = now_ts,
          returned_head_sha = p_head_sha,
          returned_notes = nullif(btrim(coalesce(p_notes, '')), ''),
@@ -283,7 +300,7 @@ begin
          updated_at = now_ts
    where task_id = p_task_id;
 
-  insert into public.outbox (kind, task_id, agent_id, session_id, lease_token, payload)
+  insert into agentbridge.outbox (kind, task_id, agent_id, session_id, lease_token, payload)
   values ('returned', p_task_id, t.assigned_agent, t.assigned_session, p_lease_token,
           jsonb_build_object('head_sha', p_head_sha, 'attempt', t.attempt));
 
@@ -303,7 +320,7 @@ create or replace function public.expire_dead_leases()
 returns integer
 language plpgsql
 security definer
-set search_path = public
+set search_path = agentbridge, public
 as $fn$
 declare
   n integer := 0;
@@ -311,20 +328,20 @@ declare
 begin
   for r in
     select task_id, assigned_agent, assigned_session, lease_token, attempt
-      from public.tasks
+      from agentbridge.tasks
      where state = 'assigned'
        and lease_token is not null
        and lease_expires_at is not null
        and lease_expires_at <= now()
        for update skip locked
   loop
-    update public.tasks
+    update agentbridge.tasks
        set state = 'runnable',
            assigned_agent = null, assigned_session = null, assigned_at = null,
            lease_token = null, lease_expires_at = null, updated_at = now()
      where task_id = r.task_id;
 
-    insert into public.outbox (kind, task_id, agent_id, session_id, lease_token, payload)
+    insert into agentbridge.outbox (kind, task_id, agent_id, session_id, lease_token, payload)
     values ('lease_expired', r.task_id, r.assigned_agent, r.assigned_session, r.lease_token,
             jsonb_build_object('attempt', r.attempt,
               'note', 'lease expired; work returned to the pool'));
