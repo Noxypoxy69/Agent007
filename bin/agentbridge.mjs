@@ -49,6 +49,15 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         the head SHA of the delivered work
   agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
                                         recorded audit held. both, not either
+  agentbridge supersede --id <new> --supersedes <old> --reason <text>
+             --replacement-task <id> [--replacement-head <sha>] [--repo <dir>]
+                                        append a correction BESIDE a wrong record.
+                                        accepted and withdrawn are terminal on
+                                        purpose, so this is the only way to put a
+                                        ledger entry right; the mistake stays
+  agentbridge token-budget --record --handoff <file> [--tier <t>] [--task <id>]
+  agentbridge token-budget [--json]     verified work per token. DESCRIPTIVE ONLY —
+                                        never rewrites a handoff, never gates
   agentbridge ask --action <action> [--question <q>] [--json]
              [--project <p>] [--repo <r>] [--lane <l>] [--task <t>]
                                         ASK THE LEDGER BEFORE ASKING THE OWNER.
@@ -433,6 +442,192 @@ try {
       console.log(result.ok ? '  contract held' : `  ${result.violations.length} violation(s)`);
     }
     process.exit(result.ok ? 0 : 1);
+  }
+
+  /*
+   * supersede — THE CORRECTION, WITHOUT THE EDIT.
+   *
+   *   agentbridge supersede --id <new> --supersedes <old> --reason <text>
+   *              --replacement-task <id> [--replacement-head <sha>] [--repo <dir>]
+   *
+   * WHY THIS COMMAND HAD TO EXIST. `accepted` and `withdrawn` are terminal in
+   * TRANSITIONS, deliberately: a cancelled contract that can return to
+   * `assigned` is indistinguishable from one that was never cancelled. The cost
+   * is that a record which is WRONG can never be put right, and this ledger has
+   * four of those -- the laneRegistry contracts covering work that shipped as
+   * 771522e. Without a correction path the ledger is condemned to misstate what
+   * happened, permanently.
+   *
+   * So a correction is APPENDED BESIDE the mistake and the mistake stays
+   * readable. "What is true now" follows the chain; "what happened" reads
+   * everything, errors included.
+   *
+   * THE APPEND-ONLY CHECK IS MADE HERE, NOT TRUSTED. applySupersession returns
+   * new rows and never touches disk, so the assertion runs against what WOULD
+   * be written, before anything is. A module that promises to append and a
+   * caller that verifies it appended are two different guarantees, and this
+   * project has been bitten too often by the first being mistaken for the
+   * second.
+   */
+  if (cmd === 'supersede') {
+    const { readDelegations, writeDelegations } = await import('../src/provenanceStore.mjs');
+    const S = await import('../src/supersession.mjs');
+    const { resolveCommit } = await import('../src/git.mjs');
+
+    let before;
+    try {
+      before = await readDelegations();
+    } catch (e) {
+      console.error(`error: cannot read the delegation store: ${e.message}`);
+      process.exit(2);
+    }
+
+    /*
+     * A REAL GIT RESOLVER, ALWAYS. The module refuses a supplied sha when no
+     * resolver is given, so passing none would not be a shortcut -- it would be
+     * a refusal. A correction naming a commit nobody can find is a second wrong
+     * record, which is exactly what this command exists to stop.
+     */
+    const cwd = args.repo ?? process.cwd();
+
+    /*
+     * THE RESOLVER CONTRACT IS SYNCHRONOUS AND STRICT: supersession.mjs calls
+     * `resolveSha(sha) === true`. The first version of this wiring passed an
+     * async function returning the resolved sha, so the module received a
+     * Promise, compared it to true, and refused a perfectly real commit.
+     *
+     * It failed CLOSED, which is the right direction for this mistake — a
+     * wiring bug that accepted an unverifiable sha would have been silent and
+     * permanent, whereas this one stopped the first correction dead. But an
+     * async-vs-sync mismatch is invisible to typecheck, lint and the module's
+     * own tests, which inject a synchronous stub.
+     *
+     * So git runs HERE, ahead of time, and what the module gets is the plain
+     * boolean predicate it asked for.
+     */
+    const verified = new Set();
+    if (args['replacement-head']) {
+      const r = await resolveCommit(cwd, args['replacement-head']);
+      if (r.ok) verified.add(args['replacement-head']);
+    }
+    const resolveSha = (sha) => verified.has(sha);
+
+    const result = await S.applySupersession(before, {
+      id: args.id,
+      supersedes: args.supersedes,
+      reason: args.reason,
+      replacement_task_id: args['replacement-task'],
+      replacement_head_sha: args['replacement-head'] ?? null,
+      recorded_by_agent: args.agent ?? 'danny-win-10',
+      recorded_by_session: args.session ?? 'danny-win-10',
+      recorded_at: new Date().toISOString(),
+    }, { resolveSha });
+
+    if (!result.ok) {
+      for (const e of result.errors) console.error(`  - ${e}`);
+      process.exit(2);
+    }
+
+    const proof = S.assertAppendOnly(before, result.rows);
+    if (!proof.ok) {
+      // Belt and braces: if this ever fires, something rewrote history and the
+      // write must not happen. Nothing has been touched on disk at this point.
+      console.error('REFUSED — the correction would not have been append-only:');
+      for (const e of proof.errors) console.error(`  - ${e}`);
+      process.exit(2);
+    }
+
+    await writeDelegations(result.rows);
+
+    /*
+     * AND AGAIN, AGAINST WHAT ACTUALLY LANDED.
+     *
+     * The check above is on rows in memory, which can only fail if
+     * applySupersession changes. This one re-reads the file and is the one that
+     * can catch something real today: a serialisation fault, a truncated write,
+     * or another process writing the ledger between the read and the write --
+     * the shared-index problem this project has already been bitten by twice.
+     *
+     * It cannot un-write a bad file, so it reports rather than pretending to
+     * recover. An operator who is told the ledger is no longer append-only can
+     * go and look; one who is told nothing cannot.
+     */
+    const landed = await readDelegations();
+    const onDisk = S.assertAppendOnly(before, landed);
+    if (!onDisk.ok) {
+      console.error('WARNING — the ledger on disk is not an append of what was read:');
+      for (const e of onDisk.errors) console.error(`  - ${e}`);
+      console.error('  another process may have written it concurrently. Inspect before trusting it.');
+      process.exit(1);
+    }
+
+    console.log(`recorded correction ${result.record.id ?? '(unnamed)'}: supersedes ${result.record.supersedes}`);
+    console.log(`  reason      ${result.record.reason}`);
+    console.log(`  replacement ${result.record.replacement_task_id}${result.record.replacement_head_sha ? ` @ ${String(result.record.replacement_head_sha).slice(0, 12)}` : ''}`);
+    console.log(`  append-only verified: ${before.length} -> ${result.rows.length} records, none edited`);
+    process.exit(0);
+  }
+
+  /*
+   * token-budget — measure verified work per token, and PERSIST it.
+   *
+   *   agentbridge token-budget --record --handoff <file> [--tier <t>] [--task <id>]
+   *   agentbridge token-budget [--json]        show what has been measured
+   *
+   * DESCRIPTIVE ONLY. This prints numbers and stores numbers. It never rewrites
+   * or truncates a handoff, never produces message text, and nothing downstream
+   * reads these to gate anything -- so a measurement can never come back to an
+   * agent as prose, and brevity cannot win on its own. Token use is optimised
+   * only after correctness, evidence and safety are satisfied, which is why the
+   * tier travels with every measurement rather than being inferred from length.
+   */
+  if (cmd === 'token-budget') {
+    const { readMeasurements, writeMeasurements } = await import('../src/provenanceStore.mjs');
+    const TB = await import('../src/tokenBudget.mjs');
+
+    let rows;
+    try {
+      rows = await readMeasurements();
+    } catch (e) {
+      console.error(`error: cannot read the measurement store: ${e.message}`);
+      process.exit(2);
+    }
+
+    if (args.record) {
+      if (typeof args.handoff !== 'string' || !args.handoff) {
+        console.error('error: --handoff <file> is required with --record');
+        process.exit(2);
+      }
+      const { readFile } = await import('node:fs/promises');
+      let text;
+      try { text = await readFile(args.handoff, 'utf8'); }
+      catch (e) { console.error(`error: cannot read ${args.handoff}: ${e.message}`); process.exit(2); }
+
+      const measured = TB.measureHandoff({
+        text,
+        tier: args.tier ?? null,
+        has_mutation_evidence: Boolean(args['mutation-evidence']),
+        bridge_state: {},
+      });
+      const row = {
+        at: new Date().toISOString(),
+        task_id: args.task ?? null,
+        ...measured,
+        metrics: TB.metricsFor(measured),
+      };
+      // Append. A measurement is an observation of a moment; editing one would
+      // make the series a claim about the present rather than a record.
+      await writeMeasurements([...rows, row]);
+      console.log(`recorded measurement${row.task_id ? ` for ${row.task_id}` : ''}: ${JSON.stringify(row.metrics)}`);
+      process.exit(0);
+    }
+
+    if (args.json) { console.log(JSON.stringify(rows, null, 2)); process.exit(0); }
+    if (!rows.length) { console.log('no measurements recorded'); process.exit(0); }
+    for (const r of rows) {
+      console.log(`${r.at}  ${r.task_id ?? '(no task)'}  ${JSON.stringify(r.metrics)}`);
+    }
+    process.exit(0);
   }
 
   /*

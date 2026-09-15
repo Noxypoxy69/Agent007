@@ -54,3 +54,20 @@ export const readAttributions = () => readJsonArray(ATTRIBUTIONS());
 export const writeAttributions = (rows) => writeJsonArray(ATTRIBUTIONS(), rows);
 export const readDecisions = () => readJsonArray(DECISIONS());
 export const writeDecisions = (rows) => writeJsonArray(DECISIONS(), rows);
+
+/*
+ * Token-budget measurements. A SEPARATE FILE FROM THE LEDGERS, on purpose.
+ *
+ * These are observations, not contracts. Mixing them into delegations.json
+ * would put a growing append-only measurement stream inside the file whose
+ * every record is a commitment somebody is accountable for -- and the
+ * append-only assertions that protect the ledger would then be guarding rows
+ * that are merely telemetry.
+ *
+ * Measurements are DESCRIPTIVE. Nothing reads this file to decide anything, and
+ * nothing in src/tokenBudget.mjs produces message text, so a number recorded
+ * here can never be fed back to an agent as prose or used to rank one.
+ */
+const MEASUREMENTS = () => path.join(HOME, 'tokenMeasurements.json');
+export const readMeasurements = () => readJsonArray(MEASUREMENTS());
+export const writeMeasurements = (rows) => writeJsonArray(MEASUREMENTS(), rows);
