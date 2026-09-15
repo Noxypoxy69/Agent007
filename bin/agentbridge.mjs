@@ -26,6 +26,8 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge unregister --agent code-c
   agentbridge status [--json]
   agentbridge heartbeat [--dry-run]      one-shot collect (+publish unless --dry-run)
+  agentbridge lanes [--file <f>] [--path <p>] [--json]
+                                        show the lane registry, or explain one path
   agentbridge release-risk [--json] [--strict]
                                         exit 1 if any worktree carries release risk
   agentbridge doctor                    verify secret sealing and file permissions
@@ -106,6 +108,65 @@ try {
       if (s.processes.length) console.log(`  running  ${s.processes.map((p) => `${p.kind}:${p.pid}${p.ambiguous ? '?' : ''}`).join(', ')}${s.processes.some((p) => p.ambiguous) ? '   (? = ambiguous match, may belong to another worktree)' : ''}`);
     }
     process.exit(0);
+  }
+
+  /*
+   * lanes — show the resolved registry, or explain one path.
+   *
+   *   agentbridge lanes                    lanes, holders, capabilities
+   *   agentbridge lanes --file <path>      read a specific registry file
+   *   agentbridge lanes --path src/x.ts    who owns this, and how each lane sees it
+   *
+   * Validation errors exit 2 and print every problem at once: an operator
+   * fixing a lane file should not discover its faults one run at a time.
+   */
+  if (cmd === 'lanes') {
+    const cfg = await loadConfig();
+    const file = args.file || cfg?.lanesFile?.[0] || cfg?.lanesFile || 'lanes.registry.example.yml';
+    const { readFile } = await import('node:fs/promises');
+    const R = await import('../src/laneRegistry.mjs');
+
+    let text;
+    try { text = await readFile(file, 'utf8'); }
+    catch { console.error(`cannot read lane registry: ${file}`); process.exit(2); }
+
+    let reg;
+    try { reg = R.parseLaneRegistry(text, { source: file }); }
+    catch (e) { console.error(`${e.message}`); process.exit(2); }
+
+    const v = R.validateRegistry(reg);
+    if (!v.ok) {
+      console.error(`lane registry ${file} has ${v.errors.length} problem(s):`);
+      for (const e of v.errors) console.error(`  - ${e}`);
+      process.exit(2);
+    }
+
+    if (args.path) {
+      const owners = R.ownersOfPath(reg, args.path);
+      const rows = reg.lanes.map((l) => ({ lane_id: l.lane_id, sees: R.classifyPath(reg, l.lane_id, args.path) }));
+      if (args.json) { console.log(JSON.stringify({ path: args.path, owners, lanes: rows }, null, 2)); process.exit(0); }
+      console.log(`${args.path}\n  owned by: ${owners.length ? owners.join(', ') : '(unclaimed)'}`);
+      for (const r of rows) console.log(`  ${r.lane_id.padEnd(18)} sees it as ${r.sees}`);
+      process.exit(0);
+    }
+
+    const contested = R.contestedLanes(reg);
+    if (args.json) { console.log(JSON.stringify({ file, reg, contested }, null, 2)); process.exit(0); }
+
+    console.log(`lane registry ${file}  (${reg.lanes.length} lanes, ${reg.agents.length} agents, ${reg.assignments.length} assignments)\n`);
+    for (const l of reg.lanes) {
+      const holders = R.holdersOfLane(reg, l.lane_id)
+        .map((h) => h.agent_id ?? `session:${h.session_id}`).join(', ') || '(unheld)';
+      console.log(`${l.lane_id}  [${l.status}]  ${l.display_name}`);
+      console.log(`  held by   ${holders}`);
+      if (l.capabilities.length) console.log(`  grants    ${l.capabilities.join(', ')}`);
+      if (l.owned_paths.length) console.log(`  owns      ${l.owned_paths.join(', ')}`);
+      if (l.shared_paths.length) console.log(`  shared    ${l.shared_paths.join(', ')}`);
+    }
+    for (const c of contested) {
+      console.log(`\nLANE CONTESTED — "${c.lane_id}" is held by ${c.agents.length} agents: ${c.agents.join(', ')}`);
+    }
+    process.exit(contested.length ? 1 : 0);
   }
 
   /*

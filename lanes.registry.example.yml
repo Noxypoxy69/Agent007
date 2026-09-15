@@ -1,0 +1,130 @@
+# Lane registry — EXAMPLE DATA, not the model.
+#
+# Everything below is editable without touching Agent Bridge source. No lane
+# name, agent name or capability assignment appears anywhere in src/. Adding
+# `payments` or `ar-hunt` tomorrow is an edit to this file and nothing else.
+#
+# Four entities, kept separate on purpose:
+#
+#   agents       worker identities that outlive any one runtime
+#   sessions     one runtime of one agent
+#   lanes        work domains -- messaging, payments, ar-hunt, fo40-funnel
+#   assignments  who holds which lane RIGHT NOW
+#
+# An agent is not its lane. code-c held the FO40 funnel and was moved to
+# messaging inside one afternoon; under a model that fuses the two, that is an
+# agent changing identity rather than a reassignment. Moving a lane here is one
+# line in `assignments`.
+
+lanes:
+  - lane_id: messaging
+    display_name: Messaging / Reply Engine
+    branch_patterns:
+      - "code-c/*"
+    worktrees:
+      - "social-sparks-code-c"
+    owned_paths:
+      - "src/lib/reply/**"
+      - "src/lib/outbound/**"
+      - "scripts/reply-*.ts"
+      - "scripts/check-reply-*.mjs"
+    shared_paths:
+      - "package.json"
+      - "scripts/verify.mjs"
+      - "scripts/check-gates-can-fail.mjs"
+    capabilities: []
+    status: active
+
+  - lane_id: onboarding
+    display_name: Merchant onboarding / phone verification
+    branch_patterns:
+      - "code-b/*"
+    owned_paths:
+      - "src/lib/merchantPhone.server.ts"
+      - "src/lib/onboarding/**"
+    shared_paths:
+      - "package.json"
+      - "docs/route-inventory.md"
+    capabilities: []
+    status: active
+
+  # The integration role is a CAPABILITY on a lane, not a property of being
+  # called "Code A". When the seat moves, the assignment moves and the
+  # privileges follow it. Nothing in src/ knows this lane exists.
+  - lane_id: integration
+    display_name: Release integration
+    branch_patterns:
+      - "release/*"
+      - "hotfix/*"
+    owned_paths:
+      - "docs/route-inventory.md"
+      - ".github/workflows/**"
+    shared_paths:
+      - "package.json"
+    capabilities:
+      - merge_main
+      - deploy
+    status: active
+
+  # Lanes nobody is running tonight. Present to show that a lane needs no
+  # agent, no worktree and no branch to exist -- it is just a record.
+  - lane_id: fo40-funnel
+    display_name: FO40 quiz funnel
+    owned_paths:
+      - "src/components/QuizFlow.tsx"
+      - "src/routes/api/public/surveys/**"
+    status: paused
+
+  - lane_id: ar-hunt
+    display_name: Hunt / AR
+    owned_paths:
+      - "src/lib/hunt/**"
+    status: active
+
+  - lane_id: website-cloner
+    display_name: Website AI Cloner
+    branch_patterns:
+      - "feature/website-ai-cloner"
+    owned_paths:
+      - "src/lib/cloner/**"
+    status: active
+
+agents:
+  - agent_id: code-a
+    display_name: Integrator
+  - agent_id: code-b
+    display_name: Onboarding worker
+  - agent_id: code-c
+    display_name: Messaging worker
+
+sessions:
+  - session_id: danny-win-51
+    agent_id: code-a
+  - session_id: danny-win-f1
+    agent_id: code-b
+  - session_id: danny-win-10
+    agent_id: code-c
+
+# Assignment is its own record, so reassignment is a data edit and one agent
+# can hold several lanes at once.
+assignments:
+  - lane_id: messaging
+    agent_id: code-c
+    session_id: danny-win-10
+    worktree: "social-sparks-code-c"
+    status: active
+
+  - lane_id: onboarding
+    agent_id: code-b
+    session_id: danny-win-f1
+    status: active
+
+  - lane_id: integration
+    agent_id: code-a
+    session_id: danny-win-51
+    status: active
+
+  # Same agent, a second simultaneous lane. Capabilities union across both.
+  - lane_id: ar-hunt
+    agent_id: code-c
+    status: active
