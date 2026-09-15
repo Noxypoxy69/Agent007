@@ -569,8 +569,17 @@ export const INSTRUCTIONS =
   'Live engineering state for multi-agent Git worktrees. Every field is observed from git ' +
   'plumbing and the process table on the developer machine, not reported by the agents ' +
   'themselves, so an agent cannot misreport its own state here. Fields that could not be ' +
-  'determined are null — treat null as unknown, never as zero. This server is read-only: ' +
-  'it cannot assign tasks, send messages, or run commands.\n\n' +
+  'determined are null — treat null as unknown, never as zero.\n\n' +
+  'WHAT THIS SERVER CAN DO DEPENDS ON YOUR TOKEN, AND THE TOOL LIST IS THE ANSWER. A reader ' +
+  'sees only read tools; a coordinator additionally sees assign_task, send_message and ' +
+  'record_owner_decision. If a tool is not in tools/list you do not have it — that is not a ' +
+  'temporary condition to retry or work around. This text said "this server is read-only" ' +
+  'for as long as that was true of every caller, and saying it to a coordinator that can in ' +
+  'fact assign work would be the server lying about its own authority.\n\n' +
+  'WHAT IS ABSENT AT EVERY SCOPE, INCLUDING COORDINATOR: shell, SQL, file writes, deploy, ' +
+  'merge, command execution. A message body is prose for a person or an agent to READ and is ' +
+  'never executed by anything. There is no path from this server to a command on any ' +
+  'machine.\n\n' +
   'QUERY THIS SERVER BEFORE ASKING A PERSON. Branches, HEADs, bases, worktrees, locks and ' +
   'running processes are all here and are authoritative. Do not ask the operator to paste a ' +
   'status brief or a file list; call the tool. A pasted summary is a stale copy of something ' +

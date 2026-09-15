@@ -12,12 +12,26 @@ workers_dev = true
 # client looking there finds nothing. The Worker owns its whole origin.
 #
 #   this Worker              OAuth + MCP facade, public
-#   Supabase Edge Function   data plane, reached with the reader token
+#   Supabase Edge Function   data plane, reached at the granted scope
 #
-# This Worker holds exactly ONE credential: BRIDGE_READER_TOKEN, the same
-# least-privilege token any other client would be issued. The database service
-# key stays inside Supabase and is never copied here, so compromising this
-# Worker yields read access to coordination state and nothing more.
+# THIS WORKER HOLDS TWO CREDENTIALS, AND THE SECOND ONE RAISES THE STAKES.
+#
+#   BRIDGE_READER_TOKEN       forwarded for a read grant
+#   BRIDGE_COORDINATOR_TOKEN  forwarded ONLY for a grant carrying
+#                             agentbridge:write, which the consent page issues
+#                             only against the coordinator secret
+#
+# It held the reader token alone until scope-aware forwarding landed, and the
+# honest consequence of adding the second is that compromising this Worker no
+# longer yields read access and nothing more -- it yields the ability to assign
+# work and send messages as the coordinator. That is the price of ChatGPT being
+# able to act rather than only look, and it is exactly why a write grant is
+# approved with a different secret from a read grant.
+#
+# The database service key still stays inside Supabase and is never copied
+# here. Neither token can reach the database directly; both are scoped labels
+# the data plane resolves, and either can be revoked by flipping one column
+# without disturbing the other.
 [vars]
 DATA_PLANE_URL = "https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp"
 
@@ -31,3 +45,9 @@ id = "ca7371ea5ae946e6bf2b9607d70b3b18"
 
 # Uploaded out of band, never committed:
 #   npx wrangler secret put BRIDGE_READER_TOKEN
+#   npx wrangler secret put BRIDGE_COORDINATOR_TOKEN
+#
+# If the coordinator secret is absent the Worker REFUSES a write grant rather
+# than falling back to the reader -- a silent downgrade would surface as write
+# tools missing from tools/list, which is the exact symptom the scope-aware
+# forwarding was written to eliminate.
