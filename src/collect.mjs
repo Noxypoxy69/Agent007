@@ -1,8 +1,30 @@
 import { gitState } from './git.mjs';
 import { discoverLocks } from './locks.mjs';
 import { probeProcesses } from './processes.mjs';
-import { redactPaths, redactHome } from './redact.mjs';
+import { redactPaths, portableWorktree } from './redact.mjs';
 import { homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
+
+/**
+ * The canonical long form of a path, or null if it cannot be resolved.
+ *
+ * On Windows this is what turns an 8.3 alias (`C:\Users\DANNYG~1\...`) back
+ * into the spelling home is compared against. `.native` is the part that does
+ * it -- the JS implementation of realpath does not expand short names.
+ *
+ * Never throws: a path that has since been deleted, or one on a volume that
+ * refuses the call, must degrade to "use what we were given" rather than take
+ * the whole heartbeat down. portableWorktree still refuses to emit an absolute
+ * path in that case, so the fallback is safe rather than merely quiet.
+ */
+function longPath(p) {
+  if (typeof p !== 'string' || !p) return null;
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return null;
+  }
+}
 import { machineInfo } from './config.mjs';
 import { loadLanes } from './lanes.mjs';
 
@@ -42,14 +64,30 @@ export async function collect(cfg, registry) {
     const hideHome = cfg.redactHomePaths !== false;
     const home = homedir();
 
+    /*
+     * BOTH SPELLINGS OF HOME, because Windows has two and hands out the short
+     * one constantly. `C:\Users\DANNYG~1\...` is the same directory as
+     * `C:\Users\DANNY GARCIA\...` -- every temp path on this machine uses the
+     * 8.3 form -- and a prefix match against the long form alone never fires
+     * on it. The path shipped absolute with the operator's name still in it,
+     * merely abbreviated.
+     *
+     * realpathSync.native is what resolves the alias, and it needs the path to
+     * exist. A worktree does. It is called once per collect, not per path, and
+     * falls back to the original spelling rather than throwing: a home we could
+     * not canonicalise must not take the heartbeat down, and portableWorktree
+     * still refuses to emit an absolute path either way.
+     */
+    const homes = [...new Set([home, longPath(home)].filter(Boolean))];
+
     sessions.push({
       agentId: a.agentId,
       lane: a.lane,
-      worktree: redactHome(a.worktree, home, hideHome),
+      worktree: portableWorktree(longPath(a.worktree) ?? a.worktree, homes, hideHome),
       git: g.ok
         ? {
             ...g,
-            worktree: redactHome(g.worktree, home, hideHome),
+            worktree: portableWorktree(longPath(g.worktree) ?? g.worktree, homes, hideHome),
             /*
              * The remote URL never leaves the machine.
              *
@@ -68,7 +106,21 @@ export async function collect(cfg, registry) {
             dirty: redactPaths(g.dirty, redact),
             untracked: redactPaths(g.untracked, redact),
           }
-        : g,
+        /*
+         * THE FAILURE BRANCH LEAKED, AND ONLY THE FAILURE BRANCH.
+         *
+         * gitState's early return is `{ ok:false, reason, worktree: cwd }` --
+         * the raw path. Spreading `g` here shipped it untouched, so a worktree
+         * that was merely NOT A GIT REPO disclosed its absolute path while
+         * every healthy one was redacted. Caught by the end-to-end test rather
+         * than by reading this, because the happy path looked correct and is
+         * the only one anybody inspects.
+         *
+         * Same treatment as above: there is no version of this where an
+         * absolute path is acceptable on the wire, including when the probe
+         * failed.
+         */
+        : { ...g, worktree: portableWorktree(longPath(g.worktree) ?? g.worktree, homes, hideHome) },
       locks,
       processes: proc.byWorktree[a.worktree] ?? [],
       processProbeOk: proc.probeOk,

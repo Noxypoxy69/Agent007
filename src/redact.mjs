@@ -68,6 +68,66 @@ export function redactHome(p, home, enabled = true) {
   return `~${sep}${sep === '\\' ? rest.replace(/\//g, '\\') : rest}`;
 }
 
+/**
+ * Is this still an absolute path of any flavour, on any platform?
+ *
+ * Deliberately not `path.isAbsolute`: that answers for the platform running
+ * the check, and a payload collected on Windows can be scanned anywhere. All
+ * three shapes have to be recognised wherever this runs.
+ */
+export function isAbsoluteLike(p) {
+  if (typeof p !== 'string' || !p) return false;
+  return /^[A-Za-z]:[\\/]/.test(p)      // C:\ or C:/
+    || /^[\\/]{2}[^\\/]/.test(p)        // \\server\share (UNC)
+    || /^\//.test(p);                   // POSIX
+}
+
+/**
+ * A worktree path safe to transmit: home-relative, or failing that, a bare name.
+ *
+ * WHY redactHome IS NOT ENOUGH, found 2026-09-15 when publish() began refusing
+ * its own heartbeat. redactHome rewrites a path that starts with the home
+ * directory AS A STRING. Two real cases slip past it and ship absolute:
+ *
+ *   8.3 SHORT NAMES. `C:\Users\DANNYG~1\AppData\Local\Temp\x` and
+ *   `C:\Users\DANNY GARCIA\AppData\Local\Temp\x` are the same directory, and
+ *   Windows hands out the short form freely -- every temp path on this machine
+ *   is spelled that way. As a string it does not start with home, so it was
+ *   never relativised. The operator's name is still in it, just abbreviated,
+ *   and `DANNYG~1` is not meaningfully less identifying than `DANNY GARCIA`.
+ *   Resolving the long form is the caller's job (it needs the filesystem);
+ *   passing both spellings here is the pure half.
+ *
+ *   A WORKTREE OUTSIDE HOME. `D:\work\repo` has no home prefix to strip, so it
+ *   came through untouched -- fully absolute, disclosing the machine's layout.
+ *
+ * Neither earns anything for coordination. What the payload needs is to tell
+ * worktrees apart and match a lane's declared worktree name; the final segment
+ * does both. So: relativise to home where possible, and where it is not,
+ * transmit the name alone rather than the route to it.
+ *
+ * `home` accepts one spelling or several. Several is the point -- long form and
+ * 8.3 form are the same identity surface and both must be stripped.
+ */
+export function portableWorktree(p, home, enabled = true) {
+  if (!enabled || typeof p !== 'string' || !p) return p;
+
+  const homes = (Array.isArray(home) ? home : [home]).filter(
+    (h) => typeof h === 'string' && h.length,
+  );
+  for (const h of homes) {
+    const r = redactHome(p, h, true);
+    if (r !== p) return r;             // matched one spelling; done
+  }
+
+  if (!isAbsoluteLike(p)) return p;    // already relative: nothing to disclose
+
+  // No home matched and it is absolute. Keep the distinguishing part, drop the
+  // route. Split on both separators: a Windows path can arrive slash-spelled.
+  const name = p.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+  return name && name !== p ? name : p;
+}
+
 export function classifyPath(p) {
   for (const { re, tag } of SENSITIVE) if (re.test(p)) return tag;
   return null;
