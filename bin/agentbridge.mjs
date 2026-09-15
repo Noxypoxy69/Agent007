@@ -49,6 +49,13 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         the head SHA of the delivered work
   agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
                                         recorded audit held. both, not either
+  agentbridge register-session --agent <agent_id> --session <session_id>
+             [--lane <l>] [--capacity idle|busy|blocked|offline] [--repo <dir>]
+                                        SELF-REGISTER. repo, worktree and head are
+                                        DERIVED FROM GIT, never accepted as flags,
+                                        so a worker cannot claim to be elsewhere
+  agentbridge unregister-session --session <session_id>
+                                        clean shutdown, rather than aging out
   agentbridge supersede --id <new> --supersedes <old> --reason <text>
              --replacement-task <id> [--replacement-head <sha>] [--repo <dir>]
                                         append a correction BESIDE a wrong record.
@@ -327,12 +334,84 @@ try {
        */
       let bound = null;
       let registry = null;
-      try { registry = await loadLaneRegistry(args['registry-file']); }
-      catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
+      /*
+       * TARGET VERIFICATION, IN PRIORITY ORDER.
+       *
+       *   1. the LIVE registry, derived from runtime self-registration
+       *   2. a lane registry FILE, if one was configured
+       *   3. neither: accept, but record the target as legacy-unverified
+       *
+       * The live registry wins because it is the only one that can be wrong in
+       * a way that corrects itself. A file is right until a session restarts
+       * and then stays confidently wrong.
+       *
+       * Path 3 is NOT deleted. Removing it would refuse every delegation on a
+       * machine where nothing has registered yet, which is every machine on its
+       * first run. It is kept, and what changes is that it no longer pretends:
+       * the contract is stamped legacy-unverified and says so on the way past.
+       */
+      let verification = 'legacy-unverified';
+      const { readRegistrations } = await import('../src/registrationStore.mjs');
+      const LR = await import('../src/liveRegistry.mjs');
+      let live = [];
+      try { live = await readRegistrations(); }
+      catch (e) {
+        // A corrupt registration file must not silently downgrade to the
+        // unverified path -- that turns a broken machine into a permissive one.
+        console.error(`error: cannot read the registration store: ${e.message}`);
+        process.exit(2);
+      }
 
-      if (!registry) {
-        console.error('warning: no lane registry configured, so --to was not verified.');
-        console.error('         set lanesFile in config, or pass --registry-file <path>.');
+      const liveReg = LR.registryFromSessions(live, { now: new Date().toISOString() });
+      if (liveReg.sessions.length) {
+        const R = await import('../src/laneRegistry.mjs');
+        const asSession = liveReg.sessions.find((s) => s.session_id === args.to);
+        const agentId = asSession ? asSession.agent_id : args.to;
+        const r = R.resolveWorker(liveReg, { agent_id: agentId });
+        if (!r.ok) {
+          console.error(`error: --to "${args.to}" did not resolve against the LIVE registry: ${r.reason}`);
+          if (r.candidates?.length) console.error(`       candidates: ${r.candidates.join(', ')}`);
+          console.error('       workers register with: agentbridge register-session --agent <a> --session <s>');
+          process.exit(2);
+        }
+        /*
+         * AN INDEPENDENT LIVENESS RE-CHECK, AND IT IS NOT DECORATION.
+         *
+         * Measured on 2026-09-15 rather than assumed: breaking resolveWorker's
+         * `capacity !== 'offline'` filter ALONE was enough to let a declared-
+         * offline worker accept a contract. isLive did not save it, because
+         * isLive only LABELS the capacity — the filter was the single
+         * enforcement point, so what looked like two layers was one layer and
+         * one annotation.
+         *
+         * This is the second layer, made real. It consults isLive directly
+         * against the registration row, so the two protections now fail
+         * independently: breaking either one still refuses, and only breaking
+         * both lets a dead session through. The redundancy harness proves each
+         * case separately.
+         */
+        const chosen = live.find((s) => s?.session_id === r.session_id);
+        if (!chosen || !LR.isLive(chosen, { now: new Date().toISOString() })) {
+          console.error(`error: --to "${args.to}" resolved to session ${r.session_id}, which is not live`);
+          console.error('       the resolver and the liveness check disagree — refusing rather than guessing');
+          process.exit(2);
+        }
+
+        bound = r;
+        verification = 'verified';
+        if (r.session_id !== args.to) console.log(`to ${args.to} -> session ${r.session_id} (agent ${r.agent_id})`);
+      } else {
+        try { registry = await loadLaneRegistry(args['registry-file']); }
+        catch (e) { console.error(`error: ${e.message}`); process.exit(2); }
+      }
+
+      if (bound) {
+        // Resolved live. Nothing further to try.
+      } else if (!registry) {
+        console.error('warning: no live registrations and no lane registry, so --to was NOT verified.');
+        console.error('         this contract is recorded as legacy-unverified.');
+        console.error('         to verify targets, have each worker run:');
+        console.error('           agentbridge register-session --agent <agent_id> --session <session_id>');
       } else {
         const { reg, R } = registry;
         // Accept either the durable agent id or a live session id, and store
@@ -347,6 +426,15 @@ try {
           process.exit(2);
         }
         bound = r;
+        /*
+         * A FILE-RESOLVED TARGET IS STILL NOT `verified`.
+         *
+         * The file said this session exists; nothing checked that it is
+         * RUNNING. That is a weaker claim than a heartbeat, and collapsing the
+         * two would let a stale roster produce contracts indistinguishable from
+         * ones the Bridge actually confirmed.
+         */
+        verification = 'file-registry-unverified-liveness';
         if (r.session_id !== args.to) console.log(`to ${args.to} -> session ${r.session_id} (agent ${r.agent_id})`);
       }
 
@@ -362,11 +450,25 @@ try {
         shared_paths: split(args.shared),
         now: new Date().toISOString(),
       });
+      /*
+       * THE MARKER IS STAMPED HERE AND NEVER INFERRED LATER.
+       *
+       * Existing contracts carry no marker at all, and verificationOf() reads an
+       * absent one as legacy-unverified, permanently. That is deliberate: every
+       * delegation recorded before today took the warn-and-accept path, and
+       * there is no way to go back and establish who those were really
+       * addressed to. Backfilling would rewrite the provenance of all of them at
+       * once, which is the same error as editing a ledger to agree with the
+       * present.
+       */
+      rec.target_verification = verification;
+
       const v = P.validateDelegation(rec);
       if (!v.ok) { for (const e of v.errors) console.error(`  - ${e}`); process.exit(2); }
       if (all.some((d) => d.id === rec.id)) { console.error(`delegation "${rec.id}" already exists`); process.exit(2); }
       await writeDelegations([...all, rec]);
       console.log(`recorded delegation ${rec.id}: ${rec.assigning_session} -> ${rec.assigned_session} from ${rec.base_sha.slice(0, 12)}`);
+      console.log(`  target ${verification}`);
       process.exit(0);
     }
 
@@ -442,6 +544,89 @@ try {
       console.log(result.ok ? '  contract held' : `  ${result.violations.length} violation(s)`);
     }
     process.exit(result.ok ? 0 : 1);
+  }
+
+  /*
+   * register-session / unregister-session / workers — RUNTIME SELF-REGISTRATION.
+   *
+   *   agentbridge register-session --agent <agent_id> --session <session_id>
+   *              [--lane <lane_id>] [--capacity idle|busy|blocked|offline] [--repo <dir>]
+   *   agentbridge unregister-session --session <session_id>
+   *
+   * THE ROSTER IS NOT TYPED. A hand-authored registry is humans writing machine
+   * truth: wrong the moment a session restarts, and wrong confidently, because
+   * `--to code-b` keeps resolving against a name that was accurate last week.
+   *
+   * WHAT THE WORKER MAY DECLARE, AND WHAT IT MAY NOT. It declares its durable
+   * agent_id and its own session_id, because only it knows those. Everything
+   * locating it in the world -- repo_id, worktree_id, head_sha -- is DERIVED
+   * FROM GIT in this process and cannot be passed as a flag. That is the teeth:
+   * an agent cannot claim to be working in a repository it is not in, so it
+   * cannot make itself the resolution target for work there.
+   *
+   * heartbeat_at is stamped here rather than accepted, for the same reason. A
+   * worker that could send its own timestamp could keep a dead session live.
+   */
+  if (cmd === 'register-session' || cmd === 'unregister-session') {
+    const R = await import('../src/registrationStore.mjs');
+
+    if (cmd === 'unregister-session') {
+      if (!args.session) { console.error('error: --session <session_id> is required'); process.exit(2); }
+      const { removed } = await R.removeRegistration(args.session);
+      console.log(removed ? `unregistered ${args.session}` : `no registration for ${args.session}`);
+      process.exit(0);
+    }
+
+    if (!args.agent || typeof args.agent !== 'string') {
+      console.error('error: --agent <agent_id> is required (your durable identity)');
+      process.exit(2);
+    }
+    if (!args.session || typeof args.session !== 'string') {
+      // NOT defaulted to the agent id. Defaulting would manufacture exactly the
+      // identity this registry exists to verify, and would look like it worked.
+      console.error('error: --session <session_id> is required, and is NOT derived from --agent');
+      process.exit(2);
+    }
+    const capacity = args.capacity ?? 'idle';
+    if (!['idle', 'busy', 'blocked', 'offline'].includes(capacity)) {
+      console.error(`error: --capacity must be idle|busy|blocked|offline, got "${capacity}"`);
+      process.exit(2);
+    }
+
+    const { resolveCommit } = await import('../src/git.mjs');
+    const cwd = args.repo ?? process.cwd();
+    const g = await resolveCommit(cwd, 'HEAD');
+    if (!g.ok) {
+      console.error(`error: cannot register from ${cwd}: ${g.reason}`);
+      console.error('       repo, worktree and head are derived from git, not accepted as flags');
+      process.exit(2);
+    }
+
+    const { basename } = await import('node:path');
+    const row = {
+      agent_id: args.agent,
+      session_id: args.session,
+      // Derived. A worker cannot name a repo it is not standing in.
+      repo_id: basename(g.worktree),
+      worktree_id: basename(g.worktree),
+      lane_id: args.lane ?? null,
+      capacity,
+      head_sha: g.sha,
+      heartbeat_at: new Date().toISOString(),
+      /*
+       * How this identity was established. `runtime-self-registration` is the
+       * only value this path writes, and it is what distinguishes a target the
+       * Bridge verified from one it merely accepted — see VERIFICATION in
+       * src/liveRegistry.mjs.
+       */
+      verification: 'runtime-self-registration',
+    };
+
+    await R.upsertRegistration(row);
+    console.log(`registered ${row.agent_id} as session ${row.session_id}`);
+    console.log(`  repo     ${row.repo_id} @ ${row.head_sha.slice(0, 12)}`);
+    console.log(`  capacity ${row.capacity}${row.lane_id ? `   lane ${row.lane_id}` : ''}`);
+    process.exit(0);
   }
 
   /*
