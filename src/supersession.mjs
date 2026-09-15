@@ -89,12 +89,39 @@ export function createSupersession(input = {}, { resolveSha = null } = {}) {
       errors.push('replacement_head_sha was supplied but no resolver was given to verify it');
     } else {
       let resolved = false;
+      let answer;
       try {
-        resolved = resolveSha(rec.replacement_head_sha) === true;
+        answer = resolveSha(rec.replacement_head_sha);
+        resolved = answer === true;
       } catch {
         resolved = false;
       }
-      if (!resolved) {
+
+      /*
+       * AN ASYNC RESOLVER IS A WIRING FAULT AND MUST SAY SO.
+       *
+       * This contract is SYNCHRONOUS: the answer is compared to `true`. Hand it
+       * an async function and it gets a Promise, which is truthy but is not
+       * `true`, so the sha is refused. The DIRECTION is right -- it fails closed
+       * -- but the message was "does not resolve to a commit", which sends
+       * somebody hunting for a bad sha when the sha was real and the caller was
+       * merely async. That happened on 2026-09-15 to the first caller ever
+       * written against this module.
+       *
+       * The hazard generalises, which is why it is named rather than patched: a
+       * Promise is truthy, so ANY synchronous predicate handed an async
+       * implementation decides on a value it never inspected. It fails closed
+       * here, and in client.mjs's payload scan, only because both demand an
+       * explicit `=== true`. The same mistake under `if (!check(x))` would fail
+       * OPEN and in silence.
+       */
+      if (!resolved && answer && typeof answer.then === 'function') {
+        errors.push(
+          'resolveSha returned a Promise: this contract is SYNCHRONOUS and compares the '
+          + 'answer to true, so an async resolver can never satisfy it. Resolve the sha '
+          + 'before calling and pass a plain boolean predicate.',
+        );
+      } else if (!resolved) {
         errors.push(`replacement_head_sha "${String(rec.replacement_head_sha).slice(0, 12)}" does not resolve to a commit`);
       }
     }
