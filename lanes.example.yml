@@ -1,0 +1,21 @@
+# Lane ownership for the social-sparks repo.
+# First match wins, so order matters. Paths not listed here are unclaimed:
+# the bridge reports them as shared, and Step 2 hooks will lock them by default.
+
+release:
+  - "supabase/migrations/**"
+  - ".github/workflows/**"
+  - "vercel.json"
+
+onboarding:
+  - "src/lib/merchantPhone.server.ts"
+  - "src/app/(onboarding)/**"
+
+messaging:
+  - "scripts/check-gates-*.mjs"
+  - "scripts/reply-*.ts"
+  - "src/lib/reply/**"
+  - "src/lib/outbound/**"
+
+cloner:
+  - "src/lib/cloner/**"

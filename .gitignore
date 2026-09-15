@@ -1,0 +1,73 @@
+# Agent Bridge — what must never enter version control.
+#
+# This tool's whole job is reporting on other people's repositories, so it holds
+# a machine secret and a live picture of where an operator's work lives. Both
+# are the sort of thing that reads as harmless until it is pushed.
+#
+# Runtime state lives OUTSIDE this tree by design -- src/config.mjs resolves
+# HOME to AGENTBRIDGE_HOME or ~/.agentbridge -- so the rules below are a belt
+# on top of braces. They matter because AGENTBRIDGE_HOME can legitimately be
+# pointed at a directory inside a checkout during development, and that is
+# exactly when somebody commits their own machine secret by accident.
+#
+# Versioned here: bridge CODE and lane-policy SCHEMA.
+# Never versioned: live session state, credentials, machine identity.
+
+# ── dependencies ────────────────────────────────────────────────────────────
+node_modules/
+
+# ── machine secrets, credentials, runtime state ─────────────────────────────
+# .agentbridge/ holds config.json (the sealed-or-plaintext machine secret) and
+# registry.json (every registered agent's worktree path -- a map of an
+# operator's machine). Both are per-machine and neither is shareable.
+.agentbridge/
+**/.agentbridge/
+config.json
+registry.json
+*.secret
+*.key
+*.pem
+.env
+.env.*
+
+# A DEGRADED init writes the machine secret in PLAINTEXT and says so loudly.
+# If that file is ever produced inside a checkout it must not be committable.
+*.plaintext
+secret.json
+
+# ── heartbeat / session state ───────────────────────────────────────────────
+heartbeat*.json
+session*.json
+state.json
+*.state
+
+# ── locks ───────────────────────────────────────────────────────────────────
+# Mutex files and the bridge's own lock dirs. A committed lock is a lock nobody
+# can clear.
+*.lock
+locks/
+.locks/
+
+# ── logs ────────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+
+# ── generated temp / test repositories ──────────────────────────────────────
+# Tests create scratch git repos via mkdtemp() in the OS temp dir, so these
+# normally never appear here. They are listed because a test run with a
+# redirected temp dir would drop them in the working tree, and a committed
+# fixture repo is both large and confusing.
+ab-*/
+tmp/
+.tmp/
+scratch/
+fixtures/generated/
+
+# ── editor / OS noise ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# NOTE: package-lock.json is deliberately NOT ignored. It is the lockfile.

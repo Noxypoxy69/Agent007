@@ -1,0 +1,22 @@
+{
+  "name": "agentbridge",
+  "version": "0.2.0",
+  "description": "Read-only coordination plane for multi-agent Git worktrees. Step 1: heartbeat + ChatGPT-readable state.",
+  "type": "module",
+  "bin": {
+    "agentbridge": "./bin/agentbridge.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "bridge": "node bridge/server.mjs",
+    "mcp:stdio": "node mcp/stdio.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pg": "^8.11.0",
+    "zod": "^4.0.0"
+  }
+}
