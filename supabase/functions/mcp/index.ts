@@ -226,15 +226,15 @@ function coordinatorStore(label) {
       if (!verdict.ok) return { ok: false, errors: verdict.errors };
 
       /*
-        * THE WRITE REVALIDATES WHAT THE GUARD JUDGED.
-        *
-        * canAssign ran against rows fetched in an EARLIER request. Without a
-        * state predicate here, two coordinators both read "runnable", both
-        * pass, and both write -- last writer wins, silently, across a window as
-        * wide as a network round trip. Raised by code-d; structural, not
-        * probabilistic, because a write with no predicate cannot refuse a stale
-        * decision under any interleaving.
-        */
+       * THE WRITE REVALIDATES WHAT THE GUARD JUDGED.
+       *
+       * canAssign ran against rows fetched in an EARLIER request. Without a
+       * state predicate here, two coordinators both read "runnable", both
+       * pass, and both write -- last writer wins, silently, across a window as
+       * wide as a network round trip. Raised by code-d; structural, not
+       * probabilistic, because a write with no predicate cannot refuse a stale
+       * decision under any interleaving.
+       */
       const rec = assignmentRecord(task, resolved, { by: label, at: now });
       const landed = writeLanded(
         await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.assign), rec),
