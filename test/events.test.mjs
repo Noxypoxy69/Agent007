@@ -125,22 +125,21 @@ test('an assignment event identifies the task without describing the work', () =
    * alone, and the outbox is at-least-once by construction, so an event body is
    * never trustworthy.
    *
-   * A LEASE TOKEN IS NOT A DESCRIPTION OF THE WORK. It is a CREDENTIAL, and it
-   * is the one thing that cannot be re-read from the authority by the process
-   * that needs it: the token is minted in the coordinator's assign, and the
-   * worker holds a registration token that the MCP read surface 401s. Without
-   * it, /return refuses every hand-back and the loop cannot close. See
-   * docs/lease-interface.md and test/leaseTokenIsDelivered.test.mjs.
+   * IT WENT RED ONCE FOR A LEASE TOKEN, AND THE TOKEN WAS TAKEN BACK OUT.
+   * 0f47999 added it; /task replaced that route. The reasoning, kept because
+   * somebody will propose it again: a credential does not belong in an
+   * at-least-once, cursor-driven feed that can deliver the same event twice or
+   * late, and an event carrying one is an event that is ALMOST enough to act
+   * on. The worker must call /task regardless, because this event is
+   * deliberately not sufficient — so the token there was redundant, not
+   * convenient. See src/ownWork.mjs and docs/lease-interface.md.
    *
-   * So the deepEqual is KEPT, not loosened — it still pins the exact shape, so
-   * the next field somebody adds still breaks this test and still has to argue
-   * for itself here. It gained one key, and the "does not describe the work"
-   * assertions below got stronger rather than weaker.
+   * The deepEqual pins the exact shape, so the next field somebody adds breaks
+   * this test and has to argue for itself here. That is the point of it.
    */
   const [e] = evs({ tasks: [task()] });
   assert.deepEqual(e, {
     kind: 'assigned', at: T(5), task_id: 't1', lane_id: 'agentbridge', repo_id: 'agentbridge',
-    lease_token: null,
   });
 
   // Nothing here may let a worker act without reading the task first.

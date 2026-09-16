@@ -6,6 +6,7 @@ import {
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
+  ownTask, ownTasks,
 } from './_shared.js';
 
 /**
@@ -1286,6 +1287,106 @@ Deno.serve(async (request) => {
    * is long enough that a waiting worker is effectively instant and short
    * enough that a wedged client releases it without anyone intervening.
    */
+  /**
+   * /task — A WORKER READS ITS OWN WORK, AND ITS OWN FENCING TOKEN.
+   *
+   * ═══ THE OMISSION THIS CLOSES ═══
+   *
+   * `eventsFor` emits an assignment and says, in its own comment, that it is
+   * "enough to know WHICH task, never enough to act without reading it". That
+   * is correct: the outbox is at-least-once by construction, so an event body
+   * is never trustworthy and the worker must re-read the authority.
+   *
+   * There was nowhere to read it from. /wait returns events, /register is
+   * registration state, /return is write-only, and the MCP surface 401s a
+   * registration token. A worker was told which task it held, told to read it
+   * before acting, and could do neither.
+   *
+   * ═══ WHY THE LEASE TOKEN COMES FROM HERE AND NOT FROM THE EVENT ═══
+   *
+   * c8's argument, and it changed a decision already committed at 0f47999,
+   * which put the token on the assigned event instead. That version worked and
+   * this one is better, for three reasons that only became visible once both
+   * existed:
+   *
+   *   THE WORKER MUST CALL THIS ANYWAY. The event is deliberately not
+   *   sufficient to act on, so the second call is not a cost this avoids -- it
+   *   is a call that always happens. Putting the token on the event made it
+   *   redundant rather than convenient.
+   *
+   *   A CREDENTIAL DOES NOT BELONG IN A REPLAYABLE FEED. Events are
+   *   at-least-once and cursor-driven; the same event can arrive twice, or
+   *   late. This is a point-in-time authenticated read that returns the CURRENT
+   *   token or nothing.
+   *
+   *   IT ERODED THE DOORBELL. An event carrying a credential is an event that
+   *   is ALMOST enough to act on, and "almost enough" is the property the
+   *   doorbell design exists to refuse.
+   *
+   * ═══ THE GUARD IS ownTask/ownTasks IN src/ownWork.mjs ═══
+   *
+   * Not here. index.ts cannot be imported by the suite, so a guard written in
+   * it is a guard nobody has watched fail -- which is exactly where
+   * confirm_proposal sat while it threw on every call for its whole life. The
+   * scope rule, the field list and the "not found and not yours are the same
+   * answer" behaviour are all tested in test/ownWork.test.mjs.
+   *
+   * THE SESSION IS RESOLVED FROM THE REGISTRY, never taken from the body, for
+   * the same reason /wait does it: a session that never checked in has no work
+   * to read. The registration token is shared across workers, so the identity
+   * that matters is the assignment itself -- which only a coordinator could
+   * have arranged.
+   */
+  if (path === '/task') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let taskLabel = null;
+    try {
+      taskLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!taskLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const claimed = typeof body?.session_id === 'string' ? body.session_id.trim() : '';
+    if (!claimed) return json({ error: 'invalid_request', detail: 'session_id is required' }, 400);
+
+    const regs = await get('session_registrations?select=*');
+    const me = regs.find((r) => r?.session_id === claimed);
+    if (!me) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${claimed}" is not registered; register before reading work`,
+      }, 409);
+    }
+
+    const rows = await get('tasks?select=*');
+    const wanted = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+
+    if (wanted) {
+      const task = ownTask(rows, { task_id: wanted, session_id: me.session_id });
+      /*
+       * NOT FOUND AND NOT YOURS ARE THE SAME 404, deliberately. Splitting them
+       * would let a worker enumerate which task ids exist by watching for a 404
+       * versus a 403, and the caller does nothing differently either way.
+       */
+      if (!task) return json({ error: 'no-such-task', detail: wanted }, 404);
+      return json({ ok: true, task });
+    }
+
+    /*
+     * NO task_id MEANS "WHAT AM I HOLDING". A worker restarting after a crash
+     * has lost its cursor with the process, so there is no event to replay --
+     * without this it sits idle while its lease runs down on work nobody else
+     * can take until the reaper frees it.
+     */
+    return json({ ok: true, tasks: ownTasks(rows, { session_id: me.session_id }) });
+  }
+
   if (path === '/wait') {
     if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
 

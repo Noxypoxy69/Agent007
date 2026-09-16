@@ -1,142 +1,163 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { eventsFor as srcEventsFor } from '../src/events.mjs';
-import { eventsFor as depEventsFor } from '../supabase/functions/mcp/_shared.js';
-import { actionableEvent } from '../src/workerLoop.mjs';
+import { eventsFor as depEventsFor, ownTask as depOwnTask } from '../supabase/functions/mcp/_shared.js';
+import { ownTask, ownTasks } from '../src/ownWork.mjs';
+import { actionableEvent, nextAction, ACTION } from '../src/workerLoop.mjs';
 
 /**
- * THE TOKEN REACHES THE HOLDER, AND NOBODY ELSE.
+ * THE TOKEN REACHES THE HOLDER BY EXACTLY ONE ROUTE.
  *
- * ═══ THE GAP THIS CLOSES ═══
+ * ═══ THE GAP, AND THE ROUTE THAT CLOSED IT ═══
  *
  * `/return` requires a `lease_token` and has no fallback — correctly, because a
- * path that accepts a return without one is the path every zombie takes by
- * omitting a field. But NOTHING DELIVERED ONE. A worker could be assigned work
- * and then be structurally unable to hand it back, so the loop could not close.
+ * path accepting a return without one is the path every zombie takes by
+ * omitting a field. Nothing delivered one, so a worker could be assigned work
+ * and be structurally unable to hand it back. Found by c8 building the client
+ * half; recorded in docs/lease-interface.md.
  *
- * Found by c8 building the client half, who then proved the fix meetable rather
- * than proposing it. Recorded in docs/lease-interface.md.
+ * ═══ IT WAS DELIVERED ON THE EVENT FIRST, AND THAT WAS TAKEN BACK OUT ═══
  *
- * The token is minted in the COORDINATOR's assign. The worker is a different
- * process, possibly on a different machine, holding a REGISTRATION token that
- * reaches only /wait, /register and /return — the MCP read surface 401s it. So
- * the assigned event is the one channel that crosses from the authority to the
- * holder.
+ * 0f47999 put the token on the assigned event. It worked. c8 then argued for
+ * /task instead and the argument is better, so this file now asserts the
+ * reverse of what it originally did — deliberately, and the reasoning is kept
+ * because somebody will propose the event route again:
  *
- * ═══ WHY THIS FILE IS MOSTLY ABOUT WHO CANNOT SEE IT ═══
+ *   THE WORKER MUST CALL /task ANYWAY. The event is deliberately not sufficient
+ *   to act on, so the read is not a cost the event route avoided; it is a call
+ *   that always happens. The token on the event was redundant, not convenient.
  *
- * Putting a credential in an event is the kind of change that is correct
- * exactly as long as its scope is, so the scope is what gets asserted — in both
- * directions, and against the deployed splice as well as the source. The
- * argument that makes it safe is that the DELIVERY scope and the FENCING scope
- * are the same scope: `eventsFor` already skips every task whose
- * `assigned_session` is not this caller's.
+ *   A CREDENTIAL DOES NOT BELONG IN A REPLAYABLE FEED. Events are at-least-once
+ *   and cursor-driven: the same one can arrive twice, or late, carrying a
+ *   credential that may no longer be current. /task answers with the token only
+ *   to the session that still holds the task, at the moment it asks.
  *
- * If that ever stops being true, this is a credential broadcast.
+ *   AND IT ERODED THE DOORBELL. An event carrying a credential is ALMOST enough
+ *   to act on, which is the exact property the design refuses.
+ *
+ * So there are two assertions here, and both matter: the token DOES reach the
+ * holder, and it does NOT reach it the other way. One route, not two — because
+ * a credential available from two places is two places to audit, and they will
+ * disagree the first time somebody changes one.
  */
 
 const AT = '2026-09-16T01:00:00.000Z';
 
 const assigned = (over = {}) => ({
   task_id: 't1', state: 'assigned', assigned_session: 's-me', assigned_at: AT,
-  lease_token: 'tok-me', lane_id: 'lane-a', repo_id: 'repo-a', ...over,
+  lease_token: 'tok-me', lease_expires_at: '2026-09-16T01:15:00.000Z', leased_at: AT,
+  lane_id: 'lane-a', repo_id: 'repo-a', allowed_paths: ['src/a.mjs'], ...over,
 });
 
-const ask = (tasks, session_id = 's-me') =>
+const evs = (tasks, session_id = 's-me') =>
   srcEventsFor({ tasks, messages: [], agent_id: 'code-b', session_id });
 
-// ── delivery ───────────────────────────────────────────────────────────────
+// ── the route that delivers ────────────────────────────────────────────────
 
-test('THE HOLDER IS TOLD ITS TOKEN — without this the loop cannot close', () => {
-  const [ev] = ask([assigned()]);
-  assert.equal(ev.kind, 'assigned');
-  assert.equal(ev.lease_token, 'tok-me',
+test('THE HOLDER GETS ITS TOKEN FROM /task — without this the loop cannot close', () => {
+  const task = ownTask([assigned()], { task_id: 't1', session_id: 's-me' });
+  assert.equal(task.lease_token, 'tok-me',
     'the worker was assigned work and given no credential to return it under');
 });
 
-test('the worker runtime actually picks it up off the event', () => {
+test('and the runtime can act on what it gets', () => {
   /*
-   * Delivery is not enough on its own: the consumer has to read it. This is the
-   * hollow-gate shape the repo has produced thirteen times — a field that is
-   * written and never consumed is the reviewer-lease column all over again.
+   * Delivery is not enough on its own — the consumer has to be able to USE it.
+   * A field written and never consumed is the reviewer-lease column again.
    */
-  const [ev] = ask([assigned()]);
-  const out = actionableEvent(ev, { task: null });
-  assert.equal(out.act, true);
-  assert.equal(out.lease_token, 'tok-me', 'the runtime dropped the token it was handed');
+  const task = ownTask([assigned()], { task_id: 't1', session_id: 's-me' });
+  const w = {
+    session_id: 's-me', task,
+    lease: { lease_token: task.lease_token, lease_expires_at: task.lease_expires_at, leased_at: task.leased_at },
+    run: null, pausedTaskIds: [],
+  };
+  assert.equal(nextAction(w, { now: AT }).action, ACTION.START,
+    'the runtime refused to start on a task it had a live token for');
 });
 
-// ── scope, which is the whole safety argument ──────────────────────────────
-
-test('ANOTHER SESSION\'S TOKEN IS NEVER VISIBLE', () => {
+test('a restarted worker recovers the token without any event', () => {
   /*
-   * The delivery scope and the fencing scope must be the SAME scope. If a
-   * caller could see a token minted for somebody else, this stops being a
-   * delivery mechanism and becomes a credential broadcast — and the holder of
-   * a stolen token could return work it never did.
+   * After a crash the cursor is gone with the process, so there is no event to
+   * replay — which is precisely the case the event route could not serve.
    */
+  const mine = ownTasks([assigned(), assigned({ task_id: 't2', assigned_session: 's-other' })],
+    { session_id: 's-me' });
+  assert.deepEqual(mine.map((t) => t.lease_token), ['tok-me']);
+});
+
+// ── the route that must NOT deliver ────────────────────────────────────────
+
+test('THE EVENT CARRIES NO CREDENTIAL', () => {
+  const [ev] = evs([assigned()]);
+  assert.equal(ev.lease_token, undefined,
+    'a credential is back in an at-least-once, replayable feed');
+  assert.ok(!JSON.stringify(ev).includes('tok-me'), 'the token leaked into the event by another name');
+
+  // The fixture must still be producing an event, or this proves nothing.
+  assert.equal(ev.kind, 'assigned');
+  assert.equal(ev.task_id, 't1');
+});
+
+test('so the runtime CANNOT act on the event alone — it must read', () => {
+  /*
+   * The doorbell property, asserted from the consumer's side. The event tells
+   * it which task; holding that task with no token is a refusal to start, so
+   * the only way forward is the authenticated read.
+   */
+  const [ev] = evs([assigned()]);
+  const take = actionableEvent(ev, { task: null });
+  assert.equal(take.act, true);
+  assert.equal(take.lease_token, null, 'the event handed over a credential');
+
+  const w = { session_id: 's-me', task: { task_id: 't1' }, lease: { lease_token: take.lease_token }, run: null };
+  const out = nextAction(w, { now: AT });
+  assert.equal(out.action, ACTION.ABANDON,
+    'the runtime started work holding a task it had no token for');
+  assert.match(out.reason, /nothing could be returned under it/);
+});
+
+// ── scope: the whole safety argument for handing out a credential at all ───
+
+test('ANOTHER SESSION\'S TOKEN IS NEVER VISIBLE, by either route', () => {
   const rows = [
     assigned({ task_id: 't1', assigned_session: 's-me', lease_token: 'tok-me' }),
     assigned({ task_id: 't2', assigned_session: 's-other', lease_token: 'tok-other' }),
-    assigned({ task_id: 't3', assigned_session: null, lease_token: 'tok-orphan' }),
   ];
 
-  const mine = JSON.stringify(ask(rows, 's-me'));
-  assert.match(mine, /tok-me/, 'the fixture stopped delivering anything, so the absences prove nothing');
-  assert.doesNotMatch(mine, /tok-other/, 'another session\'s lease token was disclosed');
-  assert.doesNotMatch(mine, /tok-orphan/, 'an unassigned task\'s token was disclosed');
+  assert.equal(ownTask(rows, { task_id: 't2', session_id: 's-me' }), null);
+  assert.ok(!JSON.stringify(ownTasks(rows, { session_id: 's-me' })).includes('tok-other'));
+  assert.ok(!JSON.stringify(evs(rows, 's-me')).includes('tok-other'));
 
-  // And symmetrically, from the other side.
-  const theirs = JSON.stringify(ask(rows, 's-other'));
-  assert.match(theirs, /tok-other/);
-  assert.doesNotMatch(theirs, /tok-me/);
-});
-
-test('a task with no lease carries an explicit null, not a missing key', () => {
-  /*
-   * The runtime treats "holding a task with no token" as a refusal to start.
-   * An absent key and a null must read the same to it, so the shape is pinned:
-   * a silently missing field is how that guard would be bypassed.
-   */
-  const [ev] = ask([assigned({ lease_token: null })]);
-  assert.equal(ev.lease_token, null);
-  assert.ok('lease_token' in ev, 'the key vanished, so a consumer cannot tell absent from unassigned');
-});
-
-test('only ASSIGNED events carry a token — a cancellation must not', () => {
-  const rows = [{
-    task_id: 't9', state: 'cancelled', assigned_session: 's-me',
-    cancelled_at: AT, lease_token: 'tok-me',
-  }];
-  const out = ask(rows);
-  assert.equal(out.length, 1);
-  assert.equal(out[0].kind, 'cancelled');
-  assert.equal(out[0].lease_token, undefined,
-    'a cancellation handed out a credential for work that no longer exists');
+  // The fixture must still deliver SOMETHING to s-me, or the absences above
+  // are satisfied by delivering nothing at all.
+  assert.equal(ownTask(rows, { task_id: 't1', session_id: 's-me' }).lease_token, 'tok-me');
 });
 
 // ── the splice ─────────────────────────────────────────────────────────────
 
-test('THE DEPLOYED COPY AGREES, including on what it withholds', () => {
+test('THE DEPLOYED COPY AGREES, on both the delivery and the withholding', () => {
   /*
-   * _shared.js is a hand-maintained splice. This one matters more than most:
-   * a drift that dropped the field breaks the loop silently, and a drift that
-   * dropped the session filter discloses credentials. Both directions are
-   * compared.
+   * _shared.js is a hand-maintained splice, and this pair matters more than
+   * most: a drift that dropped ownTask's session check discloses credentials,
+   * and a drift that re-added the token to the event puts one back in the feed.
    */
   const rows = [
     assigned({ task_id: 't1', assigned_session: 's-me', lease_token: 'tok-me' }),
     assigned({ task_id: 't2', assigned_session: 's-other', lease_token: 'tok-other' }),
-    { task_id: 't3', state: 'cancelled', assigned_session: 's-me', cancelled_at: AT, lease_token: 'x' },
   ];
 
   for (const session_id of ['s-me', 's-other', 's-nobody']) {
     const args = { tasks: rows, messages: [], agent_id: 'code-b', session_id };
-    assert.deepEqual(depEventsFor(args), srcEventsFor(args), session_id);
+    assert.deepEqual(depEventsFor(args), srcEventsFor(args), `events: ${session_id}`);
+    for (const task_id of ['t1', 't2', 'nope']) {
+      assert.deepEqual(depOwnTask(rows, { task_id, session_id }),
+        ownTask(rows, { task_id, session_id }), `ownTask: ${session_id}/${task_id}`);
+    }
   }
 
-  // The fixture must still exercise both halves or the agreement is vacuous.
-  const mine = srcEventsFor({ tasks: rows, messages: [], agent_id: 'code-b', session_id: 's-me' });
-  assert.equal(mine.find((e) => e.kind === 'assigned')?.lease_token, 'tok-me');
-  assert.equal(JSON.stringify(mine).includes('tok-other'), false);
+  // Both halves still exercised, or the agreement is vacuous.
+  assert.equal(depOwnTask(rows, { task_id: 't1', session_id: 's-me' }).lease_token, 'tok-me');
+  assert.equal(depOwnTask(rows, { task_id: 't2', session_id: 's-me' }), null);
+  assert.ok(!JSON.stringify(depEventsFor({ tasks: rows, messages: [], agent_id: 'code-b', session_id: 's-me' }))
+    .includes('tok-'));
 });

@@ -85,34 +85,30 @@ export function eventsFor({ tasks = [], messages = [], agent_id, session_id, sin
         lane_id: t.lane_id ?? null,
         repo_id: t.repo_id ?? null,
         /*
-         * THE LEASE TOKEN, AND THIS IS THE ONLY CHANNEL THAT CAN CARRY IT.
+         * NO LEASE TOKEN HERE, AND THAT IS A REVERSAL OF 0f47999.
          *
-         * `/return` requires a lease_token and has no fallback -- correctly,
-         * because a path accepting a return without one is the path every
-         * zombie takes by omitting a field. But NOTHING DELIVERED ONE, so a
-         * worker could be assigned work and then be unable to hand it back.
-         * The loop could not close. Recorded in docs/lease-interface.md.
+         * The token WAS delivered on this event. It worked, and /task is
+         * better -- c8 made the argument and it changed a decision already
+         * committed:
          *
-         * The token is minted in the COORDINATOR's assign, and the worker is a
-         * different process on a possibly different machine. It holds a
-         * registration token, which reaches only /wait, /register and /return;
-         * the MCP read surface 401s it. So the assigned event is the one thing
-         * that crosses from the authority to the holder.
+         *   THE WORKER MUST CALL /task ANYWAY. This event is deliberately not
+         *   sufficient to act on, so the second call is not a cost the event
+         *   avoided; it is a call that always happens. The token here was
+         *   redundant rather than convenient.
          *
-         * WHY THIS IS NOT A LEAK, WHICH IS THE OBVIOUS OBJECTION. The loop
-         * above already skips every task whose `assigned_session` is not this
-         * caller's, so the only session that can see a token is the one the
-         * lease was minted for. The fencing scope and the delivery scope are
-         * the same scope -- which is why this is a one-field change and not a
-         * new authenticated channel.
+         *   A CREDENTIAL DOES NOT BELONG IN A REPLAYABLE FEED. Events are
+         *   at-least-once and cursor-driven, so the same one can arrive twice
+         *   or arrive late, carrying a credential that may no longer be
+         *   current. /task returns the token only to the session that still
+         *   holds the task, at the moment it asks.
          *
-         * It sits OUTSIDE the "enough to know which task" contract above on
-         * purpose. Everything else in this event is a pointer to be re-read
-         * from the authority; this is a CREDENTIAL. A worker must still read
-         * the task, and may infer nothing from holding the token except that
-         * it is the holder.
+         *   AND IT ERODED THE DOORBELL. An event carrying a credential is an
+         *   event that is ALMOST enough to act on, and "almost enough" is
+         *   precisely what this design refuses. The test below is named
+         *   "identifies the task without describing the work"; a credential is
+         *   not a description, but it was the first thing ever added here that
+         *   made acting-without-reading feel reasonable.
          */
-        lease_token: t.lease_token ?? null,
       });
     }
 
