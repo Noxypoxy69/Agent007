@@ -1,6 +1,15 @@
--- NOT YET APPLIED. The filename is provisional: apply_migration stamps its own
--- version, so read the version back from schema_migrations and rename this file
--- to it before believing the two agree. That trap has fired three times.
+-- APPLIED as 20260916081839, and VERIFIED against the live database.
+--
+-- The version was read back from schema_migrations and this file renamed to
+-- it. apply_migration stamps its own timestamp, so a hand-named file matches
+-- no ledger row. I named it 20260916081500 and was wrong by three minutes,
+-- which is exactly how that trap fires.
+--
+-- All four refusals proved live in an aborting transaction, rolled back:
+--   timeout carrying exit 0      REFUSED
+--   raw output inline            REFUSED
+--   reviewer verdict in the machine column  REFUSED
+--   finished without an ending   REFUSED
 --
 -- ═══ THE ATTEMPT RECORD. ONE ROW, FOUR VERDICTS, NEVER A `status` COLUMN. ═══
 --
