@@ -80,34 +80,46 @@ const COMMANDS =
  * argument, or a redirect. "npm run verify" qualifies; "npm is the package
  * manager" does not.
  *
- * ═══ PRODUCTION DOES NOT ENFORCE THIS, MEASURED 2026-09-16 18:00Z ═══
+ * ═══ A STALE BUILD SERVES THE REMOTE CONNECTOR — MEASURED 2026-09-16 ═══
  *
- * b6 reported that the deployed guard refuses prose this file accepts and that
- * nobody knew what it was enforcing. Characterised by probing the live server,
- * after it refused two real report messages:
+ * I first wrote this block claiming the deployed EDGE FUNCTION had drifted from
+ * this file. That was wrong, it was inferred from black-box probes, and it was
+ * committed. Corrected here from the actual bytes:
  *
- *   "We discussed git yesterday in the meeting, and nobody ran anything"
- *      -> REFUSED live.  executableMatch() here returns null.
- *   The same sentence with "git" replaced by "version control"
- *      -> ACCEPTED live. (message a7aaad7c, 18:00:22Z)
- *   "npm is the package manager" -- the counter-example in the line above
- *      -> REFUSED live.
+ *   The Supabase edge function is at VERSION 21, and the guard region in its
+ *   `_shared.js` is normalised-IDENTICAL to this file, 1132 characters each.
+ *   Running the deployed code against the four probe bodies returns null for
+ *   all four, exactly as this file does. It would have accepted every one.
+ *   `check-deployed-instructions.mjs` also reports INSTRUCTIONS agree, 21
+ *   sentences, both sides -- the first clean result that gate has produced.
  *
- * So the deployed rule is roughly COMMANDS followed by any word, ANYWHERE:
- * neither the ARGUMENT shape below nor the line-start/after-operator position
- * is required. The comment above describes this file; it does not describe what
- * is actually guarding the channel.
+ * SO THE REFUSALS CAME FROM SOMEWHERE ELSE, and the refusal text says where.
+ * The message a remote client receives ends at "nobody audited" and is
+ * byte-identical to the text at f06b57e^. The version in this file and in the
+ * deployed function appends `Matched <rule> on <token>`, added by f06b57e on
+ * 2026-09-16 06:39Z -- the commit that fixed exactly this over-broad rule after
+ * it refused sixteen ordinary paragraphs in one morning.
  *
- * THE SPLICE IS NOT THE DRIFTING HALF, which is worth saying because it is the
- * usual suspect. A full report body was run through both this module and the
- * hand-spliced copy in `supabase/functions/mcp/_shared.js`: BOTH return null.
- * The disagreement is repo-versus-deployment, and the deployed function is
- * version 20, which predates today's merges.
+ * The Cloudflare worker is not the culprit either: it is a pure proxy.
+ * `callDataPlane` forwards the JSON-RPC body to `env.DATA_PLANE_URL` and
+ * returns the response verbatim. It contains no guard at all.
  *
- * IT FAILS SAFE AND IT IS STILL COSTING MESSAGES -- two of mine, and b6's
- * before that. Anyone deploying this module closes it; until then, a report
- * naming a tool by name may simply not arrive, and the sender is told the body
- * looks like a command rather than which word did it.
+ * THEREFORE `DATA_PLANE_URL` RESOLVES TO A BUILD OLDER THAN f06b57e, and it is
+ * not the version-21 function. There is a third serving surface behind the two
+ * in CLAUDE.md's table, its address lives in a Cloudflare secret and in no
+ * file, and it is the one every remote MCP client actually talks to. That is
+ * the same defect the table itself describes: a thing that works and cannot be
+ * found.
+ *
+ * NOTHING IN THIS REPOSITORY NEEDS CHANGING FOR IT. f06b57e is on origin/master
+ * and on work/support-modules. The fix is not missing; it is unshipped to that
+ * endpoint. Repointing the variable or redeploying what it serves closes it,
+ * and neither is a code change.
+ *
+ * Until then a report naming a tool by name may simply not arrive, and the
+ * sender is told the body looks like a command rather than which word did it.
+ * It has cost three messages across two agents.
+ *
  */
 const ARGUMENT = String.raw`(-{1,2}[a-z]|[./~]|[a-z]+:\/\/|["']|\w+\s+-{1,2}[a-z]` +
   // a runner naming a package and then an action: "npx wrangler deploy"

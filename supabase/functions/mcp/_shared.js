@@ -966,13 +966,16 @@ const COMMANDS =
   'rm|curl|wget|chmod|chown|kill|scp|ssh|nc|eval|exec|git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd';
 
 /**
- * WHAT IS LIVE DOES NOT MATCH THIS FILE. Measured 2026-09-16 18:00Z against the
- * deployed function: prose this guard accepts is refused in production, which
- * enforces roughly COMMANDS plus any word anywhere, with no shape and no
- * position required. This copy and `src/coordination.mjs` agree with each other
- * -- the splice is NOT the drifting half -- so the gap closes on the next
- * deploy of this bundle and not by editing either. Full evidence and the four
- * probes are in the header of ARGUMENT in `src/coordination.mjs`.
+ * THIS COPY IS CORRECT AND IS DEPLOYED. Verified 2026-09-16 against edge
+ * function version 21: the guard region here is normalised-identical to the
+ * running bytes, and INSTRUCTIONS agree on all 21 sentences. An earlier note in
+ * this spot claimed the opposite; it was inferred rather than read, and it was
+ * wrong.
+ *
+ * THE STALE BUILD IS BEHIND THE WORKER'S `DATA_PLANE_URL`, which is neither
+ * this function nor the worker (a pure proxy). Its refusals are byte-identical
+ * to the text at f06b57e^. Full evidence in the header of ARGUMENT in
+ * `src/coordination.mjs`.
  *
  * Command-SHAPED, not merely command-adjacent: a flag, a path, a URL, a quoted
  * argument, or a redirect. "npm run verify" qualifies; "npm is the package

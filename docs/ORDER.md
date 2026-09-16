@@ -31,7 +31,16 @@ checked it against the live function. Read the deployed source; a report about
 production ages the moment somebody deploys.*
 
 **0b. What is actually live, measured against the platform's own copy.**
-Version 20 is byte-identical to `origin/code-b/fifth-hosted-path` at `bb899fc`
+*Re-measured 2026-09-16 ~18:10Z: the edge function is now at **VERSION 21**, not
+20, and `check-deployed-instructions.mjs` reports **INSTRUCTIONS agree, 21
+sentences, both sides identical** — the first clean result that gate has ever
+produced. "Production has never matched the repo" is no longer true of the edge
+function. It IS still true of a third surface: the Cloudflare worker is a pure
+proxy to `DATA_PLANE_URL`, and whatever answers there is running a build older
+than `f06b57e` (06:39Z). That endpoint's address is in a Cloudflare secret and
+in no file. See the ARGUMENT header in `src/coordination.mjs`.*
+
+Version 20 was byte-identical to `origin/code-b/fifth-hosted-path` at `bb899fc`
 in both `index.ts` and `_shared.js`. So production DOES correspond to a commit —
 better than this morning's reading, where the outage looked like it had shipped
 from an uncommitted tree; the fix was committed to that branch.
