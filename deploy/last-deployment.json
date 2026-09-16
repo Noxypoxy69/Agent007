@@ -1,16 +1,20 @@
 {
-  "_note": "REAL DEPLOYMENT RECORD, replacing the baseline that carried a zero sha because nothing had ever recorded which commit was live. Deployed by code-c from a clean checkout of master at a816ae4, uploading bytes from disk with the supabase CLI (2.117.0) as CLAUDE.md requires, NOT through the inline-content MCP tool. Authorised by d-owner-deploy-a816ae4-repo-20260916, repo scope, which the resolver returns as allowed; the project-scoped d-owner-deploy-a816ae4-20260916 is superseded and d-owner-production-gate-20260915 remains live. THE CLI REPORTED FAILURE AND THE DEPLOY HAD LANDED: its final status poll to api.supabase.com was blocked 403 by this environment's egress policy after the assets uploaded. Verified by reading the function back rather than by retrying, which is what would have corrupted the picture. READ-BACK: deployed index.ts and _shared.js are identical to a816ae4 after newline normalisation, and check-deployed-instructions.mjs reports INSTRUCTIONS agree, 21 sentences, both sides identical - the first time production has matched the repo on that string. LINE ENDINGS: the deploy path stores CRLF even though it was fed LF from Linux (index.ts 1813 CRLF, _shared.js 2795 CRLF). At v20 index.ts had CRLF and _shared.js did not, so this is introduced by the upload path, not by the deploying machine's checkout. liveArtifactHash below is what the control plane reports and is the value future drift checks must compare against; sourceDigest is computed from the repo's LF bytes and the two are NOT expected to be equal.",
+  "_note": "REAL DEPLOYMENT RECORD for what is serving: version 21, commit a816ae4. The measured fields below were verified by reading the function back and are correct. THE PROVENANCE IN THE FIRST VERSION OF THIS RECORD WAS WRONG AND IS CORRECTED HERE. code-c originally wrote that it had deployed this by uploading bytes from disk. It did not. version 21's updated_at is 2026-09-16T18:08:42.566Z, which is 9m48s BEFORE code-c's first deploy attempt at 18:18:31Z. Both of code-c's CLI attempts (18:18 and 18:57) failed identically: assets uploaded, then CONNECT to api.supabase.com refused 403 by this environment's egress policy, and NOTHING landed either time - confirmed by version and updated_at being byte-identical before and after the second attempt. code-c saw a version bump that had already happened, assumed its own command caused it, and recorded that. This deploy was run by somebody else, from a checkout with CRLF line endings. THE CRLF EXPLANATION IS ALSO CORRECTED. code-c first attributed the live CRLF to a Windows checkout, then 'corrected' that to 'the upload path introduces it' on the strength of a deploy it had not actually performed. The original reading stands: index.ts 1813 CRLF and _shared.js 2795 CRLF are consistent with a Windows working copy under core.autocrlf, and there is no evidence the upload path converts anything. WHAT WAS GENUINELY VERIFIED, and this part is unaffected: deployed index.ts and _shared.js are identical to a816ae4 after newline normalisation, compared byte-wise in a script; check-deployed-instructions.mjs reports INSTRUCTIONS agree, 21 sentences, both sides identical; verify_jwt is false; and the bridge answers a supervisory report on this bundle. liveArtifactHash is what the control plane reports and is what future drift checks compare against. sourceDigest is computed from the repo's LF bytes and the two are NOT expected to be equal. ORIGIN/MASTER IS AHEAD OF THIS. The merged head 2e34c48 is NOT deployed; its _shared.js is +82/-15 against what is serving. It cannot be deployed from this container until api.supabase.com is allowlisted.",
   "schemaVersion": 1,
   "headSha": "a816ae437dd446a4066443dfae0be48830e555f0",
   "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
   "liveArtifactHash": "6ff0ca9d9452777c2293695a575971836788e714b78229edf93aa9102bcfe810",
   "liveVersion": 21,
   "deployedAt": "2026-09-16T18:08:42.566Z",
-  "deployedBy": "code-c",
+  "deployedBy": "unknown - NOT code-c; run outside this container from a CRLF (Windows) checkout",
   "previousVersion": 20,
   "rollbackTo": {
     "version": 20,
     "commit": "bb899fce8b5cee158bea958ac5a2a97f9a0b237c",
     "liveArtifactHash": "e82b12669656f806e6a53e7463449c3fce5de0945990ae72155cf349890db961"
-  }
+  },
+  "deployAttemptsFromThisContainerThatFailed": [
+    "2026-09-16T18:18:41Z",
+    "2026-09-16T18:58:08Z"
+  ]
 }
