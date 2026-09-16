@@ -23,12 +23,13 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile as readBytes, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { run } from '../src/exec.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
 import { createWorkspaceManager } from '../src/workspaceManager.mjs';
 import { runAttempt } from '../src/attemptPipeline.mjs';
 import { createLedger } from '../src/tokenTelemetry.mjs';
+import { createCas, digestOf } from '../src/cas.mjs';
 
 const args = process.argv.slice(2);
 const flag = (name) => {
@@ -84,8 +85,49 @@ const fs = {
 const workspaces = createWorkspaceManager({ root, git, fs });
 const executor = createLocalExecutor();
 
+/*
+ * A CONTENT-ADDRESSED STORE UNDER THE ROOT, so a spilled log is retrievable
+ * rather than merely truncated. Without a sink the compact form is honest but
+ * useless -- it says "incomplete" and the bytes are gone. With one, the whole
+ * output survives the workspace it came from, which matters most in exactly the
+ * case where the workspace is about to be quarantined or destroyed.
+ *
+ * Keyed by content, so two attempts producing the same log store it once. The
+ * namespace is the repository, because cross-project reuse should be impossible
+ * by construction rather than by a check somebody has to remember to write.
+ */
+const casDir = `${root}/.cas`;
+
+/*
+ * THE FILENAME IS A HASH OF THE KEY, NOT A SCRUBBED VERSION OF IT.
+ *
+ * The first version of this replaced unsafe characters with underscores, which
+ * quietly undid the isolation the store above enforces: a key under the
+ * namespace "project:a" and one under a namespace literally called "project_a"
+ * collapse to the same filename. Content verification does not catch that,
+ * because the bytes hash correctly -- so the second namespace could confirm the
+ * first one's content exists, which is the existence leak namespacing is for.
+ *
+ * Hashing the whole key is injective enough to make that impossible and needs no
+ * rules about which characters a namespace may contain.
+ */
+const pathFor = (key) => `${casDir}/${digestOf(key).hash}`;
+const cas = createCas({
+  namespace: task.namespace ?? 'default',
+  store: {
+    // A read that fails for any reason is a MISS. That is safe for a cache: the
+    // caller recomputes. It must never be an error that stops an attempt.
+    get: async (key) => readBytes(pathFor(key)).catch(() => null),
+    set: async (key, bytes) => {
+      await mkdir(casDir, { recursive: true });
+      await writeFile(pathFor(key), bytes);
+    },
+  },
+});
+
 const io = {
   now: () => Date.now(),
+  sink: cas.sink,
   git: {
     headSha: async () => {
       const r = await run('git', ['rev-parse', 'HEAD'], { cwd: workspacePath, timeoutMs: 30_000 });
@@ -148,7 +190,12 @@ process.stdout.write(
       },
       fingerprint: result.fingerprint,
       disposal: result.disposal,
-      stdout: { kind: result.stdout.kind, complete: result.stdout.complete, bytes: result.stdout.bytes },
+      stdout: {
+        kind: result.stdout.kind,
+        complete: result.stdout.complete,
+        bytes: result.stdout.bytes,
+        ref: result.stdout.ref ?? null,
+      },
       /*
        * STDERR TRAVELS WITH THE VERDICT, not just into the quarantine directory.
        * The first real run of this printed a clean rejection and nothing about
