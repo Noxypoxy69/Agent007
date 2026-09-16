@@ -105,14 +105,43 @@ node scripts/check-edge-deploy.mjs <downloaded-dir> supabase/functions/mcp
 
 Do not trust the deploy's own success. It reported success for the no-op above.
 
+**THE UNAUTHENTICATED 401 CHECK THIS FILE USED TO GIVE YOU WAS WRONG.** It said
+a 401 proves the route exists. It does not. Found by code-d, and the code says
+why: the router has **no 404 fallback**. An unmatched path falls through to the
+MCP surface at the bottom of `supabase/functions/mcp/index.ts`, which looks the
+bearer up in `coordinator_tokens` then `reader_tokens` and answers 401 when it
+is in neither. So a route that has never existed returns 401, and that check
+passed before the deploy exactly as happily as after it.
+
+Use an authenticated probe with a **negative control** on a path that cannot
+exist. Both need a *registration* token — it is in neither token table, so the
+fall-through answers 401 for it, which is what makes the control meaningful.
+
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -X POST \
-  https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp/review/claim \
-  -H 'content-type: application/json' -d '{}'
+TOKEN=<a registration token>
+BASE=https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp
+
+# the real route
+curl -s -o /dev/null -w 'review/claim   %{http_code}\n' -X POST "$BASE/review/claim" \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"task_id":"__probe","reviewer_session":"__probe"}'
+
+# the negative control: a path that does not and will not exist
+curl -s -o /dev/null -w 'no-such-route  %{http_code}\n' -X POST "$BASE/no-such-route" \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}'
 ```
 
-- **401** → deployed. The route exists and refuses an unauthenticated caller.
-- **404** → not deployed. The routes are not there; check the branch.
+- `review/claim` **409** and `no-such-route` **401** → deployed. The 409 is
+  `unknown-session`: the request authenticated against `registration_tokens`,
+  reached the handler, read the registry and refused a session that is not
+  there. Only the deployed route can produce it.
+- both **401** → **not deployed.** `review/claim` fell through to the same
+  place `no-such-route` did.
+- `review/claim` **401** and the control something else → stop. Your token is
+  not a registration token and neither line means what this list says.
+
+The control is the part that matters. Without it you cannot tell "the route
+answered" from "every path answers that" — which is the whole bug above.
 
 Then confirm the version moved and JWT verification is still off:
 
