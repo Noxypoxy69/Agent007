@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { codeOnly } from './helpers/codeOnly.mjs';
 import {
   TASK_WRITE_EXPECTS, ASSIGNABLE_FROM, ACCEPTABLE_FROM, TERMINAL,
 } from '../supabase/functions/mcp/_shared.js';
@@ -45,7 +46,39 @@ import {
  */
 
 const INDEX = fileURLToPath(new URL('../supabase/functions/mcp/index.ts', import.meta.url));
-const source = await readFile(INDEX, 'utf8');
+const raw = await readFile(INDEX, 'utf8');
+
+/**
+ * EVERY ASSERTION BELOW READS CODE. Nothing here may be satisfied by prose.
+ *
+ * THIS FILE HAD THE HOLE IT WAS WRITTEN TO PREVENT, and it was proved by
+ * mutation rather than noticed by reading: strip assign's state predicate, add
+ * a COMMENT saying "now routed through claim_task", and the per-site check
+ * below went GREEN. The guard accepted the identifier anywhere in the file, and
+ * a comment is anywhere.
+ *
+ * Latent while claim_task appears nowhere in the entrypoint — and it activates
+ * exactly when d-lease-wiring lands, because that change introduces both the
+ * call AND the comments explaining it. The gate would have started lying at the
+ * moment it started mattering.
+ */
+const source = codeOnly(raw);
+
+test('POSITIVE CONTROL: this is the real entrypoint, and it is not empty', () => {
+  /*
+   * A negative needs the positive first, and almost everything here is a
+   * negative. Without this, "no bare task PATCH found" passes just as happily
+   * against an empty string, a moved file, or a stripper that ate the whole
+   * file — and the strongest assertions in this suite are the ones that would
+   * go quiet first.
+   */
+  assert.ok(raw.length > 5000, `index.ts is ${raw.length} bytes; that is not the real file`);
+  assert.ok(source.includes('coordinatorStore'), 'this is not the coordinator entrypoint');
+  assert.ok(
+    source.length === raw.length,
+    'blanking changed the file length, so every offset-based assertion here is now misaligned',
+  );
+});
 
 /** Every `const x = writeLanded(` in the shipped file, with the name bound. */
 const guardedWrites = () => [...source.matchAll(/const\s+(\w+)\s*=\s*writeLanded\(/g)];
@@ -114,7 +147,23 @@ test('EACH WRITE IS GUARDED IN THE SPECIFIC WAY THAT WRITE SHOULD BE', () => {
 
   for (const [key, allowed] of Object.entries(PERMITTED)) {
     const byPredicate = regions.some((r) => r.region.includes(`TASK_WRITE_EXPECTS.${key}`));
-    const byRpc = allowed.rpc ? new RegExp(`\\b${allowed.rpc}\\b`).test(source) : false;
+    /*
+     * THE CALL SHAPE, NOT THE NAME. `\bclaim_task\b` is satisfied by the
+     * identifier appearing anywhere — and with comments now blanked that is a
+     * far smaller surface, but it would still accept a string constant, a table
+     * name or a key in an unrelated object. Requiring `rpc('claim_task'` means
+     * only an actual invocation can satisfy it.
+     *
+     * Deliberately file-wide rather than scoped to the function: slicing by
+     * anchor buys precision and costs a rename becoming a silent pass, which
+     * needs its own anchor-existence control to be safe. leaseWiring.test.mjs
+     * carries that machinery; duplicating it here would be a second copy of the
+     * thing most likely to drift. The comment-blanking above is what closes the
+     * hole that was actually demonstrated.
+     */
+    const byRpc = allowed.rpc
+      ? new RegExp(`rpc\\(\\s*['"\`]${allowed.rpc}['"\`]`).test(source)
+      : false;
 
     if (allowed.rpc) {
       assert.ok(
