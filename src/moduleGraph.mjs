@@ -54,6 +54,10 @@ export const DEFAULT_ENTRY_POINTS = [
   'bin/agentbridge-precommit.mjs',
   'bin/agentbridge-preflight.mjs',
   'bin/agentbridge-attempt.mjs',
+  /* A human runs this before hand-deploying the edge function. It is an entry
+   * point in the only sense that matters here: something outside the graph
+   * invokes it, so what it imports is shipped rather than orphaned. */
+  'bin/agentbridge-deploy-check.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
