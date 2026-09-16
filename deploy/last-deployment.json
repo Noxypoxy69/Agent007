@@ -6,8 +6,8 @@
   "liveArtifactHash": "5e3e96909b070a176e55242e273c65575a78409cbe77dd499a34be9aff3519cb",
   "liveVersion": 22,
   "deployedAt": "2026-09-16T19:13:07.171Z",
-  "deployedBy": "Danny, from his desktop checkout; confirmed directly, not inferred from a version bump",
-  "verifiedBy": "code-b — read the live artifact back and hashed it against the working tree 2026-09-16T19:2xZ",
+  "deployedBy": "code-d (danny-win-d1), from the agentbridge clone at commit 2e34c48, by npx supabase functions deploy --no-verify-jwt at 19:13:07.171Z. NOT Danny from a desktop checkout: the record this corrects said so, and that is the same misattribution the record above it was written to fix. Danny AUTHORISED it in chat (\"deploy 2e34c48 too but audit it first\") and code-d recorded that as d-owner-deploy-2e34c48-20260916 at 19:12:46Z, twenty-one seconds before the upload. Danny DID run the version 21 deploy himself from this session, which is probably where the confusion came from.",
+  "verifiedBy": "code-b read the live artifact back and hashed it against the working tree, independently of the deployer — that check stands and is the stronger half of this record. code-d ran the pre-deploy gate (DEPLOYABLE, drift none vs v21/6ff0ca9d), the suite (1449 tests, 1445 pass, 0 fail, 4 skipped), the orphan gate, and the post-deploy smoke (reader tools/list 200 with 12 tools; /task /renew /register answer 400 validation rather than 404; unauthenticated control 401; verify_jwt still false).",
   "previousVersion": 21,
   "rollbackTo": {
     "version": 21,
@@ -18,5 +18,7 @@
     "note": "the record this replaces claimed version 21 was live; version 22 had already been serving for 13 minutes when it was pushed",
     "liveVersion": 21,
     "deployedAt": "2026-09-16T18:08:42.566Z"
-  }
+  },
+  "headShaNote": "code-d deployed from a working tree at 2e34c48. code-b is right that a functions deploy ships a tree and not a ref, so the commit cannot be proven from the artifact; the artifact directory is byte-identical at 2e34c48 and 04f6e34, so naming either is a claim about bytes. The checkout on disk was 2e34c48.",
+  "auditNote": "AUDITED BEFORE DEPLOY AND FOUND BEHAVIOURALLY INERT. index.ts was byte-identical to live v21, so the entrypoint did not change. Every export changed in _shared.js — ACTORS, canonicalActor, inboxNames, messagePreamble, knownActorIds, validateSessionId — is absent from the 30 names index.ts imports from it, so no reachable code path changed. Shipped for baseline hygiene, not function. One cosmetic defect found and left for its author: the new validateSessionId doc comment cites d-owner-identity-b6-20260916 (\"b6 is code-b\"), which is SUPERSEDED by d-owner-identity-b6-20260916b (\"b6 is code-a\") — the same stale-citation mistake the commit above it fixes in the table. Code and tests follow the active decision, so nothing is broken. validateSessionId also has zero production callers and ships as dead code. Separately: this deploy does NOT start attempt recording — startAttempt, finishAttempt and attemptRecord appear zero times in both artifact files; the writer is in src/attemptRecord.mjs on the worker path."
 }
