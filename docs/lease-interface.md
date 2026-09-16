@@ -10,6 +10,65 @@ source, and every section below is a claim B is invited to reject.
 
 ---
 
+> # ⛔ THE TOKEN IS NEVER DELIVERED TO THE SIDE THAT MUST SEND IT
+>
+> **This is a gap in the interface itself, not a note about a branch. Nothing on
+> `code-b/lease-wiring` may deploy until it is closed.**
+>
+> `dfaefd4` made `/return` require `lease_token` and gave it no fallback —
+> correctly, because a path that accepts a return without a token is the one
+> every zombie takes by omitting a field. `a4076c6` then taught
+> `agentbridge return-task --lease <token>` to send one.
+>
+> **Neither commit may ship alone, and together they still do not close the
+> loop**, because nothing ever gives the worker a token to send. Deploying
+> either would break `return-task` for every worker: they could claim work and
+> never hand it back, which is strictly worse than the state it was meant to fix.
+>
+> ### Why the worker cannot simply keep it — "cannot", not "should not"
+>
+> Found by c8, verified here against source rather than taken on report:
+>
+> | | |
+> |---|---|
+> | the token is minted in | the **coordinator's** `assign_task` response |
+> | the worker holds | a **registration** token, reaching only `/wait`, `/register`, `/return` |
+> | `/wait` emits (`src/events.mjs:81`) | `{ kind, at, task_id, lane_id, repo_id }` — **no token** |
+> | the MCP read surface | takes coordinator/reader tokens, **401s** a registration token |
+>
+> Coordinator and worker are different processes and nothing carries the token
+> across. Persisting it client-side at assign time therefore works **only while
+> both are the same machine** — the exact assumption the session registry,
+> heartbeats and repo/worktree ids exist to remove. It would pass today and fail
+> silently the first time the system did what it was built for.
+>
+> ### The fix, named and proven meetable
+>
+> **The `assigned` event carries the lease token for the task it names.**
+>
+> - `eventsFor` already filters on `t.assigned_session === session_id`
+>   (`src/events.mjs:77`), so **only the lease holder is told** — the correct
+>   fencing scope, for free.
+> - The `/wait` loop already does `get('tasks?select=*')`, and `lease_token` is
+>   a column on that row (`20260915220139`). **The value is in hand and being
+>   dropped.**
+>
+> c8 proved this rather than proposing it: mutating that one field in turns the
+> coupling gate in `test/leaseWiring.test.mjs` GREEN. So the demand is meetable
+> and the named fix is the right one.
+>
+> ### Why the gate is red and must stay red
+>
+> `test/leaseWiring.test.mjs` fails on purpose, and its failure message names
+> what closes it. Do not skip or delete it. Its client limb is green and its
+> **delivery** limb is red — c8 deliberately let the gate *move* rather than
+> close, because letting it go green once the client had learned to send a
+> credential it cannot acquire would be a control reporting a closed loop that
+> is still open. That is the hollow gate this project has produced thirteen times;
+> see `CLAUDE.md`.
+
+---
+
 ## What each side owns
 
 | | |
@@ -31,8 +90,9 @@ them through the data plane, never by connecting to Postgres directly.
 
 ```
 claim_task(p_task_id, p_agent_id, p_session_id, p_by, p_lease_seconds default 900)
-  -> { ok: true,  task_id, lease_token, lease_expires_at, attempt, renewal }
+  -> { ok: true,  task_id, lease_token, lease_expires_at, attempt }
   -> { ok: false, reason: not-claimable | leased | state | dependency, detail }
+  -> { ok: false, reason: "<a whole sentence>" }        <- NO detail. see below.
 ```
 
 `lease_token` is a **fencing token**, minted fresh on every claim. It is the
@@ -44,10 +104,56 @@ right now" — because retrying is the correct response to both, and telling the
 apart would only invite B to branch on a distinction that does not change what
 it should do.
 
-**A re-claim by the same session holding a live lease is a renewal**, returns
-`renewal: true`, and does **not** increment `attempt`. So a B that forgets
-`renew_lease` and re-claims instead is not punished. Prefer `renew_lease`
-anyway; it is one round trip instead of a full re-validation.
+> #### ⚠ THREE PLACES THIS DOCUMENT DESCRIBED BEHAVIOUR THAT DOES NOT EXIST
+>
+> Found by c8 and code-d reading the shipped SQL against this file; the third is
+> mine and neither of them reached it. Corrected above and recorded here rather
+> than quietly edited away, because **a worker built to the old text would have
+> mis-handled its own retry** and the next person needs to know which way the
+> correction went.
+>
+> **1. There is no `renewal` key.** This file said a same-session re-claim
+> "is a renewal, returns `renewal: true`, and does not increment `attempt`".
+> The string `renewal` appears **zero times** in `claim_task`. A worker
+> checking for it reads `undefined` forever.
+>
+> **2. There is a FIFTH reason, and it is not a slug.** The `p_lease_seconds`
+> bounds check returns the whole sentence `"lease_seconds must be between 30
+> and 86400"` as `reason`, with **no `detail`**. Anything matching `reason`
+> against a slug list mis-handles it. `rpcRefusal` does not assume
+> slug-plus-detail; don't write something that does.
+>
+> **3. A SAME-SESSION RE-CLAIM IS REFUSED, NOT RENEWED — and this is the one
+> that bites.** A successful claim writes `state = 'assigned'`. A re-claim by
+> that same session then skips the `leased` refusal (the
+> `assigned_session is distinct from p_session_id` clause is false) and falls
+> straight into the state check, which refuses `assigned`. So it comes back
+> `reason: 'state'`.
+>
+> That matters because **losing the response to `claim_task` is the ordinary
+> case, not the exotic one** — a dropped connection, a timeout, a restart. This
+> file promised such a worker a free renewal. It gets a refusal that reads like
+> somebody else took the work.
+>
+> `src/leases.mjs` agrees with the SQL here: `canClaim` on an assigned row
+> refuses with the same state message, whoever asks. The two implementations
+> are consistent. It is only this document, and `PROOF 2b` in
+> `test/leases.test.mjs`, that described the renewal behaviour — and that proof
+> could not have caught the drift, because its fixture builds the row as
+> `runnable` with an `assigned_session`, a shape a real claim never produces.
+> Same defect as the expired-lease proof fixed in `66ef896`.
+>
+> **THE DESIGN QUESTION IS STILL OPEN AND IS NOT MINE TO CLOSE.** The original
+> intent — "a worker retrying after a lost response is not a second claimer;
+> refusing it strands the work until the lease expires, for no safety gained" —
+> is good, and the SQL does not implement it. Whether to add a same-session
+> renewal branch to `claim_task` or to tell workers to use `renew_lease` and
+> nothing else is a decision for Danny and code-b, not a thing to patch in
+> while correcting a document. **Until it is decided, the shipped behaviour is
+> the refusal**, and that is what is written above.
+
+Prefer `renew_lease` for renewals. It is one round trip instead of a full
+re-validation, and per item 3 it is currently the **only** thing that renews.
 
 ### 2. Renew
 

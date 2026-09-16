@@ -52,6 +52,88 @@ export async function closeHttp() {
 }
 
 /** Distinguishable outcomes. `unreachable` must never be treated as `absent`. */
+/**
+ * ANY HTTP RESPONSE IS AN ANSWER. `UNREACHABLE` MEANS NOBODY ANSWERED.
+ *
+ * ═══ THE THIRD TIME THIS BUG WAS FOUND IN THIS FILE ═══
+ *
+ * b6 ran `return-task` three times over twenty minutes and got
+ * "the Bridge is unreachable (d-claims-authz-b6)". It reported to Danny that
+ * the Bridge was down. It was not — `wait-for-work` answered the whole time.
+ * What the Bridge actually said was:
+ *
+ *     404  {"error":"no-such-task","detail":"d-claims-authz-b6"}
+ *
+ * b6's tell is the best part of the report and belongs here: **UNREACHABLE
+ * details are "timeout", "no fetch available", "http 500". A detail that is an
+ * IDENTIFIER means the far end answered and formed an opinion about it.**
+ *
+ * ═══ WHY IT KEPT COMING BACK: I FIXED INSTANCES, NOT THE CLASS ═══
+ *
+ * 401 was fixed after b6 found it live. Then 409. Then 400, on a branch. Each
+ * fix was a new `if (res.status === N)` branch bolted onto a ladder whose
+ * FALLBACK still said UNREACHABLE — so every status nobody had been bitten by
+ * yet kept the bug, and 404 walked straight past three fixes.
+ *
+ * And it was never one ladder. There are FOUR call sites in this file, each
+ * with its own `if (!res.ok) return UNREACHABLE`. Every one had the same hole.
+ * Patching a fifth status would have left the other thirty.
+ *
+ * This is rule 8 in CLAUDE.md turned on me: *an adversarial probe bounds
+ * nothing; fix the matcher, not the strings the prober happened to try.* I
+ * wrote that this morning about somebody else's finding.
+ *
+ * ═══ THE RULE, ONCE, FOR EVERY CALL SITE ═══
+ *
+ *   401 / 403   REJECTED    the credential was refused — fix the credential
+ *   other 4xx   REFUSED     the far end understood and said no — read the reason
+ *   5xx         UNREACHABLE it answered but cannot serve — retry may help
+ *   no response UNREACHABLE timeout, abort, no fetch — check the transport
+ *
+ * The specific branches that remain at the call sites are SPECIALISATIONS that
+ * must agree with this function, not alternatives to it. A test asserts they
+ * agree on every status they overlap on, so the ladder cannot drift again.
+ *
+ * @returns null when the response is OK, otherwise the state to report.
+ */
+export async function interpretHttp(res, { credential = 'registration token' } = {}) {
+  if (res.ok) return null;
+
+  let errors = [];
+  let parsed = null;
+  try {
+    const b = await res.json();
+    if (Array.isArray(b?.errors) && b.errors.length) {
+      errors = b.errors;
+      parsed = b.errors.join('; ');
+    } else if (b?.error && b?.detail) {
+      parsed = `${b.error}: ${String(b.detail).slice(0, 200)}`;
+    } else if (b?.detail) {
+      parsed = String(b.detail).slice(0, 200);
+    } else if (b?.error) {
+      parsed = String(b.error).slice(0, 200);
+    }
+  } catch { /* a body we cannot read does not change the STATE */ }
+
+  if (res.status === 401 || res.status === 403) {
+    return { state: HOSTED.REJECTED, detail: `${credential} rejected (${res.status})`, errors };
+  }
+  if (res.status >= 400 && res.status < 500) {
+    return { state: HOSTED.REFUSED, detail: parsed ?? `http ${res.status}`, errors };
+  }
+  /*
+   * 5xx stays UNREACHABLE, and its detail keeps the status in front. The server
+   * answered but cannot serve, so retrying is reasonable and the worker has
+   * nothing to fix -- which is what UNREACHABLE is for. Leading with "http 500"
+   * preserves b6's tell: a detail that is an identifier means a decision.
+   */
+  return {
+    state: HOSTED.UNREACHABLE,
+    detail: parsed ? `http ${res.status}: ${parsed}` : `http ${res.status}`,
+    errors,
+  };
+}
+
 export const HOSTED = {
   NOT_CONFIGURED: 'not-configured',
   OK: 'ok',
@@ -224,7 +306,8 @@ export async function waitForEvents(env = {}, body, { fetchImpl, timeoutMs = 400
       try { detail = (await res.json())?.detail ?? detail; } catch { /* keep it */ }
       return { state: HOSTED.REFUSED, detail };
     }
-    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
 
     const b = await res.json().catch(() => null);
     if (!b || !Array.isArray(b.events)) {
@@ -295,36 +378,8 @@ export async function returnWork(env = {}, body, { fetchImpl, timeoutMs = DEFAUL
       return { state: HOSTED.REFUSED, errors, detail };
     }
 
-    /*
-     * 400 IS AN ANSWER TOO, AND CALLING IT "UNREACHABLE" IS THE MISTAKE THIS
-     * FUNCTION ALREADY FIXED ONCE FOR 401.
-     *
-     * The Bridge replied and said the request was wrong. Now that /return
-     * demands a fencing token, a missing or malformed lease_token is the case
-     * that lands here -- and reporting it as unreachable sends a worker off to
-     * check a network it cannot fix, past the one line of the reply that tells
-     * it what is actually wrong. The detail is passed through verbatim for the
-     * same reason 409's is.
-     */
-    if (res.status === 400) {
-      let detail = 'the Bridge rejected the request';
-      try {
-        const b = await res.json();
-        if (typeof b?.detail === 'string') detail = b.detail.slice(0, 400);
-        else if (b?.errors?.length) detail = b.errors.join('; ');
-      } catch { /* keep the default */ }
-      return { state: HOSTED.REFUSED, errors: [detail], detail };
-    }
-
-    if (!res.ok) {
-      let detail = `http ${res.status}`;
-      try {
-        const b = await res.json();
-        if (b?.errors?.length) detail = b.errors.join('; ');
-        else if (b?.detail) detail = String(b.detail).slice(0, 200);
-      } catch { /* keep the status */ }
-      return { state: HOSTED.UNREACHABLE, detail };
-    }
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
 
     const b = await res.json().catch(() => ({}));
     return { state: HOSTED.OK, task: b?.task ?? null };
@@ -398,7 +453,8 @@ export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs 
       // a token they can.
       return { state: HOSTED.REJECTED, detail: 'reader token rejected (401)' };
     }
-    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+    const answered = await interpretHttp(res, { credential: 'reader token' });
+    if (answered) return answered;
 
     const body = await res.json();
     const text = body?.result?.content?.[0]?.text;
@@ -509,15 +565,8 @@ export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs 
       // the line below returned UNREACHABLE; b6 found it by probing live.
       return { state: HOSTED.REJECTED, detail: 'registration token rejected (401)' };
     }
-    if (!res.ok) {
-      let detail = `http ${res.status}`;
-      try {
-        const body = await res.json();
-        if (body?.errors?.length) detail = body.errors.join('; ');
-        else if (body?.detail) detail = String(body.detail).slice(0, 200);
-      } catch { /* keep the status */ }
-      return { state: HOSTED.UNREACHABLE, detail };
-    }
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
     return { state: HOSTED.OK };
   } catch (e) {
     if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
@@ -552,12 +601,50 @@ function toRegistration(r) {
 }
 
 /**
+ * FIELDS WHERE A DISAGREEMENT MEANS THE TWO REGISTRIES DESCRIBE DIFFERENT
+ * WORKERS, NOT THE SAME ONE FROM DIFFERENT ANGLES.
+ *
+ * Liveness legitimately differs -- the hosted heartbeat is server-stamped and
+ * the local one is not, so one being fresher is normal and says nothing. These
+ * four decide ROUTING. If local thinks a session belongs to `code-b` and hosted
+ * thinks it belongs to `b6`, an assignment goes to one of them and the operator
+ * is looking at the other.
+ */
+export const IDENTITY_FIELDS = Object.freeze(['agent_id', 'lane_id', 'repo_id', 'worktree_id']);
+
+/**
  * Merge local and hosted registrations into one roster.
  *
  * A session present in both is ONE worker, and the hosted row wins on liveness
  * because its heartbeat is server-stamped and therefore the one a second
  * machine can trust. The local row wins on nothing; it is the same worker seen
  * from closer up.
+ *
+ * ═══ BUT A DISAGREEMENT ABOUT IDENTITY IS NOT A MERGE, IT IS A FAULT ═══
+ *
+ * This did `{ ...existing, ...r, origin: 'hosted' }` and nothing else, so hosted
+ * silently overwrote local and the disagreement vanished in the same expression
+ * that created it. Nothing downstream could report what it never saw.
+ *
+ * Found by c8 the way these things always surface -- a WRITE refused:
+ *
+ *     unregister-session -> session_owned_by_another_agent,
+ *                           'social-sparks-app-b6' held by agent 'b6'
+ *
+ * The hosted registry had that session as `b6`; the local store had it as
+ * `code-b`. Both had been wrong about each other for hours, every read was
+ * silently consistent, and the first thing to notice was a refusal at the far
+ * end of an unrelated command.
+ *
+ * TWO SOURCES WITH NO COMPARISON IS NOT TWO SOURCES, IT IS ONE SOURCE AND A
+ * DECOY. The hosted row still wins -- it is the cross-machine authority and
+ * picking the other way would be worse -- but the conflict is now attached to
+ * the row it happened on, so a roster can show it and a person can see it
+ * before a write fails.
+ *
+ * NOT AN EXCEPTION, DELIBERATELY. A roster that throws is a roster nobody can
+ * read during exactly the incident it is describing. The conflict travels as
+ * data and the caller decides how loud to be about it.
  */
 export function mergeRegistrations(local = [], hosted = []) {
   const bySession = new Map();
@@ -568,8 +655,158 @@ export function mergeRegistrations(local = [], hosted = []) {
   for (const r of hosted) {
     if (!r?.session_id) continue;
     const existing = bySession.get(r.session_id);
-    bySession.set(r.session_id, existing ? { ...existing, ...r, origin: 'hosted' } : r);
+    if (!existing) { bySession.set(r.session_id, { ...r, origin: 'hosted' }); continue; }
+
+    /*
+     * COMPARED BEFORE IT IS OVERWRITTEN. Once the spread has run the two values
+     * are one value and the disagreement is unrecoverable, so the check has to
+     * happen here or not at all.
+     *
+     * A field the local row simply does not carry is NOT a conflict -- absence
+     * is not disagreement, and treating it as one would make every partial
+     * local record look like a fault.
+     */
+    const conflicts = IDENTITY_FIELDS
+      .filter((f) => existing[f] != null && r[f] != null && existing[f] !== r[f])
+      .map((f) => ({ field: f, local: existing[f], hosted: r[f] }));
+
+    bySession.set(r.session_id, {
+      ...existing,
+      ...r,
+      origin: 'hosted',
+      ...(conflicts.length ? { conflicts } : {}),
+    });
   }
   return [...bySession.values()].sort((a, b) =>
     String(a.session_id).localeCompare(String(b.session_id)));
+}
+
+/**
+ * ═══ THE THREE ROUTES A WORKER RUNTIME NEEDS, AND WHY THEY WERE MISSING ═══
+ *
+ * A worker holds a REGISTRATION token, which reaches only /register, /wait and
+ * /return. Building the runtime turned up three things it had to do and could
+ * not:
+ *
+ *   READ ITS OWN TASK    the assigned event says "enough to know WHICH task,
+ *                        never enough to act without reading it" — and there
+ *                        was nothing to read from. /task.
+ *   RENEW ITS LEASE      renew_lease existed as a granted SECURITY DEFINER
+ *                        function reachable from no endpoint at all. The
+ *                        default lease is 900s and the default run timeout
+ *                        1800s, so a worker doing a normal task would have lost
+ *                        its lease EVERY TIME. /renew.
+ *   RETURN ITS WORK      /return, which already existed.
+ *
+ * All three configs derive from the register URL for the same reason
+ * returnConfig does: one hosted base, and an override per route for the tests
+ * and for anyone running a split deployment.
+ */
+
+const derived = (env, suffix, override) => {
+  const reg = registrationConfig(env);
+  if (!reg) return null;
+  const raw = env[override];
+  if (typeof raw === 'string' && raw.trim()) return { url: raw.trim(), token: reg.token };
+  if (!/\/register$/.test(reg.url)) return null;
+  return { url: reg.url.replace(/\/register$/, suffix), token: reg.token };
+};
+
+export function taskConfig(env = {}) { return derived(env, '/task', 'AGENTBRIDGE_TASK_URL'); }
+export function renewConfig(env = {}) { return derived(env, '/renew', 'AGENTBRIDGE_RENEW_URL'); }
+
+/**
+ * Read the caller's own task, or everything it holds when no id is given.
+ *
+ * The "everything it holds" form is the one a restarted worker needs: after a
+ * crash the cursor is gone with the process, so there is no event to replay,
+ * and without it the worker sits idle while its lease runs down on work nobody
+ * else can take.
+ */
+export async function fetchOwnTask(env = {}, { session_id, task_id = null } = {},
+  { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = taskConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        connection: 'close',
+      },
+      body: JSON.stringify(task_id ? { session_id, task_id } : { session_id }),
+    });
+
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
+
+    const b = await res.json().catch(() => ({}));
+    return { state: HOSTED.OK, task: b?.task ?? null, tasks: Array.isArray(b?.tasks) ? b.tasks : null };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Extend the lease on work still in progress.
+ *
+ * A REFUSAL HERE IS FINAL AND MUST NOT BE RETRIED. It means this process is no
+ * longer the holder — the task was reaped and re-claimed, or the token is not
+ * one the task will accept. The runtime treats it as ABANDON, discards the
+ * result, and stops; retrying would at best succeed against a lease it does not
+ * own. That is why a malformed token answers 409 like a superseded one rather
+ * than 500: a 500 reads as transient and invites exactly the retry that must
+ * not happen.
+ */
+export async function renewLease(env = {}, { task_id, lease_token, lease_seconds = 900 } = {},
+  { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = renewConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        connection: 'close',
+      },
+      body: JSON.stringify({ task_id, lease_token, lease_seconds }),
+    });
+
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
+
+    const b = await res.json().catch(() => ({}));
+    /*
+     * A 200 CARRYING ok:false IS STILL A REFUSAL. The function answers with its
+     * own verdict; treating any 2xx as success would renew nothing and report
+     * that it had, which is the worst possible outcome here — the worker keeps
+     * working on a lease it has lost.
+     */
+    if (b?.ok === false) return { state: HOSTED.REFUSED, detail: b?.reason ?? 'refused', errors: [] };
+    return { state: HOSTED.OK, lease_expires_at: b?.lease_expires_at ?? null };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
 }

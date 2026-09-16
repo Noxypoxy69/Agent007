@@ -53,7 +53,38 @@ import { HOSTED, publishRegistration } from '../src/hostedRegistry.mjs';
  *
  * That gap is real and it is why b6's live probe is load-bearing rather than a
  * duplicate of this file. A hermetic suite cannot reach it. Anyone changing the
- * exit discipline should re-probe against the live Bridge, not trust this.
+ * exit discipline must re-probe against the live Bridge, not trust this.
+ *
+ * ── HOW TO RUN THAT PROBE, because "re-probe live" is not an instruction ──
+ *
+ * b6 asked for this and was right to. The paragraph above told the next person
+ * the hermetic suite was insufficient and gave them no way to do anything about
+ * it, which is how a caveat turns into a shrug.
+ *
+ *   WHO:    a session holding a REGISTRATION token. Not a reader, not a
+ *           coordinator: register-session and unregister-session are the
+ *           registration surface, and those two commands are the only ones
+ *           whose refusal path reaches the boundary under test.
+ *   WHERE:  agentbridge-secrets/registration-token.txt, PIPED into the command.
+ *           Never printed, never pasted, never echoed into a transcript.
+ *   WHAT:   four cases, and the last two are not optional. A rejected token must
+ *           exit EXACTLY 1. A VALID token must still exit 0 -- the outer catch
+ *           is on every command's path, so a fix here can break exits that were
+ *           already correct, and probing the refusal alone would not see it.
+ *           b6 ran the success cases unasked; that is the standard.
+ *
+ *             refused register-session     exit 1, no "error: done:", no Assertion
+ *             refused unregister-session   exit 1, same
+ *             valid register-session       exit 0, clean stderr
+ *             valid unregister-session     exit 0, clean stderr
+ *
+ *   AFTER:  remove every probe row. A liveness probe left registered is a
+ *           phantom worker in the roster, and the collision detector believed
+ *           two of them for most of one day.
+ *
+ * Measured this way at 83cd087, against the live deployment: all four as above.
+ * The measurement is recorded here rather than in a message because a message is
+ * gone by the time the next person needs it.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));

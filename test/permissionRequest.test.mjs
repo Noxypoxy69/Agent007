@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classifyRequest, riskOf, requestKey, pendingRequests, pausedTasks,
-  RISK, DECIDER, OWNER_ONLY_PREFIXES,
+  RISK, DECIDER, OWNER_ONLY_PREFIXES, ROUTINE_PREFIXES, hasPrefix, segmentSuffixes,
 } from '../src/permissionRequest.mjs';
 
 /**
@@ -70,10 +70,29 @@ test('irreversible, destructive and spending actions are owner-only', () => {
   }
 });
 
-test('an explicit reversible:false overrides a friendly-looking name', () => {
-  // A caller that knows its action cannot be undone outranks the prefix table.
+test('an explicit reversible:false RAISES — the one direction a caller is believed', () => {
+  // A caller that knows its action cannot be undone outranks the prefix table,
+  // because that declaration argues against its own interest.
   assert.equal(riskOf('write.file', { reversible: false }), RISK.IRREVERSIBLE);
-  assert.equal(riskOf('write.file', { reversible: true }), RISK.ROUTINE);
+});
+
+test('reversible:true LOWERS NOTHING, not even an unrecognised action', () => {
+  /*
+   * THIS ASSERTION IS THE FIX FOR THE ESCALATION BELOW, and it used to say the
+   * opposite: riskOf('write.file', { reversible: true }) was asserted to be
+   * ROUTINE. That was the bug written down as a requirement.
+   *
+   * `reversible: true` is self-serving evidence, so it is not believed in the
+   * direction that helps the caller. ROUTINE is now reachable only through
+   * ROUTINE_PREFIXES, which this module decides.
+   */
+  assert.equal(riskOf('write.file', { reversible: true }), RISK.ELEVATED,
+    'a caller talked its own unrecognised action down to routine');
+  assert.equal(riskOf('nobody.classified.this', { reversible: true }), RISK.ELEVATED);
+
+  // And the allow-list still works, so this is a narrowing rather than a wall.
+  assert.equal(riskOf('run.tests'), RISK.ROUTINE);
+  assert.equal(riskOf('read.file'), RISK.ROUTINE);
 });
 
 test('reversible:true CANNOT downgrade an owner-only action', () => {
@@ -87,6 +106,66 @@ test('reversible:true CANNOT downgrade an owner-only action', () => {
     assert.equal(riskOf(a, { reversible: true }), RISK.IRREVERSIBLE,
       `${a} was downgraded by a caller declaring it reversible`);
   }
+});
+
+test('AND IT CANNOT BE DOWNGRADED BY CAPITALISING A LETTER', () => {
+  /*
+   * ═══ THE TEST ABOVE PASSED WHILE THE PROPERTY IT NAMES WAS FALSE ═══
+   *
+   * It tried three actions, all in exact lower case, and concluded that a
+   * caller could not self-declare past the owner's gate. code-d probed the real
+   * module and found six spellings that did exactly that:
+   *
+   *     Deploy.Production  reversible:true  ->  routine   COORDINATOR
+   *     DEPLOY.PRODUCTION  reversible:true  ->  routine   COORDINATOR
+   *     deploy.Production  reversible:true  ->  elevated  COORDINATOR
+   *     Delete.everything  reversible:true  ->  routine   COORDINATOR
+   *     DROP.table_users   reversible:true  ->  routine   COORDINATOR
+   *     Merge.main         reversible:true  ->  routine   COORDINATOR
+   *
+   * Every one is a production deploy, a destructive action or a merge to main
+   * arriving at the coordinator instead of at Danny. The owner decision ledger
+   * records him as final authority for exactly these, so this was the confused
+   * deputy the module was written to prevent -- shipped inside a commit whose
+   * message was about a module finally not being a good-looking nothing.
+   *
+   * WHY THE OLD TEST COULD NOT SEE IT. It asserted the property using only
+   * inputs that already worked. Same family as every other hollow gate today:
+   * the assertion and the risk were about different things. A property about
+   * what a HOSTILE caller can do has to be tested with inputs a hostile caller
+   * would pick, and "the same string with a capital letter" is the first thing
+   * anyone would try.
+   *
+   * So this test carries the adversarial spellings, permanently.
+   */
+  const RESPELLINGS = [
+    'Deploy.Production', 'DEPLOY.PRODUCTION', 'deploy.Production', 'dEpLoY.pRoDuCtIoN',
+    'Delete.everything', 'DELETE.EVERYTHING', 'DROP.table_users', 'Drop.Schema',
+    'Merge.main', 'MERGE.MAIN', 'Spend.cloudflare', 'SPEND.anything',
+    'Rotate.service_key', 'REVOKE.token', 'Truncate.messages', 'Customer.Message.send',
+  ];
+
+  for (const a of RESPELLINGS) {
+    assert.equal(riskOf(a, { reversible: true }), RISK.IRREVERSIBLE,
+      `"${a}" escaped the owner-only list by respelling`);
+    assert.equal(
+      classifyRequest({ action: a, reversible: true }, [], { now: NOW }).decider,
+      DECIDER.OWNER,
+      `"${a}" was routed to the coordinator instead of the owner`);
+  }
+
+  // Leading and trailing whitespace must not be a way out either.
+  assert.equal(riskOf('  DEPLOY.production  ', { reversible: true }), RISK.IRREVERSIBLE);
+});
+
+test('a mixed-case entry in the LIST would still match too', () => {
+  /*
+   * Both sides are lowered, not just the action. Lowering only the action would
+   * leave a trap for the next person who adds "Deploy.Production" to the
+   * owner-only list and finds it silently matches nothing.
+   */
+  assert.ok(OWNER_ONLY_PREFIXES.every((p) => p === p.toLowerCase()),
+    'the list drifted out of lower case; hasPrefix lowers both sides, so this is belt-and-braces');
 });
 
 test('deploy.staging is elevated but deploy.production is not merely elevated', () => {
@@ -266,4 +345,154 @@ test('NOTHING HERE GRANTS ANYTHING', () => {
   // And the owner-only list cannot be emptied by a caller.
   assert.ok(OWNER_ONLY_PREFIXES.includes('deploy.production'));
   assert.ok(Object.isFrozen(OWNER_ONLY_PREFIXES));
+});
+
+test('hasPrefix LOWERS BOTH SIDES, so a mixed-case list entry still matches', () => {
+  /*
+   * WHY THIS TEST EXISTS RATHER THAN A COMMENT SAYING "BELT AND BRACES".
+   *
+   * The mutation "stop lowering the LIST side" came back GREEN. It was a
+   * genuine no-op, because OWNER_ONLY_PREFIXES is entirely lower case today --
+   * so the mutation changed no behaviour and green was the honest answer.
+   *
+   * But "untested because currently redundant" is how a protection quietly
+   * stops being one. The redundancy holds only while every list stays lower
+   * case, and the first person to add "Deploy.Production" to the deny-list
+   * would otherwise find it silently matches NOTHING -- a deny-list entry that
+   * denies nothing, which is the worst possible failure for this file.
+   *
+   * So the matcher is exercised directly with a mixed-case list, where the
+   * mutation is no longer a no-op and goes red.
+   */
+  assert.equal(hasPrefix('deploy.production', ['Deploy.Production']), true,
+    'a mixed-case DENY-LIST entry matched nothing, so adding one would silently disarm it');
+  assert.equal(hasPrefix('DEPLOY.PRODUCTION', ['deploy.production']), true);
+  assert.equal(hasPrefix('Delete.Everything', ['DELETE.']), true);
+
+  // The positive control: it must still be capable of NOT matching.
+  assert.equal(hasPrefix('deploy.staging', ['deploy.production']), false,
+    'the matcher matches everything, so the assertions above prove nothing');
+});
+
+test('NO PREFIX CAN SUBTRACT AUTHORITY — generated, not enumerated', () => {
+  /*
+   * ═══ ROUND 2, AND WHY THIS TEST IS BUILT RATHER THAN LISTED ═══
+   *
+   * After the case-sensitivity fix, code-d probed again and found five more:
+   *
+   *     commit.deploy.production   -> routine   COORDINATOR
+   *     read.deploy.production     -> routine   COORDINATOR
+   *     get.delete.everything      -> routine   COORDINATOR
+   *     list.merge.main            -> routine   COORDINATOR
+   *     inspect.drop.table_users   -> routine   COORDINATOR
+   *
+   * Both lists anchored at position zero and the action string is chosen by the
+   * caller, so prefixing the thing you want with something allow-listed
+   * defeated the deny-list.
+   *
+   * ITS OWN WARNING IS WHY THIS FILE STOPS ENUMERATING: "Round 1 I probed with
+   * capitalisation, because capitalisation is what I thought of. Round 2 I
+   * probed with prefixing, because your fix made me look again. There will be a
+   * round 3 and neither of us will have thought of it."
+   *
+   * An adversarial probe is evidence that a specific attack WORKS. It is never
+   * evidence that the remaining ones do not. Pasting in code-d's five strings
+   * would prove the five are fixed and say nothing about the class -- the same
+   * mistake as the original test, which asserted the property using only inputs
+   * that already worked.
+   *
+   * So the fixtures are GENERATED from the deny-list itself, crossed with every
+   * transformation we currently know of. That cannot bound round 3 either --
+   * nothing can -- but it is bounded by the DENY-LIST rather than by what I
+   * happened to think of, so adding an entry to that list automatically extends
+   * the attack surface this test covers.
+   */
+  const recase = (s) => [
+    s,
+    s.toUpperCase(),
+    s.replace(/(^|\.)([a-z])/g, (_, d, c) => d + c.toUpperCase()),
+    [...s].map((c, i) => (i % 2 ? c.toUpperCase() : c)).join(''),
+  ];
+
+  // Every owner-only entry, made into a concrete action.
+  const OWNER_ACTIONS = OWNER_ONLY_PREFIXES.map((p) => (p.endsWith('.') ? `${p}something` : p));
+
+  const attacks = [];
+  for (const base of OWNER_ACTIONS) {
+    for (const cased of recase(base)) {
+      attacks.push(cased);
+      attacks.push(`  ${cased}  `);                       // whitespace
+      for (const allow of ROUTINE_PREFIXES) {
+        const a = allow.endsWith('.') ? allow : `${allow}.`;
+        attacks.push(`${a}${cased}`);                     // one allow-listed prefix
+        attacks.push(`${a}${a}${cased}`);                 // doubled
+        attacks.push(`${a}${cased}.log`);                 // and a suffix too
+      }
+    }
+  }
+
+  const escaped = [];
+  for (const a of attacks) {
+    const risk = riskOf(a, { reversible: true });
+    const decider = classifyRequest({ action: a, reversible: true }, [], { now: NOW }).decider;
+    if (risk !== RISK.IRREVERSIBLE || decider !== DECIDER.OWNER) escaped.push(`${a} -> ${risk}/${decider}`);
+  }
+
+  assert.deepEqual(escaped.slice(0, 10), [],
+    `${escaped.length} of ${attacks.length} spellings escaped the owner-only list`);
+
+  // THE FIXTURE MUST BE BIG ENOUGH TO MEAN SOMETHING. A generator that silently
+  // produced nothing would pass this test vacuously -- which is the exact
+  // failure mode the whole file is about.
+  assert.ok(attacks.length > 1000, `the generator produced only ${attacks.length} attacks`);
+});
+
+test('the allow-list is NOT widened by the same change — a prefix cannot add authority either', () => {
+  /*
+   * The asymmetry has two halves and only one of them is about escalation.
+   * Deny-lists match anywhere; the ALLOW-list must still match only from the
+   * start, or "deploy.production.read.file" would become routine by carrying an
+   * allow-listed segment somewhere in the middle.
+   */
+  assert.equal(riskOf('deploy.production.read.file', { reversible: true }), RISK.IRREVERSIBLE);
+  assert.equal(riskOf('something.unknown.read.file', { reversible: true }), RISK.ELEVATED,
+    'an allow-listed segment in the middle made an unknown action routine');
+
+  // And the allow-list still does its job from the front, so this is a
+  // narrowing rather than a wall.
+  assert.equal(riskOf('read.file'), RISK.ROUTINE);
+  assert.equal(riskOf('commit'), RISK.ROUTINE);
+});
+
+test('segmentSuffixes splits on boundaries, not on characters', () => {
+  // Matching at arbitrary offsets would make "xdeploy.production" contain
+  // "deploy.production" and turn an unlucky substring into an owner escalation.
+  assert.deepEqual(segmentSuffixes('commit.deploy.production'),
+    ['commit.deploy.production', 'deploy.production', 'production']);
+  assert.equal(riskOf('xdeploy.production', { reversible: true }), RISK.ELEVATED,
+    'a substring resemblance was treated as a deny-list match');
+});
+
+test('THE ELEVATED DENY-LIST MATCHES ANYWHERE TOO — found by a GREEN mutation', () => {
+  /*
+   * Caught by mutation, not by thinking: "anchor the ELEVATED list at position
+   * zero again" came back GREEN, because every test above was about the
+   * OWNER-ONLY list. The elevated list had the identical round-2 hole and
+   * nothing would have noticed.
+   *
+   * It matters less than the owner-only hole -- elevated and routine both route
+   * to the coordinator today -- and it matters for exactly the same reason it
+   * will stop being true: routine is the class that gets delegated further, and
+   * "commit.migrate.everything" reading as routine is how a schema change ends
+   * up classified alongside git.status.
+   */
+  assert.equal(riskOf('read.deploy.staging', { reversible: true }), RISK.ELEVATED,
+    'a prefix demoted an elevated action to routine');
+  assert.equal(riskOf('commit.migrate.users', { reversible: true }), RISK.ELEVATED);
+  assert.equal(riskOf('get.sql.write', { reversible: true }), RISK.ELEVATED);
+  assert.equal(riskOf('list.schema.change', { reversible: true }), RISK.ELEVATED);
+
+  // Positive control: the same shapes without a denied segment stay routine.
+  assert.equal(riskOf('read.notes'), RISK.ROUTINE);
+  assert.equal(riskOf('list.tasks'), RISK.ROUTINE);
 });

@@ -8,7 +8,9 @@ import {
   messagesQuery, canReturn, canAccept, acceptRecord, canCancel, cancelRecord,
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
-  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
+  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
+  classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
+  ownTask, ownTasks,
 } from './_shared.js';
 
 /**
@@ -120,6 +122,35 @@ async function patch(pathAndQuery, body) {
 }
 
 /**
+ * A LEASE TOKEN IS A uuid, AND A MALFORMED ONE IS A REFUSAL.
+ *
+ * `renew_lease(p_lease_token uuid)` and `return_with_lease(p_lease_token uuid)`
+ * both take a typed parameter. Validating only "non-empty string" and handing it
+ * to Postgres fails the cast, PostgREST answers non-2xx, and the caller sees a
+ * 500 — while a SUPERSEDED token returns a clean 409.
+ *
+ * Those read oppositely. A 409 is final; a 500 is transient and invites a retry.
+ * And the worker most likely to send a damaged token is one that crashed or
+ * resumed from a stale file — the same population as the zombies. So the one
+ * refusal shaped like "try again later" would be aimed precisely at the caller
+ * that must not retry. That is the fencing property leaking out through an
+ * error code.
+ *
+ *
+ * IT IS THE ONLY GUARD OF ITS KIND NEEDED, and that was checked rather than
+ * assumed -- one guard for one parameter is the shape that produced the earlier
+ * 404. Every other argument this file hands an RPC is declared `text`:
+ * claim_task takes five text parameters, and return_with_lease's `p_head_sha`
+ * is text and validated inside the function, which answers a clean
+ * `reason: 'head-sha'`. `p_lease_token` is the only non-text parameter on any
+ * call site in this file.
+ * Found by code-d on /return and fixed by c8 at d3ff685. This constant exists on
+ * master so /renew is born with the guard rather than acquiring it after the
+ * same 500 is reported a second time — the class, not the instance.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
  * CALL ONE OF THE SECURITY DEFINER FUNCTIONS, AND REFUSE TO INVENT AN ANSWER.
  *
  * These functions do in ONE TRANSACTION what this file used to do in three
@@ -194,7 +225,16 @@ const listSessions = async () => {
     lastSeenAt: r.heartbeat_at ?? null,
     sessionId: r.session_id,
     repoId: r.repo_id ?? null,
-    capacity: r.capacity ?? null,
+    /*
+     * DERIVED, NOT REPORTED. A worker that claimed "idle" and then died says
+     * "idle" in its last row forever -- code-b sat in this roster for fifteen
+     * hours as idle, 898 minutes stale, and it was the only real agent among
+     * the stale rows. The write paths already derived this through
+     * registryFromSessions; only the READ surface handed the stored column
+     * straight out, so the bug could never cause a bad assignment and could
+     * only ever misinform whoever was reading.
+     */
+    capacity: observedCapacity(r, { now: new Date().toISOString() }),
   }));
 };
 
@@ -225,7 +265,258 @@ const readStore = {
    * can reach it.
    */
   async listMessages(args = {}) { return get(messagesQuery(args)); },
+
+  /**
+   * FILING A QUESTION, AND WHY A READER MAY DO IT.
+   *
+   * The thing that is blocked on a permission is a WORKER, and a worker holds
+   * no coordinator token. If asking required coordinator scope, the tool would
+   * be unreachable by every process it exists for, and the "permission system"
+   * would be a keypress with extra steps -- which is the defect, not the fix.
+   *
+   * What makes that safe is that a filed row DOES NOTHING. It carries no grant.
+   * Crucially, `decider` and `risk` are computed HERE from the action and are
+   * never read off the request: a caller that could name its own decider would
+   * file "deploy.production" as routine and have a coordinator wave it through,
+   * which is the exact escalation this whole design exists to prevent.
+   *
+   * POLICY FIRST, AND THEN NOTHING IS FILED AT ALL. Most asks have already been
+   * answered. Filing them anyway would fill the owner's list with settled
+   * questions and teach him that the list is noise.
+   */
+  async submitPermissionRequest(a = {}) {
+    const now = new Date().toISOString();
+    if (!a.action || typeof a.action !== 'string' || !a.action.trim()) {
+      return { ok: false, errors: ['action is required'] };
+    }
+    if (!a.requested_by || typeof a.requested_by !== 'string' || !a.requested_by.trim()) {
+      // Named rather than defaulted: a question whose asker is unknown cannot
+      // be answered, because nobody knows who is waiting on the answer.
+      return {
+        ok: false,
+        errors: ['requested_by is required: an anonymous question has nobody to answer to'],
+      };
+    }
+
+    const decisions = await get('owner_decisions?select=*');
+    const verdict = classifyRequest({
+      action: a.action,
+      task_id: a.task_id ?? null,
+      scope_id: a.scope_id ?? null,
+      reversible: a.reversible,
+      project: a.project,
+      repo: a.repo,
+      lane: a.lane,
+    }, decisions, { now });
+
+    if (verdict.decider === DECIDER.POLICY) {
+      return {
+        ok: true,
+        decided: true,
+        decider: 'policy',
+        allowed: verdict.allowed,
+        risk: verdict.risk,
+        decision_id: verdict.decision_id,
+        reason: verdict.reason,
+        constraints: verdict.constraints ?? {},
+        filed: false,
+        note: 'the owner has already decided this; nothing was filed and nobody was asked',
+      };
+    }
+
+    const key = verdict.key;
+
+    /*
+     * ONE OUTSTANDING ASK PER QUESTION. The unique partial index enforces it in
+     * the database; this read is the cheap path that avoids provoking it, and
+     * the 409 handler below is what makes the enforcement real when two workers
+     * ask in the same instant.
+     */
+    const seen = await get(
+      `permission_requests?select=*&key=eq.${encodeURIComponent(key)}&decided_at=is.null&limit=1`,
+    );
+    if (seen.length) {
+      return {
+        ok: true, decided: false, filed: false, already_outstanding: true,
+        request_id: seen[0].request_id,
+        decider: seen[0].decider, risk: seen[0].risk,
+        requested_at: seen[0].requested_at,
+        reason: `this exact question is already waiting on the ${seen[0].decider}; `
+          + 'poll list_permission_requests rather than asking again',
+      };
+    }
+
+    const record = {
+      key,
+      action: a.action.trim(),
+      task_id: a.task_id ?? null,
+      scope_id: a.scope_id ?? null,
+      decider: verdict.decider,
+      risk: verdict.risk,
+      requested_by: a.requested_by.trim(),
+      arguments_summary: a.arguments_summary ?? null,
+      environment: a.environment ?? null,
+      reversible: typeof a.reversible === 'boolean' ? a.reversible : null,
+    };
+
+    let row;
+    try {
+      [row] = await write('permission_requests', record);
+    } catch (e) {
+      /*
+       * A 409 HERE IS SOMEBODY ELSE ASKING THE SAME THING, WHICH IS SUCCESS.
+       *
+       * The unique index fired, so an identical open question exists. Re-read
+       * and hand back THAT one. The re-read is ASSERTED rather than assumed: if
+       * the row is not there, the 409 meant something else, and reporting
+       * success would be inventing a request that does not exist.
+       */
+      if (!String(e?.message ?? e).includes(':409')) throw e;
+      const raced = await get(
+        `permission_requests?select=*&key=eq.${encodeURIComponent(key)}&decided_at=is.null&limit=1`,
+      );
+      if (!raced.length) {
+        return { ok: false, errors: [`permission request rejected: ${String(e?.message ?? e)}`] };
+      }
+      return {
+        ok: true, decided: false, filed: false, already_outstanding: true,
+        request_id: raced[0].request_id, decider: raced[0].decider, risk: raced[0].risk,
+        reason: 'an identical question was filed by another agent at the same moment',
+      };
+    }
+
+    if (!row) {
+      return { ok: false, errors: ['the permission request did not come back from the write'] };
+    }
+
+    return {
+      ok: true,
+      decided: false,
+      filed: true,
+      request_id: row.request_id,
+      decider: verdict.decider,
+      risk: verdict.risk,
+      paused_task: a.task_id ?? null,
+      reason: verdict.reason,
+      next: verdict.decider === DECIDER.OWNER
+        ? 'this is the owner’s to answer; he answers by recording a standing decision, '
+          + 'which also stops it being asked again'
+        : 'a coordinator may answer this with decide_permission_request',
+    };
+  },
+
+  /**
+   * WHAT IS WAITING, AND ON WHOM.
+   *
+   * pendingRequests() collapses repeats by key, so the request_id is attached
+   * back here from the newest undecided row for that key -- the pure module
+   * answers "what is outstanding", and the transport is what knows which row a
+   * decider would actually write to.
+   */
+  async listPermissionRequests({ decider = null, includeDecided = false } = {}) {
+    const now = new Date().toISOString();
+    const rows = await get('permission_requests?select=*&order=requested_at.desc&limit=500');
+
+    if (includeDecided) {
+      return { requests: rows, paused_tasks: pausedTasks(rows, { now }) };
+    }
+
+    const newestOpen = new Map();
+    for (const r of rows) {
+      if (r.decided_at) continue;
+      const prev = newestOpen.get(r.key);
+      if (!prev || String(r.requested_at) > String(prev.requested_at)) newestOpen.set(r.key, r);
+    }
+
+    let pending = pendingRequests(rows, { now }).map((p) => ({
+      request_id: newestOpen.get(p.key)?.request_id ?? null,
+      requested_by: newestOpen.get(p.key)?.requested_by ?? null,
+      arguments_summary: newestOpen.get(p.key)?.arguments_summary ?? null,
+      environment: newestOpen.get(p.key)?.environment ?? null,
+      ...p,
+    }));
+    if (decider) pending = pending.filter((p) => p.decider === decider);
+
+    return {
+      counts: {
+        waiting_on_owner: pending.filter((p) => p.decider === DECIDER.OWNER).length,
+        waiting_on_coordinator: pending.filter((p) => p.decider === DECIDER.COORDINATOR).length,
+      },
+      pending,
+      paused_tasks: pausedTasks(rows, { now }),
+    };
+  },
 };
+
+/**
+ * A STANDING DECISION SETTLES THE QUESTIONS IT ANSWERS.
+ *
+ * Without this, an owner-routed request would sit open forever: the owner
+ * answers by writing a decision into the ledger, nothing would connect that
+ * answer back to the question, and the owner's "waiting on you" list would grow
+ * monotonically with things he had already dealt with. A list like that is one
+ * people stop reading, and then the one that matters is buried in it.
+ *
+ * ONE SOURCE OF TRUTH, DELIBERATELY. The answer lives in the decision ledger and
+ * the request row is closed as a consequence -- not answered independently. A
+ * second place where permissions are granted is a second place to audit, and
+ * they would disagree the first time somebody wrote to one of them.
+ *
+ * REQUESTS ARE ONLY EVER CLOSED BY A DECISION THAT COVERS THEM. classifyRequest
+ * is re-run per row against the full ledger; only rows that come back POLICY are
+ * touched. A row that is still owner_required or unresolved stays open, which is
+ * why revoking a decision cannot close anything.
+ *
+ * The write carries `decided_at=is.null` in its filter, so a request a
+ * coordinator answered in the same instant is not overwritten here.
+ */
+async function settleOpenRequestsAgainstPolicy({ decided_by }) {
+  const [decisions, open] = await Promise.all([
+    get('owner_decisions?select=*'),
+    get('permission_requests?select=*&decided_at=is.null&limit=500'),
+  ]);
+
+  const now = new Date().toISOString();
+  const settled = [];
+
+  for (const r of open) {
+    let verdict;
+    try {
+      verdict = classifyRequest({
+        action: r.action,
+        task_id: r.task_id,
+        scope_id: r.scope_id,
+        reversible: typeof r.reversible === 'boolean' ? r.reversible : undefined,
+      }, decisions, { now });
+    } catch {
+      continue; // an unclassifiable stored row is left alone, never guessed at
+    }
+
+    if (verdict.decider !== DECIDER.POLICY) continue;
+
+    const rows = await patch(
+      `permission_requests?request_id=eq.${encodeURIComponent(r.request_id)}&decided_at=is.null`,
+      {
+        decided_at: new Date().toISOString(),
+        decided_by,
+        outcome: verdict.allowed ? 'allowed' : 'denied',
+        decision_note: `settled by standing decision ${verdict.decision_id}: ${verdict.reason}`,
+      },
+    );
+    // An empty array is a lost race -- somebody answered it first. Not recorded
+    // as settled here, because this call did not settle it.
+    if (rows.length) {
+      settled.push({
+        request_id: r.request_id,
+        action: r.action,
+        outcome: verdict.allowed ? 'allowed' : 'denied',
+        by_decision: verdict.decision_id,
+      });
+    }
+  }
+
+  return settled;
+}
 
 /**
  * The COORDINATOR store: the read store plus four write methods.
@@ -235,7 +526,34 @@ const readStore = {
  * WHO may call; it does not get its own opinion about WHAT is allowed.
  */
 function coordinatorStore(label) {
-  return {
+  /*
+   * NAMED, NOT ANONYMOUS, AND THAT IS A BUG FIX RATHER THAN A STYLE CHOICE.
+   *
+   * confirmProposal has to call assignTask and acceptTask. It used `this`, and
+   * `this` was ALWAYS undefined at the point it ran: toolDefs DESTRUCTURES the
+   * store --
+   *
+   *     const { listProposals, confirmProposal, ... } = store;
+   *     run: async (a) => jsonResult(await confirmProposal(a))
+   *
+   * -- which detaches every method from its object. So confirm_proposal threw
+   * "Cannot read properties of undefined (reading 'assignTask')" on EVERY CALL
+   * IT HAS EVER RECEIVED.
+   *
+   * That is why 393 proposals had been prepared and ZERO ever confirmed. It was
+   * read all day as the coordinator not doing its job. It was this.
+   *
+   * Nothing caught it because nothing called it: index.ts cannot be imported by
+   * the suite, the tool was present in tools/list and correctly described, and
+   * every test that touched it checked the DEFINITION rather than an
+   * invocation. A tool can be listed, documented, scope-gated and completely
+   * broken at the same time.
+   *
+   * Binding to the object by name removes the dependence on the call site
+   * entirely -- a destructured reference and a method call now behave
+   * identically, which is the only version that survives toolDefs.
+   */
+  const store = {
     ...readStore,
 
     async listTasks() { return get('tasks?select=*'); },
@@ -480,8 +798,8 @@ function coordinatorStore(label) {
       }
 
       const done = p.kind === 'assign'
-        ? await this.assignTask({ task_id: p.task_id, agent_id: p.agent_id })
-        : await this.acceptTask({ task_id: p.task_id, note });
+        ? await store.assignTask({ task_id: p.task_id, agent_id: p.agent_id })
+        : await store.acceptTask({ task_id: p.task_id, note });
 
       if (!done.ok) return { ok: false, errors: done.errors, stage: 'apply' };
 
@@ -559,6 +877,79 @@ function coordinatorStore(label) {
       return { ok: true, message: row };
     },
 
+
+    /**
+     * ANSWERING A QUESTION THE COORDINATOR IS ALLOWED TO ANSWER.
+     *
+     * THE REFUSAL IS THE FEATURE. If a coordinator could answer an owner-routed
+     * request, the routing would be advisory, and "irreversible actions are the
+     * owner's" would be a sentence in a comment rather than a property of the
+     * system. Everything below this line would be decoration.
+     *
+     * THE ROUTING IS READ FROM THE ROW, NOT RECOMPUTED. The row records who it
+     * was routed to when it was asked. Recomputing from the action here would
+     * mean a later edit to the prefix table could hand the coordinator a
+     * question that was escalated to the owner at the time it was filed --
+     * silently, with no record that the routing had moved.
+     */
+    async decidePermissionRequest({ request_id, outcome, decided_by, note = null } = {}) {
+      if (typeof request_id !== 'string' || !request_id.trim()) {
+        return { ok: false, errors: ['request_id is required'] };
+      }
+
+      const rows = await get(
+        `permission_requests?select=*&request_id=eq.${encodeURIComponent(request_id)}&limit=1`,
+      );
+      const r = rows[0] ?? null;
+
+      /*
+       * THE GUARD IS canDecidePermission IN src/permissionRequest.mjs, NOT HERE.
+       *
+       * It was here first, and that was the confirm_proposal mistake repeating:
+       * index.ts cannot be imported by the test suite, so a guard written inside
+       * it is a guard nobody can watch fail. The refusal that makes this whole
+       * design worth having -- a coordinator may not answer an owner-routed
+       * request -- is the last thing that should live untested.
+       */
+      const allowed = canDecidePermission(r, { as: DECIDER.COORDINATOR, outcome, decided_by });
+      if (!allowed.ok) {
+        return {
+          ok: false,
+          errors: allowed.errors,
+          request: r
+            ? { request_id: r.request_id, action: r.action, risk: r.risk, decider: r.decider }
+            : null,
+        };
+      }
+
+      /*
+       * THE PREDICATE IS THE GUARD, NOT THE READ ABOVE.
+       *
+       * decided_at=is.null is in the filter, so a second decider writing between
+       * the read and this line loses the race and PostgREST returns 200 with an
+       * empty array. An empty array is a lost race, never a success -- the same
+       * mistake the four task writes carried until 7d908a5.
+       */
+      const updated = await patch(
+        `permission_requests?request_id=eq.${encodeURIComponent(request_id)}&decided_at=is.null`,
+        {
+          decided_at: new Date().toISOString(),
+          decided_by: decided_by.trim(),
+          outcome,
+          decision_note: note,
+        },
+      );
+
+      if (!updated.length) {
+        return {
+          ok: false,
+          errors: ['the request was decided by somebody else between reading it and answering it'],
+        };
+      }
+
+      return { ok: true, request: updated[0] };
+    },
+
     async recordOwnerDecision(d) {
       /*
        * A COORDINATOR RECORDS WHAT THE OWNER DECIDED. IT DOES NOT DECIDE.
@@ -617,42 +1008,22 @@ function coordinatorStore(label) {
         supersedes: rec.supersedes,
         history: rec.history,
       });
-      return { ok: true, decision: row };
+      /*
+       * THE ANSWER CLOSES THE QUESTION. An owner-routed request that the owner
+       * has now decided must leave his list, or the list grows with things he
+       * has already handled and stops being read.
+       */
+      const settled = await settleOpenRequestsAgainstPolicy({ decided_by: rec.owner_id });
+      return { ok: true, decision: row, settled_requests: settled };
     },
   };
+
+  return store;
 }
 
 const SHA40 = /^[0-9a-f]{40}$/i;
 const CAPACITIES = ['idle', 'busy', 'blocked', 'offline'];
 const SEGMENT = /^[^\\/]+$/;
-
-/**
- * A lease token, which is a uuid because `return_with_lease(p_lease_token uuid)`
- * says so.
- *
- * WHY THIS EXISTS: A REFUSAL WAS WEARING TRANSPORT CLOTHING. `/return` checked
- * only that the token was a non-empty string and handed it to a uuid
- * parameter. A malformed token failed the cast in Postgres, PostgREST answered
- * non-2xx, `rpc()` threw, and the worker got a 500 -- while a well-formed but
- * SUPERSEDED token returned a clean 409.
- *
- * Those two read oppositely to a caller. A 409 is final; a 500 is transient and
- * invites a retry. And the worker most likely to send a damaged token is one
- * that crashed or resumed from a stale file -- the same population as the
- * zombies. So the single refusal shaped like "try again later" was aimed
- * precisely at the caller that must not retry. The fencing property was leaking
- * out through an error code. Found by code-d reviewing the implementation
- * rather than the gate.
- *
- * IT IS THE ONLY GUARD OF ITS KIND NEEDED HERE, and that was checked rather
- * than assumed -- one guard for one parameter is the shape that produced the
- * earlier 404. Every other argument this file hands an RPC is declared `text`:
- * claim_task takes five text parameters, and return_with_lease's `p_head_sha`
- * is text and is validated inside the function, which answers with a clean
- * `reason: 'head-sha'`. `p_lease_token` is the only non-text parameter on any
- * call site in this file.
- */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function validateRegistration(b) {
   const errors = [];
@@ -1123,6 +1494,194 @@ Deno.serve(async (request) => {
    * is long enough that a waiting worker is effectively instant and short
    * enough that a wedged client releases it without anyone intervening.
    */
+  /**
+   * /task — A WORKER READS ITS OWN WORK, AND ITS OWN FENCING TOKEN.
+   *
+   * ═══ THE OMISSION THIS CLOSES ═══
+   *
+   * `eventsFor` emits an assignment and says, in its own comment, that it is
+   * "enough to know WHICH task, never enough to act without reading it". That
+   * is correct: the outbox is at-least-once by construction, so an event body
+   * is never trustworthy and the worker must re-read the authority.
+   *
+   * There was nowhere to read it from. /wait returns events, /register is
+   * registration state, /return is write-only, and the MCP surface 401s a
+   * registration token. A worker was told which task it held, told to read it
+   * before acting, and could do neither.
+   *
+   * ═══ WHY THE LEASE TOKEN COMES FROM HERE AND NOT FROM THE EVENT ═══
+   *
+   * c8's argument, and it changed a decision already committed at 0f47999,
+   * which put the token on the assigned event instead. That version worked and
+   * this one is better, for three reasons that only became visible once both
+   * existed:
+   *
+   *   THE WORKER MUST CALL THIS ANYWAY. The event is deliberately not
+   *   sufficient to act on, so the second call is not a cost this avoids -- it
+   *   is a call that always happens. Putting the token on the event made it
+   *   redundant rather than convenient.
+   *
+   *   A CREDENTIAL DOES NOT BELONG IN A REPLAYABLE FEED. Events are
+   *   at-least-once and cursor-driven; the same event can arrive twice, or
+   *   late. This is a point-in-time authenticated read that returns the CURRENT
+   *   token or nothing.
+   *
+   *   IT ERODED THE DOORBELL. An event carrying a credential is an event that
+   *   is ALMOST enough to act on, and "almost enough" is the property the
+   *   doorbell design exists to refuse.
+   *
+   * ═══ THE GUARD IS ownTask/ownTasks IN src/ownWork.mjs ═══
+   *
+   * Not here. index.ts cannot be imported by the suite, so a guard written in
+   * it is a guard nobody has watched fail -- which is exactly where
+   * confirm_proposal sat while it threw on every call for its whole life. The
+   * scope rule, the field list and the "not found and not yours are the same
+   * answer" behaviour are all tested in test/ownWork.test.mjs.
+   *
+   * THE SESSION IS RESOLVED FROM THE REGISTRY, never taken from the body, for
+   * the same reason /wait does it: a session that never checked in has no work
+   * to read. The registration token is shared across workers, so the identity
+   * that matters is the assignment itself -- which only a coordinator could
+   * have arranged.
+   */
+  /**
+   * /renew — HOLD THE LEASE WHILE THE WORK IS STILL RUNNING.
+   *
+   * ═══ THE THIRD OMISSION IN THE SAME FAMILY ═══
+   *
+   * `renew_lease` has existed as a SECURITY DEFINER function, granted to
+   * service_role, since the lease migration. NOTHING EXPOSED IT. Reachable from
+   * no endpoint, no CLI command, and no test outside the migration.
+   *
+   * That is not cosmetic. The default lease is 900 seconds and the default run
+   * timeout is 1800. A worker doing a normal-length task on a normal-length
+   * lease would lose it EVERY TIME, discard completed work as a zombie result,
+   * and be entirely right to — the runtime's whole design assumes renewal
+   * works, and renewal could not be called.
+   *
+   * Three omissions found the same way, by building the consumer: the lease
+   * token was never delivered, a worker had nowhere to read its own task, and
+   * renewal had no route. All three existed as correct, tested, unreachable
+   * code. Nothing had noticed because nothing had ever been a worker.
+   *
+   * ═══ THE SQL FUNCTION IS THE AUTHORITY, NOT THIS HANDLER ═══
+   *
+   * It would be shorter to do a conditional PATCH here with the token in the
+   * predicate. That would be a SECOND implementation of "may this lease be
+   * extended", and they would disagree the first time one changed. renew_lease
+   * already encodes compare-and-set against the token and refuses an expired
+   * lease; canRenew in src/leases.mjs is its tested pure twin. This handler
+   * authenticates, validates shape, and calls them.
+   */
+  if (path === '/renew') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let renewLabel = null;
+    try {
+      renewLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!renewLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const taskId = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+    if (!taskId) return json({ error: 'invalid_request', detail: 'task_id is required' }, 400);
+
+    const leaseToken = typeof body?.lease_token === 'string' ? body.lease_token.trim() : '';
+    if (!leaseToken) {
+      return json({ error: 'invalid_request', detail: 'lease_token is required' }, 400);
+    }
+
+    /*
+     * A MALFORMED TOKEN IS A REFUSAL, NOT A SERVER ERROR, and it answers with
+     * the SAME shape and status as a superseded one. To a worker the two mean
+     * the same thing: this credential is not one the task will accept, and
+     * retrying will not change that.
+     */
+    if (!UUID.test(leaseToken)) {
+      return json({
+        ok: false,
+        reason: 'stale-lease',
+        detail: 'lease_token is not a valid token; re-read the task with /task',
+      }, 409);
+    }
+
+    const asked = Number.parseInt(body?.lease_seconds ?? '900', 10);
+    const seconds = Number.isFinite(asked) ? asked : 900;
+
+    let out;
+    try {
+      out = await rpc('renew_lease', {
+        p_task_id: taskId, p_lease_token: leaseToken, p_lease_seconds: seconds,
+      });
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+
+    /*
+     * THE FUNCTION'S OWN VERDICT IS THE ANSWER. A refusal is a decision the
+     * authority made, so it comes back as 409 rather than 500 — the same
+     * distinction as everywhere else on this surface: an answer is not a
+     * transport failure.
+     */
+    if (out?.ok === false) return json(out, 409);
+    return json(out ?? { ok: false, reason: 'no-answer' }, out?.ok ? 200 : 409);
+  }
+
+  if (path === '/task') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let taskLabel = null;
+    try {
+      taskLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!taskLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const claimed = typeof body?.session_id === 'string' ? body.session_id.trim() : '';
+    if (!claimed) return json({ error: 'invalid_request', detail: 'session_id is required' }, 400);
+
+    const regs = await get('session_registrations?select=*');
+    const me = regs.find((r) => r?.session_id === claimed);
+    if (!me) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${claimed}" is not registered; register before reading work`,
+      }, 409);
+    }
+
+    const rows = await get('tasks?select=*');
+    const wanted = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+
+    if (wanted) {
+      const task = ownTask(rows, { task_id: wanted, session_id: me.session_id });
+      /*
+       * NOT FOUND AND NOT YOURS ARE THE SAME 404, deliberately. Splitting them
+       * would let a worker enumerate which task ids exist by watching for a 404
+       * versus a 403, and the caller does nothing differently either way.
+       */
+      if (!task) return json({ error: 'no-such-task', detail: wanted }, 404);
+      return json({ ok: true, task });
+    }
+
+    /*
+     * NO task_id MEANS "WHAT AM I HOLDING". A worker restarting after a crash
+     * has lost its cursor with the process, so there is no event to replay --
+     * without this it sits idle while its lease runs down on work nobody else
+     * can take until the reaper frees it.
+     */
+    return json({ ok: true, tasks: ownTasks(rows, { session_id: me.session_id }) });
+  }
+
   if (path === '/wait') {
     if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
 

@@ -84,6 +84,31 @@ export function eventsFor({ tasks = [], messages = [], agent_id, session_id, sin
         // Enough to know WHICH task, never enough to act without reading it.
         lane_id: t.lane_id ?? null,
         repo_id: t.repo_id ?? null,
+        /*
+         * NO LEASE TOKEN HERE, AND THAT IS A REVERSAL OF 0f47999.
+         *
+         * The token WAS delivered on this event. It worked, and /task is
+         * better -- c8 made the argument and it changed a decision already
+         * committed:
+         *
+         *   THE WORKER MUST CALL /task ANYWAY. This event is deliberately not
+         *   sufficient to act on, so the second call is not a cost the event
+         *   avoided; it is a call that always happens. The token here was
+         *   redundant rather than convenient.
+         *
+         *   A CREDENTIAL DOES NOT BELONG IN A REPLAYABLE FEED. Events are
+         *   at-least-once and cursor-driven, so the same one can arrive twice
+         *   or arrive late, carrying a credential that may no longer be
+         *   current. /task returns the token only to the session that still
+         *   holds the task, at the moment it asks.
+         *
+         *   AND IT ERODED THE DOORBELL. An event carrying a credential is an
+         *   event that is ALMOST enough to act on, and "almost enough" is
+         *   precisely what this design refuses. The test below is named
+         *   "identifies the task without describing the work"; a credential is
+         *   not a description, but it was the first thing ever added here that
+         *   made acting-without-reading feel reasonable.
+         */
       });
     }
 

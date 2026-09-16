@@ -49,6 +49,11 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         the head SHA of the delivered work
   agentbridge may-integrate --id <id>   exit 1 unless the contract is accepted AND its
                                         recorded audit held. both, not either
+  agentbridge work --session <id> [--agent <id>] [--once] [--quiet]
+                                        CLAIM, RUN, VERIFY, RETURN. Needs
+                                        AGENTBRIDGE_WORKER_CMD, WORKTREE_ROOT
+                                        and VERIFY_CMD. Exits 1 if any work
+                                        was abandoned.
   agentbridge wait-for-work --session <session_id> [--since <iso>]
              [--once] [--timeout <seconds>]
                                         WAIT to be woken instead of polling. The
@@ -744,6 +749,143 @@ try {
    * WHAT COMES BACK IS A DOORBELL. Ids and timestamps, never the instruction:
    * the worker reads the task or the message through the path it already has.
    */
+  /**
+   * THE COMMAND THAT MAKES THE RUNTIME REACHABLE.
+   *
+   * Before this existed, src/worker.mjs had ZERO production callers — imported
+   * only by its own tests. That is the "pure, tested, called by nothing" defect
+   * this project has produced seven times, and I produced two of them today
+   * while describing the result as "the runtime exists". It did not run.
+   *
+   * WHAT IT DOES NOT DECIDE. Nothing. Every judgement lives in workerLoop.mjs
+   * (when to start, renew, return, abandon) or worker.mjs (the cycle). This
+   * parses flags, builds the world, and starts the loop — so the dangerous
+   * branches stay testable without a network or a coding agent.
+   */
+  if (cmd === 'work') {
+    const W = await import('../src/worker.mjs');
+    const D = await import('../src/workerDeps.mjs');
+
+    const cfg = W.workerConfig(process.env);
+    if (!cfg.ok) {
+      // Every missing piece at once. Four restarts to learn four facts that
+      // were all knowable on the first is not a diagnostic, it is a maze.
+      console.error('error: this worker is not configured to run work');
+      for (const e of cfg.errors) console.error(`  - ${e}`);
+      process.exit(2);
+    }
+
+    if (!args.session || typeof args.session !== 'string') {
+      console.error('error: --session <session_id> is required');
+      console.error('       register first: agentbridge register-session --agent <id> --lane <lane>');
+      process.exit(2);
+    }
+
+    const sessionId = args.session.trim();
+    const agentId = typeof args.agent === 'string' ? args.agent.trim() : null;
+    const once = args.once === true || args.once === 'true';
+
+    const deps = {
+      now: () => new Date().toISOString(),
+      ...D.hostedDeps(process.env, { session_id: sessionId }),
+      ...D.heartbeatDeps(process.env, { session_id: sessionId, agent_id: agentId }),
+      prepareWorktree: (a) => D.prepareWorktree(a),
+      cleanupWorktree: (d) => D.cleanupWorktree(d),
+      headSha: (d) => D.headSha(d),
+      startRun: (a) => D.startRun(a),
+      pollRun: (s) => D.pollRun(s),
+
+      /*
+       * THE VERIFICATION GATE RUNS HERE, IN THE DAEMON, NOT IN THE AGENT.
+       *
+       * The agent finishing is not the agent succeeding. Its own exit code says
+       * whether the process ended cleanly; the verify command says whether the
+       * repository is in a state worth returning. An agent that grades its own
+       * work is the confused deputy wearing a different hat, and "all tests
+       * pass" in prose is not evidence that any ran.
+       *
+       * A FAILED VERIFY IS STILL RETURNED, with the failure attached. Holding
+       * it until the lease expires turns a fast legible failure into a silent
+       * stall and teaches the retry counter nothing.
+       */
+      async verify(state, dir) {
+        const v = await D.verify({ dir, cmd: process.env.AGENTBRIDGE_VERIFY_CMD });
+        if (!v.ran) return state;
+        return {
+          ...state,
+          ok: state.ok && v.ok,
+          error: state.ok && !v.ok ? `verification failed (exit ${v.exit_code})` : state.error,
+          notes: [state.notes, v.ran ? `verify exit ${v.exit_code}` : '', v.detail]
+            .filter(Boolean).join('\n'),
+        };
+      },
+
+      // Nothing writes permission requests yet, so nothing is ever paused. When
+      // something does, this is the one line that has to change.
+      pausedTaskIds: async () => [],
+
+      log: (action, reason) => {
+        if (args.quiet) return;
+        console.log(`${new Date().toISOString()} ${action.padEnd(8)} ${reason ?? ''}`);
+      },
+    };
+
+    // Wrap pollRun so verification happens once, when the run finishes.
+    const rawPoll = deps.pollRun;
+    let verified = false;
+    deps.pollRun = async (state) => {
+      const s = await rawPoll(state);
+      if (s?.done && !verified && s.ok !== undefined) {
+        verified = true;
+        return deps.verify(s, currentDir());
+      }
+      return s;
+    };
+    let _dir = null;
+    const currentDir = () => _dir;
+    const rawPrepare = deps.prepareWorktree;
+    deps.prepareWorktree = async (a) => { _dir = a.dir; return rawPrepare(a); };
+
+    console.log(`working as ${agentId ?? 'unknown'} / ${sessionId}`);
+    console.log(`  engine   ${cfg.config.cmd} ${cfg.config.args.join(' ')}`.trimEnd());
+    console.log(`  worktree ${cfg.config.worktreeRoot}`);
+    console.log(`  verify   ${process.env.AGENTBRIDGE_VERIFY_CMD ?? '(none — results are UNVERIFIED)'}`);
+
+    const out = await W.runWorker(
+      { config: cfg.config, session_id: sessionId, agent_id: agentId },
+      deps,
+      once ? { maxCycles: 40 } : {},
+    );
+
+    for (const d of out.done) {
+      console.log(`  ${d.task_id ?? '(none)'} -> ${d.outcome}${d.reason ? ` (${d.reason})` : ''}`);
+    }
+    /*
+     * A WORKER THAT ABANDONED WORK DID NOT SUCCEED. Exit 0 would tell a
+     * supervisor everything was fine while the result was thrown away.
+     */
+    const abandoned = out.done.filter((d) => d.outcome === 'abandoned').length;
+    process.exitCode = abandoned ? 1 : 0;
+
+    /*
+     * DRAIN THE HTTP POOL, AND DO NOT CALL process.exit().
+     *
+     * undici keeps pooled sockets on a global dispatcher. Exiting while it
+     * still holds handles trips a libuv assertion on Windows, and the command
+     * dies with exit 127 AFTER printing the correct answer -- so every caller
+     * reading an exit code sees a failure that did not happen. Found live by
+     * b6; loopback does not reproduce it, which is why the hermetic suite
+     * structurally cannot catch it. test/rejectedIsNotUnreachable.test.mjs
+     * records who can run that probe and with which token class.
+     *
+     * `handled = true` lets the process end naturally once the dispatcher has
+     * drained, which is the pattern every other hosted command here uses.
+     */
+    const Hclose = await import('../src/hostedRegistry.mjs');
+    await Hclose.closeHttp();
+    handled = true;
+  }
+
   if (cmd === 'wait-for-work') {
     if (!args.session || typeof args.session !== 'string') {
       console.error('error: --session <session_id> is required');

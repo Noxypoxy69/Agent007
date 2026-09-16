@@ -114,12 +114,40 @@ test('A WAKE-UP IS A DOORBELL: the message BODY is never in it', () => {
 });
 
 test('an assignment event identifies the task without describing the work', () => {
+  /*
+   * THIS GUARD WENT RED WHEN THE LEASE TOKEN WAS ADDED, AND IT WAS RIGHT TO.
+   * Recording why it was updated rather than relaxed, because "a test failed so
+   * I changed the test" is how a guard quietly stops being one.
+   *
+   * What this test protects is that an event is a DOORBELL, not a dispatch: it
+   * says WHICH task changed, and the worker then goes and reads the authority.
+   * A title or an allowed_paths list would let a worker act on the event body
+   * alone, and the outbox is at-least-once by construction, so an event body is
+   * never trustworthy.
+   *
+   * IT WENT RED ONCE FOR A LEASE TOKEN, AND THE TOKEN WAS TAKEN BACK OUT.
+   * 0f47999 added it; /task replaced that route. The reasoning, kept because
+   * somebody will propose it again: a credential does not belong in an
+   * at-least-once, cursor-driven feed that can deliver the same event twice or
+   * late, and an event carrying one is an event that is ALMOST enough to act
+   * on. The worker must call /task regardless, because this event is
+   * deliberately not sufficient — so the token there was redundant, not
+   * convenient. See src/ownWork.mjs and docs/lease-interface.md.
+   *
+   * The deepEqual pins the exact shape, so the next field somebody adds breaks
+   * this test and has to argue for itself here. That is the point of it.
+   */
   const [e] = evs({ tasks: [task()] });
   assert.deepEqual(e, {
     kind: 'assigned', at: T(5), task_id: 't1', lane_id: 'agentbridge', repo_id: 'agentbridge',
   });
+
+  // Nothing here may let a worker act without reading the task first.
   assert.equal(e.title, undefined);
   assert.equal(e.allowed_paths, undefined);
+  assert.equal(e.base_sha, undefined);
+  assert.equal(e.notes, undefined);
+  assert.equal(e.depends_on, undefined);
 });
 
 test('cancellation wakes the worker too, so it stops rather than finishing', () => {
