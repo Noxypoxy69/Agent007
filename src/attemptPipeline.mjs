@@ -26,6 +26,7 @@
  */
 
 import { execute } from './executorAdapter.mjs';
+import { guardExecution, OUTCOME } from './preExecutionGuard.mjs';
 import { collectEvidence } from './evidenceCollector.mjs';
 import { verdictFor } from './resultEnvelope.mjs';
 import { fingerprintAttempt } from './fingerprint.mjs';
@@ -93,6 +94,56 @@ export async function runAttempt({
       );
     }
   }
+  /*
+   * THE PERMISSION DECISION HAPPENS HERE, BEFORE ANYTHING IS LAUNCHED.
+   *
+   * A screenshot on 2026-09-16 showed a coding agent sitting on "Do you want to
+   * proceed?" for a local commit, on a machine nobody was watching. An agent
+   * that asks at the moment it acts has put the blocker on somebody's laptop
+   * instead of in a queue, where it would be visible and would survive a
+   * restart. So a command class is decided BEFORE the executor starts and the
+   * executor is launched already knowing the answer.
+   *
+   * Only commands the task declares up front can be pre-decided. That is a real
+   * limit and it is stated rather than hidden: an agent choosing commands as it
+   * goes needs the guard at its own tool boundary, which is the executor
+   * adapter's job and not this function's. What this closes is the case where
+   * the task already knew what it was going to run.
+   */
+  if (Array.isArray(task.commands) && task.commands.length) {
+    const placement = {
+      isDisposable: true,
+      branch: task.branch ?? null,
+      leaseValid: task.lease_valid !== false,
+      fenceCurrent: task.fence_current !== false,
+      task_id: taskId,
+      project: task.project, repo: task.repo, lane: task.lane,
+    };
+    for (const c of task.commands) {
+      const verdict = guardExecution(c, placement, ledger ?? [], { now: io.now ?? new Date().toISOString() });
+      if (verdict.outcome !== OUTCOME.ALLOW) {
+        /*
+         * WAITING_APPROVAL, not a prompt and not a silent skip. The attempt
+         * stops before it creates a workspace it would have to clean up, and
+         * the reason travels as machine evidence rather than as prose.
+         */
+        return {
+          taskId,
+          attempt,
+          verdict: 'blocked',
+          blocked: {
+            state: 'WAITING_APPROVAL',
+            action: verdict.action,
+            code: verdict.code,
+            decider: verdict.decider ?? null,
+            command: { file: c.file, args: c.args ?? [] },
+            reason: verdict.reason,
+          },
+        };
+      }
+    }
+  }
+
   const workspace = await workspaces.create({ taskId, baseSha: task.base_sha, attempt });
 
   const spec = {

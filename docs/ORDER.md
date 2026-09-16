@@ -87,6 +87,32 @@ tried to record it on his behalf, which is correct — it supersedes his own
 earlier prepare/confirm split, so it needs his words. Nothing here proceeds
 unattended until it is recorded.
 
+**7b. Zero interactive prompts, as a hard acceptance test.** — partly built
+NEW, 2026-09-16, from a screenshot of a coding agent stopped on "Do you want to
+proceed?" for a local commit. Not an AI problem and not a policy problem: the
+policy in `permissionRequest.mjs` has classified `commit` as ROUTINE since it
+was written. **Nothing translated an argv into that word**, so the policy was
+never consulted and the decision fell to the executor's own permission system,
+whose only vocabulary is a prompt. The gap was one translation wide.
+
+Built: `preExecutionGuard.mjs` normalises a command to the action vocabulary the
+existing classifier speaks and checks placement — worktree, branch, lease,
+fence — independently of action class, so a generous class cannot pay for a bad
+placement. `exec.mjs` now closes stdin (a reading child went from the full
+timeout to 57ms) and reports a detected prompt even on a clean exit. The
+pipeline refuses before it creates a workspace, returning `WAITING_APPROVAL`.
+
+**Not built, and it is the half that finishes this:** the executor adapter must
+launch Claude Code or Codex in a non-interactive permission mode scoped by
+Bridge policy, and an agent that chooses commands as it goes needs the guard at
+its own tool boundary rather than only at launch. Bridge grants the specific
+safe classes; nothing gets a blanket allow.
+
+*The acceptance test, and it is pass/fail:* start an unattended task that reads
+files, edits files, runs tests, stages and commits, and submits a result. Close
+the UI. **Zero interactive prompts.** One prompt fails the run as
+`INTERACTIVE_PROMPT_DETECTED`.
+
 **8. T1 closes with nobody watching.**
 A real task, leased, run, verified, reviewed, accepted, closed. Danny's windows
 shut.

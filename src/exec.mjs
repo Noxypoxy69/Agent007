@@ -75,7 +75,63 @@ function childEnv(file, override) {
   return { ...base, PSModulePath: '' };
 }
 
-export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 1024 * 1024, input = null, env = null } = {}) {
+/**
+ * Prompt shapes a child writes when it is about to wait for a person.
+ *
+ * DETECTION IS SEPARATE FROM PREVENTION AND THE TWO GET CONFUSED CONSTANTLY.
+ * Closing stdin PREVENTS the hang: a read returns end-of-file instead of
+ * blocking until the timeout. It detects nothing, because a tool that prompts
+ * and then takes the default on EOF looks, from out here, exactly like a tool
+ * that never asked -- and the default it takes is the one nobody chose.
+ *
+ * So the prompt is detected by its text, which is a heuristic and is labelled
+ * one. It cannot be exhaustive: this list holds the shapes actually seen. What
+ * makes it worth having anyway is the direction of its errors -- a missed
+ * prompt is the behaviour we already have, while a match is a loud, specific
+ * record of an executor that was configured to run unattended and was not.
+ */
+const PROMPT_SHAPES = [
+  /\bdo you want to (proceed|continue)\b/i,
+  /\?\s*\[y\/n\]/i,
+  /\(y(es)?\/n(o)?\)\s*[:?]?\s*$/im,
+  /\bpress (enter|any key)\b/i,
+  /*
+   * A URL CONTAINS COLONS, which the first version of this did not survive:
+   * `password for [^:]*:` stopped at the colon in "https:" and never reached
+   * the prompt's own. Found by its own negative test, which is the argument for
+   * asserting the positive alongside every negative -- "ordinary text is not a
+   * prompt" passes perfectly against a pattern that matches nothing at all.
+   */
+  /\bpass(word|phrase)\b[^\n]{0,80}:[ \t]*$/im,
+  /^\s*\d\)\s.*\n(\s*\d\)\s.*\n)+.*choose/im,
+];
+
+/** Which shape matched, or null. Named so a record can say what it saw. */
+export function interactivePrompt(text) {
+  const t = typeof text === 'string' ? text : '';
+  for (const re of PROMPT_SHAPES) {
+    const m = t.match(re);
+    if (m) return { pattern: String(re), token: m[0].trim().slice(0, 120) };
+  }
+  return null;
+}
+
+/**
+ * THE RUNNER RULE FOR AN UNATTENDED WORKER: stdin closed, no terminal, and a
+ * prompt is a defect rather than a pause.
+ *
+ * A screenshot on 2026-09-16 showed a coding agent stopped on "Do you want to
+ * proceed?" for a local commit. Until now this function gave every child a
+ * stdin PIPE that was never written to and never closed, so a child that read
+ * it blocked until the timeout killed it. At the 15-second default that reads
+ * as a slow command. At an executor's thirty-minute timeout it is half an hour
+ * of a lease spent waiting for a keypress on a machine nobody is sitting at,
+ * and the kill arrives with no exit code and no explanation of what was asked.
+ *
+ * `interactive: true` restores the pipe for the rare caller that genuinely
+ * feeds a child, and it is opt-in so the safe shape is what you get by default.
+ */
+export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 1024 * 1024, input = null, env = null, interactive = false } = {}) {
   if (typeof file !== 'string' || !file.length) throw new TypeError('exec: file must be a string');
   if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
     throw new TypeError('exec: args must be an array of strings');
@@ -95,6 +151,7 @@ export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 
          */
         const killed = Boolean(err) && (err.killed === true || typeof err.signal === 'string');
         const numeric = typeof err?.code === 'number' ? err.code : null;
+        const prompted = interactive ? null : interactivePrompt(`${stderr ?? ''}\n${stdout ?? ''}`);
         resolve({
           ok: !err,
           code: err ? (killed ? null : (numeric ?? null)) : 0,
@@ -103,10 +160,32 @@ export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 
           stdout: stdout ?? '',
           stderr: stderr ?? '',
           error: err ? String(err.message) : null,
+          /*
+           * Reported even when the command SUCCEEDED, and that is the case that
+           * matters: a tool that asked, got end-of-file and took its default
+           * exits zero having made a choice nobody made. A green result with
+           * this field set is the one worth looking at.
+           */
+          interactivePrompt: prompted,
         });
       });
     // Secrets are passed on stdin, never as arguments: argv is readable by any
     // process on the machine, which is the exact problem src/argv.mjs exists for.
     if (input != null) { child.stdin.end(input); }
+    /*
+     * OTHERWISE CLOSE IT, AND CLOSE IT HERE RATHER THAN BY OPTION.
+     *
+     * An `stdio` option looks like the obvious way to do this and is silently
+     * ignored: execFile builds its own spawn options and forwards cwd, env,
+     * uid, gid, shell and windowsHide -- not stdio. I wrote it that way first,
+     * watched the child still hang for the whole timeout, and only then read
+     * how execFile actually calls spawn. A configuration that is accepted
+     * without effect is the worst shape available, because the code reads as
+     * though the rule is enforced.
+     *
+     * Ending the writable side gives the child end-of-file on fd 0, which is
+     * what a prompt needs to stop waiting.
+     */
+    else if (!interactive && child.stdin) { child.stdin.end(); }
   });
 }
