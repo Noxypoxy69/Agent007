@@ -81,13 +81,53 @@ lease, fence — plus all three verdicts stored separately: what the agent
 claimed, what the machine verified, what the reviewer decided. Never one
 `status` column. *Small, and four separate specs bottom out on it.*
 
-**4. A reviewer runtime.** — code-c
-The review lease exists in SQL; nothing claims it. Needs a runner that claims a
-review lease, builds the packet, runs a reviewer in a FRESH workspace, records
-accept / fix-required / reject. Reviewer may not mutate code; a fixer may not
-resolve its own finding; `FIX_REQUIRED` creates a separate task, not a retry
-inside the same attempt. Without this, step 7 is "machine-verified" and not
-"independently reviewed".
+**4. A reviewer runtime.** — code-a *(built; SQL applied; ROUTES NOT DEPLOYED)*
+Branch `work/reviewer-runtime`, head `4b655c8`, based on `work/support-modules`
+at `2e65ed1`. Suite 1449 -> 1497 tests, 0 failures either end.
+
+`src/reviewRunner.mjs` claims the lease, builds the packet, runs a reviewer in a
+fresh worktree at the REVIEWED commit, and submits under the token that
+authorised it. `src/reviewDecision.mjs` holds everything that decides, so the
+suite can import it. The lease is NOT re-implemented in JS -- `claim_review`
+decides and the runner honours refusals it did not predict, per the owner ruling
+that keeps `src/runtime.mjs` orphaned.
+
+**APPLIED TO PRODUCTION**, and the second gap was the one worth finding: a review
+could be claimed, renewed and reaped and COULD NOT BE RECORDED. `submit_review`
+did not exist. Migration `20260916180034` is that fenced write;
+`20260916180146` implements Danny's standing ruling that `claim_task` must
+refuse while a live review lease exists -- which stopped being optional the
+moment `claim_review` acquired a caller. Both verified by probe in transactions
+that rolled back, once before applying and once after.
+
+**NOT DEPLOYED, AND THIS IS THE WHOLE REMAINING GAP.** The two edge routes
+(`/review/claim`, `/review/submit`) exist only on that branch. The database can
+record a review and nothing outside can reach it. The CLI names a 404 as
+`route-absent` rather than as a credential or network fault, so it fails
+honestly, but it fails.
+
+**0b IS STALE — MEASURED 2026-09-16 evening.** Production went 21 -> 22 -> 23
+today from at least two places. The feared regression did NOT happen: the
+deployed entrypoint still carries the single-transaction claim path, the rpc
+shape check and the refusal-reason mapping, checked by name. Two things to carry
+forward. Compare NORMALISED: the deployed bundle is CRLF and the repo is LF, so
+a raw diff reports all 1813 lines of `index.ts` changed and means nothing. And
+v23 is byte-identical to v22 -- a successful deploy that shipped NOTHING,
+because it ran from a checkout without the branch. `scripts/check-edge-deploy.mjs`
+refuses a deploy that removes a line and says so when one would change nothing.
+
+**ONE DESIGN QUESTION I REFUSED TO DECIDE QUIETLY.** On `fix_required` the
+reviewed task goes to `blocked` and depends on the fix task. What happens to it
+once the fix is ACCEPTED is NOT implemented: dependency unlock returns it to the
+pool to be re-attempted from its ORIGINAL base, throwing the fix away, or
+accepting the fix should accept the original. Both defensible. Needs Danny or
+whoever holds item 1.
+
+**THE AUTHORISATION FOR THE MIGRATION IS NOT IN THE LEDGER.** Danny said apply,
+in chat. `resolve_owner_decision` returns `no_decision` for a production
+migration in this context, and a worker cannot record it -- owner and recorder
+must be the same person, which is the mechanism that correctly refused c8 this
+morning. Item 7's complaint, with one more instance.
 
 **5. Canonical identity and recipient validation.** — me *(built, awaiting 1)*
 NEW to this section; it was in "not on the list" this morning and the ingest is
@@ -238,6 +278,25 @@ converges to one correct durable result with no chat open. Not before.
     harness, neither of which exists.
 
 ---
+
+## What reporting to a dead inbox looks like, since item 5 predicted it
+
+Code-a sent five coordination messages today -- three to `code-b`, two to
+`code-c`. Every one went to a session that was ALREADY OFFLINE: code-b last seen
+17:19, code-c last seen 12:30, the earliest message at 17:43. Nobody read any of
+them, and nothing told the sender.
+
+`send_message` validates that `to_agent` is a KNOWN actor. It does not check
+that it is a LIVE one, and `list_agents` was consulted once at the start of the
+session rather than at each send. That is exactly item 5's "a message to a name
+nobody reads is undetectable", and the twenty-nine it counts are now
+thirty-four.
+
+The cheap fix is not a new subsystem: it is for `send_message` to refuse, or at
+minimum warn, when the recipient's last heartbeat is older than the staleness
+window -- `offline` is already distinguished from `unknown`, and the sender is
+simply never told which one it got. Until then, anything that matters goes in
+the commit or in this file, not in an inbox.
 
 ## Not on the list
 
