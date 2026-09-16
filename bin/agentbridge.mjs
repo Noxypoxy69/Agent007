@@ -249,11 +249,46 @@ try {
     if (!cfg) { console.error('Not initialised. Run: agentbridge init'); process.exit(2); }
     const payload = await collect(cfg, await loadRegistry());
 
+    /*
+     * A HEARTBEAT THAT DID NOT LAND MUST NOT EXIT 0.
+     *
+     * This printed "publish failed: 401 ..." to stderr and then exited ZERO, so
+     * anything scripting it -- a watcher loop, a scheduled task, a supervisor --
+     * saw success on every single failed beat. The machine-readable signal said
+     * the opposite of the English one.
+     *
+     * THIS IS b6's OWN FINDING, IN A COMMAND NOBODY RE-CHECKED. It found exactly
+     * this on `register-session` ("a refused credential is not an unreachable
+     * service, and it is not exit 0"), that one was fixed, and `heartbeat` kept
+     * the bug -- because the fix was applied to the command that was reported
+     * rather than to every command that publishes. The same instance-not-class
+     * mistake that let 404 walk past three separate status fixes.
+     *
+     * AND IT IS THE BEST AVAILABLE EXPLANATION FOR A WATCHER THAT DIES QUIETLY.
+     * b6's watcher was "nominally running and producing no output" while its
+     * heartbeat had stopped landing. A loop calling this command would look
+     * healthy forever: exit 0 every time, nothing to alert on, and the roster
+     * going stale behind it.
+     *
+     * NOT-CONFIGURED IS NOT A FAILURE. A local-only machine has nowhere to
+     * publish and is working as intended; exiting non-zero there would make
+     * every local setup look broken -- the same distinction the runtime's
+     * heartbeat client already makes for HOSTED.NOT_CONFIGURED.
+     */
+    let beatFailed = false;
     if (cmd === 'heartbeat' && !args['dry-run']) {
       const r = await publish(cfg, payload);
-      console.error(r.ok && r.accepted ? 'published.' : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
+      const landed = r.ok && r.accepted;
+      const notConfigured = r.reason === 'no-bridge-url';
+      console.error(landed ? 'published.'
+        : notConfigured ? 'local-only: no bridgeUrl configured, nothing published'
+          : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
+      beatFailed = !landed && !notConfigured;
     }
-    if (args.json || cmd === 'heartbeat') { console.log(JSON.stringify(payload, null, 2)); process.exit(0); }
+    if (args.json || cmd === 'heartbeat') {
+      console.log(JSON.stringify(payload, null, 2));
+      process.exit(beatFailed ? 1 : 0);
+    }
 
     console.log(`machine ${localMachineLabel(cfg)} [${payload.machine.name}] (${payload.machine.platform})  ${payload.sentAt}`);
     if (!payload.processProbe.ok) console.log(`  ! process probe failed: ${payload.processProbe.error}`);
