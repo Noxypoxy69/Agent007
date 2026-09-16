@@ -54,7 +54,7 @@ export const MUST_LEAK = [
   {
     what: 'machine label built from a first name',
     value: 'jane-win',
-    why: 'leak 3 as it shipped ("danny-win"). The whole username does not appear in it, so a full-name substring test scans it clean',
+    why: 'leak 3 as it shipped ("jane-win"). The whole username does not appear in it, so a full-name substring test scans it clean',
   },
   {
     what: 'hostname',

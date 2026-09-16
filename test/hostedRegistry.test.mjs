@@ -220,7 +220,7 @@ test('no absolute path or operator name is carried in a hosted row', async () =>
   const text = JSON.stringify(rows);
   assert.doesNotMatch(text, /[A-Za-z]:[\\/]/, 'a windows absolute path reached the registry');
   assert.doesNotMatch(text, /\/home\/|\/Users\//, 'a posix home path reached the registry');
-  assert.doesNotMatch(text, /DANNY|danny garcia/i, 'an operator name reached the registry');
+  assert.doesNotMatch(text, /DANNY|jane doe/i, 'an operator name reached the registry');
   // machine_id is an opaque uuid, never a hostname.
   assert.match(rows[0].machine_id, /^[0-9a-f-]{36}$/);
 });

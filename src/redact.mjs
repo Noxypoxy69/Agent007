@@ -27,7 +27,7 @@ const SENSITIVE = [
  * transmitted. It says nothing about the operator's identity, and the identity
  * is in every path: a worktree reported as
  *
- *   C:\Users\DANNY GARCIA\Documents\social-sparks-code-c
+ *   C:\Users\JANE DOE\Documents\social-sparks-code-c
  *
  * carries a real person's full name, twice per session, in a payload bound for
  * a hosted database and from there to whatever model reads the MCP surface.
@@ -89,12 +89,12 @@ export function isAbsoluteLike(p) {
  * its own heartbeat. redactHome rewrites a path that starts with the home
  * directory AS A STRING. Two real cases slip past it and ship absolute:
  *
- *   8.3 SHORT NAMES. `C:\Users\DANNYG~1\AppData\Local\Temp\x` and
- *   `C:\Users\DANNY GARCIA\AppData\Local\Temp\x` are the same directory, and
+ *   8.3 SHORT NAMES. `C:\Users\JANEDO~1\AppData\Local\Temp\x` and
+ *   `C:\Users\JANE DOE\AppData\Local\Temp\x` are the same directory, and
  *   Windows hands out the short form freely -- every temp path on this machine
  *   is spelled that way. As a string it does not start with home, so it was
  *   never relativised. The operator's name is still in it, just abbreviated,
- *   and `DANNYG~1` is not meaningfully less identifying than `DANNY GARCIA`.
+ *   and `JANEDO~1` is not meaningfully less identifying than `JANE DOE`.
  *   Resolving the long form is the caller's job (it needs the filesystem);
  *   passing both spellings here is the pure half.
  *

@@ -163,8 +163,8 @@ test('KNOWN GAP: a home path in its 8.3 alias is NOT recognised as identity', ()
    *
    * Windows gives one directory two names. On the machine this was found on:
    *
-   *   os.homedir()  C:\Users\DANNY GARCIA
-   *   os.tmpdir()   C:\Users\DANNYG~1\AppData\Local\Temp
+   *   os.homedir()  C:\Users\JANE DOE
+   *   os.tmpdir()   C:\Users\JANEDO~1\AppData\Local\Temp
    *   realpathSync.native() resolves BOTH to the same directory
    *
    * The 8.3 form contains no part of the long username, so the username and
@@ -286,19 +286,86 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
   }
 });
 
-test('this suite committed no real identity: the fixtures name nobody on this machine', () => {
-  /*
-   * The guard on the guard. If somebody ever pastes a real payload into
-   * leakShapes.mjs, this fails on the machine it was pasted from — which is the
-   * machine whose owner would be disclosed.
-   */
-  const text = fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
-  const hit = namesMachine(text, machineIdentity());
-  assert.equal(hit, null, `a real identity value is present in the committed fixtures: ${hit}`);
-  // And the 8.3 alias of the home directory, which is the spelling that would
-  // slip in through a copied temp path.
-  const short = os.tmpdir().split(/[\\/]/).find((seg) => seg.includes('~'));
-  if (short) {
-    assert.equal(text.toLowerCase().includes(short.toLowerCase()), false, 'a real 8.3 identity segment is present in the committed fixtures');
+/*
+ * WHICH FILES ARE SCANNED, AND WHY NOT ALL OF THEM.
+ *
+ * This check read leakShapes.mjs and nothing else, on the reasonable theory
+ * that a pasted payload lands in a fixture. The disclosure it missed was
+ * somewhere else entirely: the operator's real home directory, and its real 8.3
+ * alias, written into a comment in THIS file, plus the same path in src/redact
+ * and src/collect and a worktree convention in docs. None of it was a pasted
+ * payload. All of it was somebody documenting a bug accurately, which is the
+ * normal way a real path gets committed and is not going to stop happening.
+ *
+ * So src and docs are scanned too. test/ is NOT, and the reason is load-bearing
+ * rather than laziness: the controls for this very guard must contain
+ * identity-shaped strings. leakRegression.test.mjs carries /home/runner and
+ * DESKTOP-ABC123 as the positive control for the runner fix, and three /root
+ * paths live elsewhere under test/. Scanning test/ would therefore be red on
+ * every GitHub runner and on any container running as root -- the exact failure
+ * this guard has just been fixed for, reintroduced one directory over. Measured,
+ * not assumed.
+ *
+ * THE COST IS NAMED: a real path committed into a test file outside this one is
+ * still not caught. The fix for that is a marker comment exempting control lines
+ * so the scan can cover everything, and it is a bigger change than this one.
+ */
+function scannedFiles() {
+  const files = [new URL('./fixtures/leakShapes.mjs', import.meta.url)];
+  for (const dir of ['src', 'docs']) {
+    const base = new URL(`../${dir}/`, import.meta.url);
+    for (const name of fs.readdirSync(base, { recursive: true })) {
+      if (/\.(mjs|js|md)$/.test(name)) files.push(new URL(name.split(/[\\/]/).join('/'), base));
+    }
   }
+  return files;
+}
+
+test('this suite committed no real identity: the tree names nobody on this machine', () => {
+  /*
+   * The guard on the guard. If somebody ever pastes a real payload, or writes a
+   * real path into a comment, this fails on the machine it came from -- which is
+   * the machine whose owner would be disclosed.
+   */
+  const me = machineIdentity();
+  // The 8.3 alias of the home directory, which is the spelling that slips in
+  // through a copied temp path and contains no part of the long name.
+  const short = os.tmpdir().split(/[\\/]/).find((seg) => seg.includes('~'));
+
+  for (const file of scannedFiles()) {
+    const text = fs.readFileSync(file, 'utf8');
+    const where = file.pathname.split('/').slice(-2).join('/');
+    const hit = namesMachine(text, me);
+    assert.equal(hit, null, `a real identity value is committed in ${where}: ${hit}`);
+    if (short) {
+      assert.equal(text.toLowerCase().includes(short.toLowerCase()), false, `a real 8.3 identity segment is committed in ${where}`);
+    }
+  }
+});
+
+test('CONTROL: the widened scan really does reach src and docs', () => {
+  /*
+   * Without this, deleting a directory from scannedFiles leaves the test above
+   * green, and a check that scans fewer files than it claims is the hollow kind:
+   * it passes because it looked nowhere, and reads exactly like it passed
+   * because there was nothing to find.
+   */
+  const names = scannedFiles().map((u) => u.pathname);
+  assert.ok(names.some((n) => n.endsWith('fixtures/leakShapes.mjs')), 'the fixture must be scanned');
+  assert.ok(names.some((n) => n.includes('/src/redact.mjs')), 'src must be scanned -- it held a real home path');
+  assert.ok(names.some((n) => n.includes('/docs/')), 'docs must be scanned -- it held the worktree convention');
+  assert.ok(names.length > 20, `expected the scan to reach the whole of src and docs, got ${names.length} files`);
+});
+
+test('CONTROL: a real path in a scanned file IS caught, for each identity field', () => {
+  /*
+   * The scan above passes trivially against a matcher that matches nothing. This
+   * fires it first. The identities are invented; the shapes are the real ones
+   * that were actually committed -- a Windows home in a comment, an 8.3 alias,
+   * a hostname.
+   */
+  const jane = { username: 'Jane Doe', hostname: 'DESKTOP-ZZQQXX', homedir: 'C:\\Users\\JANE DOE' };
+  assert.equal(namesMachine(' *   os.homedir()  C:\\Users\\JANE DOE', jane), 'C:\\Users\\JANE DOE');
+  assert.equal(namesMachine('reported by DESKTOP-ZZQQXX at noon', jane), 'DESKTOP-ZZQQXX');
+  assert.equal(namesMachine('nothing identifying in this sentence at all', jane), null);
 });

@@ -12,7 +12,7 @@ import { collect } from '../src/collect.mjs';
  * NO ABSOLUTE WORKTREE PATH LEAVES THE MACHINE.
  *
  * Written after publish() started refusing its own heartbeat. The payload
- * carried `C:\Users\DANNYG~1\AppData\Local\Temp\...` -- the 8.3 short form of
+ * carried `C:\Users\JANEDO~1\AppData\Local\Temp\...` -- the 8.3 short form of
  * the home directory, which a prefix match against the long form never fires
  * on. It shipped absolute, with the operator's name in it, merely abbreviated.
  *
@@ -22,16 +22,16 @@ import { collect } from '../src/collect.mjs';
  * payload anyone reads.
  */
 
-const WIN = 'C:\\Users\\DANNY GARCIA';
-const SHORT = 'C:\\Users\\DANNYG~1';
+const WIN = 'C:\\Users\\JANE DOE';
+const SHORT = 'C:\\Users\\JANEDO~1';
 
 test('8.3 short home is the same identity surface as the long one', () => {
   // The exact shape that shipped.
   const p = `${SHORT}\\AppData\\Local\\Temp\\ab-x\\code-b`;
   const got = portableWorktree(p, [WIN, SHORT]);
   assert.equal(isAbsoluteLike(got), false, `still absolute: ${got}`);
-  assert.doesNotMatch(got, /DANNYG~1/i, 'the short name is still in the payload');
-  assert.doesNotMatch(got, /DANNY GARCIA/i);
+  assert.doesNotMatch(got, /JANEDO~1/i, 'the short name is still in the payload');
+  assert.doesNotMatch(got, /JANE DOE/i);
 });
 
 test('the long spelling still relativises, as it always did', () => {
@@ -94,7 +94,7 @@ test('END TO END: a real collect() under an 8.3 temp path emits nothing absolute
   const payload = await collect(cfg, { agents: [{ agentId: 'code-b', lane: 'x', worktree: wt }] });
 
   const wire = JSON.stringify(payload);
-  assert.doesNotMatch(wire, /DANNYG~1/i, 'an 8.3 home spelling reached the wire');
+  assert.doesNotMatch(wire, /JANEDO~1/i, 'an 8.3 home spelling reached the wire');
 
   const home = homedir();
   let longHome = home;

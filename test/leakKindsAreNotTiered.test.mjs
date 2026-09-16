@@ -17,11 +17,11 @@ import { scanPayload, USERNAME, HOME_DIRECTORY, ABSOLUTE_PATH } from '../src/pay
  *
  * The same directory on this machine, differing only in spelling:
  *
- *   C:\Users\DANNYG~1\Documents\agentbridge     -> ["absolute-path"]
- *   C:\Users\DANNY GARCIA\Documents\agentbridge -> ["username","home-directory","absolute-path"]
+ *   C:\Users\JANEDO~1\Documents\agentbridge     -> ["absolute-path"]
+ *   C:\Users\JANE DOE\Documents\agentbridge -> ["username","home-directory","absolute-path"]
  *
  * The identity rules miss the 8.3 spelling of the very home they are built
- * from. "dannyg~1" does contain "danny", but nameParts requires a boundary and
+ * from. "janedo~1" does contain "danny", but nameParts requires a boundary and
  * correctly refuses to match a part butted against another letter -- the same
  * rule that stops "Dan" firing inside "abundant". Widening it would trade a
  * label for the false-positive discipline that keeps this guard installed, so
@@ -41,7 +41,7 @@ import { scanPayload, USERNAME, HOME_DIRECTORY, ABSOLUTE_PATH } from '../src/pay
  */
 
 const SRC = fileURLToPath(new URL('..', import.meta.url));
-const IDENTITY = { username: 'Danny Garcia', homedir: 'C:\\Users\\DANNY GARCIA', hostname: 'danny-win' };
+const IDENTITY = { username: 'Jane Doe', homedir: 'C:\\Users\\JANE DOE', hostname: 'jane-win' };
 
 const kindsOf = (value) => {
   const r = scanPayload(value, IDENTITY);
@@ -52,8 +52,8 @@ test('the 8.3 spelling really is classified worse — the gap is still open', ()
   // If this ever fails because 8.3 now classifies fully, that is GOOD news and
   // this file should be rewritten, not deleted. It asserts current behaviour so
   // that closing the gap is loud rather than silent.
-  const short = kindsOf('C:\\Users\\DANNYG~1\\Documents\\agentbridge');
-  const long = kindsOf('C:\\Users\\DANNY GARCIA\\Documents\\agentbridge');
+  const short = kindsOf('C:\\Users\\JANEDO~1\\Documents\\agentbridge');
+  const long = kindsOf('C:\\Users\\JANE DOE\\Documents\\agentbridge');
 
   assert.deepEqual(short.kinds, [ABSOLUTE_PATH], 'KNOWN GAP CLOSED: 8.3 now classifies as identity. Rewrite this file.');
   assert.ok(long.kinds.includes(USERNAME) && long.kinds.includes(HOME_DIRECTORY),
@@ -63,7 +63,7 @@ test('the 8.3 spelling really is classified worse — the gap is still open', ()
 test('BOTH spellings are refused — the mislabelling is not a hole', () => {
   // This is the assertion that makes the gap survivable. It must hold even if
   // the labels above change.
-  for (const p of ['C:\\Users\\DANNYG~1\\Documents\\agentbridge', 'C:\\Users\\DANNY GARCIA\\Documents\\agentbridge']) {
+  for (const p of ['C:\\Users\\JANEDO~1\\Documents\\agentbridge', 'C:\\Users\\JANE DOE\\Documents\\agentbridge']) {
     assert.equal(kindsOf(p).ok, false, `an 8.3 home path was not refused: ${p}`);
   }
 });

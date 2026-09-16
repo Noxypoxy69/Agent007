@@ -159,7 +159,7 @@ test('NEAREST CLEAN: the declared worktree is silent', () => {
 test('a full path whose basename matches the declared worktree is accepted', () => {
   // The registry says a name; the hook is handed an absolute path. Comparing
   // those as strings would block every commit in a correctly configured tree.
-  const r = run({ worktree: 'C:\\Users\\danny\\Documents\\social-sparks-code-c' });
+  const r = run({ worktree: 'C:\\Users\\jane\\Documents\\social-sparks-code-c' });
   assert.equal(r.exitCode, EXIT_ALLOW);
 });
 

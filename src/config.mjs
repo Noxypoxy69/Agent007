@@ -144,8 +144,8 @@ export function opaqueMachineName(machineId) {
  * What identifies this machine TO THE BRIDGE.
  *
  * `hostname` and the operator's chosen label are deliberately absent. Both
- * carried a person: the label was "danny-win" and the hostname
- * "DESKTOP-VPIUDEF", and neither earns anything for coordination that
+ * carried a person: the label was "jane-win" and the hostname
+ * "DESKTOP-ABC123", and neither earns anything for coordination that
  * `machine-7f3c2a` does not. The friendly label still exists in config and is
  * shown in LOCAL output -- an operator should see their own machine named the
  * way they named it. It simply does not leave the box.
