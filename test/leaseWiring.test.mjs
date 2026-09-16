@@ -301,6 +301,58 @@ test('cancelTask keeps its state predicate', () => {
   assert.match(body, /writeLanded/, 'cancelTask no longer treats an empty result as a lost race');
 });
 
+test('A MALFORMED TOKEN IS REFUSED, NOT THROWN', () => {
+  /*
+   * Found by code-d reviewing the implementation rather than the gate.
+   *
+   * `p_lease_token` is a uuid. A token validated only as "a non-empty string"
+   * reached Postgres, failed the cast, came back non-2xx, and `rpc()` threw --
+   * so the worker got a 500, while a well-formed but SUPERSEDED token got a
+   * clean 409.
+   *
+   * Those read oppositely. A 409 is final; a 500 is transient and invites a
+   * retry. And the worker most likely to hold a damaged token is one that
+   * crashed or resumed from a stale file -- the same population as the zombies.
+   * The one answer shaped like "try again later" was aimed at the caller that
+   * must not. That is the fencing property leaking out through a status code,
+   * and it is the third time this project has found a refusal wearing transport
+   * clothing: 401 as UNREACHABLE, 404 as UNREACHABLE, now this.
+   *
+   * THE ORDER IS ASSERTED, NOT JUST THE GUARD. A check that runs after the call
+   * it protects is not a guard. And the STATUS is asserted too: refusing with a
+   * 400 would fix the crash and keep the wrong meaning, since 400 says "your
+   * request was malformed" rather than "this credential is not current".
+   */
+  const body = slice(...ANCHORS.ret);
+  assert.ok(body, '/return handler not found');
+
+  const guardAt = body.search(/UUID\.test\s*\(/);
+  const rpcAt = body.search(/rpc\(\s*'return_with_lease'/);
+  assert.notEqual(guardAt, -1, '/return does not check the token is a well-formed uuid');
+  assert.notEqual(rpcAt, -1, '/return no longer calls return_with_lease');
+  assert.ok(
+    guardAt < rpcAt,
+    'the uuid check runs AFTER the RPC, so a malformed token still reaches Postgres and throws',
+  );
+
+  /*
+   * THE STATUS FROM THIS GUARD'S OWN BLOCK, captured rather than searched for.
+   * Slicing from the guard to the RPC and looking for "409" passed while the
+   * guard returned 400, because the legacy `no-lease` refusal sits between them
+   * and contributes a 409 of its own. Matching something ADJACENT to the thing
+   * under test is the same family as matching inside a comment.
+   */
+  const status = body.slice(guardAt).match(/\}\s*,\s*(\d{3})\s*\)/);
+  assert.ok(status, 'the uuid guard does not return a status at all');
+  assert.equal(
+    status[1],
+    '409',
+    'a malformed token is not refused with 409. A 500 invites the retry that fencing exists '
+      + 'to stop, and a 400 says the request was malformed rather than that the credential '
+      + 'is not current.',
+  );
+});
+
 /* ── the reviewer eviction this change must not make reachable ────────── */
 
 test('WIRING claim_review WITHOUT GATING claim_task ON THE REVIEW LEASE', async () => {

@@ -313,8 +313,14 @@ function coordinatorStore(label) {
         };
       }
 
-      // claim_task returns the lease, not the row. Read the row back so the
-      // response keeps the shape callers already parse.
+      /*
+       * THE ROW IS ADVISORY; THE LEASE IS THE FACT. This read happens AFTER the
+       * transaction, so if the row moves between the claim and the read-back
+       * the response can carry a task row that contradicts the lease just
+       * minted. Nothing depends on it -- the token, expiry and attempt all come
+       * from the function's own return value, inside the transaction. Do not
+       * add a decision that reads the row instead. (code-d)
+       */
       const claimed = await get(`tasks?select=*&task_id=eq.${encodeURIComponent(task_id)}&limit=1`);
       const row = claimed[0] ?? null;
 
@@ -620,6 +626,34 @@ const SHA40 = /^[0-9a-f]{40}$/i;
 const CAPACITIES = ['idle', 'busy', 'blocked', 'offline'];
 const SEGMENT = /^[^\\/]+$/;
 
+/**
+ * A lease token, which is a uuid because `return_with_lease(p_lease_token uuid)`
+ * says so.
+ *
+ * WHY THIS EXISTS: A REFUSAL WAS WEARING TRANSPORT CLOTHING. `/return` checked
+ * only that the token was a non-empty string and handed it to a uuid
+ * parameter. A malformed token failed the cast in Postgres, PostgREST answered
+ * non-2xx, `rpc()` threw, and the worker got a 500 -- while a well-formed but
+ * SUPERSEDED token returned a clean 409.
+ *
+ * Those two read oppositely to a caller. A 409 is final; a 500 is transient and
+ * invites a retry. And the worker most likely to send a damaged token is one
+ * that crashed or resumed from a stale file -- the same population as the
+ * zombies. So the single refusal shaped like "try again later" was aimed
+ * precisely at the caller that must not retry. The fencing property was leaking
+ * out through an error code. Found by code-d reviewing the implementation
+ * rather than the gate.
+ *
+ * IT IS THE ONLY GUARD OF ITS KIND NEEDED HERE, and that was checked rather
+ * than assumed -- one guard for one parameter is the shape that produced the
+ * earlier 404. Every other argument this file hands an RPC is declared `text`:
+ * claim_task takes five text parameters, and return_with_lease's `p_head_sha`
+ * is text and is validated inside the function, which answers with a clean
+ * `reason: 'head-sha'`. `p_lease_token` is the only non-text parameter on any
+ * call site in this file.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function validateRegistration(b) {
   const errors = [];
   const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
@@ -907,6 +941,25 @@ Deno.serve(async (request) => {
     }
 
     /*
+     * A MALFORMED TOKEN IS A REFUSAL, NOT A SERVER ERROR. See UUID above: this
+     * shape used to reach Postgres, fail the uuid cast, and surface as a 500 --
+     * the one answer that invites a retry, handed to the one caller that must
+     * not retry. It answers 409 now, the same shape and status as a superseded
+     * token, because to a worker those two mean the same thing: the credential
+     * you hold is not one this task will accept, and trying again will not
+     * change that.
+     */
+    if (!UUID.test(leaseToken)) {
+      return json({
+        error: 'return-refused',
+        reason: 'stale-lease',
+        detail: 'lease_token is not a well-formed lease token, so it cannot be the current '
+          + 'lease for this task. Re-read it from the assignment rather than retrying.',
+        errors: ['stale-lease: malformed lease_token'],
+      }, 409);
+    }
+
+    /*
      * A task assigned BEFORE this wiring holds no token at all, so every token
      * fails the comparison and return_with_lease answers 'stale-lease' -- which
      * reads as "you lost the race" when the truth is "this task predates
@@ -937,7 +990,14 @@ Deno.serve(async (request) => {
       }, 409);
     }
 
-    // As with the claim: the function returns a verdict, not the row.
+    /*
+     * THE ROW IS ADVISORY; THE LEASE IS THE FACT. This read happens AFTER the
+     * transaction, so if the row moves between the claim and the read-back
+     * the response can carry a task row that contradicts the lease just
+     * minted. Nothing depends on it -- the token, expiry and attempt all come
+     * from the function's own return value, inside the transaction. Do not
+     * add a decision that reads the row instead. (code-d)
+     */
     const after = await get(`tasks?select=*&task_id=eq.${encodeURIComponent(taskId)}&limit=1`);
     const updated = after[0] ?? null;
 
