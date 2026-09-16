@@ -32,6 +32,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 import { artifactDigest, assertPromotable, verifyLive } from '../src/deployGate.mjs';
+import { artifactLoads as checkArtifactLoads } from '../src/artifactLoads.mjs';
 
 const ARTIFACT_DIR = 'supabase/functions/mcp';
 
@@ -65,28 +66,39 @@ try {
 }
 
 /*
- * DOES IT LOAD? `node --check` on each JavaScript file in the artifact.
+ * DOES IT LOAD? Delegated to src/artifactLoads.mjs.
  *
  * This catches the duplicate top-level declaration that took the Bridge down
- * for eleven minutes -- a shape that every one of 1079 passing tests was blind
- * to, because index.ts is an entrypoint nothing in the suite can import.
+ * for eleven minutes -- a shape every one of 1079 passing tests was blind to,
+ * because index.ts is an entrypoint nothing in the suite can import.
  *
- * It does NOT catch everything a Deno isolate refuses at module scope. In the
- * other repository, `crypto.randomUUID()` at global scope threw only when the
- * isolate started, after typecheck, lint and build were all green. So a pass
- * here means "it parses", not "it starts", and that is the honest claim.
+ * THE LOOP THAT USED TO BE HERE SKIPPED .ts. It matched /\.(js|mjs)$/, so the
+ * entrypoint -- the actual file that went down -- was the one file it never
+ * parsed. It also spawned a process per file and could not tell a parse failure
+ * from a duplicate declaration.
+ *
+ * The module additionally handles what that loop could not: an empty artifact
+ * REFUSES rather than reporting a clean check of nothing; a stale shadow copy
+ * beside a real file is reported without refusing; and every non-.mjs file gets
+ * a strict second parse, because node --check is weaker on .ts and .js than on
+ * .mjs and the entrypoint was getting the weakest parse of the three.
+ *
+ * A pass still means "it parses", never "it starts". Nothing here runs a Deno
+ * isolate, and `crypto.randomUUID()` at module scope threw only when the isolate
+ * started, after typecheck, lint and build were all green.
  */
-let artifactLoads = true;
-const loadErrors = [];
-for (const f of files) {
-  if (!/\.(js|mjs)$/.test(f.path)) continue;
-  try {
-    execFileSync(process.execPath, ['--check', f.path], { stdio: 'pipe' });
-  } catch (err) {
-    artifactLoads = false;
-    loadErrors.push(`${f.path}: ${String(err.stderr ?? err.message).split('\n')[0]}`);
-  }
-}
+const loadCheck = checkArtifactLoads(process.cwd(), ARTIFACT_DIR);
+const artifactLoads = loadCheck.ok;
+
+/*
+ * Advisory findings are carried, not dropped. shadow-copy and
+ * weak-parse-coverage do not refuse -- a noisy gate gets switched off and is
+ * then absent for the case that matters -- but they are the reason a human
+ * reads this output at all, so they travel with the blocking ones.
+ */
+const loadErrors = loadCheck.findings.map(
+  (f) => `${f.kind} ${f.file}: ${f.detail}`,
+);
 
 const releaseRef = arg('--ref', 'origin/master');
 let headSha;
