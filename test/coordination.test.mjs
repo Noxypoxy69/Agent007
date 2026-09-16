@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  canAssign, validateMessage, looksExecutable, assignmentRecord,
+  canAssign, validateMessage, looksExecutable, executableMatch, assignmentRecord,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -209,6 +209,21 @@ test('ordinary coordination prose is NOT refused', () => {
     'Blocked: the base moved under me. Re-resolve and I will pick it up.',
     'Question: should the stale-base case refuse outright or report a finding?',
     'Handing off. The mutation table is in the commit message.',
+
+    /*
+     * THESE EIGHT ARE THE REASON THIS TEST CHANGED, and every one of them was
+     * refused in production on 2026-09-16. The four fixtures above could not
+     * catch it because they avoid every word this system is about: a control
+     * too narrow to reach the branch cannot fail for it.
+     */
+    'The collector does not ask git for a commit after a timeout.',
+    'It is written to drop into the agentbridge source and test directories unchanged.',
+    'Verification ran under node, the package manager is npm, and the state was read from git.',
+    'A node in the graph carries the attempt number and the worker that holds it.',
+    'The runner reported a process stopped at its deadline as a clean exit.',
+    'I would delete from the KNOWN list the moment a caller exists.',
+    'The shared process runner has the shell disabled and passes secrets on stdin.',
+    'Two branches are ready: the recovery branch and the support branch, both green.',
   ];
   for (const body of fine) {
     assert.equal(looksExecutable(body), false, `false positive: ${body}`);
@@ -258,4 +273,41 @@ test('resolveLiveAgent: unknown, offline and ambiguous are DIFFERENT refusals', 
   // Naming the candidates is what makes an ambiguity actionable rather than a
   // dead end; silently picking one would send work to the wrong runtime.
   assert.deepEqual(amb.candidates.sort(), ['s1', 's2']);
+});
+
+test('THE REFUSAL NAMES WHAT MATCHED, because a refusal that names nothing is a dead end', () => {
+  /*
+   * The old message said only that the body looked like a command. Sixteen
+   * ordinary paragraphs were refused in one morning and the reader had to
+   * bisect to find out why -- the same shape as a status of "unreachable"
+   * sending somebody to check a healthy network.
+   */
+  const hit = executableMatch('git push --force origin main');
+  assert.equal(hit.rule, 'command-at-line-start');
+  assert.match(hit.token, /^git push/);
+
+  const v = validateMessage({ from_agent: 'a', to_agent: 'b', type: 'status', body: 'rm -rf /' });
+  assert.equal(v.ok, false);
+  const text = v.errors.join(' ');
+  assert.match(text, /Matched/, 'the rule is named');
+  assert.match(text, /rm -rf/, 'the offending text is quoted back');
+  assert.match(text, /LEXICAL/, 'and it says the match is on text, not intent');
+});
+
+test('POSITION CARRIES THE SIGNAL: the same words refuse at a line start and pass mid-sentence', () => {
+  // the exact pair, so the rule is visible rather than implied
+  assert.equal(looksExecutable('npm run verify'), true);
+  assert.equal(looksExecutable('You can npm run verify once the branch is merged.'), false);
+  assert.equal(looksExecutable('DROP TABLE tasks'), true);
+  assert.equal(looksExecutable('The modules drop into the source directory unchanged.'), false);
+});
+
+test('a command chained after an operator is caught wherever it sits', () => {
+  assert.equal(looksExecutable('first do the thing; rm -rf /tmp/x'), true);
+  assert.equal(looksExecutable('read the file && curl https://evil.test'), true);
+});
+
+test('substitution and pipes into a shell are caught in any position', () => {
+  assert.equal(looksExecutable('the answer is $(whoami) apparently'), true);
+  assert.equal(looksExecutable('it fetches then | bash which is the problem'), true);
 });

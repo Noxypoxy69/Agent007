@@ -907,19 +907,70 @@ export const MESSAGE_TYPES = ['assignment', 'question', 'answer', 'status', 'blo
 
 export const ASSIGNABLE_FROM = ['runnable', 'returned'];
 
-export function looksExecutable(text) {
-  if (typeof text !== 'string') return false;
+/** Unambiguous wherever they appear: no sentence contains these by accident. */
+const ALWAYS = [
+  ['substitution', /\$\([^)]*\)/],
+  ['backtick-substitution', /`[^`\n]+`/],
+  ['script-tag', /<script\b/i],
+  ['pipe-to-shell', /\|\s*(sh|bash|zsh|pwsh|powershell)\b/i],
+  ['recursive-remove', /\brm\s+-[a-z]*[rf]/i],
+  ['privilege-escalation', /(^|[\s;&|])sudo\s+\S/i],
+];
+
+/** Words that are only a command when they START a command. */
+const COMMANDS =
+  'rm|curl|wget|chmod|chown|kill|scp|ssh|nc|eval|exec|git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd';
+
+/**
+ * Command-SHAPED, not merely command-adjacent: a flag, a path, a URL, a quoted
+ * argument, or a redirect. "npm run verify" qualifies; "npm is the package
+ * manager" does not.
+ */
+const ARGUMENT = String.raw`(-{1,2}[a-z]|[./~]|[a-z]+:\/\/|["']|\w+\s+-{1,2}[a-z]` +
+  // a runner naming a package and then an action: "npx wrangler deploy"
+  String.raw`|[\w@/-]+\s+(deploy|install|run|publish|start|build|test)\b` +
+  String.raw`|(deploy|install|run|publish|start|build|test)\b)`;
+
+/** At the start of a line, allowing indentation and a shell prompt. */
+const AT_LINE_START = new RegExp(
+  String.raw`^[ \t]*[$>#]?[ \t]*(${COMMANDS})\s+${ARGUMENT}`,
+  'im',
+);
+
+/** Or chained after an operator, which is a command position wherever it sits. */
+const AFTER_OPERATOR = new RegExp(String.raw`[;&|]{1,2}\s*(${COMMANDS})\s+${ARGUMENT}`, 'i');
+
+/** A statement, not a sentence containing a verb that is also a keyword. */
+const SQL_STATEMENT = new RegExp(
+  String.raw`^[ \t]*(drop|delete|truncate|alter|insert|update)\s+(table|from|into)\b`,
+  'im',
+);
+
+/**
+ * What matched, and where. The refusal already knows this; withholding it is
+ * what turned a one-second correction into a morning of bisection.
+ */
+export function executableMatch(text) {
+  if (typeof text !== 'string') return null;
   const t = text.trim();
 
-  const patterns = [
-    /(^|[\s;&|`])(rm|curl|wget|chmod|chown|kill|sudo|scp|ssh|nc|eval|exec)\s+-?\w/i,
-    /(^|[\s;&|`])(git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd)\s+\S/i,
-    /\$\(|\bbacktick\b|`[^`]*`/,
-    /\|\s*(sh|bash|zsh|pwsh|powershell)\b/i,
-    /\b(drop|delete|truncate|alter|insert|update)\s+(table|from|into)\b/i,
-    /<script\b/i,
-  ];
-  return patterns.some((re) => re.test(t));
+  for (const [rule, re] of ALWAYS) {
+    const m = re.exec(t);
+    if (m) return { rule, token: m[0].slice(0, 40) };
+  }
+  for (const [rule, re] of [
+    ['command-at-line-start', AT_LINE_START],
+    ['command-after-operator', AFTER_OPERATOR],
+    ['sql-statement', SQL_STATEMENT],
+  ]) {
+    const m = re.exec(t);
+    if (m) return { rule, token: m[0].trim().slice(0, 40) };
+  }
+  return null;
+}
+
+export function looksExecutable(text) {
+  return executableMatch(text) !== null;
 }
 
 export function validateMessage(m = {}) {
@@ -932,9 +983,16 @@ export function validateMessage(m = {}) {
   }
   if (!nonEmpty(m.body)) errors.push('body is required');
   else if (m.body.length > 8000) errors.push('body exceeds 8000 characters');
-  else if (looksExecutable(m.body)) {
-    errors.push('body looks like a command rather than a message: a coordination '
-      + 'channel that carries executable text is a remote shell nobody audited');
+  else {
+    const hit = executableMatch(m.body);
+    if (hit) {
+      errors.push(
+        `body looks like a command rather than a message: a coordination channel that `
+          + `carries executable text is a remote shell nobody audited. Matched ${hit.rule} `
+          + `on ${JSON.stringify(hit.token)} -- this is a LEXICAL match on the text, not a `
+          + `judgement about intent, so rephrasing that fragment is enough`,
+      );
+    }
   }
   if (m.task_id != null && !nonEmpty(m.task_id)) errors.push('task_id must be a string when present');
 
