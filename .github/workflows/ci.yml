@@ -37,14 +37,17 @@ jobs:
 
       - name: Suite
         run: |
-          # REDIRECT, NEVER PIPE. `npm test | tee` HANGS HERE, and the reason is
-          # a real defect rather than a shell detail: a test leaves an orphaned
-          # child process holding the write end of the pipe, so tee never sees
-          # EOF and waits forever even though the suite has finished. The first
-          # CI run ended with "Cleaning up orphan processes" and this one sat at
-          # 5+ minutes against a 68s suite. A file redirect has no such reader,
-          # so the orphan is invisible here -- which is exactly why it has never
-          # been noticed locally.
+          # A redirect rather than a pipe, so the summary below reads a whole
+          # file rather than racing the stream.
+          #
+          # RETRACTION, LEFT HERE ON PURPOSE. An earlier version of this comment
+          # claimed `npm test | tee` HANGS because a test leaks an orphaned child
+          # holding the write end of the pipe. That was wrong. There was no hang:
+          # the run took 61 seconds, and I read my own polling turns as elapsed
+          # time, cancelled a healthy run, and wrote the diagnosis up as fact.
+          # Piping reproduces nothing -- locally it completes with 0 failures.
+          # The claim is retracted rather than deleted because a confident wrong
+          # explanation in a commit is worth more as a warning than as a gap.
           npm test > /tmp/suite.txt 2>&1 || true
 
           echo ""

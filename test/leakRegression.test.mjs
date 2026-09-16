@@ -214,6 +214,78 @@ test('a REAL collected payload is scanned ephemerally and never becomes a fixtur
   );
 });
 
+/**
+ * Does `text` name the machine described by `identity`? Returns the offending
+ * value, or null.
+ *
+ * A HOMEDIR AND A HOSTNAME ARE ALREADY IDENTITY-SHAPED — `/home/jane`,
+ * `DESKTOP-ABC123` — so a bare substring is the right question for them.
+ *
+ * A USERNAME IS JUST A WORD, AND THAT IS WHAT BROKE THIS. On a GitHub runner
+ * `os.userInfo().username` is `runner`, and leakShapes.mjs contains the line
+ * "the runner finished in 4s" — deliberate English prose, the baseline entry
+ * proving that clean text scans clean. Matching the username as a bare
+ * substring turned that into a failure, so this test was red on a repository
+ * with nothing wrong with it, and would be on any clean machine whose operator
+ * is called runner, admin, build, ci or root.
+ *
+ * It went unseen for the same reason it was hard to diagnose: nobody had run
+ * this suite anywhere but their own desktop, where the username is a name
+ * nobody writes in a sentence.
+ *
+ * A gate that fires for a correct repo is worse than no gate — it is the one
+ * people learn to skip, and then the real red goes unread too. So a username
+ * counts only where it IDENTIFIES somebody: after a path separator or a `~`,
+ * or on either side of an `@`. Never inside a sentence.
+ */
+function namesMachine(text, identity) {
+  const hay = String(text).toLowerCase();
+
+  for (const needle of [identity.homedir, identity.hostname]) {
+    if (needle && needle.length >= 3 && hay.includes(needle.toLowerCase())) return needle;
+  }
+
+  const user = identity.username;
+  if (user && user.length >= 3) {
+    const u = user.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    //  /jane  \jane  ~jane  @jane   or   jane@
+    if (new RegExp(`[/\\\\~@]${u}(?![a-z0-9_-])|(?<![a-z0-9_-])${u}@`).test(hay)) return user;
+  }
+
+  return null;
+}
+
+test('the identity matcher fires on a real leak and stays quiet on prose', () => {
+  /*
+   * THE POSITIVE CONTROL, WITHOUT WHICH THE ASSERTION BELOW PROVES NOTHING.
+   * "The fixtures do not name me" passes trivially against a matcher that
+   * never matches anything — and a matcher that was just narrowed is exactly
+   * where that would hide. So it is shown to fire BEFORE it is trusted to
+   * stay quiet.
+   */
+  const me = { username: 'runner', hostname: 'DESKTOP-ABC123', homedir: '/home/runner' };
+
+  for (const leak of [
+    'path: /home/runner/work/x',
+    'path: C:\\Users\\runner\\AppData',
+    'from: runner@build-01',
+    'home: ~runner/.ssh',
+    'host DESKTOP-ABC123 reported',
+  ]) {
+    assert.notEqual(namesMachine(leak, me), null, `should have been flagged: ${leak}`);
+  }
+
+  // The username alone, in prose. This is the case that was failing CI.
+  const wordOnly = { username: 'runner', hostname: '', homedir: '' };
+  for (const clean of [
+    'the runner finished in 4s',
+    'a test runner, not a person',
+    'runners up were not recorded',
+  ]) {
+    assert.equal(namesMachine(clean, wordOnly), null, `should NOT have been flagged: ${clean}`);
+  }
+});
+
 test('this suite committed no real identity: the fixtures name nobody on this machine', () => {
   /*
    * The guard on the guard. If somebody ever pastes a real payload into
@@ -221,15 +293,8 @@ test('this suite committed no real identity: the fixtures name nobody on this ma
    * machine whose owner would be disclosed.
    */
   const text = fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
-  const me = machineIdentity();
-  const real = [me.username, me.hostname, me.homedir].filter((s) => s && s.length >= 3);
-  for (const needle of real) {
-    assert.equal(
-      text.toLowerCase().includes(needle.toLowerCase()),
-      false,
-      'a real identity value is present in the committed fixtures',
-    );
-  }
+  const hit = namesMachine(text, machineIdentity());
+  assert.equal(hit, null, `a real identity value is present in the committed fixtures: ${hit}`);
   // And the 8.3 alias of the home directory, which is the spelling that would
   // slip in through a copied temp path.
   const short = os.tmpdir().split(/[\\/]/).find((seg) => seg.includes('~'));
