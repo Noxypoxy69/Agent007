@@ -176,9 +176,20 @@ PreToolUse hook (`src/agentToolBoundary.mjs`, `bin/agentbridge-guard-hook.mjs`)
 puts `guardExecution` on the agent's own tool boundary. With a launch scope that
 GRANTED the commit, a stale lease in the hook's placement refused the command
 the agent chose and HEAD stayed at base. The boundary speaks shell strings and
-the guard speaks argv, so every part of a compound is classified and anything
-that can hide a command (`$( )`, backticks, newline, redirection) is refused
-rather than parsed.
+the guard speaks argv, so every part of a compound is classified.
+
+*Reviewed the same day, and the review found two holes in it.* The first pass
+BLOCKLISTED the constructs that hide a command — substitution, backticks,
+newline, redirection — and was tested against exactly those. `&` was not on the
+list, so `git status & git push` parsed as one command whose first token was a
+read verb and was **allowed**: the publish rode behind the status, which is the
+sentence that file already used to explain why compounds are split at all. And
+`git -C /other/repo commit` passed every check, because the action really is a
+commit and the placement really is a disposable worktree — they were about
+different repositories. The matcher is now an **allow-list of characters**, so a
+metacharacter nobody thought of fails closed instead of through, and the
+hostile test sweeps every printable ASCII character rather than the seven
+wrappers its author imagined. Both directions watched red.
 
 *Still open, stated so this does not read as closed:* **codex is unverified** —
 no binary on the machine this was measured on, and its flags are deliberately

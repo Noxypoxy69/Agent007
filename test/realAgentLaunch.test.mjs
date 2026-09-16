@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { permissionScope, agentLaunch, readDenials, ENGINE_IDS } from '../src/agentPermissions.mjs';
+import { hookSettings } from '../src/agentToolBoundary.mjs';
 import { run as execRun } from '../src/exec.mjs';
 
 /**
@@ -301,10 +302,9 @@ test('THE BRIDGE GUARD ON THE ENGINE\'S OWN TOOL BOUNDARY STOPS A COMMAND IT CHO
   t.after(() => rmSync(hookDir, { recursive: true, force: true }));
   const settings = path.join(hookDir, 'settings.json');
   const shim = path.resolve(import.meta.dirname, '..', 'bin', 'agentbridge-guard-hook.mjs');
-  writeFileSync(settings, JSON.stringify({
-    hooks: { PreToolUse: [{ matcher: 'Bash',
-      hooks: [{ type: 'command', command: `node ${shim}` }] }] },
-  }));
+  // from the module, not hand-rolled: a matcher typo in a second copy of this
+  // wire format would pass this test against a hook the engine never called
+  writeFileSync(settings, JSON.stringify(hookSettings(shim)));
 
   /*
    * THE LAUNCH SCOPE IS THE SAME IN BOTH RUNS AND IT GRANTS THE COMMIT. Only

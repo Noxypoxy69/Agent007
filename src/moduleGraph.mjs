@@ -58,10 +58,18 @@ export const DEFAULT_ENTRY_POINTS = [
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */
   'bin/agentbridge-deploy-check.mjs',
-  /* A CODING ENGINE runs this, not this repository: it is named as a command
-   * string in a settings file handed to the agent, so nothing here imports it
-   * and no graph can see the caller. Same sense as the deploy check above —
-   * something outside the graph invokes it, so what it imports is shipped.
+  /* A CODING ENGINE runs this — it is named as a command string in a settings
+   * file handed to the agent, so nothing here imports it and no graph can see
+   * the caller. Same sense as the deploy check above.
+   *
+   * SAID PLAINLY: NOTHING IN THIS REPOSITORY WRITES THAT SETTINGS FILE YET.
+   * `agentToolBoundary.hookSettings` produces it and only the live test calls
+   * that; wiring it through `attemptPipeline` is open work. So this line is
+   * forward-looking, which is a weaker claim than the entries above it and is
+   * exactly the kind of entry that becomes a snooze button if nobody says so.
+   * Delete it when the wiring lands and the graph should still be fine —
+   * if it is not, this line was carrying more than it admitted.
+   *
    * It was THIS GATE that caught `agentToolBoundary.mjs` as test-only on the
    * commit that added it, which is the gate doing its job. */
   'bin/agentbridge-guard-hook.mjs',
