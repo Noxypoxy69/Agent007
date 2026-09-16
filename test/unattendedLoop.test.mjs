@@ -9,6 +9,7 @@ import { run as execRun } from '../src/exec.mjs';
 import { createFakeReviewer } from './fakeReviewer.mjs';
 import { createLoopState } from '../src/loopDetector.mjs';
 import { createReadCache } from '../src/readCache.mjs';
+import { isInside } from '../src/workspaceManager.mjs';
 
 /**
  * THE ACCEPTANCE TEST FOR "ZERO INTERACTIVE PROMPTS", RUN FOR REAL.
@@ -718,7 +719,17 @@ test('A RETURNED TASK IS REVIEWED IN A FRESH WORKTREE AND ACCEPTED ON THE LEASE'
    */
   assert.notEqual(reviewedIn, null, 'the reviewer never ran');
   assert.equal(reviewedIn.readOnly, true);
-  assert.ok(reviewedIn.p.startsWith(root), `reviewed in ${reviewedIn.p}, which is not a fresh workspace`);
+  /*
+   * isInside, NOT startsWith. Two reasons, and the second is the one that bit.
+   * A raw prefix test says `/work/ab-evil` is inside `/work/ab`, which is the
+   * trap workspaceManager's header is written about -- asserting containment
+   * with the naive check here while the module refuses it there is how a test
+   * agrees with a bug. And `root` comes from mkdtemp, so on Windows it arrives
+   * with backslashes while a resolved workspace path uses forward slashes;
+   * startsWith compared the two spellings and failed on a path that was
+   * genuinely contained.
+   */
+  assert.ok(isInside(root, reviewedIn.p), `reviewed in ${reviewedIn.p}, which is not a fresh workspace`);
   assert.notEqual(reviewedIn.p, dir, 'the reviewer was handed the worker\'s own tree');
   assert.equal(reviewedIn.value, '2', 'the review workspace is not at the reviewed commit');
 
