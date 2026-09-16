@@ -189,6 +189,44 @@ Loopback, TLS-to-localhost and local servers do **not** reproduce it, so the
 hermetic suite structurally cannot catch it — see the header in
 `test/rejectedIsNotUnreachable.test.mjs` for who can run the live probe and how.
 
+## THE BRIDGE HAS TWO SURFACES, AND ONE OF THEM WAS UNFINDABLE
+
+Both are deployed. Only one was written down anywhere, and the other had to be
+located by probing workers.dev subdomains — a working, deployed connector whose
+address existed in no file, no README and no handoff note. Same defect class as
+everything in the table above: a thing that works and cannot be found.
+
+| surface | URL | auth |
+|---|---|---|
+| **Supabase edge function** | `https://ornbhvaijcpsbcgquzhd.supabase.co/functions/v1/mcp` | bearer token only, **no OAuth** |
+| **Cloudflare worker** `agentbridge` | `https://agentbridge.myfitness11.workers.dev/mcp` | **full OAuth**, PKCE S256 |
+
+`src/hostedRegistry.mjs` defaults to the Supabase one; the CLI and the
+code-b/c/d sessions use it. The Cloudflare worker (`bridge/oauthWorker.mjs`,
+`wrangler.toml`) is what a remote MCP client — Claude Cowork, a claude.ai
+custom connector, ChatGPT — connects to, because those need discovery and
+cannot present a raw bearer token.
+
+**HOW A CONNECTOR IS AUTHORISED, and it is not by registering.** Dynamic client
+registration issues a client_id and **grants nothing** — probed 2026-09-16:
+a fresh client got no token and no scope, a write request with a wrong secret
+issued no code, and a fabricated code at /token got a 400.
+
+The grant comes from the operator submitting the consent page, and **which
+secret is typed decides the scope**:
+
+    read grant   -> the READER token
+    write grant  -> the COORDINATOR token
+
+Two different secrets deliberately. Approving "this client may direct my agents"
+must not be possible with the credential that only ever meant "this client may
+look". `scopeGrantsWrite` matches an exact scope token rather than a substring,
+so `agentbridge:write-nothing` does not grant write.
+
+**A connector defaults to READ.** Write requires ticking the box AND the
+coordinator token. Do not type the coordinator token into that form unless the
+client genuinely needs to assign, accept, cancel, or record owner decisions.
+
 ## Two agents, one clone
 
 **Commit by pathspec**: `git commit path/a path/b -m "…"`. The index is shared
