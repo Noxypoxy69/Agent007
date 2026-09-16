@@ -601,12 +601,50 @@ function toRegistration(r) {
 }
 
 /**
+ * FIELDS WHERE A DISAGREEMENT MEANS THE TWO REGISTRIES DESCRIBE DIFFERENT
+ * WORKERS, NOT THE SAME ONE FROM DIFFERENT ANGLES.
+ *
+ * Liveness legitimately differs -- the hosted heartbeat is server-stamped and
+ * the local one is not, so one being fresher is normal and says nothing. These
+ * four decide ROUTING. If local thinks a session belongs to `code-b` and hosted
+ * thinks it belongs to `b6`, an assignment goes to one of them and the operator
+ * is looking at the other.
+ */
+export const IDENTITY_FIELDS = Object.freeze(['agent_id', 'lane_id', 'repo_id', 'worktree_id']);
+
+/**
  * Merge local and hosted registrations into one roster.
  *
  * A session present in both is ONE worker, and the hosted row wins on liveness
  * because its heartbeat is server-stamped and therefore the one a second
  * machine can trust. The local row wins on nothing; it is the same worker seen
  * from closer up.
+ *
+ * ═══ BUT A DISAGREEMENT ABOUT IDENTITY IS NOT A MERGE, IT IS A FAULT ═══
+ *
+ * This did `{ ...existing, ...r, origin: 'hosted' }` and nothing else, so hosted
+ * silently overwrote local and the disagreement vanished in the same expression
+ * that created it. Nothing downstream could report what it never saw.
+ *
+ * Found by c8 the way these things always surface -- a WRITE refused:
+ *
+ *     unregister-session -> session_owned_by_another_agent,
+ *                           'social-sparks-app-b6' held by agent 'b6'
+ *
+ * The hosted registry had that session as `b6`; the local store had it as
+ * `code-b`. Both had been wrong about each other for hours, every read was
+ * silently consistent, and the first thing to notice was a refusal at the far
+ * end of an unrelated command.
+ *
+ * TWO SOURCES WITH NO COMPARISON IS NOT TWO SOURCES, IT IS ONE SOURCE AND A
+ * DECOY. The hosted row still wins -- it is the cross-machine authority and
+ * picking the other way would be worse -- but the conflict is now attached to
+ * the row it happened on, so a roster can show it and a person can see it
+ * before a write fails.
+ *
+ * NOT AN EXCEPTION, DELIBERATELY. A roster that throws is a roster nobody can
+ * read during exactly the incident it is describing. The conflict travels as
+ * data and the caller decides how loud to be about it.
  */
 export function mergeRegistrations(local = [], hosted = []) {
   const bySession = new Map();
@@ -617,7 +655,27 @@ export function mergeRegistrations(local = [], hosted = []) {
   for (const r of hosted) {
     if (!r?.session_id) continue;
     const existing = bySession.get(r.session_id);
-    bySession.set(r.session_id, existing ? { ...existing, ...r, origin: 'hosted' } : r);
+    if (!existing) { bySession.set(r.session_id, { ...r, origin: 'hosted' }); continue; }
+
+    /*
+     * COMPARED BEFORE IT IS OVERWRITTEN. Once the spread has run the two values
+     * are one value and the disagreement is unrecoverable, so the check has to
+     * happen here or not at all.
+     *
+     * A field the local row simply does not carry is NOT a conflict -- absence
+     * is not disagreement, and treating it as one would make every partial
+     * local record look like a fault.
+     */
+    const conflicts = IDENTITY_FIELDS
+      .filter((f) => existing[f] != null && r[f] != null && existing[f] !== r[f])
+      .map((f) => ({ field: f, local: existing[f], hosted: r[f] }));
+
+    bySession.set(r.session_id, {
+      ...existing,
+      ...r,
+      origin: 'hosted',
+      ...(conflicts.length ? { conflicts } : {}),
+    });
   }
   return [...bySession.values()].sort((a, b) =>
     String(a.session_id).localeCompare(String(b.session_id)));
