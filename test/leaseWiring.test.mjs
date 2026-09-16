@@ -595,35 +595,97 @@ test('THE CLIENT THAT RETURNS WORK SENDS THE TOKEN THE HANDLER DEMANDS', async (
    * the value is in hand and is being dropped. Both that file and
    * supabase/functions/** are outside the client-half contract's allowed paths.
    */
-  const events = codeOnly(
-    await readFile(fileURLToPath(new URL('../src/events.mjs', import.meta.url)), 'utf8'),
-  );
-  const assignedEvent = events.slice(
-    events.indexOf("kind: 'assigned'"),
-    events.indexOf("kind: 'cancelled'"),
+  /*
+   * ASSERTED AS DELIVERY, NOT AS A ROUTE. This limb used to read
+   * `src/events.mjs` by name and require the lease on the `assigned` event.
+   *
+   * That was wrong twice over. I told code-c the gate asserted DELIVERY and
+   * would go green whichever route carried it -- and it did not; it named a
+   * file. Then code-c put the token on the assigned event, I argued the
+   * authenticated read was the better home because a worker asking "what am I
+   * holding" is exactly who should be told, code-c agreed and MOVED it, and my
+   * gate was left demanding a fix my own argument had superseded. A red test
+   * that cannot go green is a countdown, not a ratchet.
+   *
+   * The real property has never changed: a worker holding a REGISTRATION token
+   * must be able to obtain the lease token it is required to send back. So
+   * that is what this checks -- some route gated by `registration_tokens` hands
+   * the worker its task row, and that row is read with `select=*` rather than a
+   * narrowed column list that would drop `lease_token` on the way.
+   *
+   * The narrowing is the regression worth fearing now. Delivery via a whole-row
+   * read is one `select("id, title, state")` away from being silently gone,
+   * with the route still present and still authenticated.
+   */
+  const hook = codeOnly(
+    await readFile(
+      fileURLToPath(new URL('../supabase/functions/mcp/index.ts', import.meta.url)),
+      'utf8',
+    ),
   );
 
-  assert.match(
-    assignedEvent,
-    /lease/,
-    'THE LOOP STILL DOES NOT CLOSE, and the missing half is now DELIVERY, not the '
-      + 'client. `agentbridge return-task` sends lease_token, but nothing ever tells a '
-      + 'worker what its token is: a registration token reaches only /register, /wait '
-      + 'and /return, the MCP read surface 401s it, and the `assigned` event carries '
-      + 'task_id, lane_id and repo_id with no lease.\n\n'
-      + 'WHAT CLOSES THIS: the `assigned` event in src/events.mjs carries the lease '
-      + 'token for the task it names. eventsFor already filters to the worker\'s own '
-      + 'session, so that is the correct scope -- only the lease holder is told -- and '
-      + '/wait already selects the column and discards it.\n\n'
-      + 'DO NOT SOLVE THIS BY PERSISTING THE TOKEN CLIENT-SIDE AT ASSIGN TIME. The '
-      + 'coordinator assigns and the worker returns; they are different processes, and '
-      + 'a local store only works while they share a machine -- which is the assumption '
-      + 'the session registry exists to remove.\n\n'
-      + 'DO NOT SOLVE IT BY LETTING /return ACCEPT A MISSING TOKEN. That path is the '
-      + 'one every zombie takes by omitting a field.\n\n'
-      + 'DO NOT SKIP OR DELETE THIS. It is the only assertion in the suite that reads '
-      + 'the handler, the client AND the delivery; returnTaskCli.test.mjs checks the '
-      + 'client against a stub and cannot see any of the others.',
+  const REG_GATE = "tokenLabel('registration_tokens'";
+  const routes = [];
+  for (const m of hook.matchAll(/if \(path === '(\/[a-z-]+)'\) \{/g)) {
+    const from = m.index;
+    const next = hook.indexOf("if (path === '", from + 10);
+    const body = hook.slice(from, next === -1 ? hook.length : next);
+    if (body.includes(REG_GATE)) routes.push({ path: m[1], body });
+  }
+
+  assert.ok(
+    routes.length > 0,
+    'no route is gated by registration_tokens at all -- a worker has no authenticated '
+      + 'surface, so this check is reading the wrong file or the token classes moved',
+  );
+
+  /*
+   * A DELIVERY ROUTE MUST NOT REQUIRE THE TOKEN IT DELIVERS.
+   *
+   * The first version of this accepted any registration-gated route that
+   * mentioned lease_token or read the task row -- and went GREEN on a branch
+   * with no delivery at all, because `/return` satisfies both: it is
+   * registration-gated, it demands a lease_token, and it re-reads the task row
+   * afterwards. I matched the route that CONSUMES the token as evidence that
+   * something HANDS IT OUT. Adjacent to the property, not the property.
+   *
+   * The discriminator is the direction. A worker with no token must be able to
+   * call it -- so a route that refuses without one cannot be how the worker
+   * gets one. That excludes /return and /renew and admits an authenticated
+   * read, whatever it ends up being called.
+   */
+  const requiresToken = (body) => /body\?\.lease_token/.test(body);
+
+  /*
+   * RETURNS the row, not merely READS one. The second version of this checked
+   * for `tasks?select=*` in the body and went green again -- because `/wait`
+   * reads exactly that to build its event feed, and then returns
+   * { ok, events, cursor } with no row in it. eventsFor's own comment says so:
+   * "enough to know WHICH task, never enough to act without reading it".
+   *
+   * Reading a value and handing it to the caller are different things, and the
+   * whole lease gap was precisely that difference. So this looks at the
+   * RESPONSE.
+   */
+  const returnsTask = (body) => /json\(\{[^{}]*\btask\b/.test(body);
+
+  const delivers = routes.find((r) => returnsTask(r.body) && !requiresToken(r.body));
+
+  assert.ok(
+    delivers,
+    'THE LOOP STILL DOES NOT CLOSE, and the missing half is DELIVERY. '
+      + '`agentbridge return-task` sends lease_token, but no route a worker can reach '
+      + 'hands it one: a registration token reaches only '
+      + routes.map((r) => r.path).join(', ')
+      + ', and none of them returns the task row that carries the lease. '
+      + 'WHAT CLOSES THIS: any authenticated route that returns the worker its own task '
+      + 'row -- read with select=* so lease_token survives. The route is not prescribed; '
+      + 'naming one is what made this gate assert a superseded fix once already. '
+      + 'DO NOT SOLVE IT BY LETTING /return ACCEPT A MISSING TOKEN. That path is the one '
+      + 'every zombie takes by omitting a field. '
+      + 'DO NOT SKIP OR DELETE THIS. It is the only assertion in the suite that reads the '
+      + 'handler, the client AND the delivery; returnTaskCli.test.mjs checks the client '
+      + 'against a stub and cannot see any of the others.',
   );
 });
 
