@@ -105,6 +105,87 @@ export const DEFAULT_SPLICES = {
   ],
 };
 
+/**
+ * Declared modules whose SPLICE IS CHECKED BY NAME ONLY, each with the reason.
+ *
+ * WHY THIS LIST HAD TO EXIST, demonstrated rather than argued. verifySplices
+ * marks a module spliced when every export NAME of the source appears among the
+ * export names of the copy. It never compares bodies -- deliberately, because a
+ * splice legitimately differs in its imports, so a text comparison would be
+ * noise. test/sharedSpliceMatches.test.mjs is the behaviour half.
+ *
+ * The gap was the RATIO between those halves, and nothing made it visible. Ten
+ * modules were declared spliced; two were behaviour-compared. Found by b6, who
+ * inverted the executable guard inside `executableMatch` in the source --
+ * changing what it RETURNS, touching no export name -- and left the copy alone.
+ * Source and copy then differed by eight lines inside that function and
+ * verifySplices still reported `spliced: 10, findings: 0`. I reproduced it here
+ * before building this: the guard was made to permit everything, and the gate
+ * said nothing.
+ *
+ * So a change to validateMessage's real behaviour, not mirrored into the copy,
+ * would ship an edge function whose message guard disagrees with the one every
+ * test in the suite exercises -- with both gates green. Given what that function
+ * guards, it is the worst one to let drift.
+ *
+ * A REASON HERE IS A DEBT, NOT A DISPENSATION. It says "this module is trusted
+ * to a weaker check, and here is why" -- so the weakness is legible in review
+ * instead of implicit in a count nobody computed. It rots loudly: delete a
+ * behaviour pair and the module must appear here or the gate fails; add one and
+ * the entry becomes unnecessary and can go.
+ */
+export const NAME_ONLY_SPLICES = {
+  'src/coordination.mjs':
+    'HIGHEST RISK of the eight and named first for that reason. Carries '
+    + 'validateMessage and the executable-text guard behind it. Wants a behaviour '
+    + 'pair next; it is only here because writing one is more than this change.',
+  'src/events.mjs':
+    'Pure shaping of rows into events, no I/O and no decision that is not a '
+    + 'field comparison. A name-level splice catches the realistic drift, which '
+    + 'is an event kind added on one side only.',
+  'src/glob.mjs':
+    'Pattern matching with no state. Its behaviour is already pinned by its own '
+    + 'unit tests on the source side, and the copy is a verbatim splice.',
+  'src/liveRegistry.mjs':
+    'Liveness arithmetic over a timestamp and a constant. STALE_AFTER_MS drifting '
+    + 'between the halves is the risk, and that is a value a name check does see '
+    + 'because it is an export.',
+  'src/ownWork.mjs':
+    'Read-side filtering with no writes. A drift here narrows or widens what a '
+    + 'worker sees rather than what it may do.',
+  'src/ownerDecisions.mjs':
+    'Decision records are append-only and validated at the database by a check '
+    + 'constraint, so the copy cannot admit a shape Postgres would refuse.',
+  'src/permissionRequest.mjs':
+    'Newest of the eight and still moving. Deliberately not given a behaviour '
+    + 'pair while its shape is unsettled, because a pair written against a moving '
+    + 'target gets deleted rather than maintained.',
+  'mcp/toolDefs.mjs':
+    'The node-side twin, guarded end-to-end instead: test/coordinatorAuth.test.mjs '
+    + 'imports the DEPLOYED copy rather than this one, and coordinatorAuthLive '
+    + 'certifies the same surface against the live server.',
+};
+
+/**
+ * Which declared modules the behaviour half actually compares, READ FROM THAT
+ * FILE rather than restated here.
+ *
+ * A second hand-kept list would be one more copy of a claim, which is the class
+ * of defect this whole gate exists for. Adding a behaviour pair should make the
+ * ratio improve on its own, without anybody remembering to update a constant.
+ */
+export function behaviourComparedModules(root, testFile = 'test/sharedSpliceMatches.test.mjs') {
+  let text;
+  try {
+    text = readFileSync(path.join(root, testFile), 'utf8');
+  } catch {
+    return null; // absent under this root: not evidence either way
+  }
+  const found = new Set();
+  for (const m of text.matchAll(/from\s+'\.\.\/([^']+)'/g)) found.add(m[1]);
+  return found;
+}
+
 /** Reached only through a hand-maintained copy. Shipped, but not by an import. */
 export const SPLICED = 'spliced';
 
@@ -175,6 +256,29 @@ export function verifySplices(root, splices = DEFAULT_SPLICES) {
       }
     }
   }
+  /*
+   * THE RATIO, MADE VISIBLE. Everything above proves the NAMES match. This
+   * requires each declared module to be either behaviour-compared or carrying a
+   * stated reason for being trusted to the weaker check -- so "ten declared, two
+   * compared" can never again be a fact nobody has computed.
+   */
+  const compared = behaviourComparedModules(root);
+  if (compared) {
+    for (const modules of Object.values(splices)) {
+      for (const m of modules) {
+        if (!spliced.has(m)) continue; // already reported as drifted or missing
+        if (compared.has(m)) continue; // the behaviour half checks this one
+        if (NAME_ONLY_SPLICES[m]) continue; // weaker check, declared and reasoned
+        findings.push({
+          module: m,
+          status: 'splice-name-only-undeclared',
+          kind: 'splice-name-only-undeclared',
+          importedBy: [],
+        });
+      }
+    }
+  }
+
   return { spliced, findings };
 }
 

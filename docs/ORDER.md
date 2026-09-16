@@ -19,14 +19,40 @@ correctly behind the loop, not in front of it.
 
 ## Blocking the loop
 
-**0. Deploy the edge function.** — DANNY, and only Danny
-`/task`, `/renew` and the permission path are committed and undeployed. Reported
-by code-c at 04:53: *"until they ship a worker cannot read its task, cannot renew,
-and cannot close the loop."* Every item below is downstream of this. It is an
-owner gate by the repository's own rules and nobody else may clear it.
+**0. ~~Deploy the edge function.~~ ALREADY LIVE — closed 2026-09-16 08:18.**
+`/task` and `/renew` are in the deployed version 20 right now, with `/dispatch`,
+`/register`, `/return`, `/wait` and `/health`. code-c's 04:53 report — *"until
+they ship a worker cannot read its task, cannot renew"* — was true against
+version 17 and stopped being true when version 20 shipped the outage fix and
+carried those routes with it. **Nothing downstream was ever waiting on this.**
 
-**1. Merge the two ready branches to master.** — code-c *(assigned)*
-`work/recover-orphan-branches` then `work/support-modules`. Both green.
+*I put it at the top of this list on the strength of that report and never
+checked it against the live function. Read the deployed source; a report about
+production ages the moment somebody deploys.*
+
+**0b. What is actually live, measured against the platform's own copy.**
+Version 20 is byte-identical to `origin/code-b/fifth-hosted-path` at `bb899fc`
+in both `index.ts` and `_shared.js`. So production DOES correspond to a commit —
+better than this morning's reading, where the outage looked like it had shipped
+from an uncommitted tree; the fix was committed to that branch.
+
+**Against production, master is 0 ahead and 14 BEHIND.** Deploying master would
+ship nothing new and would REMOVE 232 lines currently serving traffic — the
+single-transaction claim path, the rpc shape check, the refusal-reason mapping —
+reinstating the read-decide-write race code-d found. *A pure regression wearing a
+fresh version number, which is what a successful deploy looks like from outside.*
+
+**So the merge is not queued behind a deploy. The merge IS the deploy**, and any
+tree that ships must contain `fifth-hosted-path` or it goes backwards.
+
+**1. Merge THREE branches and deploy the result.** — code-c *(assigned)*
+`code-b/fifth-hosted-path` (what is live, 14 ahead), then
+`work/recover-orphan-branches` (11 ahead), then `work/support-modules`
+(22 ahead, ends at `50f28a2`). Each contains master entire, so none drops
+anything. Danny authorised one deploy at 08:18; that is one deploy, not a
+standing grant. `code-b/lease-wiring` is NOT an ancestor of `fifth-hosted-path`
+despite its merge commit being in that history — it has moved since, so check it
+rather than assuming it is covered. Both green.
 Nothing below can start until the pipeline is on master, because the worker
 cannot call what is on a branch. *This is first and it is nobody's favourite
 task, which is exactly why it gets skipped.*
@@ -60,6 +86,17 @@ dropped assignment looks identical to one that is still working.
 Alias table, canonical id per seat, unknown recipient refused, offline
 distinguished from unknown. On `work/support-modules`; ships with item 1.
 
+*Two things learned since, both from the live system rather than from the spec.*
+*B has two registrations, `code-b` and `b6`, and canonicalising on the way in*
+*fixes what a sender may write and nothing about what B can read — a message is*
+*stored under the literal string it was sent with. The read half is `inboxNames`*
+*and no reader uses it yet, so a canonical id is the right name and not always*
+*the reachable one. And four handoffs sent this morning came back reported as*
+*instructions from Danny: the envelope carries the sender, whatever surfaces it*
+*to a worker does not, so every body now opens by naming who is speaking and*
+*saying that coordination is not a ruling. A worker that cannot tell the two*
+*apart has an owner nobody appointed, which would make the ledger decorative.*
+
 **6. A hard deploy gate.** — unassigned
 NEW. Deploy accepts only a promoted immutable commit, records the artifact
 digest, and reads it back. Today `wrangler deploy` ships a working tree, which
@@ -75,6 +112,32 @@ confirm. **That ruling is not in the decision ledger** and I was refused when I
 tried to record it on his behalf, which is correct — it supersedes his own
 earlier prepare/confirm split, so it needs his words. Nothing here proceeds
 unattended until it is recorded.
+
+**7b. Zero interactive prompts, as a hard acceptance test.** — partly built
+NEW, 2026-09-16, from a screenshot of a coding agent stopped on "Do you want to
+proceed?" for a local commit. Not an AI problem and not a policy problem: the
+policy in `permissionRequest.mjs` has classified `commit` as ROUTINE since it
+was written. **Nothing translated an argv into that word**, so the policy was
+never consulted and the decision fell to the executor's own permission system,
+whose only vocabulary is a prompt. The gap was one translation wide.
+
+Built: `preExecutionGuard.mjs` normalises a command to the action vocabulary the
+existing classifier speaks and checks placement — worktree, branch, lease,
+fence — independently of action class, so a generous class cannot pay for a bad
+placement. `exec.mjs` now closes stdin (a reading child went from the full
+timeout to 57ms) and reports a detected prompt even on a clean exit. The
+pipeline refuses before it creates a workspace, returning `WAITING_APPROVAL`.
+
+**Not built, and it is the half that finishes this:** the executor adapter must
+launch Claude Code or Codex in a non-interactive permission mode scoped by
+Bridge policy, and an agent that chooses commands as it goes needs the guard at
+its own tool boundary rather than only at launch. Bridge grants the specific
+safe classes; nothing gets a blanket allow.
+
+*The acceptance test, and it is pass/fail:* start an unattended task that reads
+files, edits files, runs tests, stages and commits, and submits a result. Close
+the UI. **Zero interactive prompts.** One prompt fails the run as
+`INTERACTIVE_PROMPT_DETECTED`.
 
 **8. T1 closes with nobody watching.**
 A real task, leased, run, verified, reviewed, accepted, closed. Danny's windows
