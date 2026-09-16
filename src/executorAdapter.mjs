@@ -37,6 +37,19 @@ const RAW_KEYS = Object.freeze([
   'artifacts',
   'notes',
   'durationMs',
+  /*
+   * WHAT THE RUNNER SAW A PROMPT SAY. Added after the first real end-to-end run
+   * of this pipeline refused its own executor: the `prompted` outcome shipped
+   * with a `prompt` field, and this list rejected it as an unknown adapter
+   * field. Every unit test passed, because they call an adapter's `run`
+   * directly and never go through `execute`. The module was exercised; the path
+   * was not.
+   *
+   * It is EVIDENCE rather than a claim -- a token the runner matched in the
+   * child's own output -- so it is allowed here, unlike the USURPED fields
+   * above, which are an adapter trying to judge its own work.
+   */
+  'prompt',
 ]);
 
 // Fields an adapter is specifically forbidden to supply, named so the error can
@@ -114,7 +127,7 @@ export function normaliseResult(raw) {
     if (!Number.isInteger(raw.exitCode)) {
       fail('adapter reported outcome exited without an integer exitCode');
     }
-  } else if (!['timeout', 'crashed', 'refused', 'unreachable'].includes(outcome)) {
+  } else if (!['timeout', 'crashed', 'refused', 'unreachable', 'prompted'].includes(outcome)) {
     fail(`adapter reported unknown outcome ${JSON.stringify(outcome)}`);
   } else if (raw.exitCode !== undefined && raw.exitCode !== null) {
     fail(`outcome ${outcome} cannot carry an exit code`);
@@ -129,6 +142,7 @@ export function normaliseResult(raw) {
     artifacts: Object.freeze([...(raw.artifacts ?? [])]),
     durationMs: raw.durationMs ?? null,
     notes: typeof raw.notes === 'string' ? raw.notes : '',
+    prompt: raw.prompt ?? null,
   });
 }
 
