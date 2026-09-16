@@ -1122,7 +1122,27 @@ export function canonicalActor(value, actors = ACTORS) {
 export function knownActorIds(sessions, actors = ACTORS) {
   const ids = new Set();
   for (const s of arr(sessions)) if (s?.agent_id) ids.add(canonicalActor(s.agent_id, actors));
-  for (const a of arr(actors)) if (a?.actor_type !== 'worker') ids.add(a.actor_id);
+  /*
+   * EVERY DECLARED ACTOR IS KNOWN, WORKER OR NOT. The roster decides whether a
+   * recipient is LIVE, never whether it EXISTS.
+   *
+   * This line used to skip workers, so a worker was addressable only while it
+   * was heartbeating. With nobody registered -- which is the state this project
+   * was in the first time the check ever ran in production -- knownActorIds
+   * returned only the non-workers, and a message to code-c was refused as "not
+   * a known actor" while chatgpt, removed from the team, stayed addressable
+   * forever because it is not typed as a worker.
+   *
+   * That contradicted the rule written directly above validateMessage's call
+   * site: an unknown recipient is refused, a KNOWN one that is offline is a
+   * note, because queueing work for a worker that is restarting is what a
+   * durable channel is for. Existence comes from this table; liveness comes
+   * from reachabilityNote, and conflating them broke the durability.
+   *
+   * A genuine typo is still refused: an id that is in neither the table nor the
+   * roster resolves to nothing and is not invented into the list.
+   */
+  for (const a of arr(actors)) if (a?.actor_id) ids.add(a.actor_id);
   return [...ids].sort();
 }
 
@@ -1201,9 +1221,18 @@ export function messagePreamble(from, actors = ACTORS) {
  *
  * AN ALIAS OF YOUR OWN ACTOR IS FINE, and this is the case that shows the rule
  * is about identity rather than about strings: `social-sparks-app-b6`
- * registering as `code-b` is correct, because `b6` IS code-b by
- * d-owner-identity-b6-20260916. The same table that resolves a recipient
- * answers this, so the two cannot drift apart.
+ * registering as `code-a` is correct, because `b6` IS code-a by
+ * d-owner-identity-b6-20260916b, ACTIVE since 08:30:48Z. The same table that
+ * resolves a recipient answers this, so the two cannot drift apart.
+ *
+ * THIS COMMENT CITED THE SUPERSEDED DECISION UNTIL 2026-09-17, and said b6 was
+ * code-b. The commit that introduced it is titled "I built the alias table on a
+ * decision that had already been superseded" -- the TABLE was corrected and the
+ * same stale citation was left standing beside it, justifying the old answer.
+ * Nothing behaved wrongly, because the code and the tests both followed the
+ * active row; the risk was purely that a later reader would trust the prose and
+ * revert a correct table. Read the ledger, do not quote the decision you
+ * remember: a superseded statement still reads perfectly true on its own.
  */
 export function validateSessionId(sessionId, agentId, actors = ACTORS) {
   const shape = validateAgentId(sessionId, 'session_id');

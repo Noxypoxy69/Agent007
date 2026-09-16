@@ -414,6 +414,59 @@ test('the roster offered in a refusal is canonical ids only, never aliases', () 
   assert.equal(ids.includes('probe-ok'), false, 'nothing unregistered is invented into the list');
 });
 
+test('A DECLARED WORKER IS ADDRESSABLE WHILE IT IS ASLEEP', () => {
+  /*
+   * THE REGRESSION, AND IT REACHED PRODUCTION. knownActorIds built its worker
+   * list from the live roster instead of from the actor table, so a worker was
+   * addressable only while it was heartbeating. The check shipped in version 24
+   * having never run in production before, and its FIRST act was to refuse a
+   * message to a teammate as "not a known actor" -- while chatgpt, removed from
+   * the team, stayed addressable forever because it is not typed as a worker.
+   *
+   * It contradicted the rule written directly above validateMessage's call
+   * site: an unknown recipient is refused, a KNOWN one that is offline is a
+   * note, because queueing work for a worker that is restarting is what a
+   * durable channel is for. Existence is the actor table; liveness is the
+   * reachability note. Conflating them broke the durability.
+   *
+   * An empty roster is not a contrived fixture. It is the state this project
+   * was actually in when the bug was found: zero live workers.
+   */
+  const asleep = [];
+  const ids = knownActorIds(asleep);
+  for (const worker of ACTORS.filter((a) => a.actor_type === 'worker')) {
+    assert.ok(
+      ids.includes(worker.actor_id),
+      `${worker.actor_id} is declared in the actor table and vanished when it stopped heartbeating`,
+    );
+  }
+
+  const say = (to) => ({ from_agent: 'code-d', to_agent: to, type: 'status', body: 'an ordinary sentence' });
+  const now = '2026-09-16T23:59:00Z';
+
+  // ACCEPTED: the whole point of a durable channel
+  const sleeping = validateMessage(say('code-c'), { sessions: asleep, now });
+  assert.equal(sleeping.ok, true, sleeping.errors.join(', '));
+
+  // STILL REFUSED: the fix must not make every string addressable
+  const typo = validateMessage(say('code-zzz'), { sessions: asleep, now });
+  assert.equal(typo.ok, false, 'a typo was accepted, so the check now proves nothing');
+
+  /*
+   * AND THE WARNING STILL FIRES, which is the half worth keeping: a worker with
+   * a stale registration is accepted AND noted, so "stored" is never mistaken
+   * for "delivered".
+   */
+  const stale = [{
+    agent_id: 'code-c', session_id: 'danny-win-10', capacity: 'idle',
+    heartbeat_at: '2026-09-16T12:30:46Z',
+  }];
+  const noted = validateMessage(say('code-c'), { sessions: stale, now });
+  assert.equal(noted.ok, true);
+  assert.equal(noted.notes.length, 1, 'an offline worker was accepted with no warning at all');
+  assert.match(noted.notes[0], /not live/);
+});
+
 test('a description in an identifier field is refused without any roster', () => {
   // "chatgpt-work coordinator" was a real sender id on the live channel
   const v = validateMessage(msg('chatgpt-work coordinator'));

@@ -1,11 +1,17 @@
 {
-  "_note": "Version 23, live 2026-09-16T19:37:00.670Z. IT SHIPPED THE SAME BYTES AS 22: ezbr_sha256 is 5e3e9690... for both, and the artifact directory is unchanged from 04f6e34 through 5083feb. A redeploy of identical bytes bumps the version and leaves the hash alone. WHO RAN IT IS NOT RECORDED because it is not known. This file has had three attribution corrections in one hour, every one from crediting a deploy to whoever was nearest; an unattributed field gets looked up, an invented one does not. NOTHING WAS DEPLOYED TO WRITE THIS. The gate refused on live-artifact-drifted (live 23 vs recorded 22) and the refusal was correct. Danny chose to reconcile rather than redeploy, because live already serves what is on disk. CONSEQUENCE FOR CI: .github/workflows/deploy-edge-function.yml fails a deploy when ezbr_sha256 is unchanged. An identical redeploy - exactly what 23 was - would be reported as a failed deploy by that check.",
+  "_note": "Version 24, deployed by code-d (danny-win-d1) from the MERGED master tree at d8235a0 -- not from the branch -- per Danny's standing order d-owner-deploy-process-20260916: audit, then merge, then deploy. This is the deploy that made the reviewer runtime reachable: /review/claim and /review/submit now exist, so the two migrations applied at 18:00 (20260916180034, 20260916180146) stop being a database nothing outside can reach. It also carries send_message's stale-recipient warning, whose unknown-recipient check had never run in production because its only caller never passed the roster, and the dispatcher confirming its own ASSIGN proposals under d-owner-dispatch-autoconfirm-20260916.  WRONG-TREE CHECK RUN BEFORE SHIPPING, which is the check that was skipped at 19:37 when 22-to-23 shipped nothing. Downloaded the live artifact and compared: index.ts +236 -2, _shared.js +69 -2, imports 32 wanted 0 unsatisfied. Hundreds of additions is the right-tree signal. It first REFUSED on 4 removed lines, correctly, and I read them instead of overriding blind: all four were replacements, not reverts. validateMessage gained a multi-line signature and its caller became validateMessage(m, { sessions, now }), which IS the roster fix this deploy exists to ship. Re-run with --expect-removed 4: all four checks pass.  THE HANDOFF'S FAR-END TEST WAS NOT SUFFICIENT AND THIS RECORD SAYS SO. It said an unauthenticated POST returning 401 proves the route is deployed. It does not. I posted to /review/nope, a route that has never existed, and got 401 as well, because the function refuses unauthenticated callers BEFORE routing -- so that test would have passed before this deploy. The discriminating test is AUTHENTICATED: with a registration token, /review/claim and /review/submit both answer 400 'task_id is required', while /review/nope answers 401. A negative needs the positive first.  Suite on the merged tree: 1513 tests, 1509 pass, 0 fail, 4 skipped. verify_jwt confirmed still false after the deploy; --no-verify-jwt was passed deliberately, because the CLI default would flip it true and refuse every registration-token call at once, which reads as a credential outage rather than as a deploy mistake.  CLAIMING VERSION 23, which this record asked whoever ran it to claim: that was me, at 19:37:00.670Z, and it shipped nothing. It re-uploaded bytes identical to v22 from a checkout that did not carry the branch. I flagged beforehand that it would be a no-op and ran it because it was asked for twice; the version bumped, the hash did not change, and it is the exact failure this file's wrong-tree check now prevents.",
   "schemaVersion": 1,
-  "headSha": "0000000000000000000000000000000000000000",
-  "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
-  "liveArtifactHash": "5e3e96909b070a176e55242e273c65575a78409cbe77dd499a34be9aff3519cb",
-  "liveVersion": 23,
-  "deployedAt": "2026-09-16T19:37:00.670Z",
-  "deployedBy": "UNATTRIBUTED - not this session, and not inferred. Whoever ran it should claim it.",
-  "previousVersion": 22
+  "headSha": "d8235a060b4c6dd8b3040af11c55db1fda731ea1",
+  "sourceDigest": "c8a63d7775a969d7",
+  "liveArtifactHash": "ebf479e4f58e8f1f06b62245fe21b5d576cc26a9343bdac50e1a9de047a3ea38",
+  "liveVersion": 24,
+  "deployedAt": "2026-09-16T23:21:56.329Z",
+  "deployedBy": "code-d (danny-win-d1), from merged master d8235a0, authorised by Danny in chat",
+  "verifiedBy": "code-d -- wrong-tree check against the downloaded live artifact BEFORE shipping, and an authenticated route probe after, with a negative control on a route that does not exist",
+  "previousVersion": 23,
+  "rollbackTo": {
+    "version": 22,
+    "note": "v23 was byte-identical to v22 and shipped nothing, so v22 is the last artifact that actually differs",
+    "liveArtifactHash": "5e3e96909b070a176e55242e273c65575a78409cbe77dd499a34be9aff3519cb"
+  }
 }
