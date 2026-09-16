@@ -66,8 +66,12 @@ writer is wired on `work/support-modules` and that branch is unmerged.
 
 ## 4. Two identity notes for whoever restarts them
 
-- **B has two registrations** (`code-b` and `b6`) and mail splits between them.
-  `d-owner-identity-b6-20260916`, in Danny's words: *"b6 is b"*.
+- **b6 is `code-a`**, per `d-owner-identity-b6-20260916b` at 08:30:48Z — which
+  supersedes *"b6 is b"*, which superseded *"b6 is Agent A"*. I built a whole
+  alias table on the middle one fifty-four minutes after it had been superseded,
+  because I worked from what I remembered the ledger saying instead of reading
+  it. **The A seat is occupied and b6 is merely asleep** — a liveness check says
+  it is free, which is not the same question.
 - **One of B's sessions is registered as `social-sparks-app-c8`.** `c8` is this
   lane's id. It was created at 07:49Z, two minutes before this lane first signed
   as c8, and `t-loop-proof` — the first end-to-end loop this system ever ran —

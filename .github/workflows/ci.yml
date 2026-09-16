@@ -1,0 +1,74 @@
+# THE SUITE, ON EVERY PUSH, ON A MACHINE NOBODY OWNS.
+#
+# This repo had no CI at all. "npm test passes" has meant "it passed on the
+# machine of whoever ran it", and that is not the same claim: a suite can lean
+# on a git identity, a HOME, a writable path or a network route that exists on
+# one desktop and nowhere else. A clean runner is the only thing that can tell
+# the difference, and the first time one ran this suite it found a failure that
+# nobody's laptop reproduces.
+#
+# FAILURES ARE PRINTED LAST, ON PURPOSE. The log reader available to agents
+# returns only the final few thousand lines, and a 1449-test TAP stream is far
+# longer than that -- so a `not ok` in the middle is invisible, which is exactly
+# how this failure stayed anonymous. The summary below is re-emitted at the end
+# so it survives truncation.
+#
+# AND THE STEP FAILS ON THE SUITE'S OWN COUNT, not on a pipe's exit code.
+# `npm test | tee` reports tee's status, which is the trap that made an earlier
+# red run look green here.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm install --no-audit --no-fund
+
+      - name: Suite
+        run: |
+          # A redirect rather than a pipe, so the summary below reads a whole
+          # file rather than racing the stream.
+          #
+          # RETRACTION, LEFT HERE ON PURPOSE. An earlier version of this comment
+          # claimed `npm test | tee` HANGS because a test leaks an orphaned child
+          # holding the write end of the pipe. That was wrong. There was no hang:
+          # the run took 61 seconds, and I read my own polling turns as elapsed
+          # time, cancelled a healthy run, and wrote the diagnosis up as fact.
+          # Piping reproduces nothing -- locally it completes with 0 failures.
+          # The claim is retracted rather than deleted because a confident wrong
+          # explanation in a commit is worth more as a warning than as a gap.
+          npm test > /tmp/suite.txt 2>&1 || true
+
+          echo ""
+          echo "================ COUNTS ================"
+          grep -E '^# (tests|pass|fail|skipped)' /tmp/suite.txt || true
+
+          echo ""
+          echo "================ FAILING TESTS ================"
+          grep -nE '^ *not ok ' /tmp/suite.txt || echo "(none)"
+
+          echo ""
+          echo "================ DETAIL ================"
+          # Everything from each failure marker to the end of its YAML block.
+          awk '/^ *not ok /{p=1} p{print} /^ *\.\.\./{if(p&&++n>0)p=0}' /tmp/suite.txt | head -200 || true
+
+          echo ""
+          echo "================ VERDICT ================"
+          # The suite's OWN reported count decides, never a pipeline's exit code.
+          if grep -qE '^# fail 0$' /tmp/suite.txt; then
+            echo "green"
+          else
+            echo "RED — see FAILING TESTS above"
+            exit 1
+          fi
