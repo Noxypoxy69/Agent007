@@ -364,13 +364,41 @@ test('WIRING claim_review WITHOUT GATING claim_task ON THE REVIEW LEASE', async 
   };
   await walk(root.replace(/[/\\]$/, ''));
 
+  /*
+   * POSITIVE CONTROL FOR THE SEARCH ITSELF. Found by code-d, and it is this
+   * file's own class one turn further out:
+   *
+   *     a match is not evidence the code does it
+   *     a non-zero exit is not evidence a test ran
+   *     A NON-MATCH IS NOT EVIDENCE THE SEARCH RAN
+   *
+   * Everything below rests on `callers` being empty, and `callers` is built
+   * from `files`. If `root` ever resolves wrongly -- this file moves, the URL
+   * changes, a directory is renamed -- `files` is empty, `callers` is empty,
+   * and the early return reports "claim_review has no callers" having read not
+   * one byte. The assertion whose entire job is to fire the moment somebody
+   * wires claim_review would be permanently, silently green.
+   *
+   * A COUNT ALONE IS NOT ENOUGH, because scanning the WRONG tree also yields a
+   * count. So name a file the walk must have reached and something in it only
+   * the real file contains.
+   */
+  assert.ok(files.length > 10, `the walk found ${files.length} files; it is scanning the wrong tree`);
+  const entrypoint = files.find((p) => p.replace(/\\/g, '/').endsWith('supabase/functions/mcp/index.ts'));
+  assert.ok(entrypoint, 'the walk never reached the edge entrypoint; the root is wrong');
+  assert.match(
+    await readFile(entrypoint, 'utf8'),
+    /coordinatorStore/,
+    'the file the walk found is not the coordinator entrypoint',
+  );
+
   const callers = [];
   for (const p of files) {
     const text = codeOnly(await readFile(p, 'utf8'));
     if (/claim_review/.test(text)) callers.push(p.slice(root.length));
   }
 
-  if (callers.length === 0) return; // vacuous, and that is the honest state
+  if (callers.length === 0) return; // vacuous, and now honestly so
 
   // claim_review is now reachable. The only thing that makes that safe is
   // claim_task refusing, or deliberately permitting, a live review lease --
@@ -387,8 +415,24 @@ test('WIRING claim_review WITHOUT GATING claim_task ON THE REVIEW LEASE', async 
   }
 
   assert.notEqual(claimTaskBody, '', 'claim_task is not defined in any migration');
+
+  /*
+   * SQL COMMENTS, STRIPPED SEPARATELY. codeOnly understands `//` and block
+   * comments; SQL uses `--`, so it would not have touched them. code-d
+   * measured the margin here and it was thin: claim_task is redefined in the
+   * review migration and this loop takes the LAST definition, which is the
+   * right behaviour -- but that later body happens not to contain the word
+   * "review". Had it mentioned it in a comment, this gate would have been
+   * permanently green while the eviction stayed live. It held by luck, which
+   * is not a property worth keeping.
+   */
+  const claimTaskCode = claimTaskBody
+    .split('\n')
+    .map((l) => l.replace(/--.*$/, ''))
+    .join('\n');
+
   assert.match(
-    claimTaskBody,
+    claimTaskCode,
     /review/,
     `claim_review is now reached from ${callers.join(', ')}, but claim_task still does not `
       + 'mention the review lease. In that combination a worker claiming returned work '
