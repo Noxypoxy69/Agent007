@@ -113,12 +113,16 @@ export async function main(deployedDir, incomingDir) {
   }
 
   let checked = 0;
+  let totalAdded = 0;
+  let totalRemoved = 0;
   for (const name of deployedNames) {
     if (!incomingNames.includes(name)) continue;
     const [was, now] = await Promise.all([read(deployedDir, name), read(incomingDir, name)]);
     const removed = linesMissingFrom(was, now);
     checked += 1;
     const added = linesMissingFrom(now, was);
+    totalAdded += added.length;
+    totalRemoved += removed.length;
     process.stdout.write(`${name}: +${added.length} -${removed.length}\n`);
     if (removed.length) {
       findings.push(
@@ -126,6 +130,29 @@ export async function main(deployedDir, incomingDir) {
         + `First: ${JSON.stringify(removed.find((l) => l.trim()) ?? removed[0])}`,
       );
     }
+  }
+
+  /*
+   * A DEPLOY THAT CHANGES NOTHING IS REPORTED, LOUDLY.
+   *
+   * Added after watching it happen: version 22 to version 23, byte-identical
+   * bundles, a clean success and not one line shipped -- because the deploy ran
+   * from a checkout that did not contain the branch. From outside that is
+   * indistinguishable from a deploy that worked, which is ORDER 0b's "a pure
+   * regression wearing a fresh version number" with the sign flipped.
+   *
+   * It is NOT a refusal. Redeploying identical bytes is a legitimate thing to
+   * do -- forcing a restart, recovering from a failed rollout -- so a gate that
+   * blocked it would be wrong and would get switched off. It is a finding only
+   * when the caller expected to ship something, and the caller is the one who
+   * knows that. So it says exactly what happened and lets them decide.
+   */
+  if (checked > 0 && totalAdded === 0 && totalRemoved === 0) {
+    process.stdout.write(
+      '\nNOTHING WOULD CHANGE. Every file in this bundle is byte-identical to what is\n'
+      + 'already deployed. If you expected to ship a change, you are deploying from the\n'
+      + 'wrong tree -- check the branch is the one carrying it.\n',
+    );
   }
 
   /*

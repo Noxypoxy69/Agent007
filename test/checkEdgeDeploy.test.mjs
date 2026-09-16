@@ -171,3 +171,36 @@ test('linesMissingFrom counts multiplicity, so two copies losing one is a remova
   assert.deepEqual(linesMissingFrom('x\nx\n', 'x\n'), ['x']);
   assert.deepEqual(linesMissingFrom('x\n', 'x\nx\n'), []);
 });
+
+test('A DEPLOY THAT CHANGES NOTHING SAYS SO', async (t) => {
+  /*
+   * WATCHED HAPPEN, 2026-09-16: version 22 to version 23, byte-identical
+   * bundles, a clean success, and not one line shipped -- the deploy ran from a
+   * checkout that did not contain the branch. From outside it is
+   * indistinguishable from a deploy that worked, and the person who ran it
+   * reasonably believed it had.
+   *
+   * Not a refusal. Redeploying identical bytes is legitimate -- forcing a
+   * restart, recovering a failed rollout -- and a gate that blocked it would be
+   * wrong and would get switched off. It has to be LOUD and it has to be
+   * allowed.
+   */
+  const files = { 'index.ts': ENTRY, '_shared.js': SHARED };
+  const [a, b] = await dirs(t, files, files);
+  const r = await run(a, b);
+  assert.equal(r.code, 0, 'a no-op redeploy was refused; it is legitimate');
+  assert.match(r.stdout, /NOTHING WOULD CHANGE/);
+  assert.match(r.stdout, /wrong tree/);
+});
+
+test('and a real change does NOT claim nothing would change', async (t) => {
+  // The negative the notice needs. A banner that printed unconditionally would
+  // pass the test above while telling every deploy it shipped nothing.
+  const [a, b] = await dirs(t,
+    { 'index.ts': ENTRY, '_shared.js': SHARED },
+    { 'index.ts': `${ENTRY}// a new route\n`, '_shared.js': SHARED });
+  const r = await run(a, b);
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.stdout, /NOTHING WOULD CHANGE/,
+    'a deploy carrying 1 added line was reported as changing nothing');
+});
