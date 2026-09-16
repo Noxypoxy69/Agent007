@@ -31,8 +31,9 @@ them through the data plane, never by connecting to Postgres directly.
 
 ```
 claim_task(p_task_id, p_agent_id, p_session_id, p_by, p_lease_seconds default 900)
-  -> { ok: true,  task_id, lease_token, lease_expires_at, attempt, renewal }
+  -> { ok: true,  task_id, lease_token, lease_expires_at, attempt }
   -> { ok: false, reason: not-claimable | leased | state | dependency, detail }
+  -> { ok: false, reason: "<a whole sentence>" }        <- NO detail. see below.
 ```
 
 `lease_token` is a **fencing token**, minted fresh on every claim. It is the
@@ -44,10 +45,56 @@ right now" — because retrying is the correct response to both, and telling the
 apart would only invite B to branch on a distinction that does not change what
 it should do.
 
-**A re-claim by the same session holding a live lease is a renewal**, returns
-`renewal: true`, and does **not** increment `attempt`. So a B that forgets
-`renew_lease` and re-claims instead is not punished. Prefer `renew_lease`
-anyway; it is one round trip instead of a full re-validation.
+> #### ⚠ THREE PLACES THIS DOCUMENT DESCRIBED BEHAVIOUR THAT DOES NOT EXIST
+>
+> Found by c8 and code-d reading the shipped SQL against this file; the third is
+> mine and neither of them reached it. Corrected above and recorded here rather
+> than quietly edited away, because **a worker built to the old text would have
+> mis-handled its own retry** and the next person needs to know which way the
+> correction went.
+>
+> **1. There is no `renewal` key.** This file said a same-session re-claim
+> "is a renewal, returns `renewal: true`, and does not increment `attempt`".
+> The string `renewal` appears **zero times** in `claim_task`. A worker
+> checking for it reads `undefined` forever.
+>
+> **2. There is a FIFTH reason, and it is not a slug.** The `p_lease_seconds`
+> bounds check returns the whole sentence `"lease_seconds must be between 30
+> and 86400"` as `reason`, with **no `detail`**. Anything matching `reason`
+> against a slug list mis-handles it. `rpcRefusal` does not assume
+> slug-plus-detail; don't write something that does.
+>
+> **3. A SAME-SESSION RE-CLAIM IS REFUSED, NOT RENEWED — and this is the one
+> that bites.** A successful claim writes `state = 'assigned'`. A re-claim by
+> that same session then skips the `leased` refusal (the
+> `assigned_session is distinct from p_session_id` clause is false) and falls
+> straight into the state check, which refuses `assigned`. So it comes back
+> `reason: 'state'`.
+>
+> That matters because **losing the response to `claim_task` is the ordinary
+> case, not the exotic one** — a dropped connection, a timeout, a restart. This
+> file promised such a worker a free renewal. It gets a refusal that reads like
+> somebody else took the work.
+>
+> `src/leases.mjs` agrees with the SQL here: `canClaim` on an assigned row
+> refuses with the same state message, whoever asks. The two implementations
+> are consistent. It is only this document, and `PROOF 2b` in
+> `test/leases.test.mjs`, that described the renewal behaviour — and that proof
+> could not have caught the drift, because its fixture builds the row as
+> `runnable` with an `assigned_session`, a shape a real claim never produces.
+> Same defect as the expired-lease proof fixed in `66ef896`.
+>
+> **THE DESIGN QUESTION IS STILL OPEN AND IS NOT MINE TO CLOSE.** The original
+> intent — "a worker retrying after a lost response is not a second claimer;
+> refusing it strands the work until the lease expires, for no safety gained" —
+> is good, and the SQL does not implement it. Whether to add a same-session
+> renewal branch to `claim_task` or to tell workers to use `renew_lease` and
+> nothing else is a decision for Danny and code-b, not a thing to patch in
+> while correcting a document. **Until it is decided, the shipped behaviour is
+> the refusal**, and that is what is written above.
+
+Prefer `renew_lease` for renewals. It is one round trip instead of a full
+re-validation, and per item 3 it is currently the **only** thing that renews.
 
 ### 2. Renew
 

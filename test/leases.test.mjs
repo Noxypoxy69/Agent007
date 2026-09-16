@@ -76,11 +76,56 @@ test('PROOF 2: a live lease held by another session blocks a second claimer', ()
   assert.match(r.errors.join(' '), /held by danny-win-10/);
 });
 
-test('PROOF 2b: the SAME session may re-claim its own live lease', () => {
-  // A worker retrying after a lost response is not a second claimer. Refusing
-  // it would strand the work until the lease expired, for no safety gained.
+test('PROOF 2b: the same session is not treated as a SECOND claimer', () => {
+  /*
+   * NOTE THE NARROWED TITLE. This proves the `leased` refusal does not fire
+   * against its own holder. It does NOT prove a worker may re-claim its own
+   * work, and it used to be read as though it did -- see the next test.
+   *
+   * The fixture is `runnable` with an `assigned_session`, which is a shape a
+   * real claim NEVER PRODUCES, because claim_task writes `assigned`. So this
+   * case is reachable only in the instant between a reaper returning a row to
+   * the pool and its stale assigned_session being cleared.
+   */
   const mine = task({ state: 'runnable', assigned_session: 'danny-win-f1' });
   assert.equal(canClaim(mine, worker(), { now: NOW }).ok, true);
+});
+
+test('A WORKER RETRYING AFTER A LOST RESPONSE IS REFUSED — this is not the renewal the docs promised', () => {
+  /*
+   * THE SHAPE PROOF 2b COULD NOT EXPRESS, AND THE ONE THAT ACTUALLY HAPPENS.
+   *
+   * A successful claim writes state='assigned'. So the real post-claim row is
+   * ASSIGNED, and a re-claim by the same session skips the `leased` refusal
+   * (assigned_session is NOT distinct from itself) and lands on the state
+   * check, which refuses `assigned`. Reason: 'state'.
+   *
+   * docs/lease-interface.md said the opposite -- "a re-claim by the same
+   * session holding a live lease is a renewal, returns renewal: true, and does
+   * not increment attempt" -- and the string `renewal` appears ZERO times in
+   * claim_task. A worker built to that document reads a refusal as a renewal.
+   *
+   * WHY IT MATTERS MORE THAN IT LOOKS: losing the response to claim_task is the
+   * ORDINARY case. A dropped connection, a timeout, a restart mid-round-trip.
+   * The document promised that worker a free retry; it gets a refusal that
+   * reads like somebody else took its work.
+   *
+   * THIS TEST PINS THE SHIPPED BEHAVIOUR, NOT THE DESIRED BEHAVIOUR, and the
+   * distinction is deliberate. The original intent in PROOF 2b -- "refusing it
+   * strands the work until the lease expires, for no safety gained" -- is
+   * sound, and claim_task does not implement it. Whether to add a same-session
+   * renewal branch is Danny's and code-b's call, not something to decide while
+   * correcting a test. If that call is made, THIS is the test that must change,
+   * and it should go red first.
+   */
+  const afterMyOwnClaim = task({ state: 'assigned', assigned_session: 'danny-win-f1' });
+  const r = canClaim(afterMyOwnClaim, worker(), { now: NOW });
+
+  assert.equal(r.ok, false,
+    'the JS granted a same-session re-claim that claim_task refuses — the two have diverged');
+  assert.match(r.errors.join(' '), /assigned/,
+    'the refusal did not name the state, which is the only thing that tells a retrying worker '
+    + 'this was not somebody else taking the task');
 });
 
 test('an EXPIRED lease does not block ONCE THE REAPER HAS RUN', () => {
