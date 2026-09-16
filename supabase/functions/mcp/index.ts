@@ -1654,9 +1654,73 @@ Deno.serve(async (request) => {
       })));
     }
 
+    /*
+     * THE DISPATCHER CONFIRMS ITS OWN ASSIGN PROPOSALS.
+     *
+     * Danny's ruling, 2026-09-16: "yes, autoconfirm". The number behind it is
+     * 1,227 proposals prepared and TWO ever confirmed -- 1,225 assignments died
+     * waiting for a human to be awake. A queue that only moves when somebody is
+     * watching is not a queue.
+     *
+     * WHAT IS GIVEN UP: the second PARTY. Prepare and confirm stop being
+     * different actors.
+     *
+     * WHAT IS KEPT, and it is the half that ever caught anything: the second
+     * LOOK. confirmProposal re-runs canConfirm against live rows -- the worker
+     * must still be live, still on the SAME session, the task still assignable,
+     * the proposal not stale. A proposal prepared against a worker that has
+     * since died is refused here exactly as before. The guard is not weakened;
+     * it stops waiting for a person to trigger it.
+     *
+     * IT REUSES confirmProposal RATHER THAN REIMPLEMENTING IT. A second copy of
+     * canConfirm is what src/runtime.mjs is kept orphaned to prevent, and the
+     * copy that disagreed would be the one nobody was reading.
+     *
+     * ASSIGN ONLY. A review proposal confirms by ACCEPTING returned work, and
+     * work accepted by the machine that scheduled it has not been independently
+     * reviewed -- the whole of ORDER item 4. Acceptance stays with a reviewer
+     * holding a review lease, or with a person. The dispatcher moves work TO a
+     * worker; it does not sign it off.
+     *
+     * OFF SWITCH IS AN ENVIRONMENT VARIABLE, not a redeploy: set
+     * DISPATCH_AUTOCONFIRM=off and the next tick goes back to preparing only. A
+     * control whose only off switch is a deploy cannot be used in the moment it
+     * is needed.
+     */
+    const autoConfirm = (Deno.env.get('DISPATCH_AUTOCONFIRM') ?? 'on').toLowerCase() !== 'off';
+    const confirmed = [];
+    const refused = [];
+    if (autoConfirm) {
+      for (const row of written) {
+        if (row?.kind !== 'assign') continue;
+        if (row?.would_be_accepted !== true) continue;
+        try {
+          const out = await store.confirmProposal({ proposal_id: row.proposal_id });
+          if (out?.ok) confirmed.push(row.proposal_id);
+          else refused.push({ proposal_id: row.proposal_id, errors: out?.errors ?? ['unknown'] });
+        } catch (e) {
+          /*
+           * ONE FAILURE MUST NOT STOP THE TICK. The others are independent, and
+           * a throw here leaves them prepared-but-never-confirmed with nothing
+           * recording why -- the state this change exists to end.
+           */
+          refused.push({ proposal_id: row.proposal_id, errors: [String(e?.message ?? e)] });
+        }
+      }
+    }
+
     return json({
       ok: true,
       prepared: written.length,
+      /*
+       * CONFIRMED AND REFUSED REPORTED SEPARATELY, with reasons. A tick that
+       * prepared five and confirmed none is the failure this change is about,
+       * and a count of "prepared" alone cannot show it -- which is how 1,225
+       * went unnoticed.
+       */
+      autoconfirm: autoConfirm ? 'on' : 'off',
+      confirmed: confirmed.length,
+      refused,
       // The dispatcher answers with the report too, so a cron run has something
       // worth logging without a second authenticated call.
       report: supervisoryReport({ proposals, idle, blocked, tasks, sessions, now }),
