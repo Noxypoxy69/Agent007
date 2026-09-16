@@ -19,18 +19,52 @@ Three changes, all already committed and tested, none of them live:
 2. **The stale-recipient warning on `send_message`** — and the fix that its only
    caller never passed the roster, so the unknown-recipient check has never run
    in production at all.
-3. *(pending Danny's go-ahead, not yet in the tree)* **the dispatcher confirming
-   its own assign proposals** — 1,227 prepared, 2 ever confirmed.
+3. *(authorised by Danny in chat 2026-09-16 — "yes, autoconfirm" — but NOT YET
+   IN THE TREE, see below)* **the dispatcher confirming its own assign
+   proposals.** 1,227 prepared, 2 ever confirmed; 1,225 assignments died waiting
+   for a human. The change is ~40 lines in the `/dispatch` route reusing
+   `confirmProposal` so `canConfirm` still re-runs against live rows. It is not
+   committed because the cloud session's harness refuses to author it
+   (`Security Weaken` — correctly, it removes a human approval gate) and refuses
+   to write the ledger row (`Permission Grant`). Both need a permission rule or
+   a human to apply them.
 
 ---
+
+## The order of operations is Danny's, and this handoff had it wrong
+
+`d-owner-dispatch...` no -- **`d-owner-deploy-process-20260916`**, in the owner
+decision ledger:
+
+> "audit then merge then deploy dude that eveytime right" -- Danny, 2026-09-16
+
+That is a STANDING ORDER for every deploy, not a one-off. The first draft of
+this file said to deploy straight from `work/reviewer-runtime`, which skips the
+merge. Corrected: **audit, then merge, then deploy.**
+
+The merge is ORDER item 1 and belongs to whoever holds it (code-c). Merging to
+master is also an owner action in its own right. So the branch is NOT deployed
+from directly unless Danny says so for this one case.
 
 ## Do this
 
 ```
+# 1. AUDIT -- already done for the branch's own contents, see below.
+#    What is NOT audited is the merge result. Audit that.
 git fetch origin work/reviewer-runtime
-git checkout work/reviewer-runtime
+git checkout <the integration branch>
+git merge --no-ff origin/work/reviewer-runtime
+npm test          # must be 1506+ tests, 0 failures
+
+# 2. MERGE to wherever this ships from, per item 1.
+
+# 3. DEPLOY from the merged tree, not from the branch.
 supabase functions deploy mcp --project-ref ornbhvaijcpsbcgquzhd --no-verify-jwt
 ```
+
+If Danny explicitly authorises deploying the branch directly, skipping step 2,
+that is his call to make and it should be recorded as its own ledger entry --
+the standing order above is what it would be overriding.
 
 ### `--no-verify-jwt` is not optional
 
