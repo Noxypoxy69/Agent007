@@ -328,7 +328,11 @@ test('the deregistration failure says the session may still look alive', async (
 test('return-task names a refusal a refusal, not a network problem', async (t) => {
   const { base } = await refusingBridge(t);
   const r = await runCli(t, [
-    'return-task', '--task', 't-probe', '--session', 'probe-r-1',
+    // --lease is required now that /return is fenced. Without it the CLI
+    // refuses locally and never reaches the credential check this asserts on,
+    // which would make this test green for a reason that has nothing to do
+    // with 401 handling.
+    'return-task', '--task', 't-probe', '--session', 'probe-r-1', '--lease', 'lease-probe',
   ], {
     AGENTBRIDGE_REGISTER_URL: `${base}/register`,
     AGENTBRIDGE_REGISTRATION_TOKEN: 'x'.repeat(24),
