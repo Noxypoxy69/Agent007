@@ -112,6 +112,33 @@ export function fixTaskFor({ task, packet, decision, raisedBy, now = null }) {
   }
   const base = packet?.evidence?.commit;
   if (!base) fail('a fix task needs the reviewed commit as its base');
+
+  /*
+   * A FULL SHA, REFUSED HERE RATHER THAN BY THE DATABASE.
+   *
+   * agentbridge.tasks constrains base_sha to exactly 40 hex characters, and
+   * submit_review refuses a shorter one with `fix-task-base`. But the result
+   * envelope this value comes from permits SEVEN to sixty-four -- deliberately,
+   * for abbreviated shas elsewhere -- so an executor reporting a short commit
+   * is a shape the caller can legitimately hold.
+   *
+   * Left to the far end, that refusal arrives AFTER the review has been done
+   * and the lease spent, and the reviewer has nothing to show for it. Failing
+   * at decision time costs the caller nothing and loses no work.
+   *
+   * FOUND BY AUDITING THE FAKE BRIDGE AGAINST THE APPLIED SQL rather than by a
+   * test: I added the far-end refusal while auditing the migration and never
+   * propagated it back here, so every test used a 40-character sha and this
+   * path had never run. That is the source-against-production drift this
+   * repository is scarred by, committed inside the hour I wrote a commit
+   * message about it.
+   */
+  if (!/^[0-9a-f]{40}$/.test(base)) {
+    fail(
+      `a fix task needs a full 40-character commit to start from, got ${JSON.stringify(base)}; `
+      + 'the task table refuses anything else and the review lease would be spent discovering it',
+    );
+  }
   if (typeof raisedBy !== 'string' || raisedBy.trim() === '') fail('a finding needs a reviewer');
 
   /*

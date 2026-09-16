@@ -39,7 +39,9 @@
  */
 
 import { buildReviewerPacket } from './reviewerPacket.mjs';
-import { decideReview, fixTaskFor, mutationBetween, REVIEW_DECISION } from './reviewDecision.mjs';
+import {
+  decideReview, fixTaskFor, mutationBetween, resolveFindings, REVIEW_DECISION,
+} from './reviewDecision.mjs';
 
 /** Where a review stopped, so a caller branches on a value and not on prose. */
 export const STAGE = Object.freeze({
@@ -54,8 +56,46 @@ export const STAGE = Object.freeze({
  * Shorter than the 1800s review lease the SQL default mints, for the same
  * reason the attempt pipeline's run timeout is shorter than its work lease: a
  * deadline that outlives the authority granting it is a scheduled loss.
+ *
+ * THIS CONSTANT EXISTED FOR HOURS WITH THAT COMMENT AND NO CONSUMER. Nothing
+ * read it, nothing bounded a reviewer, and the sentence above described an
+ * intention as though it were a behaviour -- which is the defect the review
+ * lease migration was written to fix ("a column with no writer is not a
+ * feature") reappearing one layer up. Found by auditing my own module for
+ * declarations nothing references.
  */
 export const DEFAULT_REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Stop waiting after `ms`. The promise is NOT cancelled -- it cannot be -- so
+ * this bounds how long the runner waits, not how long the reviewer runs.
+ *
+ * THAT DISTINCTION IS THE POINT. A hung reviewer keeps running; what must not
+ * happen is the runner sitting behind it until the lease expires and then
+ * submitting a verdict against a credential that is no longer current. Timing
+ * out means we do not have a verdict, so nothing is submitted.
+ */
+function withDeadline(promise, ms) {
+  let timer = null;
+  /*
+   * THE TIMER IS NOT UNREF'D, AND THE FIRST VERSION OF THIS WAS.
+   *
+   * unref() looks like tidiness -- do not hold the process open for a timer --
+   * and it removes the deadline entirely: with nothing else pending, the event
+   * loop drains, the process tears down before the timer fires, and the race
+   * never settles. The test for a hung reviewer caught it at once with "promise
+   * resolution is still pending but the event loop has already resolved". A
+   * deadline that only fires when something else happens to be keeping the
+   * loop alive is not a deadline. clearTimeout in the finally below is what
+   * stops it outliving the race.
+   */
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`reviewer exceeded ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
 
 function fail(message) {
   throw new TypeError(`review runner: ${message}`);
@@ -100,6 +140,7 @@ export async function runReview({
   envelopeFor,
   contract = null,
   leaseSeconds = 1800,
+  timeoutMs = DEFAULT_REVIEW_TIMEOUT_MS,
   io = {},
 }) {
   if (!task?.task_id) fail('runReview: task.task_id required');
@@ -113,6 +154,24 @@ export async function runReview({
   if (typeof envelopeFor !== 'function') fail('runReview: envelopeFor is required');
 
   const taskId = task.task_id;
+
+  /*
+   * A REVIEW MAY NOT OUTLIVE THE LEASE THAT AUTHORISES IT, checked before the
+   * lease is taken rather than discovered at the submit.
+   *
+   * Exactly the guard runAttempt carries for the work lease, and it was missing
+   * here. Without it a reviewer reads for longer than 1800 seconds, does the
+   * whole job, and the fenced submit refuses a token that expired mid-read --
+   * the work is lost and the failure reads as a race rather than as a deadline
+   * nobody set. Refusing before the claim costs nothing.
+   */
+  if (timeoutMs >= leaseSeconds * 1000) {
+    throw new RangeError(
+      `runReview: timeout ${timeoutMs}ms is not shorter than the review lease `
+      + `${leaseSeconds * 1000}ms; the lease would expire mid-review and the decision `
+      + 'would be refused by the fence after the work was done',
+    );
+  }
 
   /*
    * THE LEASE FIRST, BEFORE A WORKSPACE EXISTS.
@@ -197,7 +256,10 @@ export async function runReview({
   try {
     review = reviewer === null || reviewer === undefined
       ? null
-      : await reviewer.review(packet, { path: workspace.path, readOnly: true });
+      : await withDeadline(
+          reviewer.review(packet, { path: workspace.path, readOnly: true }),
+          timeoutMs,
+        );
   } catch (error) {
     crashed = error;
   }
@@ -249,6 +311,30 @@ export async function runReview({
 
   const decision = decideReview({ packet, review });
 
+  /*
+   * REVIEWING A FIX TASK CLOSES THE FINDINGS IT CARRIED, AND ONLY THIS CLOSES
+   * THEM.
+   *
+   * resolveFindings existed with tests and NO CALLER for the whole of its first
+   * day -- an orphan export inside a module that is otherwise reachable, so the
+   * module graph could not see it. Its own docstring claimed to be "the only
+   * way" a finding is closed, which was true and worthless: nothing closed one
+   * at all. A pure function's tests pass whether or not anything calls it.
+   *
+   * It belongs here. A task carrying `fix_of` is a fix, and accepting it is the
+   * moment its findings stop being open. resolveFindings refuses when the
+   * reviewer is the session that returned the fix, which is the fixer -- so the
+   * rule "a fixer may not resolve its own finding" is enforced on a real path
+   * rather than asserted in a comment.
+   */
+  let resolved = null;
+  if (task.fix_of) {
+    resolved = resolveFindings({
+      fixTask: { ...task, fixed_by: task.returned_by ?? null, findings: task.findings ?? [] },
+      review: { decision: decision.decision, reviewer: reviewerSession },
+    });
+  }
+
   const fixTask = decision.decision === REVIEW_DECISION.FIX_REQUIRED
     ? fixTaskFor({
         task,
@@ -277,6 +363,7 @@ export async function runReview({
     decision: decision.decision,
     reasons: [...decision.reasons],
     reviewer_session: reviewerSession,
+    resolves: resolved?.resolved ? [...resolved.resolved] : [],
     head_sha: envelope.commit ?? null,
     fix_task: fixTask,
   });
@@ -288,16 +375,39 @@ export async function runReview({
    * does hold evidence, is the attempt pipeline's to quarantine and this never
    * touches it.
    */
+  /*
+   * DISPOSAL MAY NOT TURN A LANDED REVIEW INTO A REPORTED FAILURE.
+   *
+   * The submit above is durable, fenced and one-shot. Everything after it is
+   * tidying, and tidying that throws would propagate out of this function and
+   * tell the caller the review failed -- for a decision the database has
+   * already recorded. CLAUDE.md names this exactly: "Reporting failure for
+   * completed work is worse than failing outright, because the retry is what
+   * corrupts the picture." The retry here cannot even succeed: the task has
+   * left `returned`, so claim_review answers `state` and a human goes looking
+   * for a race that never happened.
+   *
+   * A workspace that could not be disposed of is KEPT and said so. A directory
+   * left behind is a cheaper problem than a lost verdict.
+   */
   let disposal;
-  if (submitted?.ok) {
-    const result = await workspaces.destroy(workspace);
-    disposal = { outcome: 'destroyed', detail: result?.reason ?? null };
-  } else {
-    const kept = await workspaces.quarantine(
-      workspace,
-      `review of ${taskId} was not recorded: ${submitted?.reason ?? 'submit-refused'}`,
-    );
-    disposal = { outcome: 'quarantined', detail: kept };
+  try {
+    if (submitted?.ok) {
+      const result = await workspaces.destroy(workspace);
+      disposal = { outcome: 'destroyed', detail: result?.reason ?? null };
+    } else {
+      const kept = await workspaces.quarantine(
+        workspace,
+        `review of ${taskId} was not recorded: ${submitted?.reason ?? 'submit-refused'}`,
+      );
+      disposal = { outcome: 'quarantined', detail: kept };
+    }
+  } catch (error) {
+    disposal = {
+      outcome: 'kept',
+      detail: `disposal failed and was not allowed to mask the outcome: ${error?.message ?? error}`,
+      path: workspace.path,
+    };
   }
 
   if (!submitted?.ok) {
@@ -326,6 +436,7 @@ export async function runReview({
     review,
     packet,
     fixTask,
+    resolved,
     disposal,
     submitted,
   });

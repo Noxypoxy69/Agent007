@@ -657,3 +657,154 @@ test('A FIX TASK INHERITS THE PATH CONTRACT, BECAUSE AN EMPTY ALLOW-LIST FORBIDS
   assert.deepEqual(pathViolations(['src/thing.mjs'], { allowed: fix.allowed_paths, forbidden: fix.forbidden_paths }), [],
     'the inherited contract still refuses the file the fix is about');
 });
+
+/* ── the four things a self-audit found, each with the test it lacked ── */
+
+test('A REVIEW DEADLINE THAT OUTLIVES ITS LEASE IS REFUSED BEFORE THE CLAIM', async () => {
+  /*
+   * FINDING 1. DEFAULT_REVIEW_TIMEOUT_MS shipped with a comment calling an
+   * over-long deadline "a scheduled loss" and NOTHING READ IT. There was no
+   * deadline. runAttempt has carried this guard for the work lease since it was
+   * written; the review half simply never got one, so a reviewer could read
+   * past its lease, finish, and have the fenced submit refuse the credential --
+   * losing the work and reading as a race rather than a deadline nobody set.
+   */
+  const h = harness();
+  await assert.rejects(
+    () => runReview({ ...h.args, leaseSeconds: 60, timeoutMs: 60_000 }),
+    /not shorter than the review lease/,
+  );
+  // nothing was claimed, so nobody else is blocked by the refusal
+  assert.deepEqual(h.bridge.outbox, []);
+  assert.deepEqual(h.workspaces.log, []);
+
+  // THE POSITIVE: a deadline that fits is accepted, or the check above would
+  // pass against a function that refused every review.
+  const ok = await runReview({ ...h.args, leaseSeconds: 1800, timeoutMs: 60_000 });
+  assert.equal(ok.ok, true, `${ok.stage}/${ok.reason}`);
+});
+
+test('A REVIEWER THAT HANGS IS BOUNDED, AND SUBMITS NOTHING', async () => {
+  const h = harness({
+    reviewer: {
+      id: 'hangs',
+      review: () => new Promise(() => {}), // never settles
+    },
+  });
+  const started = Date.now();
+  const r = await runReview({ ...h.args, leaseSeconds: 1800, timeoutMs: 300 });
+  const elapsed = Date.now() - started;
+
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'reviewer:crashed', `stopped for ${r.reason}`);
+  assert.match(r.detail, /exceeded 300ms/);
+  assert.equal(r.submitted, null, 'a verdict was submitted for a review that never returned one');
+  assert.ok(elapsed < 5000, `waited ${elapsed}ms: the runner sat behind the reviewer`);
+  assert.equal(h.bridge.rows.get('t-review').state, 'returned', 'the task moved on a review that never finished');
+});
+
+test('A DISPOSAL FAILURE MAY NOT REPORT A RECORDED REVIEW AS A FAILURE', async () => {
+  /*
+   * FINDING 4, and CLAUDE.md names it: "Reporting failure for completed work is
+   * worse than failing outright, because the retry is what corrupts the
+   * picture." The submit is durable and fenced; destroy() runs after it. A
+   * worktree that will not go -- a lock, a permission, a Windows handle -- threw
+   * straight out of runReview and told the caller the review failed, for a
+   * decision the database had already taken. The retry cannot even succeed:
+   * the task has left `returned`, so the claim answers `state`.
+   */
+  const h = harness();
+  h.workspaces.destroy = async () => { throw new Error('git worktree remove: permission denied'); };
+
+  const r = await runReview(h.args);
+  assert.equal(r.ok, true, 'a tidy-up failure was reported as a failed review');
+  assert.equal(r.decision.decision, REVIEW_DECISION.ACCEPT);
+  assert.equal(r.disposal.outcome, 'kept', 'the undisposed workspace was not reported');
+  assert.match(r.disposal.detail, /permission denied/);
+  assert.equal(r.disposal.path, h.workspaces.log[0][1] ? r.disposal.path : r.disposal.path);
+
+  // and the far end really did record it, which is the whole reason the caller
+  // must not be told otherwise
+  assert.equal(h.bridge.rows.get('t-review').state, 'accepted');
+  assert.equal(h.bridge.rows.get('t-review').reviewed_by, 'reviewer-session');
+});
+
+test('AN ABBREVIATED COMMIT IS REFUSED AT DECISION TIME, NOT BY THE DATABASE', async () => {
+  /*
+   * FINDING 3. The task table constrains base_sha to exactly 40 hex and
+   * submit_review refuses anything else -- a refusal I added while auditing the
+   * migration and never propagated back to the JavaScript, so every test used a
+   * 40-character sha and this path had never run. The result envelope permits
+   * SEVEN to sixty-four, so a short commit is a shape a caller legitimately
+   * holds. Discovered at the far end it costs the whole review.
+   */
+  const shortSha = 'abc1234';
+  const env = createResultEnvelope({
+    taskId: 't-review', outcome: 'exited', exitCode: 0,
+    tests: { passed: 1, failed: 0, skipped: 0, total: 1 },
+    commit: shortSha, filesChanged: ['src/thing.mjs'],
+    pathContract: { allowed: ['src/thing.mjs'], forbidden: [], violations: [] },
+  });
+  // the premise: the envelope really does accept it
+  assert.equal(env.commit, shortSha, 'the envelope rejected it, so this tests nothing');
+
+  assert.throws(
+    () => fixTaskFor({
+      task: returnedTask(), packet: packetOf(env), raisedBy: 'r',
+      decision: { decision: REVIEW_DECISION.FIX_REQUIRED, reasons: ['reviewer:x'] },
+    }),
+    /full 40-character commit/,
+  );
+
+  // AND THE FAR END REFUSES IT TOO, so the guard above is defence in depth
+  // rather than the only thing standing between a short sha and a constraint
+  // violation surfacing as a 500.
+  const h = harness();
+  const claim = await h.bridge.claimReview({ task_id: 't-review', reviewer_session: 'r1' });
+  const out = await h.bridge.submitReview({
+    task_id: 't-review', review_lease_token: claim.review_lease_token,
+    decision: 'fix_required', reviewer_session: 'r1',
+    fix_task: { task_id: 't-review+fix@short', base_sha: shortSha },
+  });
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'fix-task-base');
+});
+
+test('ACCEPTING A FIX CLOSES THE FINDINGS IT CARRIED', async () => {
+  /*
+   * FINDING 2. resolveFindings shipped with tests and NO CALLER -- an orphan
+   * export inside a module the graph sees as reachable, so nothing flagged it.
+   * Its docstring called itself "the only way" a finding is closed, which was
+   * true and worthless: nothing closed one at all.
+   */
+  const fixTask = {
+    task_id: 't-review+fix@aaaa', state: 'returned', lane_id: 'agentbridge',
+    base_sha: SHA, returned_by: 'fixer-session', returned_head_sha: SHA,
+    allowed_paths: ['src/thing.mjs'], forbidden_paths: [], shared_paths: [],
+    attempt: 1, depends_on: [],
+    fix_of: 't-review', findings: ['reviewer:policy:too-many-files:1'],
+  };
+  const bridge = createFakeBridge({ tasks: [fixTask] });
+  const r = await runReview({
+    task: fixTask,
+    reviewerSession: 'reviewer-session',
+    reviewer: createFakeReviewer(),
+    workspaces: fakeWorkspaces(),
+    bridge,
+    envelopeFor: async () => goodEnvelope({ taskId: 't-review+fix@aaaa' }),
+    contract: { allowed: ['src/thing.mjs'], forbidden: [] },
+    io: { workspaceGit: probe(), now: () => 1 },
+  });
+
+  assert.equal(r.ok, true, `${r.stage}/${r.reason}: ${r.detail}`);
+  assert.equal(r.decision.decision, REVIEW_DECISION.ACCEPT);
+  assert.deepEqual(r.resolved.resolved, ['reviewer:policy:too-many-files:1'],
+    'accepting the fix left its finding open');
+  assert.deepEqual(r.resolved.open, []);
+
+  // AN ORDINARY TASK IS NOT A FIX, so nothing is resolved and the field says so
+  // rather than quietly reporting an empty resolution for every review.
+  const h = harness();
+  const plain = await runReview(h.args);
+  assert.equal(plain.resolved, null, 'a task that fixes nothing reported a resolution');
+});

@@ -165,6 +165,17 @@ export function createFakeBridge({ tasks = [], now = () => Date.now() } = {}) {
         if (!fix_task?.task_id) return { ok: false, reason: 'fix-task-missing' };
         if (fix_task.task_id === task_id) return { ok: false, reason: 'fix-task-collides' };
         fixId = fix_task.task_id;
+        /*
+         * MODELLED FROM THE APPLIED SQL, and it was missing until an audit
+         * compared the two: the table constrains base_sha to exactly 40 hex and
+         * submit_review refuses anything else with `fix-task-base`. A fake that
+         * accepts a short sha lets a test pass against behaviour production
+         * does not have.
+         */
+        const fixBase = fix_task.base_sha ?? row.returned_head_sha;
+        if (!/^[0-9a-f]{40}$/.test(fixBase ?? '')) {
+          return { ok: false, reason: 'fix-task-base', detail: `got ${fixBase}` };
+        }
         if (!rows.has(fixId)) {
           rows.set(fixId, {
             task_id: fixId,
@@ -172,7 +183,7 @@ export function createFakeBridge({ tasks = [], now = () => Date.now() } = {}) {
             state: 'runnable',
             lane_id: fix_task.lane_id ?? row.lane_id ?? null,
             repo_id: fix_task.repo_id ?? row.repo_id ?? null,
-            base_sha: fix_task.base_sha ?? row.returned_head_sha,
+            base_sha: fixBase,
             // modelled from the migration: an omitted allow-list defaults to
             // '[]', which means NOTHING is allowed, so the insert copies the
             // reviewed task's contract rather than leaving the default
