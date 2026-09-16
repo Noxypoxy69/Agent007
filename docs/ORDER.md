@@ -12,6 +12,16 @@ watching. Then a second one unlocks from the first and does the same.
 
 ## Blocking the loop
 
+**0. Deploy the edge function.** — DANNY, and only Danny
+`/task`, `/renew` and the permission path are committed and undeployed. Reported
+by code-c at 04:53: *"until they ship a worker cannot read its task, cannot renew,
+and cannot close the loop."* Every item below is downstream of this. It is an
+owner gate by the repository's own rules and nobody else may clear it.
+
+*This was not step one on the first version of this list, and it should have
+been. The first version had merging at the top, which is wrong: a worker cannot
+close the loop from master either, if the routes it needs answer nothing.*
+
 **1. Merge the two ready branches to master.** — code-c
 `work/recover-orphan-branches` then `work/support-modules`. Both green.
 Nothing below can start until the pipeline is on master, because the worker

@@ -34,6 +34,12 @@ import { buildReviewerPacket } from './reviewerPacket.mjs';
 import { compact } from './toolOutput.mjs';
 import { record, totals } from './tokenTelemetry.mjs';
 
+/*
+ * Shorter than the 900s default lease on purpose. A default that outlives the
+ * authority granting it is not a default, it is a scheduled loss.
+ */
+export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** Disposal outcomes, so a caller can branch on them rather than on prose. */
 export const DISPOSAL = Object.freeze({
   DESTROYED: 'destroyed',
@@ -64,13 +70,36 @@ export async function runAttempt({
 
   const taskId = task.task_id;
   const attempt = task.attempt ?? 0;
+
+  /*
+   * A RUN MAY NOT OUTLIVE THE LEASE THAT AUTHORISES IT.
+   *
+   * Reported by code-c from the live system: the default lease is 900 seconds
+   * and the default run timeout was 1800, so a worker doing a normal-length task
+   * loses its lease partway through and correctly discards finished work. The
+   * failure is silent, expensive and looks like flakiness -- the task ran, the
+   * tests passed, and the result was thrown away because the token had expired.
+   *
+   * So the deadline is checked against the lease rather than assumed to fit
+   * inside it. Refusing before the work starts costs nothing; discovering it
+   * after costs the whole attempt.
+   */
+  if (task.lease_ms !== undefined && task.lease_ms !== null) {
+    const deadline = task.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+    if (deadline >= task.lease_ms) {
+      throw new RangeError(
+        `runAttempt: timeout ${deadline}ms is not shorter than the lease ${task.lease_ms}ms; ` +
+          'the lease would expire mid-run and the finished work would be discarded',
+      );
+    }
+  }
   const workspace = await workspaces.create({ taskId, baseSha: task.base_sha, attempt });
 
   const spec = {
     taskId,
     attempt,
     cwd: workspace.path,
-    timeoutMs: task.timeout_ms ?? 30 * 60 * 1000,
+    timeoutMs: task.timeout_ms ?? DEFAULT_TIMEOUT_MS,
     ...(task.argv ? { argv: task.argv } : {}),
     ...(task.prompt ? { prompt: task.prompt } : {}),
     ...(task.env ? { env: task.env } : {}),

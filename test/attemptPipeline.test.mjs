@@ -299,3 +299,50 @@ test('telemetry records the attempt once, and a repeat report does not double it
   assert.equal(first.spent.billed, 120);
   assert.equal(first.spent.input, 100, 'cached input is not input');
 });
+
+test('A RUN MAY NOT OUTLIVE THE LEASE THAT AUTHORISES IT', async () => {
+  /*
+   * Reported from the live system by code-c: the default lease is 900s and the
+   * default run timeout was 1800s, so a normal-length task lost its lease
+   * partway through and the finished work was correctly discarded. Silent,
+   * expensive, and indistinguishable from flakiness.
+   */
+  await assert.rejects(
+    runAttempt({
+      task: { ...task, lease_ms: 900_000, timeout_ms: 1_800_000 },
+      contract, workspaces: fakeWorkspaces(), io: io(),
+      executor: executorThat(GREEN), reviewer: createFakeReviewer(),
+    }),
+    /not shorter than the lease/,
+  );
+});
+
+test('the default deadline fits inside the default lease', async () => {
+  // the positive: no explicit timeout, and it is still accepted against a 900s lease
+  const out = await runAttempt({
+    task: { ...task, lease_ms: 900_000, timeout_ms: undefined },
+    contract, workspaces: fakeWorkspaces(), io: io(),
+    executor: executorThat(GREEN), reviewer: createFakeReviewer(),
+  });
+  assert.equal(out.accepted, true);
+});
+
+test('a deadline equal to the lease is refused, not merely one that exceeds it', async () => {
+  await assert.rejects(
+    runAttempt({
+      task: { ...task, lease_ms: 900_000, timeout_ms: 900_000 },
+      contract, workspaces: fakeWorkspaces(), io: io(),
+      executor: executorThat(GREEN), reviewer: createFakeReviewer(),
+    }),
+    /not shorter than the lease/,
+  );
+});
+
+test('without a stated lease the pipeline does not invent one', async () => {
+  const out = await runAttempt({
+    task: { ...task, timeout_ms: 1_800_000 },
+    contract, workspaces: fakeWorkspaces(), io: io(),
+    executor: executorThat(GREEN), reviewer: createFakeReviewer(),
+  });
+  assert.equal(out.accepted, true, 'a caller that has not said what the lease is gets no guess');
+});
