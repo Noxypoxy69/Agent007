@@ -52,6 +52,88 @@ export async function closeHttp() {
 }
 
 /** Distinguishable outcomes. `unreachable` must never be treated as `absent`. */
+/**
+ * ANY HTTP RESPONSE IS AN ANSWER. `UNREACHABLE` MEANS NOBODY ANSWERED.
+ *
+ * ═══ THE THIRD TIME THIS BUG WAS FOUND IN THIS FILE ═══
+ *
+ * b6 ran `return-task` three times over twenty minutes and got
+ * "the Bridge is unreachable (d-claims-authz-b6)". It reported to Danny that
+ * the Bridge was down. It was not — `wait-for-work` answered the whole time.
+ * What the Bridge actually said was:
+ *
+ *     404  {"error":"no-such-task","detail":"d-claims-authz-b6"}
+ *
+ * b6's tell is the best part of the report and belongs here: **UNREACHABLE
+ * details are "timeout", "no fetch available", "http 500". A detail that is an
+ * IDENTIFIER means the far end answered and formed an opinion about it.**
+ *
+ * ═══ WHY IT KEPT COMING BACK: I FIXED INSTANCES, NOT THE CLASS ═══
+ *
+ * 401 was fixed after b6 found it live. Then 409. Then 400, on a branch. Each
+ * fix was a new `if (res.status === N)` branch bolted onto a ladder whose
+ * FALLBACK still said UNREACHABLE — so every status nobody had been bitten by
+ * yet kept the bug, and 404 walked straight past three fixes.
+ *
+ * And it was never one ladder. There are FOUR call sites in this file, each
+ * with its own `if (!res.ok) return UNREACHABLE`. Every one had the same hole.
+ * Patching a fifth status would have left the other thirty.
+ *
+ * This is rule 8 in CLAUDE.md turned on me: *an adversarial probe bounds
+ * nothing; fix the matcher, not the strings the prober happened to try.* I
+ * wrote that this morning about somebody else's finding.
+ *
+ * ═══ THE RULE, ONCE, FOR EVERY CALL SITE ═══
+ *
+ *   401 / 403   REJECTED    the credential was refused — fix the credential
+ *   other 4xx   REFUSED     the far end understood and said no — read the reason
+ *   5xx         UNREACHABLE it answered but cannot serve — retry may help
+ *   no response UNREACHABLE timeout, abort, no fetch — check the transport
+ *
+ * The specific branches that remain at the call sites are SPECIALISATIONS that
+ * must agree with this function, not alternatives to it. A test asserts they
+ * agree on every status they overlap on, so the ladder cannot drift again.
+ *
+ * @returns null when the response is OK, otherwise the state to report.
+ */
+export async function interpretHttp(res, { credential = 'registration token' } = {}) {
+  if (res.ok) return null;
+
+  let errors = [];
+  let parsed = null;
+  try {
+    const b = await res.json();
+    if (Array.isArray(b?.errors) && b.errors.length) {
+      errors = b.errors;
+      parsed = b.errors.join('; ');
+    } else if (b?.error && b?.detail) {
+      parsed = `${b.error}: ${String(b.detail).slice(0, 200)}`;
+    } else if (b?.detail) {
+      parsed = String(b.detail).slice(0, 200);
+    } else if (b?.error) {
+      parsed = String(b.error).slice(0, 200);
+    }
+  } catch { /* a body we cannot read does not change the STATE */ }
+
+  if (res.status === 401 || res.status === 403) {
+    return { state: HOSTED.REJECTED, detail: `${credential} rejected (${res.status})`, errors };
+  }
+  if (res.status >= 400 && res.status < 500) {
+    return { state: HOSTED.REFUSED, detail: parsed ?? `http ${res.status}`, errors };
+  }
+  /*
+   * 5xx stays UNREACHABLE, and its detail keeps the status in front. The server
+   * answered but cannot serve, so retrying is reasonable and the worker has
+   * nothing to fix -- which is what UNREACHABLE is for. Leading with "http 500"
+   * preserves b6's tell: a detail that is an identifier means a decision.
+   */
+  return {
+    state: HOSTED.UNREACHABLE,
+    detail: parsed ? `http ${res.status}: ${parsed}` : `http ${res.status}`,
+    errors,
+  };
+}
+
 export const HOSTED = {
   NOT_CONFIGURED: 'not-configured',
   OK: 'ok',
@@ -224,7 +306,8 @@ export async function waitForEvents(env = {}, body, { fetchImpl, timeoutMs = 400
       try { detail = (await res.json())?.detail ?? detail; } catch { /* keep it */ }
       return { state: HOSTED.REFUSED, detail };
     }
-    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
 
     const b = await res.json().catch(() => null);
     if (!b || !Array.isArray(b.events)) {
@@ -295,15 +378,8 @@ export async function returnWork(env = {}, body, { fetchImpl, timeoutMs = DEFAUL
       return { state: HOSTED.REFUSED, errors, detail };
     }
 
-    if (!res.ok) {
-      let detail = `http ${res.status}`;
-      try {
-        const b = await res.json();
-        if (b?.errors?.length) detail = b.errors.join('; ');
-        else if (b?.detail) detail = String(b.detail).slice(0, 200);
-      } catch { /* keep the status */ }
-      return { state: HOSTED.UNREACHABLE, detail };
-    }
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
 
     const b = await res.json().catch(() => ({}));
     return { state: HOSTED.OK, task: b?.task ?? null };
@@ -377,7 +453,8 @@ export async function fetchHostedRegistrations(env = {}, { fetchImpl, timeoutMs 
       // a token they can.
       return { state: HOSTED.REJECTED, detail: 'reader token rejected (401)' };
     }
-    if (!res.ok) return { state: HOSTED.UNREACHABLE, detail: `http ${res.status}` };
+    const answered = await interpretHttp(res, { credential: 'reader token' });
+    if (answered) return answered;
 
     const body = await res.json();
     const text = body?.result?.content?.[0]?.text;
@@ -488,15 +565,8 @@ export async function publishRegistration(env = {}, row, { fetchImpl, timeoutMs 
       // the line below returned UNREACHABLE; b6 found it by probing live.
       return { state: HOSTED.REJECTED, detail: 'registration token rejected (401)' };
     }
-    if (!res.ok) {
-      let detail = `http ${res.status}`;
-      try {
-        const body = await res.json();
-        if (body?.errors?.length) detail = body.errors.join('; ');
-        else if (body?.detail) detail = String(body.detail).slice(0, 200);
-      } catch { /* keep the status */ }
-      return { state: HOSTED.UNREACHABLE, detail };
-    }
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
     return { state: HOSTED.OK };
   } catch (e) {
     if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
