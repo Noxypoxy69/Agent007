@@ -1,9 +1,11 @@
 {
-  "_note": "BASELINE, established 2026-09-16 by reading the control plane, not by deploying. headSha is the zero sha because NOTHING RECORDED WHICH COMMIT IS LIVE. The edge function has been deployed by hand, which is the defect the gate exists for, so the honest answer is unknown and a plausible sha would be worse than none. It is NOT master: code-c measured index.ts byte-identical modulo line endings but _shared.js differing, with master a strict superset at 83 exports against 75. The next deploy through bin/agentbridge-deploy-check.mjs replaces this with a real commit, and from then on a hand-deploy between deploys is detectable instead of invisible.",
+  "_note": "Version 23, live 2026-09-16T19:37:00.670Z. IT SHIPPED THE SAME BYTES AS 22: ezbr_sha256 is 5e3e9690... for both, and the artifact directory is unchanged from 04f6e34 through 5083feb. A redeploy of identical bytes bumps the version and leaves the hash alone. WHO RAN IT IS NOT RECORDED because it is not known. This file has had three attribution corrections in one hour, every one from crediting a deploy to whoever was nearest; an unattributed field gets looked up, an invented one does not. NOTHING WAS DEPLOYED TO WRITE THIS. The gate refused on live-artifact-drifted (live 23 vs recorded 22) and the refusal was correct. Danny chose to reconcile rather than redeploy, because live already serves what is on disk. CONSEQUENCE FOR CI: .github/workflows/deploy-edge-function.yml fails a deploy when ezbr_sha256 is unchanged. An identical redeploy - exactly what 23 was - would be reported as a failed deploy by that check.",
   "schemaVersion": 1,
   "headSha": "0000000000000000000000000000000000000000",
   "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
-  "liveArtifactHash": "e82b12669656f806e6a53e7463449c3fce5de0945990ae72155cf349890db961",
-  "liveVersion": 20,
-  "deployedAt": "2026-09-16T06:40:54.845Z"
+  "liveArtifactHash": "5e3e96909b070a176e55242e273c65575a78409cbe77dd499a34be9aff3519cb",
+  "liveVersion": 23,
+  "deployedAt": "2026-09-16T19:37:00.670Z",
+  "deployedBy": "UNATTRIBUTED - not this session, and not inferred. Whoever ran it should claim it.",
+  "previousVersion": 22
 }
