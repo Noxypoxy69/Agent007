@@ -79,6 +79,35 @@ const COMMANDS =
  * Command-SHAPED, not merely command-adjacent: a flag, a path, a URL, a quoted
  * argument, or a redirect. "npm run verify" qualifies; "npm is the package
  * manager" does not.
+ *
+ * ═══ PRODUCTION DOES NOT ENFORCE THIS, MEASURED 2026-09-16 18:00Z ═══
+ *
+ * b6 reported that the deployed guard refuses prose this file accepts and that
+ * nobody knew what it was enforcing. Characterised by probing the live server,
+ * after it refused two real report messages:
+ *
+ *   "We discussed git yesterday in the meeting, and nobody ran anything"
+ *      -> REFUSED live.  executableMatch() here returns null.
+ *   The same sentence with "git" replaced by "version control"
+ *      -> ACCEPTED live. (message a7aaad7c, 18:00:22Z)
+ *   "npm is the package manager" -- the counter-example in the line above
+ *      -> REFUSED live.
+ *
+ * So the deployed rule is roughly COMMANDS followed by any word, ANYWHERE:
+ * neither the ARGUMENT shape below nor the line-start/after-operator position
+ * is required. The comment above describes this file; it does not describe what
+ * is actually guarding the channel.
+ *
+ * THE SPLICE IS NOT THE DRIFTING HALF, which is worth saying because it is the
+ * usual suspect. A full report body was run through both this module and the
+ * hand-spliced copy in `supabase/functions/mcp/_shared.js`: BOTH return null.
+ * The disagreement is repo-versus-deployment, and the deployed function is
+ * version 20, which predates today's merges.
+ *
+ * IT FAILS SAFE AND IT IS STILL COSTING MESSAGES -- two of mine, and b6's
+ * before that. Anyone deploying this module closes it; until then, a report
+ * naming a tool by name may simply not arrive, and the sender is told the body
+ * looks like a command rather than which word did it.
  */
 const ARGUMENT = String.raw`(-{1,2}[a-z]|[./~]|[a-z]+:\/\/|["']|\w+\s+-{1,2}[a-z]` +
   // a runner naming a package and then an action: "npx wrangler deploy"

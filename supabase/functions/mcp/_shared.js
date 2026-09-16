@@ -966,6 +966,14 @@ const COMMANDS =
   'rm|curl|wget|chmod|chown|kill|scp|ssh|nc|eval|exec|git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd';
 
 /**
+ * WHAT IS LIVE DOES NOT MATCH THIS FILE. Measured 2026-09-16 18:00Z against the
+ * deployed function: prose this guard accepts is refused in production, which
+ * enforces roughly COMMANDS plus any word anywhere, with no shape and no
+ * position required. This copy and `src/coordination.mjs` agree with each other
+ * -- the splice is NOT the drifting half -- so the gap closes on the next
+ * deploy of this bundle and not by editing either. Full evidence and the four
+ * probes are in the header of ARGUMENT in `src/coordination.mjs`.
+ *
  * Command-SHAPED, not merely command-adjacent: a flag, a path, a URL, a quoted
  * argument, or a redirect. "npm run verify" qualifies; "npm is the package
  * manager" does not.
