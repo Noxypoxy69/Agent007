@@ -41,6 +41,8 @@ const goodEnvelope = (over = {}) => createResultEnvelope({
 const returnedTask = (over = {}) => ({
   task_id: 't-review', state: 'returned', lane_id: 'agentbridge', repo_id: 'agentbridge',
   base_sha: '0'.repeat(40), returned_by: 'worker-session', returned_head_sha: SHA,
+  // a real row carries these, and they are NOT decoration -- see the test below
+  allowed_paths: ['src/thing.mjs'], forbidden_paths: ['supabase/**'], shared_paths: [],
   returned_notes: 'I refactored the thing and I am confident it is correct.',
   attempt: 1, depends_on: [],
   ...over,
@@ -613,4 +615,45 @@ test('THE CLAIM ROUTE RESOLVES THE REVIEWER FROM THE REGISTRY, NOT FROM THE BODY
     /p_reviewer_session:\s*(body|claimed)/,
     'the reviewer session comes straight from the request body',
   );
+});
+
+/* ── the fix task has to be a task somebody can actually do ───────────── */
+
+test('A FIX TASK INHERITS THE PATH CONTRACT, BECAUSE AN EMPTY ALLOW-LIST FORBIDS EVERYTHING', async () => {
+  /*
+   * FOUND BY AUDITING THE MIGRATION AGAINST THE LIVE SCHEMA, not by reading the
+   * JavaScript. allowed_paths, forbidden_paths and shared_paths are NOT NULL in
+   * agentbridge.tasks and default to '[]' -- and pathViolations treats an empty
+   * allow-list as "nothing is allowed", deliberately, so that a contract which
+   * failed to load cannot read as permission.
+   *
+   * Put those two together and a fix task created without a contract is one on
+   * which EVERY file the fixer touches is a path violation. The machine verdict
+   * rejects every attempt it will ever make. The queue looks busy, the fixer
+   * looks like it is failing, and the task is impossible by construction.
+   *
+   * So this asserts the contract survives into the row at the far end, and the
+   * second half asserts it is the REVIEWED task's contract rather than some
+   * permissive default -- "it is not empty" would pass against a fix task that
+   * silently allowed everything, which is the opposite failure and worse.
+   */
+  const h = harness({ reviewer: createFakeReviewer({ maxFilesChanged: 0 }) });
+  const r = await runReview(h.args);
+  assert.equal(r.decision.decision, REVIEW_DECISION.FIX_REQUIRED);
+
+  const fix = h.bridge.rows.get(r.fixTask.task_id);
+  assert.deepEqual(fix.allowed_paths, ['src/thing.mjs'],
+    'the fix task cannot touch the file it was raised about');
+  assert.deepEqual(fix.forbidden_paths, ['supabase/**'],
+    'the reviewed task forbade a path and the fix task does not');
+  assert.notDeepEqual(fix.allowed_paths, [],
+    'an empty allow-list means NOTHING is allowed, so every fixer attempt would be refused');
+
+  // and the evidence collector agrees about what an empty list means, which is
+  // the premise this whole test rests on rather than something it assumes
+  const { pathViolations } = await import('../src/evidenceCollector.mjs');
+  assert.deepEqual(pathViolations(['src/thing.mjs'], { allowed: [], forbidden: [] }), ['src/thing.mjs'],
+    'the premise is wrong: an empty allow-list does not forbid everything');
+  assert.deepEqual(pathViolations(['src/thing.mjs'], { allowed: fix.allowed_paths, forbidden: fix.forbidden_paths }), [],
+    'the inherited contract still refuses the file the fix is about');
 });

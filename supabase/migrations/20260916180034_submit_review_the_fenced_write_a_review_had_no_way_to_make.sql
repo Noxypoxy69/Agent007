@@ -39,9 +39,27 @@ alter table agentbridge.tasks add  constraint review_decision_is_known
          or review_decision in ('accept', 'fix_required', 'reject'));
 
 -- THE VIEW DOES NOT GROW A COLUMN WHEN ITS TABLE DOES, and this repository has
--- already taken a PGRST204 outage for forgetting it. The list below is the one
--- from 20260915133357 plus the six columns above; security_invoker is restated
--- because dropping it makes the view run as owner and bypass RLS entirely.
+-- already taken a PGRST204 outage for forgetting it.
+--
+-- THE FIRST DRAFT OF THIS MIGRATION GOT IT WRONG IN THE OTHER DIRECTION, and it
+-- is worth writing down because the trap is not the one the last author warned
+-- about. I built the list by copying it out of 20260915133357 and appending the
+-- six new columns. That migration has carried a comment since the day it landed
+-- saying the list was READ BACK from information_schema rather than recalled --
+-- and I recalled it. Six columns had been added to the view since: lease_token,
+-- lease_expires_at, attempt, reviewer, review_lease_token and
+-- review_lease_expires_at, all from the lease migration.
+--
+-- Postgres would have refused it: create or replace view cannot drop a column or
+-- rename one in place, so it fails with "cannot change name of view column
+-- lease_token to review_decision". A loud failure, which is the only reason this
+-- was cheap. Had the six columns happened to sit at the END of the old list, the
+-- replace would have SUCCEEDED and silently narrowed the view -- which is the
+-- PGRST204 outage again, from the opposite side.
+--
+-- So this list is read back from the live catalogue, in ordinal order, with the
+-- new columns appended. security_invoker is restated because dropping it makes
+-- the view run as owner and bypass RLS entirely.
 create or replace view public.tasks with (security_invoker = true) as
 select task_id, title, state, lane_id, repo_id, base_sha,
        allowed_paths, forbidden_paths, shared_paths, depends_on,
@@ -50,6 +68,8 @@ select task_id, title, state, lane_id, repo_id, base_sha,
        returned_by, returned_at, returned_head_sha, returned_notes,
        accepted_by, accepted_at, accepted_head_sha,
        cancelled_by, cancelled_at, cancelled_reason,
+       lease_token, lease_expires_at, attempt,
+       reviewer, review_lease_token, review_lease_expires_at,
        review_decision, review_reasons, reviewed_by, reviewed_at,
        fix_of, fix_task_id
   from agentbridge.tasks;
@@ -110,6 +130,7 @@ declare
   now_ts   timestamptz := now();
   next     text;
   fix_id   text;
+  fix_base text;
   hit      integer;
 begin
   if p_decision is null or p_decision not in ('accept', 'fix_required', 'reject') then
@@ -177,8 +198,40 @@ begin
                || 'separate task');
     end if;
 
+    fix_base := coalesce(p_fix_task->>'base_sha', t.returned_head_sha);
+
+    /*
+     * A BASE THAT IS NOT A FULL SHA IS REFUSED HERE RATHER THAN BY A CONSTRAINT.
+     *
+     * tasks_base_sha_check demands exactly 40 hex characters. The result
+     * envelope that produces this value accepts 7 to 64, so an abbreviated
+     * commit is a shape the caller can legitimately hold -- and it would abort
+     * this transaction with a constraint violation, which reaches the edge
+     * function as a 500. That is the one answer that invites a retry, handed to
+     * the one caller that must not retry, and the review lease would be spent.
+     * Name it instead.
+     */
+    if fix_base is null or fix_base !~ '^[0-9a-f]{40}$' then
+      return jsonb_build_object('ok', false, 'reason', 'fix-task-base',
+        'detail', format('the fix task needs a full 40-character commit to start from; got %s',
+                         coalesce(fix_base, 'nothing')));
+    end if;
+
+    /*
+     * THE FIX INHERITS THE REVIEWED TASK'S PATH CONTRACT, AND THAT IS NOT A
+     * CONVENIENCE.
+     *
+     * These columns default to '[]', and an EMPTY ALLOW-LIST MEANS NOTHING IS
+     * ALLOWED -- pathViolations in src/evidenceCollector.mjs is explicit about
+     * it, because a contract that failed to load must not read as permission.
+     * So a fix task inserted without them is a task on which every file the
+     * fixer touches is a path violation: the machine verdict rejects every
+     * attempt, forever, and the loop looks busy while nothing can ever pass.
+     * A fix to the same work has the same scope as the work.
+     */
     insert into agentbridge.tasks
-      (task_id, title, state, lane_id, repo_id, base_sha, depends_on, fix_of,
+      (task_id, title, state, lane_id, repo_id, base_sha,
+       allowed_paths, forbidden_paths, shared_paths, depends_on, fix_of,
        created_at, updated_at)
     values
       (fix_id,
@@ -186,7 +239,10 @@ begin
        'runnable',
        coalesce(p_fix_task->>'lane_id', t.lane_id),
        coalesce(p_fix_task->>'repo_id', t.repo_id),
-       coalesce(p_fix_task->>'base_sha', t.returned_head_sha),
+       fix_base,
+       coalesce(p_fix_task->'allowed_paths', t.allowed_paths),
+       coalesce(p_fix_task->'forbidden_paths', t.forbidden_paths),
+       coalesce(p_fix_task->'shared_paths', t.shared_paths),
        '[]'::jsonb,
        p_task_id,
        now_ts, now_ts)

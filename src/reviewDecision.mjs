@@ -126,6 +126,15 @@ export function fixTaskFor({ task, packet, decision, raisedBy, now = null }) {
   const fixId = `${task.task_id}+fix@${String(base).slice(0, 12)}`;
   if (fixId === task.task_id) fail('the fix task id collided with the task it fixes');
 
+  /*
+   * THE FIX INHERITS THE REVIEWED TASK'S PATH CONTRACT, AND IT IS NOT A
+   * CONVENIENCE. An EMPTY ALLOW-LIST MEANS NOTHING IS ALLOWED -- pathViolations
+   * in evidenceCollector.mjs is explicit about it, because a contract that
+   * failed to load must not read as permission. So a fix task that does not
+   * carry one is a task on which every file the fixer touches is a violation:
+   * the machine verdict rejects every attempt, forever, and the loop looks busy
+   * while nothing can ever pass. A fix to the same work has the same scope.
+   */
   return Object.freeze({
     task_id: fixId,
     state: 'runnable',
@@ -134,6 +143,9 @@ export function fixTaskFor({ task, packet, decision, raisedBy, now = null }) {
     base_sha: base,
     lane_id: task.lane_id ?? null,
     repo_id: task.repo_id ?? null,
+    allowed_paths: Object.freeze([...(task.allowed_paths ?? [])]),
+    forbidden_paths: Object.freeze([...(task.forbidden_paths ?? [])]),
+    shared_paths: Object.freeze([...(task.shared_paths ?? [])]),
     title: `Fix findings raised on ${task.task_id}`,
     fix_of: task.task_id,
     fix_of_attempt: packet.attempt ?? null,

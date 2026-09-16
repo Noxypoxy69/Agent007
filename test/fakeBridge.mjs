@@ -173,6 +173,12 @@ export function createFakeBridge({ tasks = [], now = () => Date.now() } = {}) {
             lane_id: fix_task.lane_id ?? row.lane_id ?? null,
             repo_id: fix_task.repo_id ?? row.repo_id ?? null,
             base_sha: fix_task.base_sha ?? row.returned_head_sha,
+            // modelled from the migration: an omitted allow-list defaults to
+            // '[]', which means NOTHING is allowed, so the insert copies the
+            // reviewed task's contract rather than leaving the default
+            allowed_paths: fix_task.allowed_paths ?? row.allowed_paths ?? [],
+            forbidden_paths: fix_task.forbidden_paths ?? row.forbidden_paths ?? [],
+            shared_paths: fix_task.shared_paths ?? row.shared_paths ?? [],
             depends_on: [],
             attempt: 0,
             fix_of: task_id,
