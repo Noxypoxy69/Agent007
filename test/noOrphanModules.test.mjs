@@ -298,6 +298,17 @@ const KNOWN = {
   'src/moduleGraph.mjs':
     'This gate itself, not yet wired to a command. Becomes test-only once its test lands, ' +
     'and reachable when a caller exists.',
+  'src/attemptRecord.mjs':
+    'ORPHANED BY AN AUTHORITY BOUNDARY, NOT BY OVERSIGHT, AND THIS ENTRY IS THE DECLARATION. ' +
+    'It builds the durable attempt row: four verdicts kept separate, routing identity captured ' +
+    'at claim, a step journal, raw output refused inline. Its CALL SITE is deliberately not ' +
+    'mine. The write has to happen inside the fenced return under the same lease that ' +
+    'authorised the work, and lease and fence semantics belong to code-c (ORDER.md item 2), ' +
+    'so the assignment was to build the row here and let her write it there. ' +
+    'A caller invented to satisfy this gate would put the write OUTSIDE the fence, which is ' +
+    'the exact bug the fence exists to prevent: a record written by a worker whose claim has ' +
+    'already expired. That is worse than this entry and invisible once it exists. ' +
+    'Remove this the day claim -> runAttempt -> return calls startAttempt and finishAttempt.',
 };
 
 test('THE REAL REPO HAS NO ORPHAN BEYOND THE KNOWN LIST', () => {
