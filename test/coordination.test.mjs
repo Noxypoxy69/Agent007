@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canAssign, validateMessage, validateAgentId, looksExecutable, executableMatch, assignmentRecord,
+  ACTORS, canonicalActor, knownActorIds,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -322,8 +323,17 @@ test('substitution and pipes into a shell are caught in any position', () => {
  * the field was not empty.
  */
 
-const roster = [{ agent_id: 'code-c' }, { agent_id: 'code-b' }, { agent_id: 'claude-work' }];
-const msg = (to) => ({ from_agent: 'claude-work', to_agent: to, type: 'status', body: 'a normal note' });
+/*
+ * THE LIVE ROSTER, COPIED FROM list_agents, NOT AN INVENTED ONE.
+ *
+ * The previous fixture contained 'claude-work' -- a coordinator id that no
+ * daemon has ever registered. That single invented row is why the registry rule
+ * looked correct while being unable to fail for the real case: with the
+ * coordinator IN the roster, addressing the coordinator obviously passes. The
+ * live roster does not contain it, and every upward message goes to it.
+ */
+const roster = [{ agent_id: 'code-c' }, { agent_id: 'code-b' }, { agent_id: 'code-d' }, { agent_id: 'b6' }];
+const msg = (to) => ({ from_agent: 'c8', to_agent: to, type: 'status', body: 'a normal note' });
 
 test('AN OFFLINE BUT REGISTERED AGENT IS A FINE RECIPIENT', () => {
   // the distinction that matters: queueing for a worker that is restarting is
@@ -331,11 +341,68 @@ test('AN OFFLINE BUT REGISTERED AGENT IS A FINE RECIPIENT', () => {
   assert.equal(validateMessage(msg('code-b'), { sessions: roster }).ok, true);
 });
 
-test('AN UNREGISTERED NAME IS REFUSED, AND THE ROSTER IS NAMED', () => {
-  const v = validateMessage(msg('chatgpt-command-center'), { sessions: roster });
+test('AN UNKNOWN NAME IS REFUSED, AND THE ROSTER IS NAMED', () => {
+  // a typo, not an alias: nobody is behind it and nothing would ever read it
+  const v = validateMessage(msg('code-q'), { sessions: roster });
   assert.equal(v.ok, false);
-  assert.match(v.errors.join(' '), /not a registered agent/);
+  assert.match(v.errors.join(' '), /not a known actor/);
   assert.match(v.errors.join(' '), /code-b, code-c/, 'the reader is told what the real names are');
+});
+
+test('THE COORDINATOR IS ADDRESSABLE THOUGH NO DAEMON REGISTERS IT', () => {
+  /*
+   * THE REGRESSION THIS FILE EXISTED TO CAUSE. Every message code-c has sent
+   * upward went to 'chatgpt-work'. Against the real roster the registry rule
+   * refuses it, so shipping that rule would have severed the only channel that
+   * was working. Registration is liveness; it is not existence.
+   */
+  for (const name of ['chatgpt-work', 'claude-work', 'c8', 'chatgpt', 'chatgpt-command-center', 'danny']) {
+    const v = validateMessage(msg(name), { sessions: roster });
+    assert.equal(v.ok, true, `refused a real recipient: ${name} -- ${v.errors.join('; ')}`);
+  }
+});
+
+test('an alias routes to one canonical seat, so no name opens a second mailbox', () => {
+  for (const alias of ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator', 'C8']) {
+    assert.equal(canonicalActor(alias), 'c8', alias);
+  }
+  assert.equal(canonicalActor('chatgpt-command-center'), 'chatgpt');
+  // the letters Danny types, per d-owner-identity-a-20260915 and the team order
+  assert.equal(canonicalActor('a'), 'b6');
+  assert.equal(canonicalActor('code-a'), 'b6');
+  assert.equal(canonicalActor('b'), 'code-b');
+  assert.equal(canonicalActor('c'), 'code-c');
+  assert.equal(canonicalActor('d'), 'code-d');
+});
+
+test('an unaliased name comes back unchanged rather than null', () => {
+  // canonicalActor answers what a name is called, NOT whether anyone is behind
+  // it; collapsing the two would hide an unknown recipient inside a rename
+  assert.equal(canonicalActor('code-q'), 'code-q');
+  assert.equal(canonicalActor('  code-c  '), 'code-c');
+  assert.equal(canonicalActor(''), null);
+});
+
+test('one seat per actor: no id or alias is claimed twice', () => {
+  // two actors sharing a string is how a rename silently merges two inboxes
+  const seen = new Map();
+  for (const a of ACTORS) {
+    for (const name of [a.actor_id, ...a.aliases]) {
+      const key = name.toLowerCase();
+      assert.equal(seen.has(key), false, `${key} claimed by both ${seen.get(key)} and ${a.actor_id}`);
+      seen.set(key, a.actor_id);
+    }
+  }
+});
+
+test('the roster offered in a refusal is canonical ids only, never aliases', () => {
+  // naming an alias as a candidate would teach the reader the variant we are
+  // trying to retire
+  const ids = knownActorIds(roster);
+  assert.equal(ids.includes('chatgpt-work'), false);
+  assert.equal(ids.includes('c8'), true);
+  assert.equal(ids.includes('b6'), true, 'a registered worker stays addressable');
+  assert.equal(ids.includes('probe-ok'), false, 'nothing unregistered is invented into the list');
 });
 
 test('a description in an identifier field is refused without any roster', () => {
@@ -349,7 +416,7 @@ test('a description in an identifier field is refused without any roster', () =>
 test('every id actually in use today still passes the shape rule', () => {
   // the positive control: a rule that refuses the existing roster is one
   // somebody switches off, taking the true refusals with it
-  for (const id of ['a', 'b6', 'chatgpt', 'chatgpt-work', 'claude-work', 'code-b', 'code-c', 'code-d']) {
+  for (const id of ['a', 'b6', 'c8', 'chatgpt', 'chatgpt-work', 'claude-work', 'code-b', 'code-c', 'code-d']) {
     assert.equal(validateAgentId(id, 'to_agent'), null, `rejected a real id: ${id}`);
   }
 });

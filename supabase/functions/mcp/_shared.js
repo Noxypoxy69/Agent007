@@ -973,6 +973,89 @@ export function looksExecutable(text) {
   return executableMatch(text) !== null;
 }
 
+/**
+ * THE CANONICAL ROSTER, AND WHY AN ALIAS TABLE IS NOT BUREAUCRACY.
+ *
+ * A REGISTRY RULE WITHOUT ALIASES WOULD HAVE SEVERED THE ONE WORKING CHANNEL.
+ * The rule committed earlier today refuses a recipient that is not in the live
+ * roster. The live roster is built from daemon heartbeats, so it holds code-b,
+ * code-c, code-d and b6 and nothing else. Every message code-c has ever sent
+ * upward went to "chatgpt-work", which no daemon registers and which that rule
+ * would therefore have refused the moment its call site started passing live
+ * sessions. The fix was written to stop messages vanishing and would instead
+ * have stopped them being sent. Its positive control did not catch this because
+ * it asserted the SHAPE rule against the real ids and the REGISTRY rule against
+ * an invented roster that contained the coordinator -- a fixture that could not
+ * construct the real case, so it could not fail for it.
+ *
+ * REGISTRATION IS NOT EXISTENCE. A coordinator and an owner are actors with no
+ * daemon and no worktree; they are addressed constantly and heartbeat never.
+ * Absence from the heartbeat roster means "not running", which for a worker is
+ * information and for a coordinator is just how coordinators are.
+ *
+ * SO IDENTITY RESOLVES BEFORE IT IS CHECKED. Ten identity strings were in use
+ * for six actors, and the coordinator seat alone answered to four. Renaming by
+ * decree loses the mail addressed to the old name; the alias table keeps every
+ * historical string routable while there is one canonical id per seat.
+ *
+ * WHAT IS RECORDED HERE AND WHAT IS NOT. The letters are the owner's decision
+ * ledger, not an inference: d-owner-team-order-20260915 fixes the team as
+ * C, B, D, A, and d-owner-identity-a-20260915 states that b6 is Agent A. Those
+ * are recorded owner words. Identity is NEVER inferred from a branch, a
+ * worktree or a session name -- b6 runs in a worktree called wt-release-verify
+ * and that says nothing about who b6 is.
+ */
+export const ACTORS = [
+  { actor_id: 'code-c', actor_type: 'worker', display_name: 'C', aliases: ['c'] },
+  { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b'] },
+  { actor_id: 'code-d', actor_type: 'worker', display_name: 'D', aliases: ['d'] },
+  { actor_id: 'b6', actor_type: 'worker', display_name: 'A', aliases: ['a', 'code-a'] },
+  {
+    actor_id: 'c8',
+    actor_type: 'coordinator',
+    display_name: 'Work lane / execution lead',
+    aliases: ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator'],
+  },
+  {
+    actor_id: 'chatgpt',
+    actor_type: 'coordinator',
+    display_name: 'Command center',
+    aliases: ['chatgpt-command-center'],
+  },
+  { actor_id: 'danny', actor_type: 'owner', display_name: 'Danny', aliases: ['owner'] },
+];
+
+/**
+ * An alias resolves to its canonical id; anything else is returned unchanged.
+ *
+ * Unchanged rather than null on purpose: this function answers "what is this
+ * called canonically", and refusing an unknown name is a DIFFERENT question
+ * that validateMessage asks against the roster. Folding the two would make an
+ * unknown recipient indistinguishable from an unaliased one.
+ */
+export function canonicalActor(value, actors = ACTORS) {
+  if (!nonEmpty(value)) return null;
+  const want = value.trim().toLowerCase();
+  for (const a of arr(actors)) {
+    if (!a) continue;
+    if (String(a.actor_id).toLowerCase() === want) return a.actor_id;
+    if (arr(a.aliases).some((x) => String(x).toLowerCase() === want)) return a.actor_id;
+  }
+  return value.trim();
+}
+
+/**
+ * Every id a message may be addressed to: the live roster PLUS the declared
+ * actors that have no daemon. Canonical ids only -- the caller canonicalises
+ * first, so an alias is never separately listed as a name you could have meant.
+ */
+export function knownActorIds(sessions, actors = ACTORS) {
+  const ids = new Set();
+  for (const s of arr(sessions)) if (s?.agent_id) ids.add(canonicalActor(s.agent_id, actors));
+  for (const a of arr(actors)) if (a?.actor_type !== 'worker') ids.add(a.actor_id);
+  return [...ids].sort();
+}
+
 export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
 export function validateAgentId(value, field) {
@@ -998,12 +1081,12 @@ export function validateMessage(m = {}, { sessions = null } = {}) {
    * that is restarting is what a durable channel is for.
    */
   if (!toBad && Array.isArray(sessions)) {
-    const known = sessions.some((s) => s?.agent_id === m.to_agent.trim());
-    if (!known) {
-      const roster = [...new Set(sessions.map((s) => s?.agent_id).filter(Boolean))].sort();
+    const to = canonicalActor(m.to_agent);
+    const roster = knownActorIds(sessions);
+    if (!roster.includes(to)) {
       errors.push(
-        `to_agent ${JSON.stringify(m.to_agent)} is not a registered agent, so nothing would `
-          + `ever read it. Known agents: ${roster.join(', ') || '(none registered)'}`,
+        `to_agent ${JSON.stringify(m.to_agent)} is not a known actor, so nothing would `
+          + `ever read it. Known actors: ${roster.join(', ') || '(none)'}`,
       );
     }
   }
