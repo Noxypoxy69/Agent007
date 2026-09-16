@@ -358,9 +358,18 @@ export function messagePreamble(from, actors = ACTORS) {
  *
  * AN ALIAS OF YOUR OWN ACTOR IS FINE, and this is the case that shows the rule
  * is about identity rather than about strings: `social-sparks-app-b6`
- * registering as `code-b` is correct, because `b6` IS code-b by
- * d-owner-identity-b6-20260916. The same table that resolves a recipient
- * answers this, so the two cannot drift apart.
+ * registering as `code-a` is correct, because `b6` IS code-a by
+ * d-owner-identity-b6-20260916b, ACTIVE since 08:30:48Z. The same table that
+ * resolves a recipient answers this, so the two cannot drift apart.
+ *
+ * THIS COMMENT CITED THE SUPERSEDED DECISION UNTIL 2026-09-17, and said b6 was
+ * code-b. The commit that introduced it is titled "I built the alias table on a
+ * decision that had already been superseded" -- the TABLE was corrected and the
+ * same stale citation was left standing beside it, justifying the old answer.
+ * Nothing behaved wrongly, because the code and the tests both followed the
+ * active row; the risk was purely that a later reader would trust the prose and
+ * revert a correct table. Read the ledger, do not quote the decision you
+ * remember: a superseded statement still reads perfectly true on its own.
  */
 export function validateSessionId(sessionId, agentId, actors = ACTORS) {
   const shape = validateAgentId(sessionId, 'session_id');

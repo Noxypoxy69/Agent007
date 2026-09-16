@@ -10,7 +10,7 @@ import {
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
-  ownTask, ownTasks,
+  ownTask, ownTasks, validateSessionId,
 } from './_shared.js';
 
 /**
@@ -1104,6 +1104,25 @@ function validateRegistration(b) {
   if (session_id && agent_id && session_id === agent_id) {
     errors.push('session_id must not equal agent_id');
   }
+  /*
+   * AND IT MUST NOT BE NAMED AFTER SOMEBODY ELSE. Its sibling above catches the
+   * defaulted identity; this catches the borrowed one, which is worse because it
+   * looks deliberate.
+   *
+   * MEASURED, NOT HYPOTHETICAL: social-sparks-app-c8 registered as code-b, so
+   * t-loop-proof -- the first end-to-end loop this system ever ran -- is stored
+   * with returned_by "social-sparks-app-c8" and reads on its face as c8's work.
+   * The registration mapped to code-b correctly, so a resolver got the right
+   * answer; the damage was to every human and every log line that reads the
+   * session id and believes it, which is most of them.
+   *
+   * WIRED 2026-09-17 after checking what it would refuse rather than guessing:
+   * of the five registrations then on file, exactly one fails -- that one -- and
+   * it is offline. A returning c8 must rename its session, and the refusal says
+   * so in those words.
+   */
+  const borrowed = session_id && agent_id ? validateSessionId(session_id, agent_id) : null;
+  if (borrowed) errors.push(borrowed);
   if (!str(b?.machine_id)) errors.push('machine_id is required');
 
   const capacity = str(b?.capacity) ?? 'idle';

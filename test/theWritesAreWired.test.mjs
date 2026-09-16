@@ -318,3 +318,34 @@ test('the expectations are DERIVED from the guards, not copied beside them', () 
     }
   }
 });
+
+test('THE REGISTRY REFUSES A BORROWED SESSION ID, AND THE ENTRYPOINT ACTUALLY CALLS IT', () => {
+  /*
+   * validateSessionId shipped in the artifact with ZERO production callers --
+   * correct, tested, and reachable from nothing, which is the shape this repo
+   * keeps rediscovering. Wiring it is only half; this asserts the SHIPPED
+   * entrypoint calls it, because a guard that exists and is not invoked reads
+   * identically to one that is, from anywhere except here.
+   *
+   * What it prevents is measured, not imagined: social-sparks-app-c8 registered
+   * as code-b, so t-loop-proof -- the first end-to-end loop this system ran --
+   * is stored with returned_by "social-sparks-app-c8" and reads as c8's work.
+   */
+  assert.ok(
+    /validateSessionId/.test(source),
+    'validateSessionId is not referenced by the entrypoint at all -- it is dead code again',
+  );
+
+  const reg = source.indexOf('function validateRegistration');
+  assert.notEqual(reg, -1, 'validateRegistration is gone from the entrypoint');
+  const body = source.slice(reg, reg + 2400);
+
+  assert.ok(
+    /validateSessionId\s*\(/.test(body),
+    'validateRegistration does not CALL validateSessionId: a session may register under another actor name',
+  );
+  assert.ok(
+    /errors\.push\(\s*borrowed\s*\)|errors\.push\(borrowed\)/.test(body),
+    'the result of validateSessionId is computed and then thrown away, which refuses nothing',
+  );
+});
