@@ -8,7 +8,7 @@ import { redactHome, redactPath } from '../src/redact.mjs';
  * THE REAL LEAK, found while preparing to expose the MCP surface. A heartbeat
  * reported each worktree as
  *
- *   C:\Users\DANNY GARCIA\Documents\social-sparks-code-c
+ *   C:\Users\JANE DOE\Documents\social-sparks-code-c
  *
  * twice per session -- once as `worktree`, once inside `git.worktree` -- and
  * that payload is bound for a hosted database and from there to whatever model
@@ -20,27 +20,27 @@ import { redactHome, redactPath } from '../src/redact.mjs';
  * already handled.
  */
 
-const WIN_HOME = 'C:\\Users\\DANNY GARCIA';
+const WIN_HOME = 'C:\\Users\\JANE DOE';
 const NIX_HOME = '/home/danny';
 
 test('redactHome: strips the home directory, both separator spellings', () => {
   // git spells a worktree with forward slashes while the OS spells it with
   // backslashes, and BOTH appeared in one payload. Handling one would redact
   // half the occurrences and look exactly like working redaction.
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA\\Documents\\x', WIN_HOME), '~\\Documents\\x');
-  assert.equal(redactHome('C:/Users/DANNY GARCIA/Documents/x', WIN_HOME), '~/Documents/x');
+  assert.equal(redactHome('C:\\Users\\JANE DOE\\Documents\\x', WIN_HOME), '~\\Documents\\x');
+  assert.equal(redactHome('C:/Users/JANE DOE/Documents/x', WIN_HOME), '~/Documents/x');
   assert.equal(redactHome('/home/danny/work/x', NIX_HOME), '~/work/x');
 });
 
 test('redactHome: the home directory itself becomes ~', () => {
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA', WIN_HOME), '~');
+  assert.equal(redactHome('C:\\Users\\JANE DOE', WIN_HOME), '~');
   assert.equal(redactHome('/home/danny', NIX_HOME), '~');
 });
 
 test('redactHome: keeps every bit of coordination signal', () => {
   // The worktree basename is what a lane declares and what a collision message
   // names. Redaction must not cost that, or it will be turned off.
-  const out = redactHome('C:\\Users\\DANNY GARCIA\\Documents\\social-sparks-code-c', WIN_HOME);
+  const out = redactHome('C:\\Users\\JANE DOE\\Documents\\social-sparks-code-c', WIN_HOME);
   assert.match(out, /social-sparks-code-c$/);
   assert.equal(out.includes('DANNY'), false);
 });
@@ -54,9 +54,9 @@ test('redactHome: a path outside the home directory is untouched', () => {
 });
 
 test('redactHome: a sibling directory that merely starts with the same text is untouched', () => {
-  // "C:\Users\DANNY GARCIA2" is a different user. Prefix matching without a
+  // "C:\Users\JANE DOE2" is a different user. Prefix matching without a
   // separator check would rewrite it and claim it as this operator's.
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA2\\x', WIN_HOME), 'C:\\Users\\DANNY GARCIA2\\x');
+  assert.equal(redactHome('C:\\Users\\JANE DOE2\\x', WIN_HOME), 'C:\\Users\\JANE DOE2\\x');
   assert.equal(redactHome('/home/danny2/x', NIX_HOME), '/home/danny2/x');
 });
 
@@ -64,19 +64,19 @@ test('redactHome: disabled returns the path verbatim', () => {
   // Local output must keep real paths: an operator looking at their own machine
   // should see their own machine, and a path they cannot paste is a worse tool.
   assert.equal(
-    redactHome('C:\\Users\\DANNY GARCIA\\Documents\\x', WIN_HOME, false),
-    'C:\\Users\\DANNY GARCIA\\Documents\\x',
+    redactHome('C:\\Users\\JANE DOE\\Documents\\x', WIN_HOME, false),
+    'C:\\Users\\JANE DOE\\Documents\\x',
   );
 });
 
 test('redactHome: missing or non-string input is handled rather than thrown', () => {
   assert.equal(redactHome(null, WIN_HOME), null);
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA\\x', ''), 'C:\\Users\\DANNY GARCIA\\x');
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA\\x', null), 'C:\\Users\\DANNY GARCIA\\x');
+  assert.equal(redactHome('C:\\Users\\JANE DOE\\x', ''), 'C:\\Users\\JANE DOE\\x');
+  assert.equal(redactHome('C:\\Users\\JANE DOE\\x', null), 'C:\\Users\\JANE DOE\\x');
 });
 
 test('redactHome: a trailing separator on the home value still matches', () => {
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA\\Documents\\x', 'C:\\Users\\DANNY GARCIA\\'), '~\\Documents\\x');
+  assert.equal(redactHome('C:\\Users\\JANE DOE\\Documents\\x', 'C:\\Users\\JANE DOE\\'), '~\\Documents\\x');
 });
 
 test('redactHome: is independent of the sensitive-filename redactor', () => {
@@ -84,5 +84,5 @@ test('redactHome: is independent of the sensitive-filename redactor', () => {
   // cover the other -- which is the assumption that produced the leak.
   assert.equal(redactPath('src/app.ts').sensitive, false);
   assert.equal(redactPath('.env').sensitive, true);
-  assert.equal(redactHome('C:\\Users\\DANNY GARCIA\\.env', WIN_HOME), '~\\.env');
+  assert.equal(redactHome('C:\\Users\\JANE DOE\\.env', WIN_HOME), '~\\.env');
 });

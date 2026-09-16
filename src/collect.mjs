@@ -8,7 +8,7 @@ import { realpathSync } from 'node:fs';
 /**
  * The canonical long form of a path, or null if it cannot be resolved.
  *
- * On Windows this is what turns an 8.3 alias (`C:\Users\DANNYG~1\...`) back
+ * On Windows this is what turns an 8.3 alias (`C:\Users\JANEDO~1\...`) back
  * into the spelling home is compared against. `.native` is the part that does
  * it -- the JS implementation of realpath does not expand short names.
  *
@@ -66,8 +66,8 @@ export async function collect(cfg, registry) {
 
     /*
      * BOTH SPELLINGS OF HOME, because Windows has two and hands out the short
-     * one constantly. `C:\Users\DANNYG~1\...` is the same directory as
-     * `C:\Users\DANNY GARCIA\...` -- every temp path on this machine uses the
+     * one constantly. `C:\Users\JANEDO~1\...` is the same directory as
+     * `C:\Users\JANE DOE\...` -- every temp path on this machine uses the
      * 8.3 form -- and a prefix match against the long form alone never fires
      * on it. The path shipped absolute with the operator's name still in it,
      * merely abbreviated.

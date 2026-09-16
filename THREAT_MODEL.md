@@ -36,6 +36,25 @@ repo.
 | bridge → reader | bearer token, SHA-256 at rest | token theft = full read of engineering state |
 | bridge → daemon | **none needed** — responses carry no authority | — |
 | bridge ↔ product DB | separate Supabase project | operator error connecting them |
+| git remote → whoever can read it | repository is **private**, one collaborator (the owner) | every collaborator reads the whole history, permanently |
+
+**REPOSITORY VISIBILITY IS PRIVATE, AND UNTIL NOW IT WAS NOWHERE IN THIS FILE.**
+Checked against the GitHub API rather than assumed: `Noxypoxy69/Agent007` reports
+`visibility: private`, with exactly one collaborator, who is the owner. The
+absence of that line is not a documentation nit. A coordinator spent an
+afternoon describing a committed home directory as published to the world,
+wrote it into a commit message twice, and nothing in the repository could
+contradict it, because there was no line to check. An unstated assumption cannot
+be caught being wrong; that is the whole problem with leaving one unstated.
+
+**WHAT PRIVATE DOES NOT BUY, so the correction does not become the wrong lesson.**
+It is not the control the leak guard depends on: the payload that guard scans
+goes to a hosted Bridge over the network, not into git, so repository visibility
+protects none of it. It is not a property of the past either — history is
+permanent, every future collaborator reads all of it, and the setting can be
+changed in two clicks by the same person at any hour. Identity is scrubbed from
+the tree because it does not belong in the tree, not because of who can read it
+this week.
 
 ## Secrets
 
@@ -157,6 +176,10 @@ traces are never returned to a client.
 - No mutual TLS or certificate pinning. Transport security is whatever the
   bridge host's TLS provides.
 - No per-agent scoping on reader tokens: a token reads all agents or none.
+- Git HISTORY still carries the operator's real home directory, its 8.3 alias,
+  the machine label and the real hostname, in every commit before 97cb634. The
+  working tree is scrubbed; history is not. Rewriting the history of a
+  repository other sessions have cloned is the owner's decision, not a cleanup.
 
 ## Operational rules
 
