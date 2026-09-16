@@ -1,0 +1,50 @@
+{
+  "_note": "PRE-DEPLOY AUDIT, PASSED, NOT EXECUTED. Danny authorised this deploy at 08:18Z and addressed it to code-c. Deploys are code-c's by the standing lane brief ('no deploys' is one of the hard out-of-scope items for the support lane, never revoked), so this lane ran the audit and stopped at the button rather than taking an authorisation that was issued to somebody else. Everything below was measured, not assumed. If code-c deploys a DIFFERENT commit these hashes are void.",
+  "auditedAt": "2026-09-16T10:2xZ",
+  "auditedBy": "c8",
+  "headSha": "a816ae437dd446a4066443dfae0be48830e555f0",
+  "gate": {
+    "command": "node bin/agentbridge-deploy-check.mjs --live <live.json> --record deploy/last-deployment.json",
+    "verdict": "DEPLOYABLE",
+    "dirtyTree": "clean",
+    "headPromoted": "a816ae4 is origin/master",
+    "artifactParses": true,
+    "liveDrift": "none \u2014 recorded e82b126\u2026/v20 equals what the control plane reports now"
+  },
+  "artifact": {
+    "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
+    "files": {
+      "index.ts": {
+        "bytes": 75825,
+        "sha256": "95ce14d10a849ba3e92b518a61e544224a0e991833639b1278df35dd9c635f18"
+      },
+      "_shared.js": {
+        "bytes": 118271,
+        "sha256": "daa39ede2af9347fb5059612e707c807e63ac14fb28a600bc685efdc33638e24"
+      }
+    }
+  },
+  "blastRadius": {
+    "index.ts": "BYTE-IDENTICAL to what is live \u2014 the entrypoint does not change",
+    "_shared.js": "271 lines differ \u2014 the only file this deploy moves",
+    "suiteOnMaster": "1420 tests, 1405 pass, 0 fail, 15 skipped",
+    "splices": "no findings",
+    "duplicateTopLevelConst": "none \u2014 the v19 outage shape"
+  },
+  "database": {
+    "migration": "20260916081839_the_attempt_record_four_verdicts_and_a_step_journal",
+    "applied": true,
+    "checkedAgainst": "the live database, not the migration file",
+    "direction": "database ahead of code, which is the safe one"
+  },
+  "rollback": {
+    "version": 20,
+    "equals": "bb899fc",
+    "liveArtifactHash": "e82b12669656f806e6a53e7463449c3fce5de0945990ae72155cf349890db961"
+  },
+  "afterDeploy": [
+    "read the deployed source back and compare it to a816ae4 \u2014 a version number incrementing is not evidence the bytes changed",
+    "replace deploy/last-deployment.json with a real record: headSha a816ae4, the new liveArtifactHash and version"
+  ],
+  "notInThisDeploy": "work/support-modules at 597b564 \u2014 ten commits from tonight, unmerged, 1430 pass 0 fail"
+}
