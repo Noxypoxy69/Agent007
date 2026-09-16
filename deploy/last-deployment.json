@@ -1,20 +1,22 @@
 {
-  "_note": "REAL DEPLOYMENT RECORD for what is serving: version 21, commit a816ae4. The measured fields below were verified by reading the function back and are correct. THE PROVENANCE IN THE FIRST VERSION OF THIS RECORD WAS WRONG AND IS CORRECTED HERE. code-c originally wrote that it had deployed this by uploading bytes from disk. It did not. version 21's updated_at is 2026-09-16T18:08:42.566Z, which is 9m48s BEFORE code-c's first deploy attempt at 18:18:31Z. Both of code-c's CLI attempts (18:18 and 18:57) failed identically: assets uploaded, then CONNECT to api.supabase.com refused 403 by this environment's egress policy, and NOTHING landed either time - confirmed by version and updated_at being byte-identical before and after the second attempt. code-c saw a version bump that had already happened, assumed its own command caused it, and recorded that. This deploy was run by somebody else, from a checkout with CRLF line endings. THE CRLF EXPLANATION IS ALSO CORRECTED. code-c first attributed the live CRLF to a Windows checkout, then 'corrected' that to 'the upload path introduces it' on the strength of a deploy it had not actually performed. The original reading stands: index.ts 1813 CRLF and _shared.js 2795 CRLF are consistent with a Windows working copy under core.autocrlf, and there is no evidence the upload path converts anything. WHAT WAS GENUINELY VERIFIED, and this part is unaffected: deployed index.ts and _shared.js are identical to a816ae4 after newline normalisation, compared byte-wise in a script; check-deployed-instructions.mjs reports INSTRUCTIONS agree, 21 sentences, both sides identical; verify_jwt is false; and the bridge answers a supervisory report on this bundle. liveArtifactHash is what the control plane reports and is what future drift checks compare against. sourceDigest is computed from the repo's LF bytes and the two are NOT expected to be equal. ORIGIN/MASTER IS AHEAD OF THIS. The merged head 2e34c48 is NOT deployed; its _shared.js is +82/-15 against what is serving. It cannot be deployed from this container until api.supabase.com is allowlisted.",
+  "_note": "REAL DEPLOYMENT RECORD for what is serving: version 22, deployed by DANNY from his desktop checkout at 2026-09-16T19:13:07.171Z. Provenance CONFIRMED BY DANNY IN CONVERSATION, not inferred from a version bump -- that inference is exactly what the previous record had to correct.  HOW THE ARTIFACT WAS VERIFIED. The deployed bytes were pulled back from the control plane and hashed against the working tree: index.ts 95ce14d10a84 and _shared.js e5481cc5af91, both IDENTICAL to local after newline normalisation. The deployed copies carry 1813 and 2862 CRLF lines, consistent with a Windows checkout; that is a formatting difference, not a content one, and it is the same reading the previous record settled on.  WHAT IS VERIFIED AND WHAT IS NOT. The ARTIFACT is verified. The exact COMMIT deployed from is not, and cannot be: a functions deploy ships a working tree, not a ref. The artifact directory is byte-identical at 2e34c48 and 04f6e34 (04f6e34 changed only this file), so headSha below names the master head whose artifact matches, which is a claim about bytes rather than about which checkout was sitting on disk. Stated rather than smoothed over.  THIS CORRECTS A SECOND UNRECORDED DEPLOY IN ONE HOUR. The prior record said version 21 and was already stale when it was pushed at 19:00Z: version 22 landed at 19:13Z. The deploy gate refused on live-drift-unchecked and that refusal was CORRECT -- it is the only thing that noticed. sourceDigest is computed from the repo LF bytes and liveArtifactHash is what the control plane reports; the two are NOT expected to be equal and are never compared.",
   "schemaVersion": 1,
-  "headSha": "a816ae437dd446a4066443dfae0be48830e555f0",
-  "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
-  "liveArtifactHash": "6ff0ca9d9452777c2293695a575971836788e714b78229edf93aa9102bcfe810",
-  "liveVersion": 21,
-  "deployedAt": "2026-09-16T18:08:42.566Z",
-  "deployedBy": "unknown - NOT code-c; run outside this container from a CRLF (Windows) checkout",
-  "previousVersion": 20,
+  "headSha": "04f6e34d8878f882024f2f151388d220c01aa797",
+  "sourceDigest": "67c75cb777471ff523168a33684635441402fa0272b867b7d4480cf8e6719cd0",
+  "liveArtifactHash": "5e3e96909b070a176e55242e273c65575a78409cbe77dd499a34be9aff3519cb",
+  "liveVersion": 22,
+  "deployedAt": "2026-09-16T19:13:07.171Z",
+  "deployedBy": "Danny, from his desktop checkout; confirmed directly, not inferred from a version bump",
+  "verifiedBy": "code-b — read the live artifact back and hashed it against the working tree 2026-09-16T19:2xZ",
+  "previousVersion": 21,
   "rollbackTo": {
-    "version": 20,
-    "commit": "bb899fce8b5cee158bea958ac5a2a97f9a0b237c",
-    "liveArtifactHash": "e82b12669656f806e6a53e7463449c3fce5de0945990ae72155cf349890db961"
+    "version": 21,
+    "commit": "a816ae437dd446a4066443dfae0be48830e555f0",
+    "liveArtifactHash": "6ff0ca9d9452777c2293695a575971836788e714b78229edf93aa9102bcfe810"
   },
-  "deployAttemptsFromThisContainerThatFailed": [
-    "2026-09-16T18:18:41Z",
-    "2026-09-16T18:58:08Z"
-  ]
+  "supersedes": {
+    "note": "the record this replaces claimed version 21 was live; version 22 had already been serving for 13 minutes when it was pushed",
+    "liveVersion": 21,
+    "deployedAt": "2026-09-16T18:08:42.566Z"
+  }
 }
