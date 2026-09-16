@@ -96,6 +96,30 @@ export async function closeHttp() {
  *
  * @returns null when the response is OK, otherwise the state to report.
  */
+/**
+ * The status-to-state rule, ALONE, with no response body involved.
+ *
+ * interpretHttp needs the body to build a useful `detail`. Some callers must
+ * not touch the body at all: `publish()` in client.mjs deliberately reads only
+ * `accepted` and `reason` from a bridge response, and a test asserts its return
+ * has EXACTLY four keys, because a compromised bridge must not be able to widen
+ * what a client reads from it. That invariant caught a first attempt at this
+ * fix which routed publish()'s `reason` through interpretHttp's body-derived
+ * detail -- it would have made a hostile response readable in a new place.
+ *
+ * So the RULE lives here once and both use it: interpretHttp for callers that
+ * want the detail, this for callers that may only look at the number.
+ *
+ *   401 / 403   REJECTED     the credential was refused -- fix the credential
+ *   other 4xx   REFUSED      understood and declined -- read the reason
+ *   5xx         UNREACHABLE  answered but cannot serve -- retry may help
+ */
+export function classifyStatus(status) {
+  if (status === 401 || status === 403) return HOSTED.REJECTED;
+  if (status >= 400 && status < 500) return HOSTED.REFUSED;
+  return HOSTED.UNREACHABLE;
+}
+
 export async function interpretHttp(res, { credential = 'registration token' } = {}) {
   if (res.ok) return null;
 
@@ -115,11 +139,12 @@ export async function interpretHttp(res, { credential = 'registration token' } =
     }
   } catch { /* a body we cannot read does not change the STATE */ }
 
-  if (res.status === 401 || res.status === 403) {
-    return { state: HOSTED.REJECTED, detail: `${credential} rejected (${res.status})`, errors };
+  const state = classifyStatus(res.status);
+  if (state === HOSTED.REJECTED) {
+    return { state, detail: `${credential} rejected (${res.status})`, errors };
   }
-  if (res.status >= 400 && res.status < 500) {
-    return { state: HOSTED.REFUSED, detail: parsed ?? `http ${res.status}`, errors };
+  if (state === HOSTED.REFUSED) {
+    return { state, detail: parsed ?? `http ${res.status}`, errors };
   }
   /*
    * 5xx stays UNREACHABLE, and its detail keeps the status in front. The server
