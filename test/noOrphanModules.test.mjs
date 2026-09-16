@@ -16,6 +16,9 @@ import {
   REACHABLE,
   TEST_ONLY,
   UNREFERENCED,
+  SPLICED,
+  DEFAULT_SPLICES,
+  verifySplices,
 } from '../src/moduleGraph.mjs';
 
 /**
@@ -266,6 +269,23 @@ test('a test-only finding names the test that imports it', async (t) => {
  * entry fails too, so it cannot rot into a rubber stamp.
  */
 const KNOWN = {
+  'src/runtime.mjs':
+    'A JS MIRROR OF LOGIC THE DATABASE IS AUTHORITATIVE FOR. Owner ruling 2026-09-16: ' +
+    'SQL stays authority for leases, review leases, retry limits and the outbox. ' +
+    'reviewerQueue and canReview are implemented in ' +
+    '20260915220223_the_review_lease_gets_a_writer_a_renewer_and_a_reaper.sql; retry and ' +
+    'outbox concepts appear in 20260915220139_leases_fencing_tokens_and_an_outbox.sql. ' +
+    'So this module must not acquire a caller: a second live implementation is the defect. ' +
+    'It is NOT deleted yet because "the SQL mentions the concept" is proximity, not proven ' +
+    'equivalence, and deleting behaviour on a grep is the proxy assertion rule 4 forbids. ' +
+    'invalidatedBy in particular has NO SQL counterpart at all. Removal is per-function and ' +
+    'needs equivalence proven first; until then this is a test oracle, not shipped logic.',
+  'src/auditRange.mjs':
+    'RECOVERED 2026-09-16 from b/audit-range, unmerged work from a worker that went silent ' +
+    'mid-task. It arrived green and orphaned: the branch added the module and its tests and ' +
+    'never added a call site, which is the same pattern this gate was written for. Kept ' +
+    'because losing it again is worse than carrying it; needs a caller in the precommit or ' +
+    'audit path, and this entry should go the moment one exists.',
   'src/schedule.mjs':
     'ORPHANED IN PRODUCTION. Integrated and green, imported only by its tests. ' +
     'The fifth instance of this pattern and the first found by machine. Needs a CLI caller.',
@@ -302,4 +322,106 @@ test('every known entry carries a reason a later reader can disagree with', () =
   for (const [m, reason] of Object.entries(KNOWN)) {
     assert.ok(reason && reason.trim().length > 20, `${m} needs a real reason, not a placeholder`);
   }
+});
+
+/* ── shipped by being copied, not by being imported ──────────────────── */
+
+/*
+ * THE FALSE POSITIVE THIS PREVENTS, stated plainly because it nearly cost three
+ * live modules. supabase/functions/mcp/_shared.js is a hand-maintained copy of
+ * src/ and bridge/ modules -- an Edge Function cannot import from outside its
+ * own directory. A copy is not an import, so no graph can see it, and this gate
+ * reported dispatch.mjs, ownWork.mjs and permissionRequest.mjs as orphaned while
+ * they were deployed and serving. The finding reads "wire it or justify it", and
+ * the other obvious response is deletion: removing the SOURCE of deployed code
+ * while production keeps running on the stale copy.
+ *
+ * So the splice is declared -- and every test below exists because a declaration
+ * that is never checked is just a longer allowlist.
+ */
+
+const SPLICE_ENTRY = { entryPoints: ['bin/app.mjs'], allowedOrphans: {} };
+
+test('A SPLICED MODULE IS SHIPPED, NOT TEST-ONLY', async (t) => {
+  const root = await repo(t, {
+    'bin/app.mjs': `export const noop = 1;\n`,
+    'src/carried.mjs': `export const alpha = () => 1;\nexport const beta = () => 2;\n`,
+    'test/carried.test.mjs': `import { alpha } from '../src/carried.mjs';\nalpha();\n`,
+    'edge/_shared.js': `export const alpha = () => 1;\nexport const beta = () => 2;\n`,
+  });
+  const opts = { ...SPLICE_ENTRY, splices: { 'edge/_shared.js': ['src/carried.mjs'] } };
+  assert.equal(statusOf(classifyModules(root, opts).rows, 'src/carried.mjs'), SPLICED);
+  assert.deepEqual(findOrphans(root, opts).findings, [], 'deployed code is not a finding');
+});
+
+test('WATCH IT FAIL: drop one export from the copy and the splice is no longer honoured', async (t) => {
+  // Byte-for-byte the previous fixture, except beta is missing from the copy.
+  const root = await repo(t, {
+    'bin/app.mjs': `export const noop = 1;\n`,
+    'src/carried.mjs': `export const alpha = () => 1;\nexport const beta = () => 2;\n`,
+    'test/carried.test.mjs': `import { alpha } from '../src/carried.mjs';\nalpha();\n`,
+    'edge/_shared.js': `export const alpha = () => 1;\n`,
+  });
+  const opts = { ...SPLICE_ENTRY, splices: { 'edge/_shared.js': ['src/carried.mjs'] } };
+
+  const { findings } = findOrphans(root, opts);
+  const drift = findings.find((f) => f.kind === 'splice-drifted');
+  assert.ok(drift, 'a copy that lost an export must be reported, not silently accepted');
+  assert.deepEqual(drift.absent, ['beta'], 'the finding names what is missing');
+
+  // and the exemption is withdrawn: it goes back to being an orphan
+  assert.equal(statusOf(classifyModules(root, opts).rows, 'src/carried.mjs'), TEST_ONLY);
+});
+
+test('A DECLARATION IS NOT A SNOOZE BUTTON: naming a module that was never spliced fails', async (t) => {
+  const root = await repo(t, {
+    'bin/app.mjs': `export const noop = 1;\n`,
+    'src/never.mjs': `export const gamma = () => 3;\n`,
+    'test/never.test.mjs': `import { gamma } from '../src/never.mjs';\ngamma();\n`,
+    'edge/_shared.js': `export const unrelated = () => 0;\n`,
+  });
+  const opts = { ...SPLICE_ENTRY, splices: { 'edge/_shared.js': ['src/never.mjs'] } };
+  const { findings } = findOrphans(root, opts);
+  assert.equal(findings.filter((f) => f.kind === 'splice-drifted').length, 1);
+  assert.equal(statusOf(classifyModules(root, opts).rows, 'src/never.mjs'), TEST_ONLY);
+});
+
+test('PARTIAL OVERLAP IS NOT A SPLICE: a shared name does not buy an exemption', async (t) => {
+  /*
+   * Two modules can export the same name by coincidence. Accepting a partial
+   * match would let a module REMOVED from the copy keep its exemption because
+   * one of its names happened to survive somewhere else in the bundle.
+   */
+  const root = await repo(t, {
+    'bin/app.mjs': `export const noop = 1;\n`,
+    'src/partial.mjs': `export const shared = () => 1;\nexport const only = () => 2;\n`,
+    'test/partial.test.mjs': `import { only } from '../src/partial.mjs';\nonly();\n`,
+    'edge/_shared.js': `export const shared = () => 1;\n`,
+  });
+  const opts = { ...SPLICE_ENTRY, splices: { 'edge/_shared.js': ['src/partial.mjs'] } };
+  assert.equal(statusOf(classifyModules(root, opts).rows, 'src/partial.mjs'), TEST_ONLY);
+});
+
+test('A ROOT WITH NO COPY IS NOT EVIDENCE ABOUT THE COPY', async (t) => {
+  // The declaration describes the real repository. Applied to a fixture that has
+  // no splice file it says nothing, and must not fail every fixture for it.
+  const root = await repo(t, {
+    'bin/app.mjs': `import { go } from '../src/used.mjs';\ngo();\n`,
+    'src/used.mjs': `export const go = () => 1;\n`,
+  });
+  const { findings } = verifySplices(root, { 'edge/_shared.js': ['src/used.mjs'] });
+  assert.deepEqual(findings, []);
+});
+
+test('THE REAL SPLICE DECLARATION IS TRUE TODAY', () => {
+  /*
+   * A NEGATIVE NEEDS THE POSITIVE FIRST: assert the declaration actually
+   * resolved something before asserting it produced no complaints, or an empty
+   * declaration would pass this for the wrong reason.
+   */
+  const { spliced, findings } = verifySplices(REPO_ROOT, DEFAULT_SPLICES);
+  assert.ok(spliced.size >= 8, `expected the copy to carry the declared modules, got ${spliced.size}`);
+  assert.deepEqual(findings, [], 'the deployed copy has drifted from the modules it claims to carry');
+  assert.ok(spliced.has('src/dispatch.mjs'));
+  assert.ok(spliced.has('src/permissionRequest.mjs'));
 });

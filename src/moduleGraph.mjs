@@ -66,6 +66,117 @@ export const DEFAULT_ENTRY_POINTS = [
  * dies is somebody adding a line to silence it on a Friday and nobody ever
  * being able to tell whether that line is still true.
  */
+/**
+ * MODULES THAT SHIP BY BEING COPIED, NOT BY BEING IMPORTED.
+ *
+ * A Supabase Edge Function cannot import from outside its own directory, so
+ * `supabase/functions/mcp/_shared.js` is a HAND-MAINTAINED splice of modules
+ * from src/ and bridge/. There is no generator and no manifest: the copy is
+ * made by a person.
+ *
+ * NO IMPORT GRAPH CAN SEE THAT. A splice is a copy step, so from the graph's
+ * point of view these modules are imported by nothing and the gate calls them
+ * orphans -- confidently, about code that is deployed and serving traffic. That
+ * is the false-positive direction that matters, because the finding reads
+ * "wire it or justify it" and the other obvious response is to delete the
+ * module. Deleting it would remove the SOURCE of deployed code while production
+ * kept running on the stale copy, and nothing would surface until the next
+ * splice regenerated from nothing.
+ *
+ * So the splice is DECLARED here -- and, unlike an opt-out, it is CHECKED. See
+ * verifySplices: every module named below must have all of its exports present
+ * in the splice file. A declaration that stops being true fails the gate rather
+ * than silencing it, which is the difference between a manifest and a snooze
+ * button.
+ */
+export const DEFAULT_SPLICES = {
+  'supabase/functions/mcp/_shared.js': [
+    'src/coordination.mjs',
+    'src/dispatch.mjs',
+    'src/events.mjs',
+    'src/glob.mjs',
+    'src/liveRegistry.mjs',
+    'src/ownWork.mjs',
+    'src/ownerDecisions.mjs',
+    'src/permissionRequest.mjs',
+    'bridge/collisions.mjs',
+    'mcp/toolDefs.mjs',
+  ],
+};
+
+/** Reached only through a hand-maintained copy. Shipped, but not by an import. */
+export const SPLICED = 'spliced';
+
+/** Every name a module exports, read from the syntax rather than by executing it. */
+export function exportedNames(text) {
+  const names = new Set();
+  for (const m of text.matchAll(/^export\s+(?:async\s+)?(?:function\s+|const\s+|class\s+|let\s+)(\w+)/gm)) {
+    names.add(m[1]);
+  }
+  for (const m of text.matchAll(/^export\s*\{([^}]*)\}/gm)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim().split(/\s+as\s+/).pop().trim();
+      if (name) names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Prove each declared splice is real, and still real.
+ *
+ * A module is only treated as shipped-by-copy if EVERY name it exports is also
+ * exported by the splice file. Partial overlap is not enough: two modules can
+ * share a name by coincidence, and accepting a partial match would let a module
+ * that was removed from the splice keep its exemption because one of its names
+ * happened to survive elsewhere.
+ */
+export function verifySplices(root, splices = DEFAULT_SPLICES) {
+  const spliced = new Set();
+  const findings = [];
+  for (const [target, modules] of Object.entries(splices)) {
+    let text;
+    try {
+      text = readFileSync(path.join(root, target), 'utf8');
+    } catch {
+      /*
+       * No splice file under THIS root, so the declaration does not describe
+       * this tree and is not evidence about it. That is the normal case for the
+       * synthetic roots the tests build, and treating it as a finding would
+       * make every fixture fail for a fact about the real repository.
+       *
+       * The real repository's copy cannot go missing unnoticed:
+       * test/sharedSpliceMatches.test.mjs imports it directly, so its absence
+       * is a hard import failure there rather than a soft finding here.
+       */
+      continue;
+    }
+    const carried = exportedNames(text);
+    for (const m of modules) {
+      let src;
+      try {
+        src = readFileSync(path.join(root, m), 'utf8');
+      } catch {
+        findings.push({ module: m, status: 'missing-spliced-module', kind: 'missing-spliced-module', importedBy: [] });
+        continue;
+      }
+      const want = exportedNames(src);
+      const absent = [...want].filter((n) => !carried.has(n));
+      if (want.size > 0 && absent.length === 0) spliced.add(m);
+      else {
+        findings.push({
+          module: m,
+          status: 'splice-drifted',
+          kind: 'splice-drifted',
+          importedBy: [target],
+          absent,
+        });
+      }
+    }
+  }
+  return { spliced, findings };
+}
+
 export const DEFAULT_ALLOWED_ORPHANS = {
   // Nothing today. Every entry added here should name why the module ships
   // without a caller, and should be removed the moment one exists.
@@ -181,9 +292,15 @@ function reachableFrom(graph, roots) {
  */
 export function classifyModules(
   root,
-  { entryPoints = DEFAULT_ENTRY_POINTS, allowedOrphans = DEFAULT_ALLOWED_ORPHANS, dirs } = {},
+  {
+    entryPoints = DEFAULT_ENTRY_POINTS,
+    allowedOrphans = DEFAULT_ALLOWED_ORPHANS,
+    splices = DEFAULT_SPLICES,
+    dirs,
+  } = {},
 ) {
   const { graph, dynamicOnly, files } = buildGraph(root, dirs ? { dirs } : {});
+  const { spliced, findings: spliceFindings } = verifySplices(root, splices);
 
   const presentEntries = entryPoints.filter((e) => graph.has(e));
   const missingEntries = entryPoints.filter((e) => !graph.has(e));
@@ -196,6 +313,12 @@ export function classifyModules(
   const rows = modules.map((m) => {
     let status;
     if (fromProduction.has(m)) status = REACHABLE;
+    /*
+     * The splice is checked BEFORE the test roots. A spliced module is usually
+     * imported by its tests too, so asking "test-only?" first would classify
+     * deployed code as orphaned -- the exact false positive this exists to end.
+     */
+    else if (spliced.has(m)) status = SPLICED;
     else if (fromTests.has(m)) status = TEST_ONLY;
     else status = UNREFERENCED;
     return {
@@ -207,7 +330,7 @@ export function classifyModules(
     };
   });
 
-  return { rows, missingEntries, dynamicOnly: [...dynamicOnly.entries()], graph };
+  return { rows, missingEntries, dynamicOnly: [...dynamicOnly.entries()], graph, spliceFindings };
 }
 
 /**
@@ -218,11 +341,18 @@ export function classifyModules(
  * stops meaning anything.
  */
 export function findOrphans(root, options = {}) {
-  const { rows, missingEntries, dynamicOnly } = classifyModules(root, options);
+  const { rows, missingEntries, dynamicOnly, spliceFindings } = classifyModules(root, options);
   const findings = [];
 
+  /*
+   * A declaration that stopped being true comes first: if the splice drifted,
+   * everything it carries is mis-classified, and reporting that as a pile of
+   * orphans would blame the modules for a failure of the check's own inputs.
+   */
+  findings.push(...spliceFindings);
+
   for (const r of rows) {
-    if (r.status === REACHABLE) continue;
+    if (r.status === REACHABLE || r.status === SPLICED) continue;
     if (r.allowed) {
       if (!r.reason || !String(r.reason).trim()) {
         findings.push({ module: r.module, status: r.status, kind: 'unreasoned-opt-out', importedBy: r.importedBy });
