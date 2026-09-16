@@ -84,6 +84,35 @@ export function eventsFor({ tasks = [], messages = [], agent_id, session_id, sin
         // Enough to know WHICH task, never enough to act without reading it.
         lane_id: t.lane_id ?? null,
         repo_id: t.repo_id ?? null,
+        /*
+         * THE LEASE TOKEN, AND THIS IS THE ONLY CHANNEL THAT CAN CARRY IT.
+         *
+         * `/return` requires a lease_token and has no fallback -- correctly,
+         * because a path accepting a return without one is the path every
+         * zombie takes by omitting a field. But NOTHING DELIVERED ONE, so a
+         * worker could be assigned work and then be unable to hand it back.
+         * The loop could not close. Recorded in docs/lease-interface.md.
+         *
+         * The token is minted in the COORDINATOR's assign, and the worker is a
+         * different process on a possibly different machine. It holds a
+         * registration token, which reaches only /wait, /register and /return;
+         * the MCP read surface 401s it. So the assigned event is the one thing
+         * that crosses from the authority to the holder.
+         *
+         * WHY THIS IS NOT A LEAK, WHICH IS THE OBVIOUS OBJECTION. The loop
+         * above already skips every task whose `assigned_session` is not this
+         * caller's, so the only session that can see a token is the one the
+         * lease was minted for. The fencing scope and the delivery scope are
+         * the same scope -- which is why this is a one-field change and not a
+         * new authenticated channel.
+         *
+         * It sits OUTSIDE the "enough to know which task" contract above on
+         * purpose. Everything else in this event is a pointer to be re-read
+         * from the authority; this is a CREDENTIAL. A worker must still read
+         * the task, and may infer nothing from holding the token except that
+         * it is the holder.
+         */
+        lease_token: t.lease_token ?? null,
       });
     }
 

@@ -114,12 +114,41 @@ test('A WAKE-UP IS A DOORBELL: the message BODY is never in it', () => {
 });
 
 test('an assignment event identifies the task without describing the work', () => {
+  /*
+   * THIS GUARD WENT RED WHEN THE LEASE TOKEN WAS ADDED, AND IT WAS RIGHT TO.
+   * Recording why it was updated rather than relaxed, because "a test failed so
+   * I changed the test" is how a guard quietly stops being one.
+   *
+   * What this test protects is that an event is a DOORBELL, not a dispatch: it
+   * says WHICH task changed, and the worker then goes and reads the authority.
+   * A title or an allowed_paths list would let a worker act on the event body
+   * alone, and the outbox is at-least-once by construction, so an event body is
+   * never trustworthy.
+   *
+   * A LEASE TOKEN IS NOT A DESCRIPTION OF THE WORK. It is a CREDENTIAL, and it
+   * is the one thing that cannot be re-read from the authority by the process
+   * that needs it: the token is minted in the coordinator's assign, and the
+   * worker holds a registration token that the MCP read surface 401s. Without
+   * it, /return refuses every hand-back and the loop cannot close. See
+   * docs/lease-interface.md and test/leaseTokenIsDelivered.test.mjs.
+   *
+   * So the deepEqual is KEPT, not loosened — it still pins the exact shape, so
+   * the next field somebody adds still breaks this test and still has to argue
+   * for itself here. It gained one key, and the "does not describe the work"
+   * assertions below got stronger rather than weaker.
+   */
   const [e] = evs({ tasks: [task()] });
   assert.deepEqual(e, {
     kind: 'assigned', at: T(5), task_id: 't1', lane_id: 'agentbridge', repo_id: 'agentbridge',
+    lease_token: null,
   });
+
+  // Nothing here may let a worker act without reading the task first.
   assert.equal(e.title, undefined);
   assert.equal(e.allowed_paths, undefined);
+  assert.equal(e.base_sha, undefined);
+  assert.equal(e.notes, undefined);
+  assert.equal(e.depends_on, undefined);
 });
 
 test('cancellation wakes the worker too, so it stops rather than finishing', () => {
