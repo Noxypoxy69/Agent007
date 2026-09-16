@@ -57,22 +57,49 @@ function isWindowsPowerShell(file) {
  * Scoped to powershell.exe alone. Every other subprocess inherits the
  * environment unchanged.
  */
-function childEnv(file) {
-  if (!isWindowsPowerShell(file)) return process.env;
-  return { ...process.env, PSModulePath: '' };
+function childEnv(file, override) {
+  /*
+   * AN EXPLICIT ENVIRONMENT REPLACES THE PARENT'S, IT DOES NOT EXTEND IT.
+   *
+   * Every caller here is a git or PowerShell command that needs the ambient
+   * environment, so inheriting is the right default and stays the default. A
+   * disposable EXECUTOR is the opposite case: it runs a coding agent that must
+   * not be handed every credential this process holds, and the first time that
+   * matters is the first time an agent prints its own environment.
+   *
+   * The PSModulePath repair below still applies, because a caller choosing its
+   * own environment has not thereby chosen the broken module path.
+   */
+  const base = override ?? process.env;
+  if (!isWindowsPowerShell(file)) return base;
+  return { ...base, PSModulePath: '' };
 }
 
-export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 1024 * 1024, input = null } = {}) {
+export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 1024 * 1024, input = null, env = null } = {}) {
   if (typeof file !== 'string' || !file.length) throw new TypeError('exec: file must be a string');
   if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
     throw new TypeError('exec: args must be an array of strings');
   }
   return new Promise((resolve) => {
-    const child = execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer, shell: false, windowsHide: true, env: childEnv(file) },
+    const child = execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer, shell: false, windowsHide: true, env: childEnv(file, env) },
       (err, stdout, stderr) => {
+        /*
+         * A PROCESS THAT WAS KILLED HAS NO EXIT CODE, AND `?? 0` INVENTED ONE.
+         *
+         * execFile's timeout kills the child and reports an error with no
+         * numeric code, so the old default reported a killed run as code 0 --
+         * the shape of a clean finish. Callers reading `code` alone could not
+         * tell a process that succeeded from one the runner shot. `signal` and
+         * `killed` are now surfaced so a caller can say "no exit code" instead
+         * of guessing, and `code` is null in exactly that case.
+         */
+        const killed = Boolean(err) && (err.killed === true || typeof err.signal === 'string');
+        const numeric = typeof err?.code === 'number' ? err.code : null;
         resolve({
           ok: !err,
-          code: err?.code ?? 0,
+          code: err ? (killed ? null : (numeric ?? null)) : 0,
+          signal: err?.signal ?? null,
+          killed,
           stdout: stdout ?? '',
           stderr: stderr ?? '',
           error: err ? String(err.message) : null,

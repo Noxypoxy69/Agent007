@@ -269,6 +269,12 @@ test('a test-only finding names the test that imports it', async (t) => {
  * entry fails too, so it cannot rot into a rubber stamp.
  */
 const KNOWN = {
+  'src/readCache.mjs':
+    'UNCHANGED-READ DEDUPE WITH NOTHING YET ASSEMBLING CONTEXT. Every other module in the ' +
+    'support lane earned its way out of this list by being reached from bin/agentbridge-attempt.mjs; ' +
+    'this one cannot, because its consumer is the context compiler and that does not exist. ' +
+    'A caller invented to satisfy this gate would be the snooze button in code, which is worse ' +
+    'than the entry, because nobody can see it. Remove this the day context assembly lands.',
   'src/runtime.mjs':
     'A JS MIRROR OF LOGIC THE DATABASE IS AUTHORITATIVE FOR. Owner ruling 2026-09-16: ' +
     'SQL stays authority for leases, review leases, retry limits and the outbox. ' +

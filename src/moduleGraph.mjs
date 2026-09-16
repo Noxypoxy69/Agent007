@@ -53,6 +53,7 @@ export const DEFAULT_ENTRY_POINTS = [
   'bin/agentbridge.mjs',
   'bin/agentbridge-precommit.mjs',
   'bin/agentbridge-preflight.mjs',
+  'bin/agentbridge-attempt.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
