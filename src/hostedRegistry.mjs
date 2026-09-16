@@ -295,6 +295,27 @@ export async function returnWork(env = {}, body, { fetchImpl, timeoutMs = DEFAUL
       return { state: HOSTED.REFUSED, errors, detail };
     }
 
+    /*
+     * 400 IS AN ANSWER TOO, AND CALLING IT "UNREACHABLE" IS THE MISTAKE THIS
+     * FUNCTION ALREADY FIXED ONCE FOR 401.
+     *
+     * The Bridge replied and said the request was wrong. Now that /return
+     * demands a fencing token, a missing or malformed lease_token is the case
+     * that lands here -- and reporting it as unreachable sends a worker off to
+     * check a network it cannot fix, past the one line of the reply that tells
+     * it what is actually wrong. The detail is passed through verbatim for the
+     * same reason 409's is.
+     */
+    if (res.status === 400) {
+      let detail = 'the Bridge rejected the request';
+      try {
+        const b = await res.json();
+        if (typeof b?.detail === 'string') detail = b.detail.slice(0, 400);
+        else if (b?.errors?.length) detail = b.errors.join('; ');
+      } catch { /* keep the default */ }
+      return { state: HOSTED.REFUSED, errors: [detail], detail };
+    }
+
     if (!res.ok) {
       let detail = `http ${res.status}`;
       try {

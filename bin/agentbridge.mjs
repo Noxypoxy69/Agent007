@@ -59,7 +59,7 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         ids and times, NOT instructions: read
                                         the task or message yourself.
                                         exit 0 something happened, 3 nothing did
-  agentbridge return-task --task <task_id> --session <session_id>
+  agentbridge return-task --task <task_id> --session <session_id> --lease <lease_token>
              [--notes <text>] [--repo <dir>]
                                         HAND YOUR OWN WORK BACK. The head SHA is
                                         DERIVED FROM GIT, never a flag: a return
@@ -839,6 +839,32 @@ try {
       process.exit(2);
     }
 
+    /*
+     * THE FENCING TOKEN, AND WHY THIS REFUSES LOCALLY RATHER THAN LETTING THE
+     * BRIDGE SAY NO.
+     *
+     * /return requires lease_token and has no fallback -- the comparison IS the
+     * zombie catch, and a path that accepts a return without one is the path
+     * every zombie takes by omitting a field. Sending the request anyway earns
+     * an HTTP 400 that reads like a malformed client. Refusing here says the
+     * true thing: this worker does not hold the credential the task's row is
+     * fenced with.
+     *
+     * IT IS PER TASK, NOT PER SESSION, ON PURPOSE. claim_task mints a fresh
+     * token on every claim, so a worker holding two tasks holds two tokens. One
+     * stored against the session would send the wrong one for one of them, and
+     * the far end would read that as a stale lease -- the zombie refusal firing
+     * on a worker that is not a zombie.
+     */
+    if (!args.lease || typeof args.lease !== 'string') {
+      console.error('error: --lease <lease_token> is required (the fencing token for THIS task)');
+      console.error('       claim_task mints it when the task is assigned; it is what proves the');
+      console.error('       lease you hold is still the current one');
+      console.error('       NOTE: nothing delivers it to a worker yet -- see the gap named in');
+      console.error('       test/leaseWiring.test.mjs. Until then this command cannot succeed.');
+      process.exit(2);
+    }
+
     const { resolveCommit: resolveForReturn } = await import('../src/git.mjs');
     const cwdR = args.repo ?? process.cwd();
     const gR = await resolveForReturn(cwdR, 'HEAD');
@@ -852,6 +878,7 @@ try {
     const res = await Hr.returnWork(process.env, {
       task_id: args.task,
       session_id: args.session,
+      lease_token: args.lease,
       head_sha: gR.sha,
       notes: typeof args.notes === 'string' ? args.notes : null,
     });

@@ -450,21 +450,84 @@ test('THE CLIENT THAT RETURNS WORK SENDS THE TOKEN THE HANDLER DEMANDS', async (
   const end = cli.indexOf("if (cmd === '", start + 30);
   const block = cli.slice(start, end === -1 ? cli.length : end);
 
+  /*
+   * THE PAYLOAD FIELD, not the word. A bare /lease_token/ also matches the
+   * `--lease is required` message the command prints, so deleting the field
+   * from the request body left this limb green -- the check was reading help
+   * text. Caught by the control that removes the field and requires THIS limb
+   * to be the one that fails.
+   */
   assert.match(
     block,
-    /lease_token/,
-    'THE LOOP DOES NOT CLOSE. /return requires lease_token; `agentbridge return-task` '
-      + 'sends { task_id, session_id, head_sha, notes } and no token, so every return '
-      + 'answers 400 and a worker that claimed work cannot hand it back.\n\n'
-      + 'WHAT CLOSES THIS: the client half of the lease wiring -- bin/agentbridge.mjs '
-      + 'sends lease_token on return-task, and the worker runtime STORES the token it '
-      + 'gets from assign_task\'s `lease.token` so there is one to send. That is runtime '
-      + 'work, it is outside d-lease-wiring\'s allowed paths, and it is a named open gap '
-      + 'rather than an assigned contract. This test going green IS that contract\'s '
-      + 'acceptance.\n\n'
+    /lease_token:\s*args\.lease/,
+    'The handler requires lease_token and `agentbridge return-task` does not send it '
+      + 'in the request body. Every return answers 400 and a worker that claimed work '
+      + 'cannot hand it back.',
+  );
+
+  /*
+   * THE SECOND LIMB, AND THE REASON THIS TEST DID NOT GO GREEN WHEN THE CLIENT
+   * LEARNED TO SEND A TOKEN.
+   *
+   * Sending a credential you cannot obtain is not a closed loop. A worker holds
+   * a REGISTRATION token, and that reaches exactly three endpoints: /register,
+   * /wait and /return. None of them hands it a lease token --
+   *
+   *   /wait      eventsFor filters to the worker's own session (correct) and
+   *              emits { kind, at, task_id, lane_id, repo_id }. Its own comment
+   *              says "enough to know WHICH task, never enough to act without
+   *              reading it". No token.
+   *   /register  answers with registration state, not tasks.
+   *   /return    is the thing demanding the token.
+   *
+   * and the MCP read surface that could show the row needs a coordinator or
+   * reader token, so a worker gets 401 there. The announcement is
+   * `Assigned <id>: <title>` and carries nothing either.
+   *
+   * So the token is minted in the COORDINATOR's assign response, and the
+   * coordinator and the worker are different processes. Nothing carries it
+   * across. Persisting it on the coordinator's side would only work while both
+   * happen to be the same machine, which is precisely the assumption the
+   * session registry, heartbeats and repo/worktree ids exist to remove -- it
+   * would work today and break silently the first time the system did what it
+   * was built for.
+   *
+   * WHERE THE FIX GOES, and it is small: the `assigned` event in
+   * src/events.mjs. It already filters to `t.assigned_session === session_id`,
+   * which is exactly the fencing scope -- only the session that holds the lease
+   * would receive the token -- and /wait already fetches `tasks?select=*`, so
+   * the value is in hand and is being dropped. Both that file and
+   * supabase/functions/** are outside the client-half contract's allowed paths.
+   */
+  const events = codeOnly(
+    await readFile(fileURLToPath(new URL('../src/events.mjs', import.meta.url)), 'utf8'),
+  );
+  const assignedEvent = events.slice(
+    events.indexOf("kind: 'assigned'"),
+    events.indexOf("kind: 'cancelled'"),
+  );
+
+  assert.match(
+    assignedEvent,
+    /lease/,
+    'THE LOOP STILL DOES NOT CLOSE, and the missing half is now DELIVERY, not the '
+      + 'client. `agentbridge return-task` sends lease_token, but nothing ever tells a '
+      + 'worker what its token is: a registration token reaches only /register, /wait '
+      + 'and /return, the MCP read surface 401s it, and the `assigned` event carries '
+      + 'task_id, lane_id and repo_id with no lease.\n\n'
+      + 'WHAT CLOSES THIS: the `assigned` event in src/events.mjs carries the lease '
+      + 'token for the task it names. eventsFor already filters to the worker\'s own '
+      + 'session, so that is the correct scope -- only the lease holder is told -- and '
+      + '/wait already selects the column and discards it.\n\n'
+      + 'DO NOT SOLVE THIS BY PERSISTING THE TOKEN CLIENT-SIDE AT ASSIGN TIME. The '
+      + 'coordinator assigns and the worker returns; they are different processes, and '
+      + 'a local store only works while they share a machine -- which is the assumption '
+      + 'the session registry exists to remove.\n\n'
+      + 'DO NOT SOLVE IT BY LETTING /return ACCEPT A MISSING TOKEN. That path is the '
+      + 'one every zombie takes by omitting a field.\n\n'
       + 'DO NOT SKIP OR DELETE THIS. It is the only assertion in the suite that reads '
-      + 'both the handler and the client; returnTaskCli.test.mjs checks the client '
-      + 'against a stub and cannot see the handler at all.',
+      + 'the handler, the client AND the delivery; returnTaskCli.test.mjs checks the '
+      + 'client against a stub and cannot see any of the others.',
   );
 });
 
