@@ -103,9 +103,22 @@ test('A HAND-DEPLOY SINCE LAST TIME IS REFUSED before we overwrite it', () => {
   assert.ok(r.refusals.some((x) => x.reason === 'live-artifact-drifted'));
 });
 
-test('a first deploy with nothing recorded is NOT drift', () => {
-  const r = assertPromotable(clean({ liveDrift: null }));
-  assert.equal(r.ok, true, 'having no previous record is honest, not a failure');
+test('A FIRST DEPLOY IS HONEST, BUT IT HAS TO SAY SO', () => {
+  /*
+   * The null was doing two jobs: "there is no prior deployment" and "nobody
+   * compared". One value meant both and the unsafe reading was the default, so
+   * the check that catches a hand-deploy -- the one this gate exists for, and
+   * the one its own header calls the normal case here -- was skipped by simply
+   * not passing it. The CLI did exactly that unless given two optional flags.
+   */
+  assert.equal(assertPromotable(clean({ liveDrift: { noPriorDeployment: true } })).ok, true,
+    'having no previous record is honest, and now it is stated');
+
+  for (const missing of [null, undefined]) {
+    const r = assertPromotable(clean({ liveDrift: missing }));
+    assert.equal(r.ok, false, `liveDrift ${String(missing)} passed`);
+    assert.ok(r.refusals.some((x) => x.reason === 'live-drift-unchecked'));
+  }
 });
 
 /* ── an empty deploy replaces a working function with nothing ────────── */
