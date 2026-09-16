@@ -10,6 +10,65 @@ source, and every section below is a claim B is invited to reject.
 
 ---
 
+> # ⛔ THE TOKEN IS NEVER DELIVERED TO THE SIDE THAT MUST SEND IT
+>
+> **This is a gap in the interface itself, not a note about a branch. Nothing on
+> `code-b/lease-wiring` may deploy until it is closed.**
+>
+> `dfaefd4` made `/return` require `lease_token` and gave it no fallback —
+> correctly, because a path that accepts a return without a token is the one
+> every zombie takes by omitting a field. `a4076c6` then taught
+> `agentbridge return-task --lease <token>` to send one.
+>
+> **Neither commit may ship alone, and together they still do not close the
+> loop**, because nothing ever gives the worker a token to send. Deploying
+> either would break `return-task` for every worker: they could claim work and
+> never hand it back, which is strictly worse than the state it was meant to fix.
+>
+> ### Why the worker cannot simply keep it — "cannot", not "should not"
+>
+> Found by c8, verified here against source rather than taken on report:
+>
+> | | |
+> |---|---|
+> | the token is minted in | the **coordinator's** `assign_task` response |
+> | the worker holds | a **registration** token, reaching only `/wait`, `/register`, `/return` |
+> | `/wait` emits (`src/events.mjs:81`) | `{ kind, at, task_id, lane_id, repo_id }` — **no token** |
+> | the MCP read surface | takes coordinator/reader tokens, **401s** a registration token |
+>
+> Coordinator and worker are different processes and nothing carries the token
+> across. Persisting it client-side at assign time therefore works **only while
+> both are the same machine** — the exact assumption the session registry,
+> heartbeats and repo/worktree ids exist to remove. It would pass today and fail
+> silently the first time the system did what it was built for.
+>
+> ### The fix, named and proven meetable
+>
+> **The `assigned` event carries the lease token for the task it names.**
+>
+> - `eventsFor` already filters on `t.assigned_session === session_id`
+>   (`src/events.mjs:77`), so **only the lease holder is told** — the correct
+>   fencing scope, for free.
+> - The `/wait` loop already does `get('tasks?select=*')`, and `lease_token` is
+>   a column on that row (`20260915220139`). **The value is in hand and being
+>   dropped.**
+>
+> c8 proved this rather than proposing it: mutating that one field in turns the
+> coupling gate in `test/leaseWiring.test.mjs` GREEN. So the demand is meetable
+> and the named fix is the right one.
+>
+> ### Why the gate is red and must stay red
+>
+> `test/leaseWiring.test.mjs` fails on purpose, and its failure message names
+> what closes it. Do not skip or delete it. Its client limb is green and its
+> **delivery** limb is red — c8 deliberately let the gate *move* rather than
+> close, because letting it go green once the client had learned to send a
+> credential it cannot acquire would be a control reporting a closed loop that
+> is still open. That is the hollow gate this project has produced thirteen times;
+> see `CLAUDE.md`.
+
+---
+
 ## What each side owns
 
 | | |

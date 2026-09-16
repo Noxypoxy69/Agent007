@@ -2,7 +2,7 @@
 
 Guidance for Claude Code and any other agent working in this repository.
 
-This file exists because on 2026-09-15 **eleven hollow gates were found in a
+This file exists because on 2026-09-15 **thirteen hollow gates were found in a
 single day** and every lesson was written into a commit message. 84 commits in,
 nobody reads commit messages. Where a lesson goes, most durable first: **a check
 script beats this file, which beats a code comment, which beats a commit
@@ -27,12 +27,12 @@ There is no build step and no lint gate yet.
 # THE HOLLOW GATE
 
 **A hollow gate is a check that passes while proving nothing.** It is the only
-bug class this project has produced in volume, it has appeared in eleven
+bug class this project has produced in volume, it has appeared in thirteen
 distinct forms in one day, and every single one looked identical from the
 outside: a green test.
 
-Read the eleven before writing a test. They are not variations on one mistake —
-they are eleven *different* mistakes that share one signature.
+Read the thirteen before writing a test. They are not variations on one mistake —
+they are thirteen *different* mistakes that share one signature.
 
 | # | What passed | What was actually true |
 |---|---|---|
@@ -47,6 +47,8 @@ they are eleven *different* mistakes that share one signature.
 | 9 | A verification harness reported RED | **No assertion had executed** — a module failed to resolve and the process exited non-zero |
 | 10 | A splice-agreement test compared src against the deployed copy | Its fixture was too narrow to reach the branch that diverged — **three times, after every round** |
 | 11 | A `grep` said production matched the repo | `INSTRUCTIONS` is a concatenation; the grep compared **wrapping, not content** |
+| 12 | A mutation harness reported a mutation **missed** | It **counted failures**. The mutation turned one test red and another green; the total never moved, so a *caught* mutation read as uncaught |
+| 13 | A coupling gate asserted the client sends `lease_token` | It matched `lease_token` inside the CLI's own **error message**, so deleting the payload field passed |
 
 ## The rules that fall out of them
 
@@ -108,7 +110,29 @@ and false negatives. See `scripts/check-deployed-instructions.mjs`.
 
 **13. COMMENT-BLANK BEFORE MATCHING ANYTHING.** A check that greps for
 `claim_task` matches its own explanatory comment, so renaming the call passes.
-Three independent rediscoveries in one day.
+Three independent rediscoveries in one day. The same trap catches payload
+assertions: a gate matching `lease_token` also matches the CLI's own *error
+message* about a missing `lease_token`, so deleting the field passes.
+
+**14. A HARNESS MUST MEASURE THE SPECIFIC ASSERTION, NOT A TOTAL.** A mutation
+verdict that counts failures is wrong the moment a mutation falsifies a gate's
+premise: one test goes red, another goes green, the total does not move, and a
+*caught* mutation is reported as missed. Ask whether the assertion you care
+about fired. This one is corrosive out of proportion to its size — a harness
+that cries wolf about a working gate burns the credibility of every other row
+in the table above.
+
+**15. LET A GATE MOVE RATHER THAN CLOSE.** When half a contract lands, the gate
+should go red on the *remaining* half with a message naming it, not go green.
+A control that reports a closed loop while the loop is open is the failure this
+whole file describes — and "the client now sends a credential it cannot
+acquire" is exactly that shape.
+
+**16. A RED TEST NOBODY HAS SHOWN CAN GO GREEN IS A COUNTDOWN, NOT A RATCHET.**
+Before handing anyone a deliberately-failing gate, prove the demand is
+reachable (make it pass, then restore) and prove it stands down if its premise
+is removed. Otherwise it is an IOU that outlives its reason and teaches people
+to ignore red.
 
 ---
 
