@@ -28,6 +28,7 @@
 import { execute } from './executorAdapter.mjs';
 import { guardExecution, OUTCOME } from './preExecutionGuard.mjs';
 import { permissionScope, agentLaunch } from './agentPermissions.mjs';
+import { startAttempt, finishAttempt, crashAttempt } from './attemptRecord.mjs';
 import { collectEvidence } from './evidenceCollector.mjs';
 import { verdictFor } from './resultEnvelope.mjs';
 import { fingerprintAttempt } from './fingerprint.mjs';
@@ -196,6 +197,63 @@ export async function runAttempt({
       })
     : null;
 
+  /*
+   * THE ATTEMPT BECOMES DURABLE BEFORE THE WORK STARTS, NOT AFTER IT FINISHES.
+   *
+   * The record existed and nothing wrote one. That is the gap four separate
+   * specifications were waiting on, and it is the one that cannot be filled
+   * retroactively: routing and environment identity -- engine, model, role
+   * profile, slot, lease, fence, base sha, runtime and executor versions -- can
+   * only be observed while the attempt is being created. Everything else in the
+   * record can be recomputed from the result. These can only be watched.
+   *
+   * SO A CRASH AFTER THIS POINT LEAVES A ROW SAYING WHAT WAS RUNNING. A record
+   * written at the end describes only the attempts that survived to write one,
+   * which is exactly the set that needed no record.
+   *
+   * It is optional, because the pipeline has to run in a test and on a machine
+   * with no store. `io.records` absent means no row -- and an absent store is
+   * not a silent success: nothing downstream reads a record it did not get.
+   *
+   * ---------------------------------------------------------------------------
+   * WHERE THE FENCE LIVES, because code-b left this module deliberately
+   * uncalled rather than wire it in the wrong place, and the reason was good.
+   *
+   * Their worry: a record written by a worker whose claim has already expired.
+   * The START write cannot have that problem -- it happens before any work, so
+   * the lease that authorised the claim is the newest thing in the room. The
+   * FINISH write can: execution takes time, and time is how a lease expires.
+   *
+   * So the fence is the STORE's, not this function's. `io.records.finish` is
+   * the same fenced write code-c owns at the return boundary; this pipeline
+   * hands it a row and it refuses one whose fence has moved. Putting that check
+   * here instead would be a second implementation of lease semantics, and the
+   * one that disagreed would be the one nobody was looking at.
+   */
+  // NOT `record`: that name is already the telemetry writer imported above, and
+  // shadowing it made every attempt throw "record is not a function" at the
+  // telemetry step. One name, two meanings, caught by an existing test.
+  let attemptRow = null;
+  if (io.records && task.routing) {
+    attemptRow = startAttempt({
+      attemptId: `${taskId}:${attempt}`,
+      taskId,
+      // the record counts attempts from one; the pipeline counts retries from
+      // zero. Converting here rather than renaming either keeps both honest.
+      attemptNo: attempt + 1,
+      startedAt: isoNow(io),
+      workspaceId: workspace.id ?? workspace.path,
+      retryOfAttemptId: task.retry_of ?? null,
+      runtimeVersion: task.runtime_version ?? 'unknown',
+      executorVersion: executor.id ?? 'unknown',
+      policyRevision: task.policy_revision ?? 'unknown',
+      toolSchemaRevision: task.tool_schema_revision ?? 'unknown',
+      contextDigest: task.context_digest,
+      ...task.routing,
+    });
+    await io.records.start(attemptRow);
+  }
+
   const spec = {
     taskId,
     attempt,
@@ -289,10 +347,44 @@ export async function runAttempt({
           }),
         );
 
+  /*
+   * ALL FOUR VERDICTS, STORED SEPARATELY. The agent's claim, the machine's
+   * verification and the reviewer's decision disagree in exactly the case the
+   * review runtime exists to catch, and a schema that keeps only the final
+   * answer has thrown that disagreement away before anyone can look at it.
+   */
+  if (attemptRow !== null) {
+    attemptRow = finishAttempt({
+      record: attemptRow,
+      finishedAt: isoNow(io),
+      ending: envelope.outcome === 'prompted' ? 'crashed' : envelope.outcome,
+      exitCode: envelope.outcome === 'exited' ? envelope.exitCode : null,
+      resultSha: envelope.commit,
+      resultEnvelopeDigest: null,
+      rawOutputRef: stdout.ref ?? null,
+      /*
+       * WHAT THE WORK SAID ABOUT ITSELF, kept apart from what was observed. An
+       * exit code is the only claim a process makes without being asked, and it
+       * is a claim rather than evidence -- which is the whole reason it is
+       * stored in a different column from the verification verdict below.
+       */
+      agentClaimedSuccess: envelope.outcome === 'exited' ? envelope.exitCode === 0 : false,
+      verificationVerdict: verdict.verdict === 'accept' ? 'verified' : 'rejected',
+      reviewVerdict: review === null
+        ? null
+        : (review.decision === 'accept' ? 'accept' : 'fix_required'),
+      finalState: accepted ? 'done' : 'failed',
+      failureCode: accepted ? null : (verdict.reasons[0] ?? null),
+      failureFingerprint: fingerprint ?? null,
+    });
+    await io.records.finish(attemptRow);
+  }
+
   return Object.freeze({
     taskId,
     attempt,
     accepted,
+    record: attemptRow,
     envelope,
     verdict,
     review,

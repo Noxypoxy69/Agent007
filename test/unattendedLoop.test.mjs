@@ -308,3 +308,133 @@ setInterval(() => {}, 1000);
   // REPORT, not about the mess being absent
   assert.equal(readFileSync(path.join(dir, 'value.txt'), 'utf8').trim(), '99');
 });
+
+test('THE ATTEMPT IS DURABLE BEFORE THE WORK RUNS, AND CARRIES ALL FOUR VERDICTS', async (t) => {
+  /*
+   * The record existed and nothing ever wrote one. Routing and environment
+   * identity is the part that cannot be filled in afterwards -- engine, model,
+   * slot, lease, fence, base sha, runtime and executor versions can only be
+   * observed while the attempt is being created. So the row is written BEFORE
+   * the executor starts, and a crash after that point leaves something behind
+   * saying what was running. A record written at the end describes only the
+   * attempts that survived to write one, which is the set that needed no record.
+   */
+  const { dir, sha } = await scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'agent.mjs');
+  writeFileSync(agent, `
+import {readFileSync, writeFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
+const cwd = process.cwd();
+const v = Number(readFileSync(cwd + '/value.txt', 'utf8').trim());
+writeFileSync(cwd + '/value.txt', String(v + 1) + '\\n');
+process.stdout.write(execFileSync(process.execPath, [cwd + '/check.mjs'], {cwd, encoding: 'utf8'}));
+execFileSync('git', ['add', '-A'], {cwd});
+execFileSync('git', ['commit', '--quiet', '-m', 'raise the value'], {cwd});
+`);
+
+  const written = [];
+  const records = {
+    start: async (r) => { written.push(['start', r]); },
+    finish: async (r) => { written.push(['finish', r]); },
+  };
+
+  const result = await runAttempt({
+    task: {
+      task_id: 't1-recorded', base_sha: sha, branch: 'work/t1',
+      lease_ms: 120000, timeout_ms: 60000,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+      context_digest: 'a'.repeat(64),
+      routing: {
+        engine: 'local', model: 'none', roleProfile: 'builder',
+        workerSlotId: 'slot-1', sessionId: 'sess-1', leaseId: 'lease-1',
+        fenceToken: '1', repo: 'agentbridge', baseSha: sha,
+        taskClass: 'code', riskClass: 'routine', environmentDigest: 'b'.repeat(64),
+      },
+    },
+    contract: { allowed: ['value.txt'], forbidden: [] },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    reviewer: createFakeReviewer(),
+    records,
+    io: {
+      now: () => Date.now(),
+      records,
+      diffRef: 'cas:diff',
+      git: {
+        headSha: async () => git(dir, 'rev-parse', 'HEAD'),
+        changedFiles: async () => (await git(dir, 'diff', '--name-only', `${sha}..HEAD`)).split('\n').filter(Boolean),
+      },
+    },
+  });
+
+  assert.deepEqual(written.map((w) => w[0]), ['start', 'finish'], 'the row must exist before the work');
+  const [, started] = written[0];
+  assert.equal(started.state, 'running', 'the first row describes an attempt in flight, not a finished one');
+  assert.equal(started.engine, 'local');
+  assert.equal(started.leaseId, 'lease-1');
+  assert.equal(started.fenceToken, '1');
+  assert.equal(started.baseSha, sha, 'the base is recorded, so a retry can start from it');
+  assert.equal(started.finishedAt, null);
+
+  // all four verdicts, in four fields, never collapsed into one status
+  const done = result.record;
+  assert.equal(done.agentClaimedSuccess, true, "what the work said about itself");
+  assert.equal(done.verificationVerdict, 'verified', 'what the machine observed');
+  assert.equal(done.reviewVerdict, 'accept', 'what the reviewer decided');
+  assert.equal(done.finalState, 'done', 'what the task became');
+  assert.equal(done.resultSha, result.envelope.commit);
+  assert.equal(Object.prototype.hasOwnProperty.call(done, 'status'), false, 'never a status column');
+});
+
+test('A FALSE DONE IS VISIBLE: THE AGENT CLAIMED SUCCESS AND THE MACHINE DID NOT', async (t) => {
+  /*
+   * The case the four columns exist for. The agent exits zero having changed
+   * nothing and committed nothing, so its own claim is success and verification
+   * rejects. A single status column would keep one of those and throw away the
+   * disagreement, which IS the signal.
+   */
+  const { dir, sha } = await scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'liar.mjs');
+  writeFileSync(agent, "process.stdout.write('# tests 1\\n# pass 1\\n# fail 0\\nAll done!');process.exit(0);");
+
+  const written = [];
+  const records = { start: async (r) => written.push(r), finish: async (r) => written.push(r) };
+
+  const result = await runAttempt({
+    task: {
+      task_id: 't1-false-done', base_sha: sha, branch: 'work/t1',
+      lease_ms: 120000, timeout_ms: 30000,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+      context_digest: 'a'.repeat(64),
+      routing: {
+        engine: 'local', model: 'none', roleProfile: 'builder',
+        workerSlotId: 'slot-1', sessionId: 'sess-1', leaseId: 'lease-1',
+        fenceToken: '1', repo: 'agentbridge', baseSha: sha,
+        taskClass: 'code', riskClass: 'routine', environmentDigest: 'b'.repeat(64),
+      },
+    },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    reviewer: createFakeReviewer(),
+    records,
+    io: {
+      now: () => Date.now(),
+      records,
+      git: { headSha: async () => sha, changedFiles: async () => [] },
+    },
+  });
+
+  assert.equal(result.record.agentClaimedSuccess, true, 'it exited zero and said All done');
+  assert.equal(result.record.verificationVerdict, 'rejected', 'and produced no commit');
+  assert.equal(result.record.finalState, 'failed');
+  assert.notEqual(result.record.failureCode, null, 'a failure with no code cannot be grouped later');
+  assert.equal(result.accepted, false);
+});
