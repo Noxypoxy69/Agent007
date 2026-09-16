@@ -25,8 +25,8 @@
     }
   },
   "blastRadius": {
-    "index.ts": "BYTE-IDENTICAL to what is live \u2014 the entrypoint does not change",
-    "_shared.js": "271 lines differ \u2014 the only file this deploy moves",
+    "index.ts": "CORRECTION: content-identical, NOT byte-identical. Live carries 1812 CRLF line endings (77637 bytes); strip them and it is exactly the repo's 75825. It was deployed from Windows. So a deploy from this container WILL change index.ts bytes and WILL change the artifact hash, and that is NOT drift. Whoever reads the artifact back must compare NORMALISED content, or they will see the hash move and think something shipped outside the path.",
+    "_shared.js": "live 107446 bytes, no CRLF, matches bb899fc exactly \u2014 production genuinely is that commit. Repo is 118271. This is the real change, +254/-17, additive.",
     "suiteOnMaster": "1420 tests, 1405 pass, 0 fail, 15 skipped",
     "splices": "no findings",
     "duplicateTopLevelConst": "none \u2014 the v19 outage shape"
@@ -47,5 +47,7 @@
     "replace deploy/last-deployment.json with a real record: headSha a816ae4, the new liveArtifactHash and version"
   ],
   "notInThisDeploy": "work/support-modules at 597b564 \u2014 ten commits from tonight, unmerged, 1430 pass 0 fail",
-  "_clockNote": "The first version of this file said 10:2xZ. That came from a scheduled check-in whose notification stated its own fire time as 10:16:04Z and said to treat it as the current time; the machine clock said 16:18Z. Six hours, and a deployment record carrying the wrong one is the sort of thing that is believed later. The value above is the machine's. A time reported by the thing asking you to act on it is a claim like any other."
+  "_clockNote": "The first version of this file said 10:2xZ. That came from a scheduled check-in whose notification stated its own fire time as 10:16:04Z and said to treat it as the current time; the machine clock said 16:18Z. Six hours, and a deployment record carrying the wrong one is the sort of thing that is believed later. The value above is the machine's. A time reported by the thing asking you to act on it is a claim like any other.",
+  "_correction": "The byte-identical claim for index.ts was wrong and was mine. Found by code-c while preparing the deploy, verified here against the live fetch: 77637 - 1812 CRLF = 75825 exactly. The error mattered because it sets up a false drift alarm at precisely the moment somebody is deciding whether production got what they meant to send.",
+  "_deliveryBlocker": "NOT DEPLOYED. code-c stopped because it cannot deliver the bytes, and measured rather than assumed: it reproduced a 6000-character slice and got one byte wrong \u2014 a dropped trailing space, invisible in any rendered output. Extrapolated over 194KB that is roughly 32 silent corruptions. c8 has the same limitation: no supabase CLI, no SUPABASE_ACCESS_TOKEN, so the only route is retyping the file into an MCP tool call, which is the same operation that was measured failing. The failure mode is a bundle that does not parse, which takes the coordination channel every agent uses offline, and rollback runs through the identical mechanism \u2014 so a bad deploy is likely unrecoverable. The fix removes transcription entirely: one credential, or one CLI command on a machine that has the files."
 }
