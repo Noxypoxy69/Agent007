@@ -1,0 +1,29 @@
+-- A security_invoker VIEW DOES NOT LEND ITS OWN PRIVILEGES.
+--
+-- 20260915234102 created public.permission_requests with security_invoker=true
+-- and granted select/insert/update on THE VIEW to service_role. It never
+-- granted anything on agentbridge.permission_requests underneath it.
+--
+-- security_invoker means the view executes with the CALLER's rights, so the
+-- grant that matters is the one on the base table. Without it PostgREST
+-- answered 403 and request_permission returned:
+--
+--     { "error": "supabase-read-failed:403" }
+--
+-- on every call, for every action, the moment it shipped. The permission
+-- classifier was deployed and completely unreachable -- listed in tools/list,
+-- correctly described, and answering nothing. The same shape as
+-- confirm_proposal, arriving by a different route: this time the code was right
+-- and the GRANT was missing.
+--
+-- agentbridge.tasks has exactly these three grants, which is why every task
+-- tool worked and this one did not. The asymmetry is the tell, and comparing
+-- against a table that works is how it was found rather than by reading the
+-- migration again.
+--
+-- SELECT, INSERT and UPDATE only. No DELETE: permission requests are the audit
+-- trail of what was asked and what was decided, and a decided row leaving the
+-- table would remove exactly the record that makes a delegated approval
+-- reviewable afterwards. The unique partial index already stops duplicates
+-- accumulating, so nothing needs to clean up.
+grant select, insert, update on agentbridge.permission_requests to service_role;

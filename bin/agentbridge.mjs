@@ -64,7 +64,7 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         ids and times, NOT instructions: read
                                         the task or message yourself.
                                         exit 0 something happened, 3 nothing did
-  agentbridge return-task --task <task_id> --session <session_id>
+  agentbridge return-task --task <task_id> --session <session_id> --lease <lease_token>
              [--notes <text>] [--repo <dir>]
                                         HAND YOUR OWN WORK BACK. The head SHA is
                                         DERIVED FROM GIT, never a flag: a return
@@ -249,11 +249,46 @@ try {
     if (!cfg) { console.error('Not initialised. Run: agentbridge init'); process.exit(2); }
     const payload = await collect(cfg, await loadRegistry());
 
+    /*
+     * A HEARTBEAT THAT DID NOT LAND MUST NOT EXIT 0.
+     *
+     * This printed "publish failed: 401 ..." to stderr and then exited ZERO, so
+     * anything scripting it -- a watcher loop, a scheduled task, a supervisor --
+     * saw success on every single failed beat. The machine-readable signal said
+     * the opposite of the English one.
+     *
+     * THIS IS b6's OWN FINDING, IN A COMMAND NOBODY RE-CHECKED. It found exactly
+     * this on `register-session` ("a refused credential is not an unreachable
+     * service, and it is not exit 0"), that one was fixed, and `heartbeat` kept
+     * the bug -- because the fix was applied to the command that was reported
+     * rather than to every command that publishes. The same instance-not-class
+     * mistake that let 404 walk past three separate status fixes.
+     *
+     * AND IT IS THE BEST AVAILABLE EXPLANATION FOR A WATCHER THAT DIES QUIETLY.
+     * b6's watcher was "nominally running and producing no output" while its
+     * heartbeat had stopped landing. A loop calling this command would look
+     * healthy forever: exit 0 every time, nothing to alert on, and the roster
+     * going stale behind it.
+     *
+     * NOT-CONFIGURED IS NOT A FAILURE. A local-only machine has nowhere to
+     * publish and is working as intended; exiting non-zero there would make
+     * every local setup look broken -- the same distinction the runtime's
+     * heartbeat client already makes for HOSTED.NOT_CONFIGURED.
+     */
+    let beatFailed = false;
     if (cmd === 'heartbeat' && !args['dry-run']) {
       const r = await publish(cfg, payload);
-      console.error(r.ok && r.accepted ? 'published.' : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
+      const landed = r.ok && r.accepted;
+      const notConfigured = r.reason === 'no-bridge-url';
+      console.error(landed ? 'published.'
+        : notConfigured ? 'local-only: no bridgeUrl configured, nothing published'
+          : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
+      beatFailed = !landed && !notConfigured;
     }
-    if (args.json || cmd === 'heartbeat') { console.log(JSON.stringify(payload, null, 2)); process.exit(0); }
+    if (args.json || cmd === 'heartbeat') {
+      console.log(JSON.stringify(payload, null, 2));
+      process.exit(beatFailed ? 1 : 0);
+    }
 
     console.log(`machine ${localMachineLabel(cfg)} [${payload.machine.name}] (${payload.machine.platform})  ${payload.sentAt}`);
     if (!payload.processProbe.ok) console.log(`  ! process probe failed: ${payload.processProbe.error}`);
@@ -788,6 +823,7 @@ try {
     const deps = {
       now: () => new Date().toISOString(),
       ...D.hostedDeps(process.env, { session_id: sessionId }),
+      ...D.heartbeatDeps(process.env, { session_id: sessionId, agent_id: agentId }),
       prepareWorktree: (a) => D.prepareWorktree(a),
       cleanupWorktree: (d) => D.cleanupWorktree(d),
       headSha: (d) => D.headSha(d),
@@ -980,6 +1016,32 @@ try {
       process.exit(2);
     }
 
+    /*
+     * THE FENCING TOKEN, AND WHY THIS REFUSES LOCALLY RATHER THAN LETTING THE
+     * BRIDGE SAY NO.
+     *
+     * /return requires lease_token and has no fallback -- the comparison IS the
+     * zombie catch, and a path that accepts a return without one is the path
+     * every zombie takes by omitting a field. Sending the request anyway earns
+     * an HTTP 400 that reads like a malformed client. Refusing here says the
+     * true thing: this worker does not hold the credential the task's row is
+     * fenced with.
+     *
+     * IT IS PER TASK, NOT PER SESSION, ON PURPOSE. claim_task mints a fresh
+     * token on every claim, so a worker holding two tasks holds two tokens. One
+     * stored against the session would send the wrong one for one of them, and
+     * the far end would read that as a stale lease -- the zombie refusal firing
+     * on a worker that is not a zombie.
+     */
+    if (!args.lease || typeof args.lease !== 'string') {
+      console.error('error: --lease <lease_token> is required (the fencing token for THIS task)');
+      console.error('       claim_task mints it when the task is assigned; it is what proves the');
+      console.error('       lease you hold is still the current one');
+      console.error('       NOTE: nothing delivers it to a worker yet -- see the gap named in');
+      console.error('       test/leaseWiring.test.mjs. Until then this command cannot succeed.');
+      process.exit(2);
+    }
+
     const { resolveCommit: resolveForReturn } = await import('../src/git.mjs');
     const cwdR = args.repo ?? process.cwd();
     const gR = await resolveForReturn(cwdR, 'HEAD');
@@ -993,6 +1055,7 @@ try {
     const res = await Hr.returnWork(process.env, {
       task_id: args.task,
       session_id: args.session,
+      lease_token: args.lease,
       head_sha: gR.sha,
       notes: typeof args.notes === 'string' ? args.notes : null,
     });

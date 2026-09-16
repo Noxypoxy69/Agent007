@@ -110,7 +110,7 @@ test('a return carries the sha RESOLVED FROM GIT, never one that was typed', asy
   const { posts, base } = await bridge(t);
 
   const r = await run(
-    ['return-task', '--task', 't-1', '--session', 'sess-a', '--notes', 'tests green'],
+    ['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc', '--notes', 'tests green'],
     {
       AGENTBRIDGE_HOME: home,
       AGENTBRIDGE_REGISTRATION_TOKEN: 'tok',
@@ -124,7 +124,7 @@ test('a return carries the sha RESOLVED FROM GIT, never one that was typed', asy
   assert.equal(posts[0].url, '/return', 'posted to the wrong endpoint');
   assert.equal(posts[0].auth, 'Bearer tok');
   assert.deepEqual(posts[0].body, {
-    task_id: 't-1', session_id: 'sess-a', head_sha: sha, notes: 'tests green',
+    task_id: 't-1', session_id: 'sess-a', lease_token: 'lease-abc', head_sha: sha, notes: 'tests green',
   });
   // There is no --head flag to pass, and the sha sent is the real one.
   assert.match(r.stdout, new RegExp(sha.slice(0, 12)));
@@ -148,7 +148,7 @@ test('THERE IS NO WAY TO TYPE A COMMIT: --head is ignored', async (t) => {
   assert.notEqual(lie, sha);
 
   const r = await run(
-    ['return-task', '--task', 't-1', '--session', 'sess-a', '--head', lie],
+    ['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc', '--head', lie],
     {
       AGENTBRIDGE_HOME: home,
       AGENTBRIDGE_REGISTRATION_TOKEN: 'tok',
@@ -182,7 +182,7 @@ test('A REFUSAL EXITS 1 AND NAMES EVERY REASON', async (t) => {
     },
   });
 
-  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a'], {
+  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc'], {
     AGENTBRIDGE_HOME: home,
     AGENTBRIDGE_REGISTRATION_TOKEN: 'tok',
     AGENTBRIDGE_REGISTER_URL: `${base}/register`,
@@ -198,7 +198,7 @@ test('an UNREACHABLE bridge exits 2 and says the work was not returned', async (
   // Distinct from a refusal. Nothing was recorded, and the worker should try
   // again later rather than conclude its work is filed.
   const { repo, home } = await fixture(t);
-  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a'], {
+  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc'], {
     AGENTBRIDGE_HOME: home,
     AGENTBRIDGE_REGISTRATION_TOKEN: 'tok',
     // Nothing listens here.
@@ -216,7 +216,7 @@ test('a 500 is unreachable, not a refusal', async (t) => {
   const { repo, home } = await fixture(t);
   const { base } = await bridge(t, { status: 500, body: { detail: 'boom' } });
 
-  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a'], {
+  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc'], {
     AGENTBRIDGE_HOME: home,
     AGENTBRIDGE_REGISTRATION_TOKEN: 'tok',
     AGENTBRIDGE_REGISTER_URL: `${base}/register`,
@@ -248,7 +248,7 @@ test('outside a git repo it refuses rather than inventing a commit', async (t) =
   await rm(bare, { recursive: true, force: true }).catch(() => {});
   await writeFile(path.join(root, 'loose.txt'), 'x\n');
 
-  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a', '--repo', root], {
+  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc', '--repo', root], {
     AGENTBRIDGE_HOME: home, AGENTBRIDGE_REGISTRATION_TOKEN: 'tok',
   }, root);
 
@@ -258,7 +258,7 @@ test('outside a git repo it refuses rather than inventing a commit', async (t) =
 
 test('no registration token is a configuration failure, not a refusal', async (t) => {
   const { repo, home } = await fixture(t);
-  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a'],
+  const r = await run(['return-task', '--task', 't-1', '--session', 'sess-a', '--lease', 'lease-abc'],
     { AGENTBRIDGE_HOME: home }, repo);
 
   assert.equal(r.code, 2);

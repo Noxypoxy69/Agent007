@@ -72,3 +72,8 @@ Thumbs.db
 
 # NOTE: package-lock.json is deliberately NOT ignored. It is the lockfile.
 supabase/.temp/
+
+# Per-machine Claude Code permission rules. Local by definition: it names
+# absolute paths on this machine and encodes what THIS operator has approved.
+# Committing it would hand every clone somebody else@s allow-list.
+.claude/settings.local.json

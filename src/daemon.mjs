@@ -1,6 +1,7 @@
 import { loadConfig, loadRegistry } from './config.mjs';
 import { collect } from './collect.mjs';
 import { publish } from './client.mjs';
+import { HOSTED, classifyStatus } from './hostedRegistry.mjs';
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -32,6 +33,10 @@ export async function runDaemon({ once = false } = {}) {
   process.on('SIGTERM', shutdown);
 
   let backoff = 0;
+
+  // Latched so a refused credential is stated once, not every interval.
+
+  let refusedAnnounced = false;
   do {
     // Registry is re-read every tick, so `agentbridge register` takes effect
     // without restarting the daemon.
@@ -51,7 +56,35 @@ export async function runDaemon({ once = false } = {}) {
       const r = await publish(cfg, payload);
       if (r.ok && r.accepted) {
         backoff = 0;
+        refusedAnnounced = false;
         log(`published ${payload.sessions.length} session(s)`);
+      } else if (r.status && classifyStatus(r.status) === HOSTED.REJECTED) {
+        /*
+         * A REFUSED CREDENTIAL IS NOT A TRANSIENT FAILURE, AND BACKOFF SAID IT
+         * WAS.
+         *
+         * Every failure used to double the delay to a two-minute ceiling and
+         * retry forever. On this path a 401 means the machine signature or the
+         * registration is wrong -- an operator has to fix it, and no amount of
+         * waiting will. So the daemon logged the same line every two minutes
+         * indefinitely while implying, by backing off, that it was waiting for
+         * something to clear.
+         *
+         * Three things change and no more. It says so ONCE, naming the cause
+         * and what fixes it. It stops escalating, because escalation is the lie.
+         * And it keeps running at the base interval, so local registration
+         * still works and a corrected secret recovers on its own without
+         * anybody restarting anything.
+         */
+        backoff = 0;
+        if (!refusedAnnounced) {
+          refusedAnnounced = true;
+          log(
+            `publish REFUSED (${r.status ?? '-'}): ${r.reason ?? 'credential rejected'}. `
+              + 'The machine signature or registration is wrong; this cannot succeed until '
+              + 'that is fixed. Continuing local-only and will resume automatically.',
+          );
+        }
       } else {
         backoff = Math.min(backoff ? backoff * 2 : 5_000, 120_000);
         log(`publish failed (${r.status ?? '-'} ${r.reason ?? 'unknown'}); backoff ${backoff / 1000}s`);
