@@ -250,6 +250,21 @@ function namesMachine(text, identity) {
     const u = user.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     //  /jane  \jane  ~jane  @jane   or   jane@
     if (new RegExp(`[/\\\\~@]${u}(?![a-z0-9_-])|(?<![a-z0-9_-])${u}@`).test(hay)) return user;
+    /*
+     * AND A MACHINE LABEL BUILT FROM THE NAME — `jane-win`, `jdoe_laptop`.
+     *
+     * THE FIRST VERSION OF THIS NARROWING DROPPED THIS SHAPE SILENTLY, which is
+     * the risk its own comment named and did not cover: separator-anchored
+     * cases were controlled for, a hyphenated label was not, and the fixtures
+     * contained one. `payloadGuard` classifies `jane-win` as a USERNAME leak and
+     * this matcher called it clean — the same question answered two ways in one
+     * repository.
+     *
+     * A DOT IS DELIBERATELY NOT A SEPARATOR HERE. Including it matched
+     * `test.mjs` for an operator called `test`, which is a filename in every
+     * directory of this project.
+     */
+    if (new RegExp(`(?<![a-z0-9_-])${u}[-_][a-z0-9]`).test(hay)) return user;
   }
 
   return null;
@@ -271,6 +286,9 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
     'from: runner@build-01',
     'home: ~runner/.ssh',
     'host DESKTOP-ABC123 reported',
+    // a machine label built from the name — the shape the first narrowing dropped
+    'worker runner-win reported',
+    'slot runner_laptop-3 registered',
   ]) {
     assert.notEqual(namesMachine(leak, me), null, `should have been flagged: ${leak}`);
   }
@@ -283,6 +301,69 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
     'runners up were not recorded',
   ]) {
     assert.equal(namesMachine(clean, wordOnly), null, `should NOT have been flagged: ${clean}`);
+  }
+});
+
+test('KNOWN COST: an english hyphenation is indistinguishable from a machine label', () => {
+  /*
+   * CHARACTERISATION, NOT APPROVAL, in the style of the two gaps above it.
+   *
+   * `runner-up` and `jane-win` are the SAME SHAPE — a name, a hyphen, a word —
+   * and no lexical rule separates them. So catching the machine label costs a
+   * false positive on the hyphenation, for an operator whose username happens
+   * to be an english word. `root-cause` is the realistic one in this repository.
+   *
+   * IT IS ACCEPTED RATHER THAN SOLVED, and the reason is the direction of the
+   * damage. Missing `jane-win` publishes a real operator's machine name for
+   * ever; flagging `runner-up` costs one fixture edit and says exactly which
+   * word did it. The first is silent, the second is loud.
+   *
+   * MEASURED AGAINST THE COMMITTED FIXTURES: adding this rule reddens NOTHING
+   * that was green. runner, root, admin, test and node all still scan clean
+   * against leakShapes.mjs; the only operator this newly flags is one whose
+   * name is actually in the file, which is the whole point.
+   *
+   * WHEN SOMEBODY FINDS A RULE THAT SEPARATES THEM, this test fails. Assert the
+   * hyphenation is clean, keep the label flagged, and say so in the handoff.
+   */
+  const runner = { username: 'runner', hostname: '', homedir: '' };
+  assert.equal(namesMachine('the runner-up was not recorded', runner), 'runner',
+    'GAP CLOSED? if this is clean now, keep the label case flagged and say so');
+  assert.equal(namesMachine('runners up were not recorded', runner), null,
+    'no hyphen, no label: this must stay clean or the CI failure is back');
+});
+
+test('KNOWN GAP: a username that collides with a path segment still reddens a clean repo', () => {
+  /*
+   * THE HALF THE CI FIX DID NOT REACH, recorded because it is the same defect
+   * class and it is still live.
+   *
+   * The fixtures deliberately contain leak examples with real-looking paths --
+   * `D:\build\artifacts\out` and `https://deploy:hunter2...` among them. The
+   * homedir and hostname rules are bare substrings, correctly, and a username
+   * sitting after a path separator is exactly what the matcher looks for. So an
+   * operator called `build` or `deploy` sees this suite go red on a repository
+   * with nothing wrong with it -- which is what happened to `runner`, one
+   * mechanism over.
+   *
+   * NOT FIXED HERE because the fix is to change the fixture VALUES, and those
+   * values are asserted by the MUST_LEAK cases above; editing them is a
+   * separate change with its own review. Filed so the next person who sees red
+   * on a clean checkout reads this instead of bisecting.
+   */
+  const text = fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
+  for (const colliding of ['build', 'deploy']) {
+    assert.notEqual(
+      namesMachine(text, { username: colliding, hostname: '', homedir: '' }), null,
+      `GAP CLOSED for ${colliding}? assert null here and say so in the handoff`,
+    );
+  }
+  // and the ones that are genuinely fixed, asserted so a widening shows up here.
+  // `test` is the dot case: treating `.` as a label separator matches `test.mjs`,
+  // a filename in every directory of this project, and reddens a clean repo again.
+  for (const fine of ['runner', 'root', 'test', 'node', 'admin']) {
+    assert.equal(namesMachine(text, { username: fine, hostname: '', homedir: '' }), null,
+      `a clean repo went red for an operator called ${fine}`);
   }
 });
 

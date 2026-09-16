@@ -54,7 +54,7 @@ export const MUST_LEAK = [
   {
     what: 'machine label built from a first name',
     value: 'jane-win',
-    why: 'leak 3 as it shipped ("danny-win"). The whole username does not appear in it, so a full-name substring test scans it clean',
+    why: 'the shape leak 3 shipped as: a machine label built from the operator\'s first name. The whole username does not appear in it, so a full-name substring test scans it clean. The real label is deliberately NOT quoted here — this file is scanned against the running machine\'s identity precisely so a real one cannot sit in it, and a provenance note is not an exemption from that',
   },
   {
     what: 'hostname',
