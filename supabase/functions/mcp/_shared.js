@@ -520,21 +520,137 @@ export const ELEVATED_PREFIXES = Object.freeze([
   'sql.write',
 ]);
 
-const hasPrefix = (action, list) =>
-  list.some((p) => (p.endsWith('.') ? action.startsWith(p) : action === p || action.startsWith(`${p}.`)));
+/**
+ * THE ONLY ACTIONS THAT ARE ROUTINE, AS AN EXPLICIT ALLOW-LIST.
+ *
+ * This did not exist, and its absence is what made the escalation below
+ * possible: `reversible: true` was the ONLY route to ROUTINE, so the caller's
+ * own word was the classifier. Membership here is decided by this file, not by
+ * the thing asking for permission.
+ */
+export const ROUTINE_PREFIXES = Object.freeze([
+  'read.',
+  'list.',
+  'get.',
+  'search.',
+  'inspect.',
+  'run.tests',
+  'git.status',
+  'git.diff',
+  'git.log',
 
+  /*
+   * A LOCAL COMMIT IS ROUTINE BY THIS FILE'S OWN DEFINITION: reversible by the
+   * actor alone, and nobody outside the machine sees it. `merge.main` is the
+   * owner-only one and is on the deny-list above; `push` is deliberately on
+   * NEITHER list, so it falls through to ELEVATED -- publishing is the step
+   * that stops being local, and it should cost an approval until somebody
+   * decides otherwise on purpose.
+   */
+  'commit',
+]);
+
+/**
+ * CASE-INSENSITIVE, AND THAT IS A SECURITY PROPERTY RATHER THAN A CONVENIENCE.
+ *
+ * It was case-SENSITIVE, using startsWith and strict equality with no
+ * normalisation, so "Deploy.Production" missed both deny-lists while
+ * "deploy.production" hit them. Capitalising one letter was enough to leave the
+ * owner-only list. Both sides are lowered here rather than only the action, so
+ * an entry added to a list in mixed case still matches.
+ */
+export const hasPrefix = (action, list) => {
+  const a = String(action).toLowerCase();
+  return list.some((raw) => {
+    const p = String(raw).toLowerCase();
+    return p.endsWith('.') ? a.startsWith(p) : a === p || a.startsWith(`${p}.`);
+  });
+};
+
+/**
+ * Classify by risk. UNKNOWN ACTIONS ARE NOT ROUTINE.
+ *
+ * An action this function does not recognise is classified ELEVATED, never
+ * routine. The cost of that is one extra coordinator approval; the cost of the
+ * other default is a capability nobody reviewed slipping through because it was
+ * new.
+ *
+ * ══ THE ESCALATION THIS SHAPE EXISTS TO PREVENT, AND ONCE FAILED TO ══
+ *
+ * Found by code-d probing the real module, reproduced here before anything was
+ * changed. Six spellings, every one an owner-only action reaching the
+ * coordinator instead of Danny:
+ *
+ *     Deploy.Production  reversible:true  ->  routine      coordinator
+ *     DEPLOY.PRODUCTION  reversible:true  ->  routine      coordinator
+ *     deploy.Production  reversible:true  ->  elevated     coordinator
+ *     Delete.everything  reversible:true  ->  routine      coordinator
+ *     DROP.table_users   reversible:true  ->  routine      coordinator
+ *     Merge.main         reversible:true  ->  routine      coordinator
+ *
+ * TWO CAUSES THAT COMPOSED, neither fatal alone:
+ *
+ *   1. hasPrefix matched case-sensitively, so a capital letter missed both
+ *      deny-lists. (deploy.Production landing on ELEVATED rather than ROUTINE
+ *      is its own small horror: a PARTIAL case match downgraded it.)
+ *   2. `if (reversible === true) return RISK.ROUTINE` sat BEFORE the
+ *      unknown-action default, so an unrecognised spelling did not fall through
+ *      to the safe default -- it landed on the CALLER'S OWN DECLARATION.
+ *
+ * Cause 2 is the one that matters, and it contradicted the paragraph directly
+ * above it in writing. The header said UNKNOWN ACTIONS ARE NOT ROUTINE while
+ * the code returned ROUTINE for any unknown action whose caller said so. That
+ * is the confused deputy this module exists to prevent: the component asking
+ * for permission was deciding its own risk class.
+ *
+ * ══ THE RULE NOW, AND WHY IT IS ASYMMETRIC ══
+ *
+ * `reversible` is EVIDENCE FROM AN INTERESTED PARTY, so it is believed only
+ * when it argues against that party's interest:
+ *
+ *     reversible: false  ->  RAISES to irreversible. Believed: nobody declares
+ *                            their own action dangerous to gain something.
+ *     reversible: true   ->  LOWERS NOTHING, EVER. Self-serving, so it cannot
+ *                            move the classification down by itself.
+ *
+ * ROUTINE is now reachable only by membership of ROUTINE_PREFIXES, which this
+ * file decides. The caller can still raise its own risk and can no longer lower
+ * it at all -- which is what the test on this property always claimed to
+ * assert, and did not, because it only ever tried exact lowercase spellings.
+ */
 export function riskOf(action, { reversible } = {}) {
   if (!nonEmpty(action)) return RISK.IRREVERSIBLE;
   const a = action.trim();
 
+  // Deny-lists first, and they are checked case-insensitively.
   if (hasPrefix(a, OWNER_ONLY_PREFIXES)) return RISK.IRREVERSIBLE;
+  // An explicit reversible:false raises. This is the one direction a caller's
+  // own declaration is trusted in, because it argues against its own interest.
   if (reversible === false) return RISK.IRREVERSIBLE;
   if (hasPrefix(a, ELEVATED_PREFIXES)) return RISK.ELEVATED;
-  if (reversible === true) return RISK.ROUTINE;
 
+  /*
+   * ROUTINE IS AN ALLOW-LIST, NOT A CALLER'S CLAIM.
+   *
+   * reversible:true no longer appears in this decision at all. It is recorded
+   * on the request for a human to read, and it classifies nothing downward.
+   */
+  if (hasPrefix(a, ROUTINE_PREFIXES)) return RISK.ROUTINE;
+
+  // Not recognised: somebody looks at it. This is now genuinely unreachable
+  // from the caller's side, which is what the header always promised.
   return RISK.ELEVATED;
 }
 
+/**
+ * A stable identity for "the same request", so repeats collapse.
+ *
+ * KEYED ON WHAT IS BEING DECIDED, NOT ON WHEN OR BY WHOM. A worker retrying
+ * after a crash asks the identical question; if the attempt number or a
+ * timestamp were in the key, the owner would be asked again for a decision they
+ * have already made. The task is in the key because the same action on a
+ * different task IS a different decision.
+ */
 export function requestKey({ action, task_id = null, scope_id = null } = {}) {
   if (!nonEmpty(action)) throw new TypeError('requestKey requires an action');
   return [action.trim(), task_id ?? '-', scope_id ?? '-'].join('::');

@@ -267,10 +267,33 @@ test('THE DEPLOYED COPY AGREES — classification and routing', () => {
   assert.deepEqual([...seen].sort(), ['coordinator', 'owner', 'policy'],
     'the fixture stopped exercising all three routes, so agreement proves less than it looks');
 
-  for (const a of ['deploy.production', 'deploy.staging', 'run.tests', '', 'x.y']) {
-    assert.equal(depRiskOf(a, { reversible: true }), srcRiskOf(a, { reversible: true }), a);
-    assert.equal(depRiskOf(a, { reversible: false }), srcRiskOf(a, { reversible: false }), a);
+  /*
+   * THE RESPELLINGS ARE IN THIS FIXTURE ON PURPOSE, AND THEY WERE NOT.
+   *
+   * This loop used to carry only lower-case actions, so a drift where the
+   * DEPLOYED copy alone went back to case-sensitive matching was invisible to
+   * it -- proven by mutation: that change left this file green. Which is the
+   * exact defect the escalation itself was, reappearing one level up in the
+   * thing meant to catch it.
+   *
+   * A splice-agreement fixture has to exercise the branch most likely to
+   * diverge, and after today that branch is case handling.
+   */
+  for (const a of [
+    'deploy.production', 'deploy.staging', 'run.tests', 'commit', 'push', '', 'x.y',
+    'Deploy.Production', 'DEPLOY.PRODUCTION', 'deploy.Production',
+    'DROP.table_users', 'Merge.main', '  DEPLOY.production  ',
+  ]) {
+    for (const reversible of [true, false, undefined]) {
+      assert.equal(depRiskOf(a, { reversible }), srcRiskOf(a, { reversible }),
+        `${JSON.stringify(a)} reversible=${reversible}`);
+    }
   }
+
+  // And the fixture must still contain a case that a case-sensitive match gets
+  // WRONG, or the loop above is agreeing about nothing again.
+  assert.equal(srcRiskOf('Deploy.Production', { reversible: true }), 'irreversible',
+    'the respelling fixture stopped exercising the escalation it exists to pin');
 });
 
 test('THE DEPLOYED COPY AGREES — what is outstanding and what is paused', () => {
