@@ -206,6 +206,31 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
     const now = deps.now();
     w.pausedTaskIds = (await deps.pausedTaskIds?.(w)) ?? [];
 
+    /*
+     * BEAT EVERY CYCLE, AND SAY SO WHEN IT STOPS LANDING.
+     *
+     * The LEASE and the SESSION are different clocks. Renewing the lease keeps
+     * the TASK; beating the session keeps the WORKER visible. This loop renewed
+     * one and not the other, so a worker on a normal thirty-minute task
+     * vanished from the roster after ten -- reported stale by wentStale, shown
+     * offline to every reader, while working perfectly.
+     *
+     * GOING DARK IS LOGGED, NOT SWALLOWED. b6 lost a watcher this way: the
+     * process was nominally alive, produced nothing, and stopped beating, and
+     * it did not know. A worker that cannot tell whether its heartbeat is
+     * landing keeps working while the system has written it off.
+     */
+    if (deps.heartbeat) {
+      const hb = await deps.heartbeat({
+        capacity: w.task ? 'busy' : 'idle',
+        task_id: w.task?.task_id ?? null,
+      });
+      if (hb && hb.ok === false) {
+        log('heartbeat', `FAILED x${hb.consecutiveFailures}: ${hb.detail}`
+          + (hb.goingDark ? ' — THIS WORKER IS GOING DARK; the roster will call it offline' : ''));
+      }
+    }
+
     const decision = nextAction(w, { now });
     log(decision.action, decision.reason);
 

@@ -116,3 +116,90 @@ test('every store method that reaches a sibling does so BY NAME', () => {
   assert.match(code, /await store\.assignTask\(/);
   assert.match(code, /await store\.acceptTask\(/);
 });
+
+test('THE ROSTER READ PATH DERIVES CAPACITY, it does not report the stored column', () => {
+  /*
+   * FOUND BY MUTATION, AND IT IS THE SAME SHAPE AS THE `this` BUG ABOVE.
+   *
+   * code-d found the live roster describing code-b as `idle` after 898 minutes
+   * of silence — the only real agent among the stale rows, and the only wrong
+   * one. The fix was to derive capacity through observedCapacity instead of
+   * handing out `r.capacity`.
+   *
+   * Reverting that fix left every test in rosterDoesNotLie.test.mjs GREEN,
+   * because the fix is in index.ts and nothing can import index.ts. The pure
+   * rule is well covered; the SITE THAT USES IT was not covered at all. That is
+   * the second time today the same gap has swallowed a fix.
+   */
+  const code = codeOnly(readFileSync(INDEX, 'utf8'));
+
+  assert.match(code, /capacity:\s*observedCapacity\(/,
+    'the roster read path reports the stored capacity again; a worker that died '
+    + 'while claiming "idle" will be listed as available forever');
+
+  assert.doesNotMatch(code, /capacity:\s*r\.capacity\s*\?\?\s*null/,
+    'the undesired form is back');
+});
+
+test('THE CONTROL: that roster assertion can fail', () => {
+  const real = readFileSync(INDEX, 'utf8');
+  const broken = real.replace(
+    'capacity: observedCapacity(r, { now: new Date().toISOString() }),',
+    'capacity: r.capacity ?? null,',
+  );
+  assert.notEqual(broken, real, 'the mutation did not apply, so this proves nothing');
+  assert.doesNotMatch(codeOnly(broken), /capacity:\s*observedCapacity\(/);
+});
+
+test('NO DUPLICATE TOP-LEVEL DECLARATION — this one caused a live outage', () => {
+  /*
+   * ═══ THE OUTAGE, AND IT WAS MINE ═══
+   *
+   * Merging code-b/lease-wiring kept BOTH my `const UUID` and c8's — we had
+   * independently added the same guard after the same finding. Two top-level
+   * `const UUID` declarations is `SyntaxError: Identifier 'UUID' has already
+   * been declared`, so Deno never finished loading the module and every call
+   * answered:
+   *
+   *     { "code": "BOOT_ERROR", "message": "Function failed to start" }
+   *
+   * The entire coordination plane, down, from a merge whose full suite was
+   * 1079 green.
+   *
+   * ═══ WHY NOTHING CAUGHT IT ═══
+   *
+   * `node --check` passed. It does not reject a duplicate `const` in a .ts
+   * file the way Deno does at module load, and I had treated a green
+   * --check as "this parses". The suite cannot import index.ts at all, so it
+   * had no opinion either. Both of my existing pre-deploy checks — the marker
+   * greps and the byte-for-byte artifact comparison — verify that the right
+   * TEXT shipped, and neither can tell whether that text RUNS.
+   *
+   * A merge is where this class arrives: both sides adding the same guard is a
+   * sign they were both right, and the conflict resolver happily keeps both.
+   */
+  const code = codeOnly(readFileSync(INDEX, 'utf8'));
+
+  const counts = {};
+  for (const m of code.matchAll(/^(?:export\s+)?(?:const|let|class|function|async function)\s+([A-Za-z_$][\w$]*)/gm)) {
+    counts[m[1]] = (counts[m[1]] ?? 0) + 1;
+  }
+  const duplicates = Object.entries(counts).filter(([, n]) => n > 1);
+
+  assert.deepEqual(duplicates, [],
+    'a top-level identifier is declared twice in the edge function; Deno refuses to '
+    + 'load the module and EVERY request answers BOOT_ERROR');
+});
+
+test('THE CONTROL: the duplicate-declaration gate can fail', () => {
+  // Applied to a copy in memory, so proving it cannot damage the real file.
+  const real = readFileSync(INDEX, 'utf8');
+  const broken = `${real}\nconst UUID = /x/;\n`;
+
+  const counts = {};
+  for (const m of codeOnly(broken).matchAll(/^(?:export\s+)?(?:const|let|class|function|async function)\s+([A-Za-z_$][\w$]*)/gm)) {
+    counts[m[1]] = (counts[m[1]] ?? 0) + 1;
+  }
+  assert.ok(Object.entries(counts).some(([, n]) => n > 1),
+    'the gate cannot see a duplicate that would take the function down');
+});

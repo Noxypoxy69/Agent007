@@ -19,7 +19,7 @@ import { spawn } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { run } from './exec.mjs';
 import {
-  waitForEvents, fetchOwnTask, renewLease, returnWork, HOSTED,
+  waitForEvents, fetchOwnTask, renewLease, returnWork, publishRegistration, HOSTED,
 } from './hostedRegistry.mjs';
 
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
@@ -183,5 +183,84 @@ export function hostedDeps(env, { session_id }) {
     },
 
     returnWork: async (body) => returnWork(env, body),
+  };
+}
+
+/**
+ * HEARTBEAT WHILE WORKING, AND NOTICE WHEN IT STOPS.
+ *
+ * ═══ THE BUG THIS FIXES, WHICH WAS AN HOUR OLD ═══
+ *
+ * `agentbridge work` claimed a task, worked for up to THIRTY MINUTES, renewed
+ * its LEASE faithfully -- and never beat its SESSION. Sessions go stale after
+ * ten minutes. So a worker doing a perfectly normal task disappeared from the
+ * roster a third of the way through, `wentStale` raised an alert about a worker
+ * that was fine, and any coordinator reading the roster saw a dead agent
+ * holding live work.
+ *
+ * The lease and the session are different clocks and I had wired only one.
+ *
+ * ═══ AND THE OTHER HALF, WHICH b6 FOUND THE HARD WAY ═══
+ *
+ * b6's watcher died silently: the background process was still nominally
+ * running, produced no output, and stopped beating. The roster was right to
+ * call it offline; b6 did not know. A worker that cannot tell whether its own
+ * heartbeat is landing will keep working while the system has written it off --
+ * and its task is reaped out from under it the moment the lease lapses.
+ *
+ * So this returns the outcome rather than swallowing it, and the driver logs a
+ * failure. A heartbeat that fails silently is worse than none: none is at least
+ * consistent with what the roster says.
+ */
+export function heartbeatDeps(env, { session_id, agent_id }) {
+  let consecutiveFailures = 0;
+
+  return {
+    // `opts` carries an injectable fetch. Without it this client could only be
+    // tested through the driver's fake, which is how the NOT_CONFIGURED branch
+    // went uncovered: a fake dep proves the driver calls something, never that
+    // the something is right.
+    async heartbeat({ capacity = 'busy', task_id = null, head_sha = null } = {}, opts = {}) {
+      const res = await publishRegistration(env, {
+        session_id,
+        agent_id,
+        capacity,
+        task_id,
+        head_sha,
+        heartbeat_at: new Date().toISOString(),
+      }, opts);
+
+      if (res.state === HOSTED.OK) {
+        consecutiveFailures = 0;
+        return { ok: true };
+      }
+
+      consecutiveFailures += 1;
+      /*
+       * NOT_CONFIGURED is not a failure -- a local-only worker is a legitimate
+       * setup and counting it would raise a false alarm forever. Everything
+       * else is: REFUSED and REJECTED mean the Bridge answered and said no,
+       * UNREACHABLE means nobody answered. All three leave this worker
+       * invisible, which is the thing that matters.
+       */
+      if (res.state === HOSTED.NOT_CONFIGURED) {
+        consecutiveFailures = 0;
+        return { ok: true, note: 'not configured; local-only' };
+      }
+
+      return {
+        ok: false,
+        consecutiveFailures,
+        detail: res.detail ?? res.state,
+        /*
+         * THE THRESHOLD IS THE STALENESS WINDOW, NOT A ROUND NUMBER. Sessions
+         * go stale at ten minutes and the driver cycles far faster than that,
+         * so three consecutive failures means the roster is about to be right
+         * about us and we should say so loudly rather than discover it when a
+         * return is refused.
+         */
+        goingDark: consecutiveFailures >= 3,
+      };
+    },
   };
 }
