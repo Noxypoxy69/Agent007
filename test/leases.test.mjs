@@ -83,10 +83,56 @@ test('PROOF 2b: the SAME session may re-claim its own live lease', () => {
   assert.equal(canClaim(mine, worker(), { now: NOW }).ok, true);
 });
 
-test('an EXPIRED lease does not block: that is what an expiry is for', () => {
-  const dead = task({ state: 'runnable', assigned_session: 'danny-win-10', lease_expires_at: at(-1) });
-  assert.equal(canClaim(dead, worker(), { now: NOW }).ok, true,
-    'work whose holder died stayed locked to the grave');
+test('an EXPIRED lease does not block ONCE THE REAPER HAS RUN', () => {
+  /*
+   * READ THE STATE IN THIS FIXTURE BEFORE BELIEVING THE TITLE. It is `runnable`,
+   * which is the POST-REAPER shape: the sweep has already returned the row to
+   * the pool. This test says nothing whatever about the moment the holder dies.
+   *
+   * The original title was "an EXPIRED lease does not block: that is what an
+   * expiry is for", and it was over-promising in a way that mattered. code-d
+   * found the gap by probing the database: an expired lease does NOT make work
+   * claimable on its own, because claim_task admits only runnable and returned
+   * and an expiry leaves the row in `assigned`. Its first fencing probe failed
+   * at the second claim with reason `state` for exactly this reason.
+   *
+   * So the pre-reaper case was untestable here by construction -- the fixture
+   * could not express it -- and a reader would have taken this as proof of
+   * automatic recovery, which is precisely what did not exist while the reaper
+   * sat unscheduled. The next test expresses it.
+   */
+  const swept = task({ state: 'runnable', assigned_session: 'danny-win-10', lease_expires_at: at(-1) });
+  assert.equal(canClaim(swept, worker(), { now: NOW }).ok, true,
+    'work whose holder died stayed locked to the grave even after the sweep');
+});
+
+test('PRE-REAPER: an expired lease on an ASSIGNED row is NOT claimable — and that is the SQL too', () => {
+  /*
+   * THE SHAPE THE OTHER TEST COULD NOT EXPRESS, pinned so the two
+   * implementations are visibly the same rather than accidentally the same.
+   *
+   * The instant a worker dies its row is `assigned` with an expired lease.
+   * Nothing recovers it. canClaim refuses on state; claim_task refuses on state,
+   * with reason `state`. They AGREE -- which is the good news, and which nothing
+   * at either site said out loud, so agreeing looked identical to diverging.
+   *
+   * WHAT THIS MEANS, IN code-d's WORDS, WHICH ARE BETTER THAN MINE: while the
+   * reaper was unscheduled, expired work was STRANDED PERMANENTLY. Not "recovery
+   * was slower" -- claim_task would not pick it up, whoever asked. I wrote that
+   * migration up as a missing convenience and it was a missing recovery path.
+   *
+   * SO THIS TEST IS A DEPENDENCY DECLARATION. The lease layer's recovery
+   * property lives in reconcile_leases running on its schedule, NOT in the
+   * expiry timestamp. If that cron job is ever removed, this comment is where
+   * the reason it existed is written down.
+   */
+  const justDied = task({ state: 'assigned', assigned_session: 'danny-win-10', lease_expires_at: at(-1) });
+  const r = canClaim(justDied, worker(), { now: NOW });
+
+  assert.equal(r.ok, false,
+    'an expired lease made assigned work claimable here while the SQL refuses it — the two have diverged');
+  assert.match(r.errors.join(' '), /assigned/,
+    'the refusal did not name the state, which is the only thing that explains why an expiry was not enough');
 });
 
 test('only runnable or returned work is claimable', () => {
