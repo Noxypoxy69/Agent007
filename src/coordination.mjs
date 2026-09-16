@@ -1,3 +1,4 @@
+import { isLive, heartbeatAgeMs, STALE_AFTER_MS } from './liveRegistry.mjs';
 /**
  * THE COORDINATION GUARD: what may be assigned, to whom, and what may be said.
  *
@@ -378,8 +379,73 @@ export function validateAgentId(value, field) {
  * Fixed fields only. There is no free-form envelope, no attachment, and no
  * field whose contents are interpreted by anything.
  */
-export function validateMessage(m = {}, { sessions = null } = {}) {
+
+/**
+ * IS ANYBODY GOING TO READ THIS? Reported, never refused.
+ *
+ * WRITTEN AFTER SENDING FIVE REPORTS INTO A DEAD INBOX. Three went to code-b
+ * and two to code-c on 2026-09-16; code-b's sessions had last been seen at
+ * 17:19 and 17:07 and the first message went at 17:43, and code-c had been
+ * silent since 12:30 when it was written to at 18:58 and 19:34. Nobody read any
+ * of them. Nothing said so. docs/ORDER.md item 5 had predicted exactly this --
+ * "with no chat open, a message to a name nobody reads is undetectable" -- and
+ * counted twenty-nine before these.
+ *
+ * THE GAP WAS NEVER THE ROSTER CHECK. `to_agent` was validated as a KNOWN actor
+ * and both recipients were known. Known and reachable are different questions
+ * and only one of them was being asked.
+ *
+ * IT IS A NOTE AND NOT AN ERROR, and the comment above this function has said
+ * so since the day it was written: queueing work for a worker that is
+ * restarting is what a durable channel is for. Refusing would break the case
+ * the channel exists for. So the message lands and the sender is told what it
+ * landed in.
+ *
+ * THE WINDOW IS THE SHARED ONE. test/oneStalenessWindow.test.mjs exists because
+ * two windows disagreed about the same rows in the same second and demoted a
+ * live lane; a third private window here would be that bug again.
+ */
+function reachabilityNote(to, sessions, { now, staleAfterMs }) {
+  const rows = arr(sessions).filter((s) => s?.agent_id && canonicalActor(s.agent_id) === to);
+
+  /*
+   * NO SESSION ROW IS NOT STALENESS. A coordinator or an owner is a known actor
+   * that never heartbeats, and warning that they look offline on every message
+   * is how a warning gets ignored -- which costs more than it saves, because the
+   * one that matters is then indistinguishable from the noise.
+   */
+  if (rows.length === 0) return null;
+
+  /*
+   * WITHOUT A CLOCK, LIVENESS IS UNKNOWN AND UNKNOWN IS NOT LIVE. A caller that
+   * passes sessions and forgets `now` would otherwise get silence, which reads
+   * exactly like "the recipient is fine".
+   */
+  if (!nonEmpty(now)) {
+    return `reachability of ${to} was not checked: sessions were supplied without a clock, `
+      + 'so this message may be addressed to a worker that stopped';
+  }
+
+  if (rows.some((r) => isLive(r, { now, staleAfterMs }))) return null;
+
+  const freshest = rows
+    .map((r) => ({ id: r.session_id ?? '(no session id)', age: heartbeatAgeMs(r, now) }))
+    .sort((a, b) => (a.age ?? Infinity) - (b.age ?? Infinity))[0];
+  const silence = freshest?.age == null
+    ? 'has never heartbeated'
+    : `has been silent for ${Math.round(freshest.age / 1000)}s`;
+
+  return `${to} is not live: its freshest session (${freshest.id}) ${silence}, past the `
+    + `${Math.round(staleAfterMs / 1000)}s window. The message is stored and will be there if it `
+    + 'comes back, but nothing is reading it now -- do not treat this as delivered';
+}
+
+export function validateMessage(
+  m = {},
+  { sessions = null, now = null, staleAfterMs = STALE_AFTER_MS } = {},
+) {
   const errors = [];
+  const notes = [];
 
   const fromBad = validateAgentId(m.from_agent, 'from_agent');
   if (fromBad) errors.push(fromBad);
@@ -399,6 +465,9 @@ export function validateMessage(m = {}, { sessions = null } = {}) {
         `to_agent ${JSON.stringify(m.to_agent)} is not a known actor, so nothing would `
           + `ever read it. Known actors: ${roster.join(', ') || '(none)'}`,
       );
+    } else {
+      const note = reachabilityNote(to, sessions, { now, staleAfterMs });
+      if (note) notes.push(note);
     }
   }
   if (!MESSAGE_TYPES.includes(m.type)) {
@@ -425,7 +494,7 @@ export function validateMessage(m = {}, { sessions = null } = {}) {
   }
   if (m.task_id != null && !nonEmpty(m.task_id)) errors.push('task_id must be a string when present');
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, notes };
 }
 
 /**

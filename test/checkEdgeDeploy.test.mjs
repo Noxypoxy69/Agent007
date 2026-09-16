@@ -24,8 +24,8 @@ import { linesMissingFrom, sharedImports, moduleExports } from '../scripts/check
 const SCRIPT = fileURLToPath(new URL('../scripts/check-edge-deploy.mjs', import.meta.url));
 
 /** Run the real script as a real process, so the exit code is the shipped one. */
-const run = (a, b) => new Promise((resolve) => {
-  execFile(process.execPath, [SCRIPT, a, b], (error, stdout, stderr) => {
+const run = (a, b, ...flags) => new Promise((resolve) => {
+  execFile(process.execPath, [SCRIPT, a, b, ...flags], (error, stdout, stderr) => {
     resolve({ code: error?.code ?? 0, stdout, stderr });
   });
 });
@@ -58,8 +58,19 @@ test('A DEPLOY THAT REMOVES A LIVE LINE IS REFUSED', async (t) => {
     { 'index.ts': ENTRY, '_shared.js': SHARED });
   const r = await run(a, b);
   assert.equal(r.code, 1, 'a deploy that reverts a line was allowed');
-  assert.match(r.stderr, /REMOVES 1 line/);
-  assert.match(r.stderr, /theFix/, 'the refusal does not name the line it is protecting');
+  assert.match(r.stderr, /removes 1 line\(s\)/);
+  assert.match(r.stdout, /theFix/, 'the operator is not shown the line they would lose');
+
+  /*
+   * AND THE BUDGET IS THE ONLY WAY PAST IT. --expect-removed takes a NUMBER and
+   * not a flag on purpose: a boolean is satisfied by typing it, while a count
+   * can only come from somebody who read the removals printed above.
+   */
+  const stated = await run(a, b, '--expect-removed', '1');
+  assert.equal(stated.code, 0, `a stated removal was still refused: ${stated.stderr}`);
+  const wrong = await run(a, b, '--expect-removed', '4');
+  assert.equal(wrong.code, 1, 'a wrong count was accepted');
+  assert.match(wrong.stderr, /says 4/);
 });
 
 test('A MODIFIED LINE IS A REMOVAL, which is the stronger claim', async (t) => {
@@ -70,7 +81,7 @@ test('A MODIFIED LINE IS A REMOVAL, which is the stronger claim', async (t) => {
     { 'index.ts': 'const timeout = 30;\n', '_shared.js': SHARED });
   const r = await run(a, b);
   assert.equal(r.code, 1, 'a silently modified line passed as an addition');
-  assert.match(r.stderr, /timeout = 900/);
+  assert.match(r.stdout, /timeout = 900/, 'the modified line was not shown');
 });
 
 test('A FILE DROPPED FROM THE BUNDLE IS REFUSED', async (t) => {
@@ -203,4 +214,37 @@ test('and a real change does NOT claim nothing would change', async (t) => {
   assert.equal(r.code, 0);
   assert.doesNotMatch(r.stdout, /NOTHING WOULD CHANGE/,
     'a deploy carrying 1 added line was reported as changing nothing');
+});
+
+test('THE REMOVAL BUDGET IS A COUNT, AND IT REFUSES A LOW ONE TOO', async (t) => {
+  /*
+   * A budget you can only overshoot is a boolean wearing a number. Refusing
+   * when FEWER lines were removed than stated catches the other accident: you
+   * expected to replace something and the change is not in the bundle.
+   */
+  const [a, b] = await dirs(t,
+    { 'index.ts': `${ENTRY}const one = 1;\nconst two = 2;\n`, '_shared.js': SHARED },
+    { 'index.ts': ENTRY, '_shared.js': SHARED });
+  assert.equal((await run(a, b, '--expect-removed', '2')).code, 0);
+
+  // MORE removed than stated: the accident the budget exists for.
+  const over = await run(a, b, '--expect-removed', '1');
+  assert.equal(over.code, 1);
+  assert.match(over.stderr, /a removal you did not intend/);
+
+  // FEWER removed than stated: the other accident. You expected to replace
+  // something and the change is not in the bundle -- which is v22 to v23, the
+  // successful deploy that shipped nothing, caught from the other side.
+  const under = await run(a, b, '--expect-removed', '3');
+  assert.equal(under.code, 1);
+  assert.match(under.stderr, /Fewer were removed than you expected/);
+});
+
+test('a malformed budget is a usage error, not a refusal and not a pass', async (t) => {
+  // 2 is usage, 1 is a refusal, 0 is a pass. Collapsing them into "non-zero"
+  // is how the default invocation silently became a usage error earlier today.
+  const [a, b] = await dirs(t, { 'index.ts': ENTRY, '_shared.js': SHARED }, { 'index.ts': ENTRY, '_shared.js': SHARED });
+  assert.equal((await run(a, b, '--expect-removed', 'lots')).code, 2);
+  assert.equal((await run(a, b, '--expect-removed', '-1')).code, 2);
+  assert.equal((await run(a, b)).code, 0, 'the no-flag form regressed into a usage error');
 });

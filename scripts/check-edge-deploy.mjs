@@ -22,10 +22,20 @@
  *      rewritten. That is CLAUDE.md's "grep compares wrapping, not content" in
  *      a place nobody had met it yet. Everything below compares normalised.
  *
- *   2. NOTHING MAY BE REMOVED. Additions are a release; removals are how a
- *      deploy silently reverts somebody else's fix. A changed line shows up as
- *      both a removal and an addition, so "zero removals" also proves nothing
- *      was MODIFIED -- which is the stronger claim and the one worth making.
+ *   2. NOTHING MAY BE REMOVED, UNLESS YOU SAY HOW MANY. Additions are a
+ *      release; removals are how a deploy silently reverts somebody else's fix.
+ *      A changed line shows up as both a removal and an addition, so "zero
+ *      removals" also proves nothing was MODIFIED -- the stronger claim, and
+ *      the one worth making.
+ *
+ *      IT REFUSED A LEGITIMATE CHANGE WITHIN AN HOUR OF BEING WRITTEN, which is
+ *      the correct behaviour and an incomplete design: editing two lines in a
+ *      handler is two removals, and a gate that cannot tell that from a revert
+ *      is one people route around. So `--expect-removed N` states the count in
+ *      advance. A NUMBER AND NOT A FLAG, deliberately: a boolean override is
+ *      satisfied by typing it, while a count can only be supplied by somebody
+ *      who read the diff, and it refuses when the real figure is LOWER too --
+ *      which is the case where you expected to replace something and did not.
  *
  *   3. THE ENTRYPOINT'S IMPORTS MUST BE SATISFIED BY THE SHARED FILE SHIPPING
  *      WITH IT. Pairing a new entrypoint with an older _shared.js is a runtime
@@ -97,7 +107,7 @@ export function moduleExports(source) {
  * module that performs its work on import cannot be unit tested without being
  * executed, which is how a check script ends up with no tests at all.
  */
-export async function main(deployedDir, incomingDir) {
+export async function main(deployedDir, incomingDir, expectRemoved = 0) {
   const read = (dir, name) => readFile(`${dir}/${name}`, 'utf8');
   const findings = [];
 
@@ -125,10 +135,8 @@ export async function main(deployedDir, incomingDir) {
     totalRemoved += removed.length;
     process.stdout.write(`${name}: +${added.length} -${removed.length}\n`);
     if (removed.length) {
-      findings.push(
-        `${name}: this deploy REMOVES ${removed.length} line(s) that are serving traffic. `
-        + `First: ${JSON.stringify(removed.find((l) => l.trim()) ?? removed[0])}`,
-      );
+      for (const line of removed.slice(0, 10)) process.stdout.write(`  - ${line}\n`);
+      if (removed.length > 10) process.stdout.write(`  ... and ${removed.length - 10} more\n`);
     }
   }
 
@@ -152,6 +160,23 @@ export async function main(deployedDir, incomingDir) {
       '\nNOTHING WOULD CHANGE. Every file in this bundle is byte-identical to what is\n'
       + 'already deployed. If you expected to ship a change, you are deploying from the\n'
       + 'wrong tree -- check the branch is the one carrying it.\n',
+    );
+  }
+
+  /*
+   * THE REMOVAL BUDGET, CHECKED ONCE ACROSS THE WHOLE BUNDLE. Every removed
+   * line was printed above, so a caller setting this has been shown exactly
+   * what they are agreeing to.
+   */
+  if (totalRemoved !== expectRemoved) {
+    findings.push(
+      `this deploy removes ${totalRemoved} line(s) that are serving traffic and `
+      + `--expect-removed says ${expectRemoved}. `
+      + (totalRemoved > expectRemoved
+        ? 'Read the removals printed above: a removal you did not intend is how a deploy '
+          + "reverts somebody else's fix while looking like a release."
+        : 'Fewer were removed than you expected, which usually means the change you meant '
+          + 'to make is not in this bundle.'),
     );
   }
 
@@ -193,10 +218,26 @@ export async function main(deployedDir, incomingDir) {
 const invokedDirectly = process.argv[1]
   && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (invokedDirectly) {
-  const [deployedDir, incomingDir] = process.argv.slice(2);
-  if (!deployedDir || !incomingDir) {
-    process.stderr.write('usage: check-edge-deploy.mjs <deployed-dir> <about-to-deploy-dir>\n');
+  const args = process.argv.slice(2);
+  const at = args.indexOf('--expect-removed');
+  const expect = at === -1 ? 0 : Number(args[at + 1]);
+  /*
+   * FILTER ONLY WHEN THE FLAG IS THERE. `at` is -1 when it is absent, so a
+   * naive `i !== at + 1` drops argument ZERO -- the first directory -- and the
+   * script reports a usage error for the commonest invocation of all. Caught
+   * because the check asserted the EXACT exit code: 2 is a usage error and 1 is
+   * a refusal, and "non-zero" would have called that passing.
+   */
+  const positional = at === -1
+    ? args
+    : args.filter((a, i) => i !== at && i !== at + 1);
+  const [deployedDir, incomingDir] = positional;
+  if (!deployedDir || !incomingDir || !Number.isInteger(expect) || expect < 0) {
+    process.stderr.write(
+      'usage: check-edge-deploy.mjs <deployed-dir> <about-to-deploy-dir> '
+      + '[--expect-removed <n>]\n',
+    );
     process.exit(2);
   }
-  process.exit(await main(deployedDir, incomingDir));
+  process.exit(await main(deployedDir, incomingDir, expect));
 }

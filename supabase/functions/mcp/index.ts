@@ -858,8 +858,48 @@ function coordinatorStore(label) {
     },
 
     async sendMessage(m) {
-      const v = validateMessage(m);
+      /*
+       * THE ROSTER IS FETCHED, AND UNTIL NOW IT WAS NOT.
+       *
+       * validateMessage has taken a `sessions` option since it was written, and
+       * this -- its only caller -- never passed one. So the "unknown recipient
+       * is refused" check has never run in production: the one branch that
+       * could refuse an unreadable address was unreachable from the only path
+       * that reaches it. A guard whose caller withholds its input is not a
+       * weaker guard, it is an absent one.
+       *
+       * The clock goes with it. Without `now` liveness cannot be computed, and
+       * validateMessage says so in a note rather than staying quiet, because
+       * silence there is indistinguishable from "the recipient is fine".
+       */
+      const now = new Date().toISOString();
+      let sessions = [];
+      try {
+        const regs = await get('session_registrations?select=*');
+        sessions = regs.map((r) => ({
+          agent_id: r.agent_id, session_id: r.session_id, lane_id: r.lane_id,
+          capacity: r.capacity, heartbeat_at: r.heartbeat_at,
+        }));
+      } catch (e) {
+        /*
+         * A ROSTER WE COULD NOT READ MUST NOT REFUSE THE MESSAGE. Passing an
+         * empty array would make every recipient look unknown and turn a
+         * registry hiccup into a total coordination outage. Passing null skips
+         * the recipient checks entirely, and the note below says the check did
+         * not happen -- an unchecked send is reported, never silently blessed.
+         */
+        sessions = null;
+      }
+
+      const v = validateMessage(m, { sessions, now });
       if (!v.ok) return { ok: false, errors: v.errors };
+
+      const notes = [...(v.notes ?? [])];
+      if (sessions === null) {
+        notes.push('the roster could not be read, so the recipient was not checked for '
+          + 'existence or liveness; this message may be addressed to nobody');
+      }
+
       const [row] = await write('messages', {
         task_id: m.task_id ?? null,
         from_agent: m.from_agent,
@@ -867,7 +907,12 @@ function coordinatorStore(label) {
         type: m.type,
         body: m.body,
       });
-      return { ok: true, message: row };
+
+      /*
+       * THE NOTE TRAVELS WITH THE SUCCESS. `ok: true` on its own is what let
+       * five reports land in a dead inbox and read as delivered.
+       */
+      return notes.length ? { ok: true, message: row, notes } : { ok: true, message: row };
     },
 
 
