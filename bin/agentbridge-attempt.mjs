@@ -28,6 +28,7 @@ import { run } from '../src/exec.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
 import { createWorkspaceManager } from '../src/workspaceManager.mjs';
 import { runAttempt } from '../src/attemptPipeline.mjs';
+import { ENVELOPE_VERSION } from '../src/resultEnvelope.mjs';
 import { createLedger } from '../src/tokenTelemetry.mjs';
 import { createCas, digestOf } from '../src/cas.mjs';
 
@@ -176,6 +177,12 @@ const result = await runAttempt({
 process.stdout.write(
   `${JSON.stringify(
     {
+      /*
+       * The schema version travels with the record, because the reader arrives
+       * months after the writer and will meet rows from earlier versions of it.
+       * One field now, unrecoverable later.
+       */
+      envelope_version: ENVELOPE_VERSION,
       task_id: result.taskId,
       attempt: result.attempt,
       accepted: result.accepted,
