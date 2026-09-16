@@ -62,7 +62,19 @@ claim → `runAttempt` → return. The daemon owns the lease, never the process 
 starts. `bin/agentbridge-attempt.mjs` is a working caller of everything except
 those three verbs.
 
-**3. Persist the attempt record.** — b6 *(assigned)*
+**3. ~~Persist the attempt record.~~ BUILT AND WIRED — 2026-09-16.** — b6 built it, c8 wired it
+code-b built the row and deliberately left it uncalled, declaring why in the
+orphan list: the write must happen under the lease that authorised the work, and
+a caller invented to satisfy a gate would put it outside the fence. Resolved by
+splitting it — the START write happens before any work, when the claim's lease
+is the newest thing in the room; the FINISH write goes through `io.records`,
+which is the fenced write at the return boundary. A fence check in the pipeline
+would be a second implementation of lease semantics.
+All four verdicts are stored separately, and a false done — agent claims success,
+machine rejects — is now a passing test rather than an argument.
+
+*(original brief kept below)*
+**3a. Persist the attempt record.** — b6
 Must land before step 7 runs, or the first real attempts are unrecorded and
 unrecoverable. Routing identity — engine, model, role profile, worker slot,
 lease, fence — plus all three verdicts stored separately: what the agent
@@ -113,7 +125,7 @@ tried to record it on his behalf, which is correct — it supersedes his own
 earlier prepare/confirm split, so it needs his words. Nothing here proceeds
 unattended until it is recorded.
 
-**7b. Zero interactive prompts, as a hard acceptance test.** — partly built
+**7b. Zero interactive prompts, as a hard acceptance test.** — ACCEPTANCE TEST BUILT
 NEW, 2026-09-16, from a screenshot of a coding agent stopped on "Do you want to
 proceed?" for a local commit. Not an AI problem and not a policy problem: the
 policy in `permissionRequest.mjs` has classified `commit` as ROUTINE since it
@@ -134,10 +146,19 @@ Bridge policy, and an agent that chooses commands as it goes needs the guard at
 its own tool boundary rather than only at launch. Bridge grants the specific
 safe classes; nothing gets a blanket allow.
 
-*The acceptance test, and it is pass/fail:* start an unattended task that reads
-files, edits files, runs tests, stages and commits, and submits a result. Close
-the UI. **Zero interactive prompts.** One prompt fails the run as
-`INTERACTIVE_PROMPT_DETECTED`.
+*The acceptance test exists and passes* — `test/unattendedLoop.test.mjs`, run
+against a real repository, a real child process and real git rather than mocks.
+A task reads, edits, runs a check, stages and commits with nobody at a keyboard;
+an agent that prompts fails in under fifteen seconds with `outcome:prompted`
+instead of waiting out its lease. It found two shipped bugs on its first run,
+including one of mine from an hour earlier: the `prompted` outcome could not
+survive the executor adapter, and every unit test passed because they call an
+adapter directly and never go through `execute`.
+
+*Still open here:* launching the coding agent itself in a non-interactive
+permission mode is built (`agentPermissions.mjs`, derived from the guard, never
+a blanket grant) but has never been run against a real Claude Code or Codex
+binary. That is the remaining half.
 
 **8. T1 closes with nobody watching.**
 A real task, leased, run, verified, reviewed, accepted, closed. Danny's windows
@@ -200,7 +221,12 @@ converges to one correct durable result with no chat open. Not before.
 ## Only after that
 
 21. **Code-health metrics per attempt** — recorded only, no blocking gates.
-22. **`readCache` gets its consumer** — the context compiler. Built, tested, unused.
+22. ~~**`readCache` gets its consumer**~~ **DONE — 2026-09-16.** `contextCompiler.mjs`.
+    The digest is of what was SENT, not of the files: an unchanged file travels
+    as a reference, so identical files can be a different prompt, and hashing
+    content would blind the loop detector in the one case it exists for. The
+    pipeline computes the digest rather than accepting the caller's. Four known
+    orphans left.
 23. **Cache L0–L2 and prefix alignment** — the deterministic half only.
 24. **Reviewer/fixer hardening** — stable finding ids, dedupe, re-review.
 25. **Learning: scorer, then replay gate, then promotion.** Entry condition is
