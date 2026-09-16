@@ -325,10 +325,18 @@ test('WIRING claim_review WITHOUT GATING claim_task ON THE REVIEW LEASE', async 
    * row. The reviewer finds out at submission, when fencing refuses a token
    * that was superseded half an hour earlier.
    *
-   * WHY THIS IS A TEST AND NOT A FIX. Whether a worker may EVER evict a live
-   * reviewer is a design decision, and it should not arrive as a side effect of
-   * a trigger nobody was thinking about. It is with Danny and code-c. Inventing
-   * an answer inside the wiring is exactly what would bury it.
+   * THE RULING, so this is a regression gate and not a placeholder. Danny has
+   * since decided it: claim_task must REFUSE while a live review lease exists,
+   * mirroring the `under-review` check claim_review already carries, with a
+   * detail naming the reviewer and the expiry. The implementation is a
+   * migration and is deliberately NOT part of d-lease-wiring -- that change
+   * carries enough already. So what this assertion guards is a decided design
+   * awaiting implementation, not an open question.
+   *
+   * WHY IT WAS STILL A TEST AND NOT A FIX WHEN IT WAS WRITTEN. Whether a worker
+   * may ever evict a live reviewer was a design decision, and it should not
+   * arrive as a side effect of a trigger nobody was thinking about. Inventing
+   * an answer inside the wiring is exactly what would have buried it.
    *
    * WHY IT IS NOT REACHABLE TODAY, and why this file says so rather than
    * printing a green tick over it: `claim_review` and `renew_review_lease` have
@@ -388,6 +396,75 @@ test('WIRING claim_review WITHOUT GATING claim_task ON THE REVIEW LEASE', async 
       + 'and nothing is addressed to the reviewer -- it finds out when submission refuses a '
       + 'token superseded half an hour earlier. Decide whether a worker may evict a live '
       + 'reviewer before shipping both halves.',
+  );
+});
+
+/* ── the seam: the handler's demand and the client's payload ──────────── */
+
+test('THE CLIENT THAT RETURNS WORK SENDS THE TOKEN THE HANDLER DEMANDS', async () => {
+  /*
+   * THIS TEST IS EXPECTED TO BE RED, AND IT IS RED ON PURPOSE.
+   *
+   * It is not a discovered flake and it is not something to skip. It records a
+   * real, deploy-blocking gap that d-lease-wiring opened and cannot close from
+   * inside its own allowed paths. Turning it green is the acceptance criterion
+   * for the follow-up contract named in the failure message below.
+   *
+   * THE GAP. /return now requires `lease_token` and offers no fallback, which
+   * is the correct design -- the token comparison IS the zombie catch, and a
+   * path that accepts a return without one is a path every zombie takes by
+   * omitting a field. But the only client that posts to /return is
+   * `bin/agentbridge.mjs return-task`, and its body is
+   *
+   *     { task_id, session_id, head_sha, notes }
+   *
+   * with no token, because until this change there was none to send. So a
+   * worker can CLAIM work and cannot HAND IT BACK: every return answers 400.
+   *
+   * WHY 930 GREEN TESTS SAID NOTHING ABOUT IT, which is the part worth keeping.
+   * test/returnTaskCli.test.mjs asserts the client's payload against a STUBBED
+   * endpoint. The rest of this file asserts the handler's requirements against
+   * SOURCE. Both are correct, both are green, and neither can see the other.
+   * Two halves, each internally right, disagreeing across a seam nothing spans
+   * -- the same shape as the booking sheet and the phone agent reading
+   * different sources for a fortnight. This assertion exists because it is the
+   * only one in the suite that reads both halves and compares them.
+   *
+   * IT IS CONDITIONAL, DELIBERATELY. If the handler ever stops requiring a
+   * token, this stops demanding one rather than nagging forever about a rule
+   * that no longer exists. A test that outlives its premise gets deleted along
+   * with whatever it was protecting.
+   */
+  const handler = slice(...ANCHORS.ret);
+  assert.ok(handler, '/return handler not found');
+
+  const handlerRequires = /body\?\.lease_token/.test(handler)
+    && /lease_token is required/.test(raw.slice(source.indexOf(ANCHORS.ret[0])));
+  if (!handlerRequires) return; // premise gone; nothing to couple
+
+  const cli = codeOnly(
+    await readFile(fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url)), 'utf8'),
+  );
+  const start = cli.indexOf("if (cmd === 'return-task') {");
+  assert.notEqual(start, -1, 'the return-task command is gone from the CLI');
+  const end = cli.indexOf("if (cmd === '", start + 30);
+  const block = cli.slice(start, end === -1 ? cli.length : end);
+
+  assert.match(
+    block,
+    /lease_token/,
+    'THE LOOP DOES NOT CLOSE. /return requires lease_token; `agentbridge return-task` '
+      + 'sends { task_id, session_id, head_sha, notes } and no token, so every return '
+      + 'answers 400 and a worker that claimed work cannot hand it back.\n\n'
+      + 'WHAT CLOSES THIS: the client half of the lease wiring -- bin/agentbridge.mjs '
+      + 'sends lease_token on return-task, and the worker runtime STORES the token it '
+      + 'gets from assign_task\'s `lease.token` so there is one to send. That is runtime '
+      + 'work, it is outside d-lease-wiring\'s allowed paths, and it is a named open gap '
+      + 'rather than an assigned contract. This test going green IS that contract\'s '
+      + 'acceptance.\n\n'
+      + 'DO NOT SKIP OR DELETE THIS. It is the only assertion in the suite that reads '
+      + 'both the handler and the client; returnTaskCli.test.mjs checks the client '
+      + 'against a stub and cannot see the handler at all.',
   );
 });
 
