@@ -128,16 +128,71 @@ export function looksExecutable(text) {
 }
 
 /**
+ * AN AGENT ID IS A SLUG, AND A NAME NOBODY ANSWERS TO IS A BLACK HOLE.
+ *
+ * Measured on the live log, 98 messages: ten distinct identity strings for what
+ * are actually six actors. The coordinator alone sent under four names --
+ * "chatgpt", "chatgpt-command-center", "chatgpt-work" and "chatgpt-work
+ * coordinator" -- and two names, code-b and b6, had received twenty-nine
+ * messages between them while having sent none, ever.
+ *
+ * Nothing was broken in the sense of erroring. Every one of those sends
+ * returned ok, because the only rule was that the field was non-empty. A typo
+ * or a variant silently opens a new mailbox that nobody reads, and the sender
+ * is told it worked. One lane spent a whole morning writing to a name the
+ * recipient was not listening on, and neither side saw a reply.
+ *
+ * THE SHAPE RULE COSTS NOTHING AND CATCHES THE VARIANT WITH A SPACE IN IT.
+ * Every real id here is a slug. "chatgpt-work coordinator" is a description
+ * that got into an identifier field, and it is refused now.
+ *
+ * THE REGISTRY RULE IS THE REAL ONE and needs the live roster, so it applies
+ * only when a caller supplies it. Note the two outcomes are NOT the same:
+ * an UNKNOWN name is a mistake and is refused, while a KNOWN but offline agent
+ * is a normal thing to write to -- queued work for a worker that is restarting
+ * is the whole point of a durable channel. resolveLiveAgent already draws
+ * exactly that distinction for assignment; messages simply never used it.
+ */
+export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
+export function validateAgentId(value, field) {
+  if (!nonEmpty(value)) return `${field} is required`;
+  if (!AGENT_ID.test(value.trim())) {
+    return `${field} ${JSON.stringify(value)} is not an agent id: ids are slugs, `
+      + 'so a space or punctuation usually means a description reached an identifier field';
+  }
+  return null;
+}
+
+/**
  * Validate a structured message.
  *
  * Fixed fields only. There is no free-form envelope, no attachment, and no
  * field whose contents are interpreted by anything.
  */
-export function validateMessage(m = {}) {
+export function validateMessage(m = {}, { sessions = null } = {}) {
   const errors = [];
 
-  if (!nonEmpty(m.from_agent)) errors.push('from_agent is required');
-  if (!nonEmpty(m.to_agent)) errors.push('to_agent is required');
+  const fromBad = validateAgentId(m.from_agent, 'from_agent');
+  if (fromBad) errors.push(fromBad);
+  const toBad = validateAgentId(m.to_agent, 'to_agent');
+  if (toBad) errors.push(toBad);
+
+  /*
+   * An unknown recipient is refused; a known one that is offline is fine and is
+   * reported as a note rather than an error, because queueing work for a worker
+   * that is restarting is what a durable channel is for.
+   */
+  if (!toBad && Array.isArray(sessions)) {
+    const known = sessions.some((s) => s?.agent_id === m.to_agent.trim());
+    if (!known) {
+      const roster = [...new Set(sessions.map((s) => s?.agent_id).filter(Boolean))].sort();
+      errors.push(
+        `to_agent ${JSON.stringify(m.to_agent)} is not a registered agent, so nothing would `
+          + `ever read it. Known agents: ${roster.join(', ') || '(none registered)'}`,
+      );
+    }
+  }
   if (!MESSAGE_TYPES.includes(m.type)) {
     errors.push(`type must be one of ${MESSAGE_TYPES.join(', ')}`);
   }

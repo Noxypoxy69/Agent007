@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  canAssign, validateMessage, looksExecutable, executableMatch, assignmentRecord,
+  canAssign, validateMessage, validateAgentId, looksExecutable, executableMatch, assignmentRecord,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -310,4 +310,58 @@ test('a command chained after an operator is caught wherever it sits', () => {
 test('substitution and pipes into a shell are caught in any position', () => {
   assert.equal(looksExecutable('the answer is $(whoami) apparently'), true);
   assert.equal(looksExecutable('it fetches then | bash which is the problem'), true);
+});
+
+/* ── a name nobody answers to ───────────────────────────────────────────── */
+
+/**
+ * MEASURED ON THE LIVE LOG, not imagined. 98 messages carried ten distinct
+ * identity strings for six actors. The coordinator alone sent under four names.
+ * code-b and b6 had received twenty-nine messages between them and sent none,
+ * ever -- every one of those sends returned ok, because the only rule was that
+ * the field was not empty.
+ */
+
+const roster = [{ agent_id: 'code-c' }, { agent_id: 'code-b' }, { agent_id: 'claude-work' }];
+const msg = (to) => ({ from_agent: 'claude-work', to_agent: to, type: 'status', body: 'a normal note' });
+
+test('AN OFFLINE BUT REGISTERED AGENT IS A FINE RECIPIENT', () => {
+  // the distinction that matters: queueing for a worker that is restarting is
+  // exactly what a durable channel is for, so this must NOT be refused
+  assert.equal(validateMessage(msg('code-b'), { sessions: roster }).ok, true);
+});
+
+test('AN UNREGISTERED NAME IS REFUSED, AND THE ROSTER IS NAMED', () => {
+  const v = validateMessage(msg('chatgpt-command-center'), { sessions: roster });
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join(' '), /not a registered agent/);
+  assert.match(v.errors.join(' '), /code-b, code-c/, 'the reader is told what the real names are');
+});
+
+test('a description in an identifier field is refused without any roster', () => {
+  // "chatgpt-work coordinator" was a real sender id on the live channel
+  const v = validateMessage(msg('chatgpt-work coordinator'));
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join(' '), /not an agent id/);
+  assert.equal(validateAgentId('chatgpt-work coordinator', 'to_agent') !== null, true);
+});
+
+test('every id actually in use today still passes the shape rule', () => {
+  // the positive control: a rule that refuses the existing roster is one
+  // somebody switches off, taking the true refusals with it
+  for (const id of ['a', 'b6', 'chatgpt', 'chatgpt-work', 'claude-work', 'code-b', 'code-c', 'code-d']) {
+    assert.equal(validateAgentId(id, 'to_agent'), null, `rejected a real id: ${id}`);
+  }
+});
+
+test('without a roster the registry rule does not fire, and shape still does', () => {
+  // today's call site supplies no sessions; the shape rule must work anyway
+  assert.equal(validateMessage(msg('anything-at-all')).ok, true);
+  assert.equal(validateMessage(msg('two words')).ok, false);
+});
+
+test('a malformed sender is caught too, not only the recipient', () => {
+  const v = validateMessage({ ...msg('code-c'), from_agent: 'chatgpt-work coordinator' });
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join(' '), /from_agent/);
 });

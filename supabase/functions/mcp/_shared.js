@@ -973,11 +973,40 @@ export function looksExecutable(text) {
   return executableMatch(text) !== null;
 }
 
-export function validateMessage(m = {}) {
+export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
+export function validateAgentId(value, field) {
+  if (!nonEmpty(value)) return `${field} is required`;
+  if (!AGENT_ID.test(value.trim())) {
+    return `${field} ${JSON.stringify(value)} is not an agent id: ids are slugs, `
+      + 'so a space or punctuation usually means a description reached an identifier field';
+  }
+  return null;
+}
+
+export function validateMessage(m = {}, { sessions = null } = {}) {
   const errors = [];
 
-  if (!nonEmpty(m.from_agent)) errors.push('from_agent is required');
-  if (!nonEmpty(m.to_agent)) errors.push('to_agent is required');
+  const fromBad = validateAgentId(m.from_agent, 'from_agent');
+  if (fromBad) errors.push(fromBad);
+  const toBad = validateAgentId(m.to_agent, 'to_agent');
+  if (toBad) errors.push(toBad);
+
+  /*
+   * An unknown recipient is refused; a known one that is offline is fine and is
+   * reported as a note rather than an error, because queueing work for a worker
+   * that is restarting is what a durable channel is for.
+   */
+  if (!toBad && Array.isArray(sessions)) {
+    const known = sessions.some((s) => s?.agent_id === m.to_agent.trim());
+    if (!known) {
+      const roster = [...new Set(sessions.map((s) => s?.agent_id).filter(Boolean))].sort();
+      errors.push(
+        `to_agent ${JSON.stringify(m.to_agent)} is not a registered agent, so nothing would `
+          + `ever read it. Known agents: ${roster.join(', ') || '(none registered)'}`,
+      );
+    }
+  }
   if (!MESSAGE_TYPES.includes(m.type)) {
     errors.push(`type must be one of ${MESSAGE_TYPES.join(', ')}`);
   }
