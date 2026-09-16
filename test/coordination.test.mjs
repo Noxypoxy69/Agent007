@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canAssign, validateMessage, validateAgentId, looksExecutable, executableMatch, assignmentRecord,
-  ACTORS, canonicalActor, knownActorIds, inboxNames, messagePreamble,
+  ACTORS, canonicalActor, knownActorIds, inboxNames, messagePreamble, validateSessionId,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -491,4 +491,64 @@ test('EVERY MESSAGE SAYS WHO IS SPEAKING AND WHAT THAT IS WORTH', () => {
   // readers a sender who does not exist
   assert.equal(messagePreamble('chatgpt-work'), mine);
   assert.equal(messagePreamble('claude-work'), mine);
+});
+
+test('A SESSION MAY NOT REGISTER UNDER ANOTHER ACTOR\'S NAME', () => {
+  /*
+   * MEASURED. `social-sparks-app-c8` registered as agent `code-b` at 07:49Z,
+   * two minutes before this lane first signed as c8, and `t-loop-proof` -- the
+   * first end-to-end loop this system ever ran -- is stored with
+   * `returned_by: social-sparks-app-c8`. The mapping in the registration is
+   * correct, so a resolver gets the right actor; every human and every log line
+   * reading the string gets the wrong one, which is most of them.
+   */
+  const e = validateSessionId('social-sparks-app-c8', 'code-b');
+  assert.notEqual(e, null, 'a session claiming another actor was accepted');
+  assert.match(e, /c8/);
+  assert.match(e, /code-b/, 'the refusal has to name who it actually is');
+});
+
+test('THE POSITIVE CONTROL: EVERY SESSION THAT HAS REALLY WORKED STILL REGISTERS', () => {
+  /*
+   * Copied from session_registrations, not invented. A rule that refuses the
+   * sessions running all week is one somebody switches off, taking the true
+   * refusal with it -- and `danny-win-10` is the case that would break a naive
+   * version, because it BEGINS with the owner's own actor id.
+   */
+  for (const [sid, aid] of [
+    ['danny-win-10', 'code-c'],
+    ['danny-win-d1', 'code-d'],
+    ['danny-win-f1', 'code-b'],
+    ['probe-ok-session', 'probe-ok'],
+  ]) {
+    assert.equal(validateSessionId(sid, aid), null, `refused a real session: ${sid}`);
+  }
+});
+
+test('an alias of your OWN actor is fine, which is why this is about identity not strings', () => {
+  // b6 IS code-b, by d-owner-identity-b6-20260916. The same table that resolves
+  // a recipient answers this, so the two cannot drift apart.
+  assert.equal(validateSessionId('social-sparks-app-b6', 'code-b'), null);
+  assert.equal(validateSessionId('social-sparks-app-b6', 'b6'), null);
+  // but the same suffix under a different actor is the collision again
+  assert.notEqual(validateSessionId('social-sparks-app-b6', 'code-d'), null);
+});
+
+test('only the last segment is examined, and the shape rule still applies', () => {
+  /*
+   * THE PREFIX IS A MACHINE OR A REPOSITORY and legitimately contains anything.
+   *
+   * `b6-win-10` is the case that pins this, and my first version used
+   * `c8-win-10`, which does NOT: `c8` is a canonical id and resolves to itself,
+   * so a check that scanned every segment looking for a name that RESOLVED
+   * elsewhere would have passed it and the test would have proved nothing.
+   * `b6` is an alias and resolves to `code-b`, so it trips exactly the
+   * scan-everything mistake this is guarding against -- B's machine launching
+   * C's session is a real thing that would then be refused for no reason.
+   */
+  assert.equal(validateSessionId('b6-win-10', 'code-c'), null, 'a prefix is not a claim');
+  assert.equal(validateSessionId('c8-win-10', 'code-c'), null);
+  assert.notEqual(validateSessionId('anything-c', 'code-b'), null);
+  assert.notEqual(validateSessionId('two words', 'code-b'), null, 'the shape rule runs first');
+  assert.notEqual(validateSessionId('', 'code-b'), null);
 });

@@ -69,7 +69,29 @@ writer is wired on `work/support-modules` and that branch is unmerged.
 - **B has two registrations** (`code-b` and `b6`) and mail splits between them.
   `d-owner-identity-b6-20260916`, in Danny's words: *"b6 is b"*.
 - **One of B's sessions is registered as `social-sparks-app-c8`.** `c8` is this
-  lane's id. A session named after another actor is how a return gets attributed
-  to the wrong one — `t-loop-proof` is recorded as `returned_by:
-  social-sparks-app-c8`, which reads as mine and is B's.
+  lane's id. It was created at 07:49Z, two minutes before this lane first signed
+  as c8, and `t-loop-proof` — the first end-to-end loop this system ever ran —
+  is stored with `returned_by: social-sparks-app-c8`, which reads as mine and is
+  B's.
+
+  **The guard is built** (`validateSessionId`, on `work/support-modules`) and
+  refuses a session id whose LAST segment names a different actor. Only the last
+  segment, because these ids are `<where-it-was-launched>-<which-session>` and
+  `danny-win-10` legitimately begins with the owner's own id — a check that
+  scanned every segment would refuse the three sessions that have worked all
+  week, and a rule that refuses the working roster is one somebody switches off.
+  An alias of your OWN actor passes: `social-sparks-app-b6` as `code-b` is
+  correct, because b6 IS code-b.
+
+  **Two things still need doing by hand when B comes up**, and neither is mine:
+  B must restart under a session id that is not another actor's name — anything
+  whose last segment is not a roster name, e.g. `agentbridge-b11` after its own
+  worktree — and the guard only bites once `work/support-modules` is merged and
+  deployed.
+
+  **The historical row is NOT being rewritten.** `t-loop-proof.returned_by`
+  stays as it is. It records what the system was told at the time, the
+  registration correctly maps that session to `code-b` so a resolver still gets
+  the right actor, and editing a returned-by field to make a log read better is
+  how a record stops being evidence.
 - Nine `probe-*` rows are test leftovers cluttering the roster.
