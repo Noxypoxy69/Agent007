@@ -283,6 +283,12 @@ test('THE DEPLOYED COPY AGREES — classification and routing', () => {
     'deploy.production', 'deploy.staging', 'run.tests', 'commit', 'push', '', 'x.y',
     'Deploy.Production', 'DEPLOY.PRODUCTION', 'deploy.Production',
     'DROP.table_users', 'Merge.main', '  DEPLOY.production  ',
+    // ROUND 2 belongs in this fixture, and its absence was caught by mutation
+    // for the THIRD time on this same fixture: anchoring the deny-list at
+    // position zero in the DEPLOYED copy alone left this file green.
+    'commit.deploy.production', 'read.deploy.production', 'get.delete.everything',
+    'list.merge.main', 'inspect.drop.table_users', 'Commit.Deploy.Production',
+    'read.deploy.staging', 'xdeploy.production', 'deploy.production.read.file',
   ]) {
     for (const reversible of [true, false, undefined]) {
       assert.equal(depRiskOf(a, { reversible }), srcRiskOf(a, { reversible }),

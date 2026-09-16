@@ -136,6 +136,72 @@ export const hasPrefix = (action, list) => {
 };
 
 /**
+ * Every segment-boundary suffix of an action, longest first.
+ *
+ *   "commit.deploy.production" -> ["commit.deploy.production",
+ *                                  "deploy.production",
+ *                                  "production"]
+ *
+ * SEGMENT boundaries, not every character offset, deliberately. Matching at
+ * arbitrary offsets would make "xdeploy.production" contain "deploy.production"
+ * and turn any action with an unlucky substring into an owner escalation, which
+ * is a different way of making the gate useless.
+ */
+export const segmentSuffixes = (action) => {
+  const parts = String(action).toLowerCase().split('.');
+  return parts.map((_, i) => parts.slice(i).join('.'));
+};
+
+/**
+ * A DENY-LIST MATCH WINS WHEREVER IT APPEARS, SO ADDING A PREFIX CANNOT
+ * SUBTRACT AUTHORITY.
+ *
+ * ══ ROUND 2: THE SAME CLASS AS ROUND 1, ONE LEVEL UP ══
+ *
+ * code-d probed again after the case-sensitivity fix and found five more, every
+ * one reaching the coordinator instead of Danny:
+ *
+ *     commit.deploy.production   -> routine   COORDINATOR
+ *     read.deploy.production     -> routine   COORDINATOR
+ *     get.delete.everything      -> routine   COORDINATOR
+ *     list.merge.main            -> routine   COORDINATOR
+ *     inspect.drop.table_users   -> routine   COORDINATOR
+ *
+ * The action string is chosen by the CALLER and both lists anchored at position
+ * zero, so prefixing the thing you want with something allow-listed defeated
+ * the deny-list completely.
+ *
+ * ══ WHY THIS IS A MATCHER CHANGE AND NOT FIVE MORE TEST CASES ══
+ *
+ * code-d's sentence, which is the most useful thing written here today:
+ * "Round 1 I probed with capitalisation, because capitalisation is what I
+ * thought of. Round 2 I probed with prefixing, because your fix made me look
+ * again. There will be a round 3 and neither of us will have thought of it."
+ *
+ * AN ADVERSARIAL PROBE IS EVIDENCE THAT A SPECIFIC ATTACK WORKS. IT IS NEVER
+ * EVIDENCE THAT THE REMAINING ONES DO NOT. Adding the five strings code-d
+ * happened to try would fix those five and leave the class open -- which is the
+ * hollow-gate shape again, in yet another costume: a fix whose evidence and
+ * whose claim are about different things.
+ *
+ * ══ THE ASYMMETRY IS THE DESIGN ══
+ *
+ *   DENY-lists  match ANYWHERE at a segment boundary  -- maximally broad.
+ *   ALLOW-list  matches only from the START           -- maximally narrow.
+ *
+ * A prefix can therefore never remove a denial, and never add an allowance the
+ * whole action did not already have. Both errors fail toward the owner.
+ *
+ * KNOWN, ACCEPTED RESIDUAL: this over-blocks. "read.deploy.notes" is now
+ * ELEVATED because "deploy." appears at a boundary. That costs one coordinator
+ * approval, and it is the correct direction to be wrong in. An action that
+ * merely RESEMBLES a denied one -- "xdeploy.production" -- is not caught; it is
+ * an unrecognised action and lands on ELEVATED by the default, which is the
+ * documented behaviour for anything nobody classified.
+ */
+export const denies = (action, list) => segmentSuffixes(action).some((s) => hasPrefix(s, list));
+
+/**
  * Classify by risk. UNKNOWN ACTIONS ARE NOT ROUTINE.
  *
  * An action this function does not recognise is classified ELEVATED, never
@@ -190,12 +256,14 @@ export function riskOf(action, { reversible } = {}) {
   if (!nonEmpty(action)) return RISK.IRREVERSIBLE;
   const a = action.trim();
 
-  // Deny-lists first, and they are checked case-insensitively.
-  if (hasPrefix(a, OWNER_ONLY_PREFIXES)) return RISK.IRREVERSIBLE;
+  // Deny-lists first. Case-insensitive, and matched at EVERY segment boundary
+  // rather than only at position zero -- see `denies` for why that is
+  // structural rather than a wider fixture.
+  if (denies(a, OWNER_ONLY_PREFIXES)) return RISK.IRREVERSIBLE;
   // An explicit reversible:false raises. This is the one direction a caller's
   // own declaration is trusted in, because it argues against its own interest.
   if (reversible === false) return RISK.IRREVERSIBLE;
-  if (hasPrefix(a, ELEVATED_PREFIXES)) return RISK.ELEVATED;
+  if (denies(a, ELEVATED_PREFIXES)) return RISK.ELEVATED;
 
   /*
    * ROUTINE IS AN ALLOW-LIST, NOT A CALLER'S CLAIM.
