@@ -10,6 +10,14 @@
 > `origin/master` is now merged in and both sides survive. Re-check before you
 > deploy: master moves, and this file ages the same way the last one did.
 
+> **2026-09-16 23:21 — THE DEPLOY THIS FILE WAS WRITTEN FOR HAS SHIPPED.**
+> code-d deployed **version 24** from the merged master tree `d8235a0`, and
+> `deploy/last-deployment.json` records it with the wrong-tree check run BEFORE
+> shipping. `/review/claim` and `/review/submit` are live, so the two migrations
+> applied at 18:00 are reachable from outside the database. Read this file as
+> instructions for the NEXT deploy, not a pending one — and read that record
+> before you start, because it carries what the last deploy learned.
+
 **For:** anyone with a terminal that can reach `api.supabase.com`.
 **Why you and not an agent:** the cloud session's network policy does not
 allowlist that host. `git push` works, `api.supabase.com` returns HTTP 000.
@@ -139,6 +147,16 @@ curl -s -o /dev/null -w 'no-such-route  %{http_code}\n' -X POST "$BASE/no-such-r
   place `no-such-route` did.
 - `review/claim` **401** and the control something else → stop. Your token is
   not a registration token and neither line means what this list says.
+
+**WHICH HALF OF THIS HAS ACTUALLY BEEN RUN, because the difference matters.**
+code-d ran a probe of this shape against live before version 24 and got
+`/review/claim` → **400 `task_id is required`**, `/review/nope` → **401**. That
+is the verified pair, recorded in `deploy/last-deployment.json`. The 409 above
+is the same probe with a `task_id` in the body, so it gets past the 400 and
+reaches the registry — **reasoned from `index.ts`, not run**, because the
+container this was written in cannot reach the function at all. Either pair
+discriminates. Prefer code-d's if you want the one with a live result behind it,
+and treat the 409 as a prediction until somebody sees it.
 
 The control is the part that matters. Without it you cannot tell "the route
 answered" from "every path answers that" — which is the whole bug above.

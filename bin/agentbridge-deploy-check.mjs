@@ -146,6 +146,31 @@ const recordPath = arg('--record');
  * without also blocking the first. The flag costs one deploy one word, and it
  * is the only shape a forgetful caller cannot silently get wrong.
  */
+/*
+ * AND IT MAY NOT SILENCE A COMPARISON THE ARGV CAN ALREADY MAKE.
+ *
+ * The flag above is read before the --record branch and used to win outright,
+ * so `--record r --live l --no-prior-deployment` printed "none recorded yet,
+ * declared explicitly" and skipped the drift check while holding both halves
+ * of it. That is this file's own "a skip is not a pass", with a switch on it:
+ * the one check the gate exists for, turned off by a caller who had already
+ * handed over the evidence to run it.
+ *
+ * A record IS the evidence of a prior deployment, so asserting there is none
+ * while passing one is a contradiction, not a preference to resolve. Exit 2 --
+ * could not run -- rather than 1: nothing about the tree was judged, and
+ * reporting a deploy refusal would name the wrong problem.
+ */
+if (process.argv.includes('--no-prior-deployment') && recordPath) {
+  console.error(
+    '--no-prior-deployment contradicts --record. A record is what a prior deployment leaves '
+    + 'behind, so the flag cannot be true while one is being supplied. Drop the flag to compare '
+    + `against ${recordPath}, or drop --record if this really is the first deploy. Refusing to `
+    + 'pick one for you: the flag would silence the drift check, which is the check this gate exists for.',
+  );
+  process.exit(2);
+}
+
 if (process.argv.includes('--no-prior-deployment')) {
   liveDrift = { noPriorDeployment: true };
   driftChecked = true;
