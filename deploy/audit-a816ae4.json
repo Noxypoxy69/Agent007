@@ -1,6 +1,6 @@
 {
   "_note": "PRE-DEPLOY AUDIT, PASSED, NOT EXECUTED. Danny authorised this deploy at 08:18Z and addressed it to code-c. Deploys are code-c's by the standing lane brief ('no deploys' is one of the hard out-of-scope items for the support lane, never revoked), so this lane ran the audit and stopped at the button rather than taking an authorisation that was issued to somebody else. Everything below was measured, not assumed. If code-c deploys a DIFFERENT commit these hashes are void.",
-  "auditedAt": "2026-09-16T10:2xZ",
+  "auditedAt": "2026-09-16T16:19:29Z",
   "auditedBy": "c8",
   "headSha": "a816ae437dd446a4066443dfae0be48830e555f0",
   "gate": {
@@ -46,5 +46,6 @@
     "read the deployed source back and compare it to a816ae4 \u2014 a version number incrementing is not evidence the bytes changed",
     "replace deploy/last-deployment.json with a real record: headSha a816ae4, the new liveArtifactHash and version"
   ],
-  "notInThisDeploy": "work/support-modules at 597b564 \u2014 ten commits from tonight, unmerged, 1430 pass 0 fail"
+  "notInThisDeploy": "work/support-modules at 597b564 \u2014 ten commits from tonight, unmerged, 1430 pass 0 fail",
+  "_clockNote": "The first version of this file said 10:2xZ. That came from a scheduled check-in whose notification stated its own fire time as 10:16:04Z and said to treat it as the current time; the machine clock said 16:18Z. Six hours, and a deployment record carrying the wrong one is the sort of thing that is believed later. The value above is the machine's. A time reported by the thing asking you to act on it is a claim like any other."
 }
