@@ -58,6 +58,13 @@ export const DEFAULT_ENTRY_POINTS = [
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */
   'bin/agentbridge-deploy-check.mjs',
+  /* A CODING ENGINE runs this, not this repository: it is named as a command
+   * string in a settings file handed to the agent, so nothing here imports it
+   * and no graph can see the caller. Same sense as the deploy check above —
+   * something outside the graph invokes it, so what it imports is shipped.
+   * It was THIS GATE that caught `agentToolBoundary.mjs` as test-only on the
+   * commit that added it, which is the gate doing its job. */
+  'bin/agentbridge-guard-hook.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',

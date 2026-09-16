@@ -155,10 +155,40 @@ including one of mine from an hour earlier: the `prompted` outcome could not
 survive the executor adapter, and every unit test passed because they call an
 adapter directly and never go through `execute`.
 
-*Still open here:* launching the coding agent itself in a non-interactive
-permission mode is built (`agentPermissions.mjs`, derived from the guard, never
-a blanket grant) but has never been run against a real Claude Code or Codex
-binary. That is the remaining half.
+**RUN AGAINST A REAL BINARY — 2026-09-16, and it did not start.** Claude Code
+2.1.273, in a Linux container, launched with the argv `agentLaunch` emitted:
+*"Input must be provided either through stdin or as a prompt argument."*
+`--allowed-tools <tools...>` is variadic and had eaten the prompt, so the module
+that was mutation-proved against its own reasoning had never produced a command
+line that starts. `test/realAgentLaunch.test.mjs` now runs the real thing.
+
+*What the engine actually does, measured rather than assumed:* under the derived
+scope a real agent read, edited, ran `npm test`, staged and committed in 33s
+with nothing asked. With the guard narrowing the scope (`isDisposable:false`) it
+was stopped — no commit — and **exited 0, `is_error:false`, subtype "success",
+with the prompt detector seeing nothing.** A real engine does not write
+"[y/n]"; it writes a paragraph asking for approval. So `--output-format json`
+is now emitted and refusals are read from `permission_denials`: the exit code
+and the prose both said clean on the run that did nothing.
+
+**The choose-as-you-go hole is closed too, and the engine honours it.** A
+PreToolUse hook (`src/agentToolBoundary.mjs`, `bin/agentbridge-guard-hook.mjs`)
+puts `guardExecution` on the agent's own tool boundary. With a launch scope that
+GRANTED the commit, a stale lease in the hook's placement refused the command
+the agent chose and HEAD stayed at base. The boundary speaks shell strings and
+the guard speaks argv, so every part of a compound is classified and anything
+that can hide a command (`$( )`, backticks, newline, redirection) is refused
+rather than parsed.
+
+*Still open, stated so this does not read as closed:* **codex is unverified** —
+no binary on the machine this was measured on, and its flags are deliberately
+left as written rather than guessed into shape. The executor allow-lists the
+child's environment so an agent cannot inherit the daemon's credentials, and
+**nothing yet names which variables a real engine needs to start**, so the live
+test passes the ambient environment and says so. And `--permission-prompts none`
+is a **no-op today** — deleting it kept every test green, because a bare CLI
+launch has no host to refer to; it is kept for when one is attached and that
+owes a test.
 
 **8. T1 closes with nobody watching.**
 A real task, leased, run, verified, reviewed, accepted, closed. Danny's windows
