@@ -24,15 +24,49 @@
 const SEP = '/';
 
 /*
+ * THE ROOT OF A PATH, WHICH IS THE ONLY PART THAT IS PLATFORM-SPECIFIC.
+ *
+ * Returns the absolute prefix ('/' or 'C:/') and the rest, backslashes already
+ * folded to SEP. An empty prefix means the path is relative.
+ *
+ * This exists because "absolute" was `startsWith('/')`, which is FALSE for
+ * every real Windows path. `C:\work` is absolute and was rejected as though it
+ * were not, so createWorkspaceManager could not be constructed at all on
+ * Windows -- which is why three unattended-loop tests failed on the only
+ * machine still running agents, while passing everywhere else.
+ *
+ * WHY NOT node:path. The header's reason still holds: no import means the tests
+ * run this exact code against posix-looking fake paths on any platform, and the
+ * containment check is the point of this file. `node:path.isAbsolute` answers
+ * differently depending on the host, so the fake `/work/ab-evil` case would
+ * stop being checkable on Windows. The drive letter is handled here instead and
+ * the posix behaviour is unchanged.
+ */
+function splitRoot(path) {
+  const s = String(path).replace(/\\/g, SEP);
+  const drive = /^([A-Za-z]:)\//.exec(s);
+  if (drive) return { prefix: `${drive[1]}${SEP}`, rest: s.slice(drive[0].length) };
+  if (s.startsWith(SEP)) return { prefix: SEP, rest: s.slice(1) };
+  return { prefix: '', rest: s };
+}
+
+/** Absolute on EITHER platform: a leading separator, or a drive root. */
+export function isAbsolutePath(path) {
+  return typeof path === 'string' && splitRoot(path).prefix !== '';
+}
+
+/*
  * Resolve without node:path so the module has no import at all and the tests
  * can run the same code against posix-looking fake paths on any platform.
- * Handles `.`, `..` and repeated separators; it does not handle Windows drive
- * letters, and the caller is expected to hand it already-posix paths.
+ * Handles `.`, `..`, repeated separators, backslashes and Windows drive
+ * letters. Output always uses SEP, which node's fs accepts on Windows too, so a
+ * resolved path stays a usable filesystem path rather than becoming only a key.
  */
 export function resolvePath(path) {
-  const absolute = path.startsWith(SEP);
+  const { prefix, rest } = splitRoot(path);
+  const absolute = prefix !== '';
   const out = [];
-  for (const part of path.split(SEP)) {
+  for (const part of rest.split(SEP)) {
     if (part === '' || part === '.') continue;
     if (part === '..') {
       if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
@@ -41,7 +75,7 @@ export function resolvePath(path) {
     }
     out.push(part);
   }
-  return (absolute ? SEP : '') + out.join(SEP);
+  return prefix + out.join(SEP);
 }
 
 /*
@@ -61,7 +95,7 @@ function fail(message) {
 }
 
 export function createWorkspaceManager({ root, git, fs, now, randomId } = {}) {
-  if (typeof root !== 'string' || !root.startsWith(SEP)) fail('root must be an absolute path');
+  if (!isAbsolutePath(root)) fail('root must be an absolute path');
   if (!git || typeof git.addWorktree !== 'function') fail('git.addWorktree required');
   if (!fs || typeof fs.exists !== 'function') fail('fs.exists required');
   const clock = now ?? (() => Date.now());
