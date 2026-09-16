@@ -1122,7 +1122,27 @@ export function canonicalActor(value, actors = ACTORS) {
 export function knownActorIds(sessions, actors = ACTORS) {
   const ids = new Set();
   for (const s of arr(sessions)) if (s?.agent_id) ids.add(canonicalActor(s.agent_id, actors));
-  for (const a of arr(actors)) if (a?.actor_type !== 'worker') ids.add(a.actor_id);
+  /*
+   * EVERY DECLARED ACTOR IS KNOWN, WORKER OR NOT. The roster decides whether a
+   * recipient is LIVE, never whether it EXISTS.
+   *
+   * This line used to skip workers, so a worker was addressable only while it
+   * was heartbeating. With nobody registered -- which is the state this project
+   * was in the first time the check ever ran in production -- knownActorIds
+   * returned only the non-workers, and a message to code-c was refused as "not
+   * a known actor" while chatgpt, removed from the team, stayed addressable
+   * forever because it is not typed as a worker.
+   *
+   * That contradicted the rule written directly above validateMessage's call
+   * site: an unknown recipient is refused, a KNOWN one that is offline is a
+   * note, because queueing work for a worker that is restarting is what a
+   * durable channel is for. Existence comes from this table; liveness comes
+   * from reachabilityNote, and conflating them broke the durability.
+   *
+   * A genuine typo is still refused: an id that is in neither the table nor the
+   * roster resolves to nothing and is not invented into the list.
+   */
+  for (const a of arr(actors)) if (a?.actor_id) ids.add(a.actor_id);
   return [...ids].sort();
 }
 
