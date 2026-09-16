@@ -1407,6 +1407,131 @@ Deno.serve(async (request) => {
     return json({ ok: true, task: updated });
   }
 
+  // ── the REVIEWER's two verbs ─────────────────────────────────────────────
+  /*
+   * THE REVIEW LEASE HAS EXISTED SINCE 2026-09-15 AND NOTHING HAS EVER CLAIMED
+   * IT. claim_review, renew_review_lease and expire_dead_reviews were written,
+   * granted and scheduled with no caller anywhere -- the migration that added
+   * them says so itself. These two routes are the caller.
+   *
+   * THEY TAKE A REGISTRATION TOKEN, the same credential a worker already holds,
+   * and NOT a fifth token class. A reviewer is a registered session doing a
+   * review; the credential says "this machine is one of ours", and every rule
+   * that decides whether THIS session may review THIS task lives in
+   * claim_review: the work must be 'returned', the returning session may not
+   * review its own work, and a live lease held by somebody else refuses. None
+   * of those is re-implemented here, because a copy of a rule is a copy that
+   * can disagree, and this is the one rule whose violation leaves no trace --
+   * an accepted task does not record who reviewed it against who wrote it.
+   *
+   * SO THIS FILE DECIDES NOTHING. It authenticates, resolves the session from
+   * the registry rather than from the body, forwards, and maps a refusal to a
+   * status. Everything that judges the work is in src/reviewRunner.mjs and
+   * src/reviewDecision.mjs, where the test suite can import it -- a guard that
+   * cannot be imported is a guard nobody has watched fail.
+   */
+  if (path === '/review/claim' || path === '/review/submit') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let regLabel = null;
+    try {
+      regLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!regLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const taskId = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+    if (!taskId) return json({ error: 'invalid_request', detail: 'task_id is required' }, 400);
+
+    /*
+     * THE REVIEWER IS RESOLVED FROM THE REGISTRY, NOT TAKEN FROM THE BODY.
+     * Same rule as /return: a session that is not registered cannot review
+     * anything, and a caller does not get to name itself. It matters more here
+     * than there -- claim_review's self-review refusal compares this string to
+     * returned_by, so a caller that could choose it could review its own work
+     * by typing a different name.
+     */
+    const claimed = typeof body?.reviewer_session === 'string' ? body.reviewer_session.trim() : '';
+    const regs = await get('session_registrations?select=*');
+    const row = regs.find((r) => r?.session_id === claimed);
+    if (!row) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${claimed}" is not registered; register before reviewing work`,
+      }, 409);
+    }
+
+    if (path === '/review/claim') {
+      const seconds = Number.isInteger(body?.lease_seconds) ? body.lease_seconds : 1800;
+      const claimed_ = await rpc('claim_review', {
+        p_task_id: taskId,
+        p_reviewer_session: row.session_id,
+        p_lease_seconds: seconds,
+      });
+      if (!claimed_.ok) {
+        return json({
+          error: 'review-claim-refused',
+          reason: claimed_.reason ?? null,
+          detail: claimed_.detail ?? null,
+        }, 409);
+      }
+      return json(claimed_);
+    }
+
+    /*
+     * THE FENCED SUBMIT. The token travels with the decision and submit_review
+     * compares it inside the write.
+     *
+     * A MALFORMED TOKEN IS 409, NOT 500 AND NOT 400. Identical reasoning to the
+     * lease_token guard on /return: this shape used to reach Postgres, fail the
+     * uuid cast and surface as a 500 -- the one answer that invites a retry,
+     * handed to the one caller that must not retry. To a reviewer, malformed
+     * and superseded mean the same thing: the credential you hold is not one
+     * this task will accept, and trying again will not change that.
+     */
+    const reviewToken = typeof body?.review_lease_token === 'string'
+      ? body.review_lease_token.trim() : '';
+    if (!reviewToken) {
+      return json({
+        error: 'invalid_request',
+        detail: 'review_lease_token is required. It is the fencing token handed back by '
+          + '/review/claim; without it a decision cannot be told apart from one by a reviewer '
+          + 'whose lease already expired.',
+      }, 400);
+    }
+    if (!UUID.test(reviewToken)) {
+      return json({
+        error: 'review-submit-refused',
+        reason: 'review-lease-not-current',
+        detail: 'review_lease_token is not a well-formed lease token, so it cannot be the '
+          + 'current review lease for this task. Re-read it from the claim rather than retrying.',
+      }, 409);
+    }
+
+    const recorded = await rpc('submit_review', {
+      p_task_id: taskId,
+      p_review_token: reviewToken,
+      p_decision: typeof body?.decision === 'string' ? body.decision : null,
+      p_reasons: Array.isArray(body?.reasons) ? body.reasons : [],
+      p_reviewer_session: row.session_id,
+      p_head_sha: typeof body?.head_sha === 'string' ? body.head_sha : null,
+      p_fix_task: body?.fix_task ?? null,
+    });
+    if (!recorded.ok) {
+      return json({
+        error: 'review-submit-refused',
+        reason: recorded.reason ?? null,
+        detail: recorded.detail ?? null,
+      }, 409);
+    }
+    return json(recorded);
+  }
+
   // ── the DISPATCHER: prepares, never decides ────────────────────────────
   /*
    * THE ONLY ENDPOINT A DISPATCHER TOKEN OPENS.

@@ -576,3 +576,267 @@ test('A REPEATED FAILURE IS CAUGHT AS A LOOP EVEN THOUGH THE CONTEXT DIGEST MOVE
   assert.equal(third.loop.kind, 'repeat');
   assert.equal(third.loop.count, 3);
 });
+
+/* ── THE REVIEW STAGE, ON A REAL WORKTREE AND A REAL LEASE ───────────── */
+
+/*
+ * Everything above proves an attempt runs unattended. These prove the half that
+ * follows it, and they belong in this file for the reason this file exists: the
+ * reviewer runtime's unit tests inject the workspace and the git layer, so they
+ * cannot catch a reviewer that edits a tree git actually reports on, and they
+ * cannot catch a worktree that was never fresh.
+ *
+ * REAL: the repository, the child process, git, `git worktree add`, the commit
+ * the review is based on, and the porcelain status that catches a meddler.
+ * MODELLED: the database, by test/fakeBridge.mjs, which is a model of the SQL
+ * and not the SQL. Nothing here is evidence that a migration is applied.
+ */
+
+const workspaceManagerFor = async (repoDir, root) => {
+  const { createWorkspaceManager } = await import('../src/workspaceManager.mjs');
+  const { mkdir, rename, rm, stat, writeFile } = await import('node:fs/promises');
+  return createWorkspaceManager({
+    root,
+    git: {
+      addWorktree: ({ path: p, baseSha, detach }) =>
+        git(repoDir, 'worktree', 'add', ...(detach ? ['--detach'] : []), p, baseSha),
+      removeWorktree: ({ path: p, force }) =>
+        git(repoDir, 'worktree', 'remove', ...(force ? ['--force'] : []), p).catch(() => {}),
+      isDirty: async (p) => (await execRun('git', ['status', '--porcelain'], { cwd: p, timeoutMs: 20000 }))
+        .stdout.trim().length > 0,
+    },
+    fs: {
+      exists: (p) => stat(p).then(() => true).catch(() => false),
+      mkdirp: (p) => mkdir(p, { recursive: true }),
+      rename,
+      writeFile: (p, body) => writeFile(p, body),
+      rm: (p) => rm(p, { recursive: true, force: true }),
+    },
+  });
+};
+
+/** The real git probe the CLI uses: both halves must answer or the photo is null. */
+const realWorkspaceGit = {
+  async headSha(p) {
+    const r = await execRun('git', ['rev-parse', 'HEAD'], { cwd: p, timeoutMs: 20000 });
+    if (!r.ok) throw new Error(r.stderr || r.error);
+    return r.stdout.trim();
+  },
+  async dirtyFiles(p) {
+    const r = await execRun('git', ['status', '--porcelain'], { cwd: p, timeoutMs: 20000 });
+    if (!r.ok) throw new Error(r.stderr || r.error);
+    return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  },
+};
+
+/** Run the attempt from the tests above, and hand back its envelope. */
+const attemptForReview = async (t) => {
+  const { dir, sha } = await scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'agent.mjs');
+  writeFileSync(agent, `
+import {readFileSync, writeFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
+const cwd = process.cwd();
+const v = Number(readFileSync(cwd + '/value.txt', 'utf8').trim());
+writeFileSync(cwd + '/value.txt', String(v + 1) + '\\n');
+process.stdout.write(execFileSync(process.execPath, [cwd + '/check.mjs'], {cwd, encoding: 'utf8'}));
+execFileSync('git', ['add', '-A'], {cwd});
+execFileSync('git', ['commit', '--quiet', '-m', 'raise the value'], {cwd});
+`);
+  const result = await runAttempt({
+    task: {
+      task_id: 't1-for-review', base_sha: sha, branch: 'work/t1',
+      lease_ms: 120000, timeout_ms: 60000,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+      // the agent's own account of itself, which no decision below may read
+      },
+    contract: { allowed: ['value.txt'], forbidden: [] },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    io: {
+      now: () => Date.now(),
+      git: {
+        headSha: async () => git(dir, 'rev-parse', 'HEAD'),
+        changedFiles: async () => (await git(dir, 'diff', '--name-only', `${sha}..HEAD`)).split('\n').filter(Boolean),
+      },
+    },
+  });
+  assert.equal(result.envelope.outcome, 'exited', 'the attempt this review depends on did not run');
+  assert.notEqual(result.envelope.commit, null, 'the attempt produced no commit to review');
+  return { dir, sha, result };
+};
+
+test('A RETURNED TASK IS REVIEWED IN A FRESH WORKTREE AND ACCEPTED ON THE LEASE', async (t) => {
+  const { runReview } = await import('../src/reviewRunner.mjs');
+  const { REVIEW_DECISION } = await import('../src/reviewDecision.mjs');
+  const { createFakeBridge } = await import('./fakeBridge.mjs');
+
+  const { dir, sha, result } = await attemptForReview(t);
+  const head = result.envelope.commit;
+
+  const root = mkdtempSync(path.join(tmpdir(), 'reviewroot-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workspaces = await workspaceManagerFor(dir, root);
+
+  const task = {
+    task_id: 't1-for-review', state: 'returned', lane_id: 'agentbridge',
+    base_sha: sha, returned_by: 'worker-session',
+    returned_head_sha: head, attempt: 1, depends_on: [],
+  };
+  const bridge = createFakeBridge({ tasks: [task] });
+
+  let reviewedIn = null;
+  const review = await runReview({
+    task,
+    reviewerSession: 'reviewer-session',
+    reviewer: {
+      id: 'reads-the-tree',
+      async review(packet, { path: p, readOnly }) {
+        reviewedIn = { p, readOnly, value: readFileSync(path.join(p, 'value.txt'), 'utf8').trim() };
+        return { reviewer: 'reads-the-tree', decision: 'accept', findings: [] };
+      },
+    },
+    workspaces,
+    bridge,
+    envelopeFor: async () => result.envelope,
+    contract: { allowed: ['value.txt'], forbidden: [] },
+    io: { workspaceGit: realWorkspaceGit, now: () => Date.now() },
+  });
+
+  assert.equal(review.ok, true, `${review.stage}/${review.reason}: ${review.detail}`);
+  assert.equal(review.decision.decision, REVIEW_DECISION.ACCEPT, review.decision.reasons.join(', '));
+
+  /*
+   * THE WORKTREE WAS REAL AND IT WAS FRESH. Not asserted from the return value:
+   * the reviewer read a file out of it, the path is under the review root and
+   * not the worker's directory, and the content is the committed value rather
+   * than whatever the worker's tree happened to hold.
+   */
+  assert.notEqual(reviewedIn, null, 'the reviewer never ran');
+  assert.equal(reviewedIn.readOnly, true);
+  assert.ok(reviewedIn.p.startsWith(root), `reviewed in ${reviewedIn.p}, which is not a fresh workspace`);
+  assert.notEqual(reviewedIn.p, dir, 'the reviewer was handed the worker\'s own tree');
+  assert.equal(reviewedIn.value, '2', 'the review workspace is not at the reviewed commit');
+
+  // and the far end moved
+  assert.equal(bridge.rows.get('t1-for-review').state, 'accepted');
+  assert.equal(bridge.rows.get('t1-for-review').accepted_head_sha, head);
+  assert.equal(review.disposal.outcome, 'destroyed');
+  assert.equal(existsSync(reviewedIn.p), false, 'the review workspace was left behind');
+});
+
+test('A REVIEWER THAT COMMITS IN ITS OWN WORKTREE IS CAUGHT BY GIT, NOT BY TRUST', async (t) => {
+  /*
+   * THE NEGATIVE, AND IT NEEDS THE POSITIVE ABOVE. "No mutation was detected"
+   * passes against a harness that cannot see one, so this reviewer really does
+   * edit and commit in the worktree it was given, and real `git rev-parse` is
+   * what notices.
+   */
+  const { runReview, STAGE } = await import('../src/reviewRunner.mjs');
+  const { createFakeBridge } = await import('./fakeBridge.mjs');
+
+  const { dir, sha, result } = await attemptForReview(t);
+  const root = mkdtempSync(path.join(tmpdir(), 'reviewroot-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workspaces = await workspaceManagerFor(dir, root);
+
+  const task = {
+    task_id: 't1-for-review', state: 'returned', lane_id: 'agentbridge', base_sha: sha,
+    returned_by: 'worker-session', returned_head_sha: result.envelope.commit,
+    attempt: 1, depends_on: [],
+  };
+  const bridge = createFakeBridge({ tasks: [task] });
+
+  const review = await runReview({
+    task,
+    reviewerSession: 'reviewer-session',
+    reviewer: {
+      id: 'meddler',
+      async review(packet, { path: p }) {
+        writeFileSync(path.join(p, 'value.txt'), '3\n');
+        await git(p, 'add', '-A');
+        await git(p, 'commit', '--quiet', '-m', 'I fixed it myself');
+        return { reviewer: 'meddler', decision: 'accept', findings: [] };
+      },
+    },
+    workspaces,
+    bridge,
+    envelopeFor: async () => result.envelope,
+    io: { workspaceGit: realWorkspaceGit, now: () => Date.now() },
+  });
+
+  assert.equal(review.ok, false, 'a reviewer that rewrote the code had its verdict recorded');
+  assert.equal(review.stage, STAGE.REVIEW);
+  assert.equal(review.reason, 'reviewer:mutated-workspace');
+  assert.equal(review.mutation.kind, 'head', `caught as ${review.mutation.kind}, not as a new commit`);
+  assert.equal(review.submitted, null);
+
+  // the task is untouched and still reviewable by somebody who will not edit it
+  assert.equal(bridge.rows.get('t1-for-review').state, 'returned');
+  assert.equal(bridge.rows.get('t1-for-review').review_decision, undefined);
+  // and the meddling is kept as evidence rather than tidied away
+  assert.ok(existsSync(review.quarantined), 'the edited tree was destroyed instead of quarantined');
+  assert.equal(
+    readFileSync(path.join(review.quarantined, 'value.txt'), 'utf8').trim(), '3',
+    'the quarantined tree does not contain the edit; the wrong thing was kept',
+  );
+});
+
+test('FIX_REQUIRED MAKES A SEPARATE TASK OFF THE REVIEWED COMMIT, AND THE ORIGINAL IS NOT RETRIED', async (t) => {
+  const { runReview } = await import('../src/reviewRunner.mjs');
+  const { REVIEW_DECISION } = await import('../src/reviewDecision.mjs');
+  const { createFakeBridge } = await import('./fakeBridge.mjs');
+
+  const { dir, sha, result } = await attemptForReview(t);
+  const head = result.envelope.commit;
+  const root = mkdtempSync(path.join(tmpdir(), 'reviewroot-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workspaces = await workspaceManagerFor(dir, root);
+
+  const task = {
+    task_id: 't1-for-review', state: 'returned', lane_id: 'agentbridge', repo_id: 'agentbridge',
+    base_sha: sha, returned_by: 'worker-session', returned_head_sha: head, attempt: 1, depends_on: [],
+  };
+  const bridge = createFakeBridge({ tasks: [task] });
+
+  const review = await runReview({
+    task,
+    reviewerSession: 'reviewer-session',
+    // the machine is happy; only the reviewer objects, which is the only case
+    // that proves a reviewer can stop work rather than echo the evidence
+    reviewer: createFakeReviewer({ maxFilesChanged: 0 }),
+    workspaces,
+    bridge,
+    envelopeFor: async () => result.envelope,
+    contract: { allowed: ['value.txt'], forbidden: [] },
+    io: { workspaceGit: realWorkspaceGit, now: () => Date.now() },
+  });
+
+  assert.equal(review.ok, true, `${review.stage}/${review.reason}: ${review.detail}`);
+  assert.equal(review.decision.decision, REVIEW_DECISION.FIX_REQUIRED);
+
+  const fix = bridge.rows.get(review.fixTask.task_id);
+  assert.ok(fix, 'fix_required left the findings with nowhere to go');
+  assert.notEqual(fix.task_id, 't1-for-review', 'the fix is the same task again under a new name');
+  assert.equal(fix.state, 'runnable');
+  assert.equal(fix.base_sha, head, 'the fixer would start from the original base and lose the work');
+  assert.equal(fix.attempt, 0);
+
+  const original = bridge.rows.get('t1-for-review');
+  assert.equal(original.attempt, 1, 'the reviewed task was retried in place');
+  assert.deepEqual(original.depends_on, [fix.task_id]);
+
+  /*
+   * AND THE FIX TASK IS A REAL BASE. Not asserted from the string: a worktree
+   * really can be made at it, which is what a fixer will do next. A base_sha
+   * that is a plausible-looking sha nothing can check out is the shape of this
+   * whole file's failure mode.
+   */
+  const fixWorkspace = await workspaces.create({ taskId: fix.task_id, baseSha: fix.base_sha, attempt: 0 });
+  t.after(async () => { await workspaces.destroy(fixWorkspace, { force: true }).catch(() => {}); });
+  assert.equal(readFileSync(path.join(fixWorkspace.path, 'value.txt'), 'utf8').trim(), '2');
+});
