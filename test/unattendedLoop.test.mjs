@@ -6,6 +6,7 @@ import path from 'node:path';
 import { runAttempt } from '../src/attemptPipeline.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
 import { run as execRun } from '../src/exec.mjs';
+import { createFakeReviewer } from './fakeReviewer.mjs';
 
 /**
  * THE ACCEPTANCE TEST FOR "ZERO INTERACTIVE PROMPTS", RUN FOR REAL.
@@ -173,4 +174,137 @@ process.stdin.on('end', () => { process.exit(0); });
   assert.equal(result.accepted, false);
   assert.ok(elapsed < 15000, `waited ${elapsed}ms: the run hung instead of failing`);
   assert.equal(result.disposal.outcome, 'quarantined', 'a refused attempt must not destroy its evidence');
+});
+
+test('THE REVIEWER HALF RUNS TOO, AND BOTH SIDES HAVE TO AGREE', async (t) => {
+  /*
+   * The second half of T1, which has never run. A reviewer reads the packet,
+   * decides from evidence, and the attempt is accepted only if the machine and
+   * the reviewer agree. Asserted in both directions in one test, because a
+   * review stage proven only to accept is decoration and one proven only to
+   * reject is an outage.
+   */
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'agent.mjs');
+  writeFileSync(agent, `
+import {readFileSync, writeFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
+const cwd = process.cwd();
+const v = Number(readFileSync(cwd + '/value.txt', 'utf8').trim());
+writeFileSync(cwd + '/value.txt', String(v + 1) + '\\n');
+process.stdout.write(execFileSync(process.execPath, [cwd + '/check.mjs'], {cwd, encoding: 'utf8'}));
+execFileSync('git', ['add', '-A'], {cwd});
+execFileSync('git', ['commit', '--quiet', '-m', 'raise the value'], {cwd});
+`);
+
+  /*
+   * A FRESH REPOSITORY PER ATTEMPT, and the first version of this test is why.
+   * Reusing one tree meant the second run raised the value from 2 to 3, the
+   * check correctly failed, and the machine rejected -- so the case meant to
+   * isolate the REVIEWER was being refused by the evidence instead. An attempt
+   * starts from the accepted base; that is the retry invariant, and a harness
+   * that ignores it tests something else.
+   */
+  const attempt = async (reviewer) => {
+    const fresh = await scratchRepo();
+    t.after(() => rmSync(fresh.dir, { recursive: true, force: true }));
+    return attemptIn(fresh, reviewer);
+  };
+  const attemptIn = ({ dir, sha }, reviewer) => runAttempt({
+    task: {
+      task_id: 't1-reviewed', base_sha: sha, branch: 'work/t1',
+      lease_ms: 120000, timeout_ms: 60000,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+    },
+    contract: { allowed: ['value.txt'], forbidden: [] },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    reviewer,
+    io: {
+      now: () => Date.now(),
+      diffRef: 'cas:diff',
+      git: {
+        headSha: async () => git(dir, 'rev-parse', 'HEAD'),
+        changedFiles: async () => (await git(dir, 'diff', '--name-only', `${sha}..HEAD`)).split('\n').filter(Boolean),
+      },
+    },
+  });
+
+  const accepted = await attempt(createFakeReviewer());
+  assert.equal(accepted.envelope.outcome, 'exited');
+  assert.equal(accepted.verdict.verdict, 'accept', accepted.verdict.reasons.join(', '));
+  assert.equal(accepted.review.decision, 'accept',
+    `reviewer refused a good attempt: ${accepted.review.findings.join(', ')}`);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.disposal.outcome, 'destroyed');
+
+  /*
+   * THE OTHER DIRECTION, ON EVIDENCE THE MACHINE IS HAPPY WITH. A policy the
+   * attempt genuinely fails -- one file changed against a two-file minimum --
+   * so the reviewer is the only thing refusing it. That is the case that proves
+   * a reviewer can actually stop an attempt rather than rubber-stamping one the
+   * machine had already passed.
+   */
+  const refused = await attempt(createFakeReviewer({ maxFilesChanged: 0 }));
+  assert.equal(refused.verdict.verdict, 'accept', 'the machine still accepts; only the reviewer objects');
+  assert.equal(refused.review.decision, 'request-changes');
+  assert.ok(refused.review.findings.some((f) => f.startsWith('policy:too-many-files')));
+  assert.equal(refused.accepted, false, 'a reviewer that cannot refuse is decoration');
+  assert.equal(refused.disposal.outcome, 'quarantined');
+});
+
+test('A WORKER KILLED MID-RUN PRODUCES NO COMMIT AND NO VERDICT OF SUCCESS', async (t) => {
+  /*
+   * The first kill-at-a-boundary case. The process is shot at its deadline
+   * after it has already written to the tree, which is the state a crashed
+   * worker really leaves: a half-finished workspace that git will happily
+   * report a sha from.
+   *
+   * NOTHING MAY REPORT A COMMIT HERE. The evidence collector asks git only when
+   * the process exited, precisely so a killed run cannot acquire a
+   * plausible-looking result from a tree nobody chose to leave that way.
+   */
+  const { dir, sha } = await scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'hangs.mjs');
+  writeFileSync(agent, `
+import {writeFileSync} from 'node:fs';
+writeFileSync(process.cwd() + '/value.txt', '99\\n');
+setInterval(() => {}, 1000);
+`);
+
+  const result = await runAttempt({
+    task: {
+      task_id: 't1-killed', base_sha: sha, branch: 'work/t1',
+      lease_ms: 120000, timeout_ms: 1500,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+    },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    reviewer: createFakeReviewer(),
+    io: {
+      now: () => Date.now(),
+      git: {
+        headSha: async () => git(dir, 'rev-parse', 'HEAD'),
+        changedFiles: async () => ['value.txt'],
+      },
+    },
+  });
+
+  assert.equal(result.envelope.outcome, 'timeout');
+  assert.equal(result.envelope.exitCode, null, 'a killed process has no exit code, and zero is not none');
+  assert.equal(result.envelope.commit, null, 'a sha was read out of a half-written tree');
+  assert.equal(result.verdict.verdict, 'reject');
+  assert.ok(result.verdict.reasons.includes('outcome:timeout'));
+  assert.equal(result.accepted, false);
+  assert.equal(result.disposal.outcome, 'quarantined', 'the evidence of a killed run was thrown away');
+
+  // the tree really was left half-written: the assertion above is about what we
+  // REPORT, not about the mess being absent
+  assert.equal(readFileSync(path.join(dir, 'value.txt'), 'utf8').trim(), '99');
 });
