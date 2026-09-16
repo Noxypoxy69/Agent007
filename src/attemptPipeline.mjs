@@ -29,6 +29,7 @@ import { execute } from './executorAdapter.mjs';
 import { guardExecution, OUTCOME } from './preExecutionGuard.mjs';
 import { permissionScope, agentLaunch } from './agentPermissions.mjs';
 import { startAttempt, finishAttempt, crashAttempt } from './attemptRecord.mjs';
+import { compileContext } from './contextCompiler.mjs';
 import { collectEvidence } from './evidenceCollector.mjs';
 import { verdictFor } from './resultEnvelope.mjs';
 import { fingerprintAttempt } from './fingerprint.mjs';
@@ -233,6 +234,23 @@ export async function runAttempt({
   // NOT `record`: that name is already the telemetry writer imported above, and
   // shadowing it made every attempt throw "record is not a function" at the
   // telemetry step. One name, two meanings, caught by an existing test.
+  /*
+   * THE CONTEXT DIGEST IS COMPUTED, NOT ACCEPTED.
+   *
+   * A caller-supplied digest is a claim about what the agent was told, and the
+   * loop detector compares digests to decide whether a retry saw the same
+   * prompt. Taking the caller's word there means a retry that quietly sent less
+   * context still looks identical, which is the case the comparison exists for.
+   *
+   * The cache is the CALLER'S, deliberately: one shared across attempts is the
+   * only kind that can ever report a hit, and a fresh one per attempt makes the
+   * whole dedupe decorative while looking wired.
+   */
+  let context = null;
+  if (Array.isArray(task.context_files) && task.context_files.length) {
+    context = await compileContext(task.context_files, { cache: io.readCache ?? null });
+  }
+
   let attemptRow = null;
   if (io.records && task.routing) {
     attemptRow = startAttempt({
@@ -248,7 +266,7 @@ export async function runAttempt({
       executorVersion: executor.id ?? 'unknown',
       policyRevision: task.policy_revision ?? 'unknown',
       toolSchemaRevision: task.tool_schema_revision ?? 'unknown',
-      contextDigest: task.context_digest,
+      contextDigest: context?.digest ?? task.context_digest,
       ...task.routing,
     });
     await io.records.start(attemptRow);

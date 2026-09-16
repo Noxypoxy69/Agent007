@@ -438,3 +438,51 @@ test('A FALSE DONE IS VISIBLE: THE AGENT CLAIMED SUCCESS AND THE MACHINE DID NOT
   assert.notEqual(result.record.failureCode, null, 'a failure with no code cannot be grouped later');
   assert.equal(result.accepted, false);
 });
+
+test('THE CONTEXT DIGEST IS COMPUTED, AND A CALLER\'S CLAIM DOES NOT WIN', async (t) => {
+  /*
+   * The loop detector compares context digests to decide whether a retry saw
+   * the same prompt. If the caller supplies that digest it is a CLAIM, and a
+   * retry that quietly sent less context still compares identical -- which is
+   * precisely the case the comparison exists to catch.
+   *
+   * So this task hands in a digest that is deliberately wrong AND the files it
+   * was supposedly computed from. The record must carry what was actually
+   * assembled.
+   */
+  const { dir, sha } = await scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'noop.mjs');
+  writeFileSync(agent, "process.stdout.write('# tests 1\\n# pass 1\\n# fail 0');process.exit(0);");
+
+  const LIE = 'f'.repeat(64);
+  let saved = null;
+  const records = { start: async (r) => { saved = r; }, finish: async () => {} };
+
+  await runAttempt({
+    task: {
+      task_id: 't1-context', base_sha: sha, branch: 'work/t1',
+      lease_ms: 120000, timeout_ms: 30000,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+      context_digest: LIE,
+      context_files: [{ path: 'value.txt', load: async () => '1\n' }],
+      routing: {
+        engine: 'local', model: 'none', roleProfile: 'builder',
+        workerSlotId: 'slot-1', sessionId: 'sess-1', leaseId: 'lease-1',
+        fenceToken: '1', repo: 'agentbridge', baseSha: sha,
+        taskClass: 'code', riskClass: 'routine', environmentDigest: 'b'.repeat(64),
+      },
+    },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    records,
+    io: { now: () => Date.now(), records, git: { headSha: async () => sha, changedFiles: async () => [] } },
+  });
+
+  assert.notEqual(saved, null, 'no attempt row was written');
+  assert.notEqual(saved.contextDigest, LIE, "the caller's claim was recorded as fact");
+  assert.match(saved.contextDigest, /^[0-9a-f]{64}$/);
+});
