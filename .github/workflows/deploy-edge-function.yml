@@ -1,0 +1,211 @@
+# DEPLOY THE MCP EDGE FUNCTION, FROM A COMMIT, WITH THE GATE IN FRONT OF IT.
+#
+# WHY THIS EXISTS. Every deploy this project has ever done came off somebody's
+# laptop. That is the root cause behind "production has never matched the repo":
+# the deploying context was the source of truth by construction, so INSTRUCTIONS
+# drifted in both directions and nothing recorded which commit was live. It is
+# also why the deploy stalled for a day -- the one machine that could reach
+# api.supabase.com was a person's desktop, and agents cannot reach it at all
+# from a sandboxed container.
+#
+# A runner fixes both. It checks out an immutable commit, so the bytes are the
+# commit's rather than an editor buffer's, and it has unrestricted egress.
+#
+# IT DEPLOYS ONLY WHAT IS PROMOTED. The sha you pass must be an ancestor of
+# origin/master. Pushed is not promoted; a branch can be unreviewed and still
+# rebased away, and deploying one puts production ahead of what everyone reads.
+#
+# IT IS MANUAL ON PURPOSE. Production is Danny's under
+# d-owner-production-gate-20260915. Automatic deploy on push would move that
+# gate without anybody deciding to, so this only ever runs when a human presses
+# the button and types DEPLOY.
+#
+# ONE SECRET IS REQUIRED: SUPABASE_ACCESS_TOKEN, a Supabase personal access
+# token (sbp_...), set at Settings > Secrets and variables > Actions. A repo
+# secret is the right home for it -- it is never in a transcript, never in a
+# prompt, and rotating it is one place.
+
+name: Deploy edge function
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-char commit SHA to deploy (must be on master)"
+        required: true
+      confirm:
+        description: 'Type DEPLOY to confirm this ships to production'
+        required: true
+
+concurrency:
+  group: deploy-edge-function
+  cancel-in-progress: false
+
+env:
+  PROJECT_REF: ornbhvaijcpsbcgquzhd
+  FUNCTION: mcp
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse without an explicit confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DEPLOY" ]; then
+            echo "confirm was '${{ github.event.inputs.confirm }}', not DEPLOY. Refusing."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.sha }}
+
+      - name: The sha must be PROMOTED, not merely pushed
+        run: |
+          git fetch origin master --quiet
+          if ! git merge-base --is-ancestor "${{ github.event.inputs.sha }}" origin/master; then
+            echo "${{ github.event.inputs.sha }} is not an ancestor of origin/master. Refusing."
+            exit 1
+          fi
+          echo "promoted: $(git rev-parse --short=12 HEAD) is on origin/master"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Suite must be green before anything ships
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+          # npm test's own exit code, never a pipe's.
+
+      - name: Read the LIVE artifact, fresh, in the same job as the gate
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          # Generated here rather than reused from a file. A cached control-plane
+          # reading makes the drift check agree with itself, which is exactly how
+          # a hand-deploy slipped past it once already.
+          code=$(curl -sS -o fn-before.json -w '%{http_code}' \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            "https://api.supabase.com/v1/projects/$PROJECT_REF/functions/$FUNCTION")
+          if [ "$code" != "200" ]; then echo "control plane returned $code"; exit 1; fi
+          node -e '
+            const f = require("./fn-before.json");
+            if (!f.ezbr_sha256 || !Number.isInteger(f.version)) {
+              throw new Error("control plane reading is missing version or ezbr_sha256");
+            }
+            require("fs").writeFileSync("live.json",
+              JSON.stringify({ artifactHash: f.ezbr_sha256, version: f.version }));
+            console.log("live before:", f.version, f.ezbr_sha256, "updated_at", f.updated_at);
+          '
+          node -e '
+            const f = require("./fn-before.json");
+            require("fs").writeFileSync("before.env",
+              `BEFORE_VERSION=${f.version}\nBEFORE_HASH=${f.ezbr_sha256}\nBEFORE_UPDATED=${f.updated_at}\n`);
+          '
+          cat before.env >> "$GITHUB_ENV"
+
+      - name: The gate
+        run: |
+          node bin/agentbridge-deploy-check.mjs --live live.json --record deploy/last-deployment.json
+
+      - name: Deploy, bytes from the checkout
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          # --no-verify-jwt is REQUIRED: the live function has verify_jwt false,
+          # and letting it default back to true breaks every bearer-token client.
+          npx --yes supabase@2.117.0 functions deploy "$FUNCTION" \
+            --project-ref "$PROJECT_REF" --no-verify-jwt --use-api
+
+      - name: Did it actually land? updated_at, not just the version number
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          curl -sS -o fn-after.json \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            "https://api.supabase.com/v1/projects/$PROJECT_REF/functions/$FUNCTION"
+          node -e '
+            const a = require("./fn-after.json");
+            const before = { v: Number(process.env.BEFORE_VERSION), h: process.env.BEFORE_HASH,
+                             u: String(process.env.BEFORE_UPDATED) };
+            console.log("before:", before.v, before.h, before.u);
+            console.log("after :", a.version, a.ezbr_sha256, a.updated_at);
+            // A version bump is not evidence your command ran -- somebody else may
+            // have deployed between the reading and this check. updated_at moving
+            // is what says the far end changed.
+            if (String(a.updated_at) === before.u) {
+              throw new Error("updated_at did not move: this deploy did NOT land, whatever the CLI printed");
+            }
+            if (a.ezbr_sha256 === before.h) {
+              throw new Error("artifact hash unchanged: the bytes did not change");
+            }
+            if (a.verify_jwt !== false) {
+              throw new Error("verify_jwt is " + a.verify_jwt + ", expected false: bearer clients would break");
+            }
+            require("fs").writeFileSync("after.env",
+              `AFTER_VERSION=${a.version}\nAFTER_HASH=${a.ezbr_sha256}\nAFTER_UPDATED=${a.updated_at}\n`);
+          '
+          cat after.env >> "$GITHUB_ENV"
+
+      - name: Read the deployed source back and compare it to the commit
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          rm -rf readback && mkdir -p readback
+          npx --yes supabase@2.117.0 functions download "$FUNCTION" \
+            --project-ref "$PROJECT_REF" --output-dir readback
+          node -e '
+            const fs = require("fs"), path = require("path"), crypto = require("crypto");
+            const norm = (b) => Buffer.from(b.toString("utf8").replace(/\r\n/g, "\n"));
+            const find = (dir, name) => {
+              for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                const p = path.join(dir, e.name);
+                if (e.isDirectory()) { const hit = find(p, name); if (hit) return hit; }
+                else if (e.name === name) return p;
+              }
+              return null;
+            };
+            let bad = 0;
+            for (const name of ["index.ts", "_shared.js"]) {
+              const repo = fs.readFileSync(path.join("supabase/functions/mcp", name));
+              const got = find("readback", name);
+              if (!got) { console.log(`MISSING from read-back: ${name}`); bad++; continue; }
+              const live = fs.readFileSync(got);
+              const exact = live.equals(repo);
+              const normal = norm(live).equals(norm(repo));
+              console.log(`${name}: exact=${exact} after-newline-normalise=${normal} ` +
+                `live=${live.length}B ${crypto.createHash("sha256").update(live).digest("hex").slice(0,12)} ` +
+                `repo=${repo.length}B ${crypto.createHash("sha256").update(repo).digest("hex").slice(0,12)}`);
+              if (!normal) bad++;
+            }
+            if (bad) throw new Error(`${bad} file(s) deployed do not match the commit`);
+            console.log("read-back OK: what is serving is this commit");
+          '
+
+      - name: INSTRUCTIONS must say what the repo says
+        run: |
+          # This is operative guidance handed to every connecting agent and it has
+          # drifted from the repo in both directions before. Compares content, not
+          # wrapping -- the string is a concatenation, so grep gives false answers.
+          LIVE=$(find readback -name '_shared.js' | head -1)
+          node scripts/check-deployed-instructions.mjs "$LIVE" supabase/functions/mcp/_shared.js
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed \`${{ github.event.inputs.sha }}\`"
+            echo ""
+            echo "| | before | after |"
+            echo "|---|---|---|"
+            echo "| version | $BEFORE_VERSION | $AFTER_VERSION |"
+            echo "| artifact | \`${BEFORE_HASH:0:12}\` | \`${AFTER_HASH:0:12}\` |"
+            echo "| updated_at | $BEFORE_UPDATED | $AFTER_UPDATED |"
+            echo ""
+            echo "Read-back matched the commit and INSTRUCTIONS agree."
+            echo ""
+            echo "Update \`deploy/last-deployment.json\` with headSha \`${{ github.event.inputs.sha }}\`,"
+            echo "liveArtifactHash \`$AFTER_HASH\`, liveVersion \`$AFTER_VERSION\`."
+          } >> "$GITHUB_STEP_SUMMARY"
