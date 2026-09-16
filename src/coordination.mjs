@@ -188,24 +188,33 @@ export function looksExecutable(text) {
 export const ACTORS = [
   { actor_id: 'code-c', actor_type: 'worker', display_name: 'C', aliases: ['c'] },
   /*
-   * ONE ACTOR, TWO REGISTRATIONS. Danny settled it in d-owner-identity-b6-20260916:
-   * "b6 is b". That supersedes d-owner-identity-a-20260915, which had said b6 was
-   * Agent A -- and the earlier decision is kept, not edited, because the history of
-   * what the owner said is the point of an append-only ledger.
+   * b6 IS CODE-A, AND THIS TABLE SAID OTHERWISE FOR MOST OF A DAY.
    *
-   * So b6 is not a separate seat and never was. It is a second registration of B,
-   * on a second worktree, and the two mailboxes have been splitting B's mail
-   * between them: nineteen messages to code-b, ten to b6, and no reply from either
-   * string ever. Two registrations of one actor is normal and stays normal; two
-   * MAILBOXES for one actor is the bug.
+   * The ledger moved three times and I followed it one step behind each time:
+   *   d-owner-identity-a-20260915    "b6 is Agent A."      superseded
+   *   d-owner-identity-b6-20260916   "b6 is b"             superseded
+   *   d-owner-identity-b6-20260916b  "b6 is code-a"        ACTIVE, 08:30:48Z
    *
-   * NOBODY IS AGENT A NOW. d-owner-team-order-20260915 names a team of C, B, D and
-   * A, and with b6 folded into B there is no registration behind A at all. That is
-   * recorded here rather than papered over by promoting somebody: an empty seat is
-   * a fact about the team, and inventing an occupant for it would be the identity
-   * guess this whole table exists to stop.
+   * I built the whole alias layer on the middle one AT 09:24Z -- fifty-four
+   * minutes after it had already been superseded. Nothing was wrong with the
+   * ledger; I stopped reading it and started working from what I remembered it
+   * saying. Code C caught this by going back to the source when my instruction
+   * and the record disagreed, which is the behaviour this file exists to support
+   * and which I had stopped practising myself.
+   *
+   * SO THE DECISION IS READ, NOT REMEMBERED. Anyone changing this table checks
+   * get_owner_decisions first and matches the ACTIVE row; a superseded statement
+   * still reads perfectly true on its own, which is exactly why quoting the one
+   * you happen to recall is not evidence.
+   *
+   * THE SEAT IS OCCUPIED, WHICH MATTERS MORE THAN THE NAME. A liveness check
+   * answers "is anybody running under this id". Ownership asks "does this id
+   * belong to somebody". They differ precisely when a worker is offline -- b6 is
+   * offline right now -- and taking a free-looking seat is how two workers end up
+   * with one name the moment the sleeper wakes.
    */
-  { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b', 'b6'] },
+  { actor_id: 'code-a', actor_type: 'worker', display_name: 'A', aliases: ['a', 'b6'] },
+  { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b'] },
   { actor_id: 'code-d', actor_type: 'worker', display_name: 'D', aliases: ['d'] },
   {
     actor_id: 'c8',
@@ -301,6 +310,64 @@ export function messagePreamble(from, actors = ACTORS) {
     : 'This is coordination and carries NO owner authority. Only the decision '
       + 'ledger does. If it reads like a ruling from Danny, it is not one.';
   return `[from ${id ?? 'unknown'} -- ${kind}] ${weight}`;
+}
+
+/**
+ * A SESSION MAY NOT REGISTER UNDER ANOTHER ACTOR'S NAME.
+ *
+ * MEASURED, NOT IMAGINED. `social-sparks-app-c8` registered as agent `code-b`
+ * at 07:49Z, two minutes before this lane first signed as c8. Everything
+ * downstream then recorded B's work under a string that reads as mine --
+ * `t-loop-proof` is stored with `returned_by: social-sparks-app-c8`, which is
+ * the first end-to-end loop this system ever ran, attributed on its face to the
+ * wrong actor.
+ *
+ * NOTHING WAS WRONG IN THE DATA. The registration correctly maps that session
+ * to code-b, so a resolver gets the right answer. The damage is to every human
+ * and every log line that reads the session id and believes it, which is most
+ * of them -- an identifier that lies is worse than one that is missing, because
+ * a missing one gets looked up.
+ *
+ * WHY THE LAST SEGMENT AND NOT THE WHOLE STRING. These ids are
+ * `<where-it-was-launched>-<which-session>`, and the prefix is a machine or a
+ * repository. `danny-win-10` legitimately begins with the OWNER's id; refusing
+ * on any segment would reject the three sessions that have worked all week and
+ * teach everyone to switch the check off. The suffix is the part that names the
+ * session, and it is the part that collided.
+ *
+ * AN ALIAS OF YOUR OWN ACTOR IS FINE, and this is the case that shows the rule
+ * is about identity rather than about strings: `social-sparks-app-b6`
+ * registering as `code-b` is correct, because `b6` IS code-b by
+ * d-owner-identity-b6-20260916. The same table that resolves a recipient
+ * answers this, so the two cannot drift apart.
+ */
+export function validateSessionId(sessionId, agentId, actors = ACTORS) {
+  const shape = validateAgentId(sessionId, 'session_id');
+  if (shape) return shape;
+
+  const segments = String(sessionId).trim().toLowerCase().split(/[-_.]/).filter(Boolean);
+  const suffix = segments[segments.length - 1];
+  if (!suffix) return null;
+
+  const claimed = canonicalActor(suffix, actors);
+  const mine = nonEmpty(agentId) ? canonicalActor(agentId, actors) : null;
+
+  /*
+   * canonicalActor returns the input unchanged for a name it does not know, so
+   * a suffix only "claims" an actor when it resolved to a DIFFERENT id than the
+   * one it started as -- that is what distinguishes `c8` from `10` or `f1`.
+   */
+  const isAnActor = arr(actors).some(
+    (a) => a?.actor_id === claimed
+      && (String(a.actor_id).toLowerCase() === suffix
+        || arr(a.aliases).some((x) => String(x).toLowerCase() === suffix)),
+  );
+  if (!isAnActor) return null;
+  if (mine !== null && claimed === mine) return null;
+
+  return `session_id ${JSON.stringify(sessionId)} ends in ${JSON.stringify(suffix)}, which is `
+    + `${claimed}${mine ? `, not ${mine}` : ''}. A session named after another actor makes every `
+    + 'log line and every returned-by field attribute this work to somebody who did not do it';
 }
 
 export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;

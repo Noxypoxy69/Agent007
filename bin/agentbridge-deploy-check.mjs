@@ -137,7 +137,18 @@ let liveDrift = null;
 let driftChecked = false;
 const livePath = arg('--live');
 const recordPath = arg('--record');
-if (livePath && recordPath) {
+/*
+ * THE HONEST FIRST DEPLOY SAYS SO, RATHER THAN LOOKING LIKE A SKIPPED CHECK.
+ *
+ * Without this there is one value -- absent -- for both "there is no prior
+ * deployment" and "nobody compared", and the gate cannot refuse the second
+ * without also blocking the first. The flag costs one deploy one word, and it
+ * is the only shape a forgetful caller cannot silently get wrong.
+ */
+if (process.argv.includes('--no-prior-deployment')) {
+  liveDrift = { noPriorDeployment: true };
+  driftChecked = true;
+} else if (livePath && recordPath) {
   try {
     liveDrift = verifyLive({
       recorded: JSON.parse(readFileSync(recordPath, 'utf8')),
@@ -170,14 +181,18 @@ if (process.argv.includes('--json')) {
   console.log(`  parses     ${artifactLoads ? 'yes' : 'NO'}`);
   for (const e of loadErrors) console.log(`             ${e}`);
   console.log(
-    driftChecked
-      ? `  live drift ${liveDrift.ok ? 'none' : 'DRIFTED'}`
-      : '  live drift NOT CHECKED — pass --live and --record. A skip is not a pass: this is the\n' +
-        '             check that catches a hand-deploy nobody recorded.',
+    // eslint-disable-next-line no-nested-ternary
+    !driftChecked
+      ? '  live drift NOT CHECKED — pass --live and --record, or --no-prior-deployment if this\n' +
+        '             is genuinely the first. A skip is not a pass, and it is now refused:\n' +
+        '             this is the check that catches a hand-deploy nobody recorded.'
+      : liveDrift.noPriorDeployment
+        ? '  live drift none recorded yet, declared explicitly'
+        : `  live drift ${liveDrift.ok ? 'none' : 'DRIFTED'}`,
   );
   console.log('');
   if (verdict.ok) {
-    console.log('DEPLOYABLE.' + (driftChecked ? '' : ' Drift unchecked — see above.'));
+    console.log('DEPLOYABLE.');
   } else {
     console.log('REFUSED:');
     for (const r of verdict.refusals) console.log(`  - ${r.reason}: ${r.detail}`);

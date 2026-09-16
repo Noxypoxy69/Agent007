@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canAssign, validateMessage, validateAgentId, looksExecutable, executableMatch, assignmentRecord,
-  ACTORS, canonicalActor, knownActorIds, inboxNames, messagePreamble,
+  ACTORS, canonicalActor, knownActorIds, inboxNames, messagePreamble, validateSessionId,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -367,8 +367,17 @@ test('an alias routes to one canonical seat, so no name opens a second mailbox',
     assert.equal(canonicalActor(alias), 'c8', alias);
   }
   assert.equal(canonicalActor('chatgpt-command-center'), 'chatgpt');
-  // the letters Danny types, per the team order and d-owner-identity-b6-20260916
-  assert.equal(canonicalActor('b6'), 'code-b', 'b6 is b, per the superseding decision');
+  /*
+   * PER THE ACTIVE DECISION, WHICH IS NOT THE ONE I BUILT THIS ON. The ledger
+   * moved three times: "b6 is Agent A", then "b6 is b", then
+   * d-owner-identity-b6-20260916b "b6 is code-a" at 08:30:48Z. I wrote this
+   * table at 09:24Z against the middle one, fifty-four minutes after it had been
+   * superseded -- working from what I remembered the ledger saying instead of
+   * reading it. A superseded statement reads perfectly true on its own, which is
+   * why quoting the one you recall is not evidence.
+   */
+  assert.equal(canonicalActor('b6'), 'code-a', 'b6 is code-a per the ACTIVE decision');
+  assert.equal(canonicalActor('a'), 'code-a');
   assert.equal(canonicalActor('b'), 'code-b');
   assert.equal(canonicalActor('c'), 'code-c');
   assert.equal(canonicalActor('d'), 'code-d');
@@ -448,12 +457,24 @@ test('B HAS TWO REGISTRATIONS AND THEY COLLAPSE TO ONE SEAT', () => {
   }
 });
 
-test('NOBODY IS AGENT A, AND THE TABLE SAYS SO RATHER THAN INVENTING ONE', () => {
-  // d-owner-team-order-20260915 names a team of C, B, D and A. With b6 folded
-  // into B, no registration is behind A. An empty seat is a fact; promoting
-  // somebody into it would be exactly the identity guess this table forbids.
-  assert.equal(ACTORS.some((a) => a.display_name === 'A'), false);
-  assert.equal(canonicalActor('a'), 'a', 'an unclaimed letter resolves to nobody');
+test('THE A SEAT IS OCCUPIED, AND A LIVENESS CHECK WOULD SAY IT IS FREE', () => {
+  /*
+   * b6 holds it and b6 is offline. The distinction that matters: a liveness
+   * check answers "is anybody running under this id", ownership asks "does this
+   * id belong to somebody", and they differ exactly when a worker is asleep.
+   * I briefed a new session to claim code-a if no LIVE session held it, which
+   * would have produced two code-a the moment b6 woke.
+   */
+  const a = ACTORS.find((x) => x.display_name === 'A');
+  assert.notEqual(a, undefined, 'the A seat exists');
+  assert.equal(a.actor_id, 'code-a');
+  assert.equal(a.aliases.includes('b6'), true, 'b6 is how that seat has been registering');
+  // and the whole team from d-owner-team-order-20260916
+  for (const id of ['code-a', 'code-b', 'code-c', 'code-d']) {
+    assert.ok(ACTORS.some((x) => x.actor_id === id), `${id} missing from the roster`);
+  }
+  assert.equal(ACTORS.some((x) => x.actor_id === 'chatgpt'), true,
+    'kept addressable on purpose: out of the team, but historical mail still routes');
 });
 
 test('THE READ HALF: a canonical id is not always the reachable one', () => {
@@ -462,9 +483,10 @@ test('THE READ HALF: a canonical id is not always the reachable one', () => {
    * what B can read: mail is stored under the literal string it was sent with,
    * and a reader queries its own id. Both piles have to be polled.
    */
-  const names = inboxNames('code-b');
-  for (const n of ['code-b', 'b6', 'b']) assert.equal(names.includes(n), true, n);
-  assert.deepEqual(inboxNames('b6'), inboxNames('b'), 'an alias polls the same set as its seat');
+  const names = inboxNames('code-a');
+  for (const n of ['code-a', 'b6', 'a']) assert.equal(names.includes(n), true, n);
+  assert.deepEqual(inboxNames('b6'), inboxNames('a'), 'an alias polls the same set as its seat');
+  assert.deepEqual(inboxNames('code-b'), ['code-b', 'b'], 'B no longer carries b6');
   assert.deepEqual(inboxNames('code-q'), ['code-q'], 'an unknown name polls only itself');
   assert.deepEqual(inboxNames(''), []);
 });
@@ -491,4 +513,67 @@ test('EVERY MESSAGE SAYS WHO IS SPEAKING AND WHAT THAT IS WORTH', () => {
   // readers a sender who does not exist
   assert.equal(messagePreamble('chatgpt-work'), mine);
   assert.equal(messagePreamble('claude-work'), mine);
+});
+
+test('A SESSION MAY NOT REGISTER UNDER ANOTHER ACTOR\'S NAME', () => {
+  /*
+   * MEASURED. `social-sparks-app-c8` registered as agent `code-b` at 07:49Z,
+   * two minutes before this lane first signed as c8, and `t-loop-proof` -- the
+   * first end-to-end loop this system ever ran -- is stored with
+   * `returned_by: social-sparks-app-c8`. The mapping in the registration is
+   * correct, so a resolver gets the right actor; every human and every log line
+   * reading the string gets the wrong one, which is most of them.
+   */
+  const e = validateSessionId('social-sparks-app-c8', 'code-b');
+  assert.notEqual(e, null, 'a session claiming another actor was accepted');
+  assert.match(e, /c8/);
+  assert.match(e, /code-b/, 'the refusal has to name who it actually is');
+});
+
+test('THE POSITIVE CONTROL: EVERY SESSION THAT HAS REALLY WORKED STILL REGISTERS', () => {
+  /*
+   * Copied from session_registrations, not invented. A rule that refuses the
+   * sessions running all week is one somebody switches off, taking the true
+   * refusal with it -- and `danny-win-10` is the case that would break a naive
+   * version, because it BEGINS with the owner's own actor id.
+   */
+  for (const [sid, aid] of [
+    ['danny-win-10', 'code-c'],
+    ['danny-win-d1', 'code-d'],
+    ['danny-win-f1', 'code-b'],
+    ['probe-ok-session', 'probe-ok'],
+  ]) {
+    assert.equal(validateSessionId(sid, aid), null, `refused a real session: ${sid}`);
+  }
+});
+
+test('an alias of your OWN actor is fine, which is why this is about identity not strings', () => {
+  // b6 IS code-b, by d-owner-identity-b6-20260916. The same table that resolves
+  // a recipient answers this, so the two cannot drift apart.
+  assert.equal(validateSessionId('social-sparks-app-b6', 'code-a'), null);
+  assert.equal(validateSessionId('social-sparks-app-b6', 'b6'), null);
+  // and the same suffix under a different actor is the collision again --
+  // including under code-b, which is what this asserted until the ledger was
+  // re-read and b6 turned out to be code-a
+  assert.notEqual(validateSessionId('social-sparks-app-b6', 'code-b'), null);
+  assert.notEqual(validateSessionId('social-sparks-app-b6', 'code-d'), null);
+});
+
+test('only the last segment is examined, and the shape rule still applies', () => {
+  /*
+   * THE PREFIX IS A MACHINE OR A REPOSITORY and legitimately contains anything.
+   *
+   * `b6-win-10` is the case that pins this, and my first version used
+   * `c8-win-10`, which does NOT: `c8` is a canonical id and resolves to itself,
+   * so a check that scanned every segment looking for a name that RESOLVED
+   * elsewhere would have passed it and the test would have proved nothing.
+   * `b6` is an alias and resolves to `code-b`, so it trips exactly the
+   * scan-everything mistake this is guarding against -- B's machine launching
+   * C's session is a real thing that would then be refused for no reason.
+   */
+  assert.equal(validateSessionId('b6-win-10', 'code-c'), null, 'a prefix is not a claim');
+  assert.equal(validateSessionId('c8-win-10', 'code-c'), null);
+  assert.notEqual(validateSessionId('anything-c', 'code-b'), null);
+  assert.notEqual(validateSessionId('two words', 'code-b'), null, 'the shape rule runs first');
+  assert.notEqual(validateSessionId('', 'code-b'), null);
 });

@@ -38,6 +38,16 @@ export const OUTCOMES = Object.freeze([
   'crashed', // died on a signal
   'refused', // the far end answered and declined (401/409) -- not unreachable
   'unreachable', // no answer at all -- not exit 0, and not a refusal
+  /*
+   * The process stopped to ask a person. NOTHING ABOUT THE WORK IS KNOWN, even
+   * though it may have exited zero: a tool that prompts, reaches end-of-file
+   * and takes its default has made a choice nobody made, and the exit code
+   * describes that default rather than the work. verdictFor refuses every
+   * outcome but `exited`, so this rejects with no further wiring -- which is
+   * the point of the outcome being a value rather than a flag somebody has to
+   * remember to read.
+   */
+  'prompted',
 ]);
 
 const ENVELOPE_KEYS = Object.freeze([

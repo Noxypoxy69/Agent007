@@ -27,6 +27,9 @@
 
 import { execute } from './executorAdapter.mjs';
 import { guardExecution, OUTCOME } from './preExecutionGuard.mjs';
+import { permissionScope, agentLaunch } from './agentPermissions.mjs';
+import { startAttempt, finishAttempt, crashAttempt } from './attemptRecord.mjs';
+import { compileContext } from './contextCompiler.mjs';
 import { collectEvidence } from './evidenceCollector.mjs';
 import { verdictFor } from './resultEnvelope.mjs';
 import { fingerprintAttempt } from './fingerprint.mjs';
@@ -55,6 +58,26 @@ export const DISPOSAL = Object.freeze({
  * a machine verdict -- review is a second opinion, not the only opinion, and a
  * missing reviewer must not make a failing attempt look unjudged.
  */
+/**
+ * `io.now` IS A CLOCK FUNCTION EVERYWHERE ELSE IN THIS FILE, and both places
+ * below want an ISO timestamp instead.
+ *
+ * I passed the function straight through and the policy classifier, which
+ * parses its `now`, got NaN and refused every request as unclassifiable. It
+ * surfaced as "now is not a function" one layer further on, from a caller that
+ * did supply the clock -- so the guard wiring committed earlier today would
+ * have thrown for every real caller and passed every test, because the tests
+ * supplied no clock at all and the `?? new Date()` fallback covered it.
+ *
+ * One name, two types, and the default hid the collision. Converted in one
+ * place so the two callers cannot drift.
+ */
+function isoNow(io) {
+  const t = typeof io?.now === 'function' ? io.now() : io?.now;
+  if (typeof t === 'string') return t;
+  return new Date(typeof t === 'number' ? t : Date.now()).toISOString();
+}
+
 export async function runAttempt({
   task,
   contract = null,
@@ -120,7 +143,7 @@ export async function runAttempt({
       project: task.project, repo: task.repo, lane: task.lane,
     };
     for (const c of task.commands) {
-      const verdict = guardExecution(c, placement, ledger ?? [], { now: io.now ?? new Date().toISOString() });
+      const verdict = guardExecution(c, placement, ledger ?? [], { now: isoNow(io) });
       if (verdict.outcome !== OUTCOME.ALLOW) {
         /*
          * WAITING_APPROVAL, not a prompt and not a silent skip. The attempt
@@ -146,10 +169,114 @@ export async function runAttempt({
 
   const workspace = await workspaces.create({ taskId, baseSha: task.base_sha, attempt });
 
+  /*
+   * AN AGENT IS LAUNCHED ALREADY KNOWING WHAT IT MAY DO.
+   *
+   * The guard above covers commands the task named. An agent choosing commands
+   * as it goes never reaches that check -- it asks its OWN permission system,
+   * whose only answer is a prompt on a machine nobody is watching. So when the
+   * task names an engine rather than an argv, the argv is BUILT here from the
+   * same guard: the scope is derived, never transcribed, so a policy change
+   * moves both halves together instead of leaving two lists to disagree.
+   */
+  const launched = (!task.argv && task.engine)
+    ? agentLaunch(task.engine, {
+        binary: task.binary ?? null,
+        scope: permissionScope(
+          {
+            isDisposable: true,
+            branch: task.branch ?? null,
+            leaseValid: task.lease_valid !== false,
+            fenceCurrent: task.fence_current !== false,
+            task_id: taskId,
+            project: task.project, repo: task.repo, lane: task.lane,
+          },
+          ledger ?? [],
+          { now: isoNow(io) },
+        ),
+        extraArgs: task.engine_args ?? [],
+      })
+    : null;
+
+  /*
+   * THE ATTEMPT BECOMES DURABLE BEFORE THE WORK STARTS, NOT AFTER IT FINISHES.
+   *
+   * The record existed and nothing wrote one. That is the gap four separate
+   * specifications were waiting on, and it is the one that cannot be filled
+   * retroactively: routing and environment identity -- engine, model, role
+   * profile, slot, lease, fence, base sha, runtime and executor versions -- can
+   * only be observed while the attempt is being created. Everything else in the
+   * record can be recomputed from the result. These can only be watched.
+   *
+   * SO A CRASH AFTER THIS POINT LEAVES A ROW SAYING WHAT WAS RUNNING. A record
+   * written at the end describes only the attempts that survived to write one,
+   * which is exactly the set that needed no record.
+   *
+   * It is optional, because the pipeline has to run in a test and on a machine
+   * with no store. `io.records` absent means no row -- and an absent store is
+   * not a silent success: nothing downstream reads a record it did not get.
+   *
+   * ---------------------------------------------------------------------------
+   * WHERE THE FENCE LIVES, because code-b left this module deliberately
+   * uncalled rather than wire it in the wrong place, and the reason was good.
+   *
+   * Their worry: a record written by a worker whose claim has already expired.
+   * The START write cannot have that problem -- it happens before any work, so
+   * the lease that authorised the claim is the newest thing in the room. The
+   * FINISH write can: execution takes time, and time is how a lease expires.
+   *
+   * So the fence is the STORE's, not this function's. `io.records.finish` is
+   * the same fenced write code-c owns at the return boundary; this pipeline
+   * hands it a row and it refuses one whose fence has moved. Putting that check
+   * here instead would be a second implementation of lease semantics, and the
+   * one that disagreed would be the one nobody was looking at.
+   */
+  // NOT `record`: that name is already the telemetry writer imported above, and
+  // shadowing it made every attempt throw "record is not a function" at the
+  // telemetry step. One name, two meanings, caught by an existing test.
+  /*
+   * THE CONTEXT DIGEST IS COMPUTED, NOT ACCEPTED.
+   *
+   * A caller-supplied digest is a claim about what the agent was told, and the
+   * loop detector compares digests to decide whether a retry saw the same
+   * prompt. Taking the caller's word there means a retry that quietly sent less
+   * context still looks identical, which is the case the comparison exists for.
+   *
+   * The cache is the CALLER'S, deliberately: one shared across attempts is the
+   * only kind that can ever report a hit, and a fresh one per attempt makes the
+   * whole dedupe decorative while looking wired.
+   */
+  let context = null;
+  if (Array.isArray(task.context_files) && task.context_files.length) {
+    context = await compileContext(task.context_files, { cache: io.readCache ?? null });
+  }
+
+  let attemptRow = null;
+  if (io.records && task.routing) {
+    attemptRow = startAttempt({
+      attemptId: `${taskId}:${attempt}`,
+      taskId,
+      // the record counts attempts from one; the pipeline counts retries from
+      // zero. Converting here rather than renaming either keeps both honest.
+      attemptNo: attempt + 1,
+      startedAt: isoNow(io),
+      workspaceId: workspace.id ?? workspace.path,
+      retryOfAttemptId: task.retry_of ?? null,
+      runtimeVersion: task.runtime_version ?? 'unknown',
+      executorVersion: executor.id ?? 'unknown',
+      policyRevision: task.policy_revision ?? 'unknown',
+      toolSchemaRevision: task.tool_schema_revision ?? 'unknown',
+      contextDigest: context?.digest ?? task.context_digest,
+      ...task.routing,
+    });
+    await io.records.start(attemptRow);
+  }
+
   const spec = {
     taskId,
     attempt,
     cwd: workspace.path,
+    ...(launched ? { argv: [launched.file, ...launched.args] } : {}),
     timeoutMs: task.timeout_ms ?? DEFAULT_TIMEOUT_MS,
     ...(task.argv ? { argv: task.argv } : {}),
     ...(task.prompt ? { prompt: task.prompt } : {}),
@@ -238,10 +365,44 @@ export async function runAttempt({
           }),
         );
 
+  /*
+   * ALL FOUR VERDICTS, STORED SEPARATELY. The agent's claim, the machine's
+   * verification and the reviewer's decision disagree in exactly the case the
+   * review runtime exists to catch, and a schema that keeps only the final
+   * answer has thrown that disagreement away before anyone can look at it.
+   */
+  if (attemptRow !== null) {
+    attemptRow = finishAttempt({
+      record: attemptRow,
+      finishedAt: isoNow(io),
+      ending: envelope.outcome === 'prompted' ? 'crashed' : envelope.outcome,
+      exitCode: envelope.outcome === 'exited' ? envelope.exitCode : null,
+      resultSha: envelope.commit,
+      resultEnvelopeDigest: null,
+      rawOutputRef: stdout.ref ?? null,
+      /*
+       * WHAT THE WORK SAID ABOUT ITSELF, kept apart from what was observed. An
+       * exit code is the only claim a process makes without being asked, and it
+       * is a claim rather than evidence -- which is the whole reason it is
+       * stored in a different column from the verification verdict below.
+       */
+      agentClaimedSuccess: envelope.outcome === 'exited' ? envelope.exitCode === 0 : false,
+      verificationVerdict: verdict.verdict === 'accept' ? 'verified' : 'rejected',
+      reviewVerdict: review === null
+        ? null
+        : (review.decision === 'accept' ? 'accept' : 'fix_required'),
+      finalState: accepted ? 'done' : 'failed',
+      failureCode: accepted ? null : (verdict.reasons[0] ?? null),
+      failureFingerprint: fingerprint ?? null,
+    });
+    await io.records.finish(attemptRow);
+  }
+
   return Object.freeze({
     taskId,
     attempt,
     accepted,
+    record: attemptRow,
     envelope,
     verdict,
     review,

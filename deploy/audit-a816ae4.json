@@ -1,0 +1,53 @@
+{
+  "_note": "PRE-DEPLOY AUDIT, PASSED, NOT EXECUTED. Danny authorised this deploy at 08:18Z and addressed it to code-c. Deploys are code-c's by the standing lane brief ('no deploys' is one of the hard out-of-scope items for the support lane, never revoked), so this lane ran the audit and stopped at the button rather than taking an authorisation that was issued to somebody else. Everything below was measured, not assumed. If code-c deploys a DIFFERENT commit these hashes are void.",
+  "auditedAt": "2026-09-16T16:19:29Z",
+  "auditedBy": "c8",
+  "headSha": "a816ae437dd446a4066443dfae0be48830e555f0",
+  "gate": {
+    "command": "node bin/agentbridge-deploy-check.mjs --live <live.json> --record deploy/last-deployment.json",
+    "verdict": "DEPLOYABLE",
+    "dirtyTree": "clean",
+    "headPromoted": "a816ae4 is origin/master",
+    "artifactParses": true,
+    "liveDrift": "none \u2014 recorded e82b126\u2026/v20 equals what the control plane reports now"
+  },
+  "artifact": {
+    "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
+    "files": {
+      "index.ts": {
+        "bytes": 75825,
+        "sha256": "95ce14d10a849ba3e92b518a61e544224a0e991833639b1278df35dd9c635f18"
+      },
+      "_shared.js": {
+        "bytes": 118271,
+        "sha256": "daa39ede2af9347fb5059612e707c807e63ac14fb28a600bc685efdc33638e24"
+      }
+    }
+  },
+  "blastRadius": {
+    "index.ts": "CORRECTION: content-identical, NOT byte-identical. Live carries 1812 CRLF line endings (77637 bytes); strip them and it is exactly the repo's 75825. It was deployed from Windows. So a deploy from this container WILL change index.ts bytes and WILL change the artifact hash, and that is NOT drift. Whoever reads the artifact back must compare NORMALISED content, or they will see the hash move and think something shipped outside the path.",
+    "_shared.js": "live 107446 bytes, no CRLF, matches bb899fc exactly \u2014 production genuinely is that commit. Repo is 118271. This is the real change, +254/-17, additive.",
+    "suiteOnMaster": "1420 tests, 1405 pass, 0 fail, 15 skipped",
+    "splices": "no findings",
+    "duplicateTopLevelConst": "none \u2014 the v19 outage shape"
+  },
+  "database": {
+    "migration": "20260916081839_the_attempt_record_four_verdicts_and_a_step_journal",
+    "applied": true,
+    "checkedAgainst": "the live database, not the migration file",
+    "direction": "database ahead of code, which is the safe one"
+  },
+  "rollback": {
+    "version": 20,
+    "equals": "bb899fc",
+    "liveArtifactHash": "e82b12669656f806e6a53e7463449c3fce5de0945990ae72155cf349890db961"
+  },
+  "afterDeploy": [
+    "read the deployed source back and compare it to a816ae4 \u2014 a version number incrementing is not evidence the bytes changed",
+    "replace deploy/last-deployment.json with a real record: headSha a816ae4, the new liveArtifactHash and version"
+  ],
+  "notInThisDeploy": "work/support-modules at 597b564 \u2014 ten commits from tonight, unmerged, 1430 pass 0 fail",
+  "_clockNote": "The first version of this file said 10:2xZ. That came from a scheduled check-in whose notification stated its own fire time as 10:16:04Z and said to treat it as the current time; the machine clock said 16:18Z. Six hours, and a deployment record carrying the wrong one is the sort of thing that is believed later. The value above is the machine's. A time reported by the thing asking you to act on it is a claim like any other.",
+  "_correction": "The byte-identical claim for index.ts was wrong and was mine. Found by code-c while preparing the deploy, verified here against the live fetch: 77637 - 1812 CRLF = 75825 exactly. The error mattered because it sets up a false drift alarm at precisely the moment somebody is deciding whether production got what they meant to send.",
+  "_deliveryBlocker": "NOT DEPLOYED. code-c stopped because it cannot deliver the bytes, and measured rather than assumed: it reproduced a 6000-character slice and got one byte wrong \u2014 a dropped trailing space, invisible in any rendered output. Extrapolated over 194KB that is roughly 32 silent corruptions. c8 has the same limitation: no supabase CLI, no SUPABASE_ACCESS_TOKEN, so the only route is retyping the file into an MCP tool call, which is the same operation that was measured failing. The failure mode is a bundle that does not parse, which takes the coordination channel every agent uses offline, and rollback runs through the identical mechanism \u2014 so a bad deploy is likely unrecoverable. The fix removes transcription entirely: one credential, or one CLI command on a machine that has the files."
+}
