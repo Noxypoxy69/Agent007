@@ -951,34 +951,204 @@ export const MESSAGE_TYPES = ['assignment', 'question', 'answer', 'status', 'blo
 
 export const ASSIGNABLE_FROM = ['runnable', 'returned'];
 
-export function looksExecutable(text) {
-  if (typeof text !== 'string') return false;
+/** Unambiguous wherever they appear: no sentence contains these by accident. */
+const ALWAYS = [
+  ['substitution', /\$\([^)]*\)/],
+  ['backtick-substitution', /`[^`\n]+`/],
+  ['script-tag', /<script\b/i],
+  ['pipe-to-shell', /\|\s*(sh|bash|zsh|pwsh|powershell)\b/i],
+  ['recursive-remove', /\brm\s+-[a-z]*[rf]/i],
+  ['privilege-escalation', /(^|[\s;&|])sudo\s+\S/i],
+];
+
+/** Words that are only a command when they START a command. */
+const COMMANDS =
+  'rm|curl|wget|chmod|chown|kill|scp|ssh|nc|eval|exec|git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd';
+
+/**
+ * Command-SHAPED, not merely command-adjacent: a flag, a path, a URL, a quoted
+ * argument, or a redirect. "npm run verify" qualifies; "npm is the package
+ * manager" does not.
+ */
+const ARGUMENT = String.raw`(-{1,2}[a-z]|[./~]|[a-z]+:\/\/|["']|\w+\s+-{1,2}[a-z]` +
+  // a runner naming a package and then an action: "npx wrangler deploy"
+  String.raw`|[\w@/-]+\s+(deploy|install|run|publish|start|build|test)\b` +
+  String.raw`|(deploy|install|run|publish|start|build|test)\b)`;
+
+/** At the start of a line, allowing indentation and a shell prompt. */
+const AT_LINE_START = new RegExp(
+  String.raw`^[ \t]*[$>#]?[ \t]*(${COMMANDS})\s+${ARGUMENT}`,
+  'im',
+);
+
+/** Or chained after an operator, which is a command position wherever it sits. */
+const AFTER_OPERATOR = new RegExp(String.raw`[;&|]{1,2}\s*(${COMMANDS})\s+${ARGUMENT}`, 'i');
+
+/** A statement, not a sentence containing a verb that is also a keyword. */
+const SQL_STATEMENT = new RegExp(
+  String.raw`^[ \t]*(drop|delete|truncate|alter|insert|update)\s+(table|from|into)\b`,
+  'im',
+);
+
+/**
+ * What matched, and where. The refusal already knows this; withholding it is
+ * what turned a one-second correction into a morning of bisection.
+ */
+export function executableMatch(text) {
+  if (typeof text !== 'string') return null;
   const t = text.trim();
 
-  const patterns = [
-    /(^|[\s;&|`])(rm|curl|wget|chmod|chown|kill|sudo|scp|ssh|nc|eval|exec)\s+-?\w/i,
-    /(^|[\s;&|`])(git|npm|npx|node|python|bash|sh|powershell|pwsh|cmd)\s+\S/i,
-    /\$\(|\bbacktick\b|`[^`]*`/,
-    /\|\s*(sh|bash|zsh|pwsh|powershell)\b/i,
-    /\b(drop|delete|truncate|alter|insert|update)\s+(table|from|into)\b/i,
-    /<script\b/i,
-  ];
-  return patterns.some((re) => re.test(t));
+  for (const [rule, re] of ALWAYS) {
+    const m = re.exec(t);
+    if (m) return { rule, token: m[0].slice(0, 40) };
+  }
+  for (const [rule, re] of [
+    ['command-at-line-start', AT_LINE_START],
+    ['command-after-operator', AFTER_OPERATOR],
+    ['sql-statement', SQL_STATEMENT],
+  ]) {
+    const m = re.exec(t);
+    if (m) return { rule, token: m[0].trim().slice(0, 40) };
+  }
+  return null;
 }
 
-export function validateMessage(m = {}) {
+export function looksExecutable(text) {
+  return executableMatch(text) !== null;
+}
+
+/**
+ * THE CANONICAL ROSTER, AND WHY AN ALIAS TABLE IS NOT BUREAUCRACY.
+ *
+ * A REGISTRY RULE WITHOUT ALIASES WOULD HAVE SEVERED THE ONE WORKING CHANNEL.
+ * The rule committed earlier today refuses a recipient that is not in the live
+ * roster. The live roster is built from daemon heartbeats, so it holds code-b,
+ * code-c, code-d and b6 and nothing else. Every message code-c has ever sent
+ * upward went to "chatgpt-work", which no daemon registers and which that rule
+ * would therefore have refused the moment its call site started passing live
+ * sessions. The fix was written to stop messages vanishing and would instead
+ * have stopped them being sent. Its positive control did not catch this because
+ * it asserted the SHAPE rule against the real ids and the REGISTRY rule against
+ * an invented roster that contained the coordinator -- a fixture that could not
+ * construct the real case, so it could not fail for it.
+ *
+ * REGISTRATION IS NOT EXISTENCE. A coordinator and an owner are actors with no
+ * daemon and no worktree; they are addressed constantly and heartbeat never.
+ * Absence from the heartbeat roster means "not running", which for a worker is
+ * information and for a coordinator is just how coordinators are.
+ *
+ * SO IDENTITY RESOLVES BEFORE IT IS CHECKED. Ten identity strings were in use
+ * for six actors, and the coordinator seat alone answered to four. Renaming by
+ * decree loses the mail addressed to the old name; the alias table keeps every
+ * historical string routable while there is one canonical id per seat.
+ *
+ * WHAT IS RECORDED HERE AND WHAT IS NOT. The letters are the owner's decision
+ * ledger, not an inference: d-owner-team-order-20260915 fixes the team as
+ * C, B, D, A, and d-owner-identity-a-20260915 states that b6 is Agent A. Those
+ * are recorded owner words. Identity is NEVER inferred from a branch, a
+ * worktree or a session name -- b6 runs in a worktree called wt-release-verify
+ * and that says nothing about who b6 is.
+ */
+export const ACTORS = [
+  { actor_id: 'code-c', actor_type: 'worker', display_name: 'C', aliases: ['c'] },
+  { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b'] },
+  { actor_id: 'code-d', actor_type: 'worker', display_name: 'D', aliases: ['d'] },
+  { actor_id: 'b6', actor_type: 'worker', display_name: 'A', aliases: ['a', 'code-a'] },
+  {
+    actor_id: 'c8',
+    actor_type: 'coordinator',
+    display_name: 'Work lane / execution lead',
+    aliases: ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator'],
+  },
+  {
+    actor_id: 'chatgpt',
+    actor_type: 'coordinator',
+    display_name: 'Command center',
+    aliases: ['chatgpt-command-center'],
+  },
+  { actor_id: 'danny', actor_type: 'owner', display_name: 'Danny', aliases: ['owner'] },
+];
+
+/**
+ * An alias resolves to its canonical id; anything else is returned unchanged.
+ *
+ * Unchanged rather than null on purpose: this function answers "what is this
+ * called canonically", and refusing an unknown name is a DIFFERENT question
+ * that validateMessage asks against the roster. Folding the two would make an
+ * unknown recipient indistinguishable from an unaliased one.
+ */
+export function canonicalActor(value, actors = ACTORS) {
+  if (!nonEmpty(value)) return null;
+  const want = value.trim().toLowerCase();
+  for (const a of arr(actors)) {
+    if (!a) continue;
+    if (String(a.actor_id).toLowerCase() === want) return a.actor_id;
+    if (arr(a.aliases).some((x) => String(x).toLowerCase() === want)) return a.actor_id;
+  }
+  return value.trim();
+}
+
+/**
+ * Every id a message may be addressed to: the live roster PLUS the declared
+ * actors that have no daemon. Canonical ids only -- the caller canonicalises
+ * first, so an alias is never separately listed as a name you could have meant.
+ */
+export function knownActorIds(sessions, actors = ACTORS) {
+  const ids = new Set();
+  for (const s of arr(sessions)) if (s?.agent_id) ids.add(canonicalActor(s.agent_id, actors));
+  for (const a of arr(actors)) if (a?.actor_type !== 'worker') ids.add(a.actor_id);
+  return [...ids].sort();
+}
+
+export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
+export function validateAgentId(value, field) {
+  if (!nonEmpty(value)) return `${field} is required`;
+  if (!AGENT_ID.test(value.trim())) {
+    return `${field} ${JSON.stringify(value)} is not an agent id: ids are slugs, `
+      + 'so a space or punctuation usually means a description reached an identifier field';
+  }
+  return null;
+}
+
+export function validateMessage(m = {}, { sessions = null } = {}) {
   const errors = [];
 
-  if (!nonEmpty(m.from_agent)) errors.push('from_agent is required');
-  if (!nonEmpty(m.to_agent)) errors.push('to_agent is required');
+  const fromBad = validateAgentId(m.from_agent, 'from_agent');
+  if (fromBad) errors.push(fromBad);
+  const toBad = validateAgentId(m.to_agent, 'to_agent');
+  if (toBad) errors.push(toBad);
+
+  /*
+   * An unknown recipient is refused; a known one that is offline is fine and is
+   * reported as a note rather than an error, because queueing work for a worker
+   * that is restarting is what a durable channel is for.
+   */
+  if (!toBad && Array.isArray(sessions)) {
+    const to = canonicalActor(m.to_agent);
+    const roster = knownActorIds(sessions);
+    if (!roster.includes(to)) {
+      errors.push(
+        `to_agent ${JSON.stringify(m.to_agent)} is not a known actor, so nothing would `
+          + `ever read it. Known actors: ${roster.join(', ') || '(none)'}`,
+      );
+    }
+  }
   if (!MESSAGE_TYPES.includes(m.type)) {
     errors.push(`type must be one of ${MESSAGE_TYPES.join(', ')}`);
   }
   if (!nonEmpty(m.body)) errors.push('body is required');
   else if (m.body.length > 8000) errors.push('body exceeds 8000 characters');
-  else if (looksExecutable(m.body)) {
-    errors.push('body looks like a command rather than a message: a coordination '
-      + 'channel that carries executable text is a remote shell nobody audited');
+  else {
+    const hit = executableMatch(m.body);
+    if (hit) {
+      errors.push(
+        `body looks like a command rather than a message: a coordination channel that `
+          + `carries executable text is a remote shell nobody audited. Matched ${hit.rule} `
+          + `on ${JSON.stringify(hit.token)} -- this is a LEXICAL match on the text, not a `
+          + `judgement about intent, so rephrasing that fragment is enough`,
+      );
+    }
   }
   if (m.task_id != null && !nonEmpty(m.task_id)) errors.push('task_id must be a string when present');
 

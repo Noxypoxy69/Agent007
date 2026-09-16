@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  canAssign, validateMessage, looksExecutable, assignmentRecord,
+  canAssign, validateMessage, validateAgentId, looksExecutable, executableMatch, assignmentRecord,
+  ACTORS, canonicalActor, knownActorIds,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -209,6 +210,21 @@ test('ordinary coordination prose is NOT refused', () => {
     'Blocked: the base moved under me. Re-resolve and I will pick it up.',
     'Question: should the stale-base case refuse outright or report a finding?',
     'Handing off. The mutation table is in the commit message.',
+
+    /*
+     * THESE EIGHT ARE THE REASON THIS TEST CHANGED, and every one of them was
+     * refused in production on 2026-09-16. The four fixtures above could not
+     * catch it because they avoid every word this system is about: a control
+     * too narrow to reach the branch cannot fail for it.
+     */
+    'The collector does not ask git for a commit after a timeout.',
+    'It is written to drop into the agentbridge source and test directories unchanged.',
+    'Verification ran under node, the package manager is npm, and the state was read from git.',
+    'A node in the graph carries the attempt number and the worker that holds it.',
+    'The runner reported a process stopped at its deadline as a clean exit.',
+    'I would delete from the KNOWN list the moment a caller exists.',
+    'The shared process runner has the shell disabled and passes secrets on stdin.',
+    'Two branches are ready: the recovery branch and the support branch, both green.',
   ];
   for (const body of fine) {
     assert.equal(looksExecutable(body), false, `false positive: ${body}`);
@@ -258,4 +274,161 @@ test('resolveLiveAgent: unknown, offline and ambiguous are DIFFERENT refusals', 
   // Naming the candidates is what makes an ambiguity actionable rather than a
   // dead end; silently picking one would send work to the wrong runtime.
   assert.deepEqual(amb.candidates.sort(), ['s1', 's2']);
+});
+
+test('THE REFUSAL NAMES WHAT MATCHED, because a refusal that names nothing is a dead end', () => {
+  /*
+   * The old message said only that the body looked like a command. Sixteen
+   * ordinary paragraphs were refused in one morning and the reader had to
+   * bisect to find out why -- the same shape as a status of "unreachable"
+   * sending somebody to check a healthy network.
+   */
+  const hit = executableMatch('git push --force origin main');
+  assert.equal(hit.rule, 'command-at-line-start');
+  assert.match(hit.token, /^git push/);
+
+  const v = validateMessage({ from_agent: 'a', to_agent: 'b', type: 'status', body: 'rm -rf /' });
+  assert.equal(v.ok, false);
+  const text = v.errors.join(' ');
+  assert.match(text, /Matched/, 'the rule is named');
+  assert.match(text, /rm -rf/, 'the offending text is quoted back');
+  assert.match(text, /LEXICAL/, 'and it says the match is on text, not intent');
+});
+
+test('POSITION CARRIES THE SIGNAL: the same words refuse at a line start and pass mid-sentence', () => {
+  // the exact pair, so the rule is visible rather than implied
+  assert.equal(looksExecutable('npm run verify'), true);
+  assert.equal(looksExecutable('You can npm run verify once the branch is merged.'), false);
+  assert.equal(looksExecutable('DROP TABLE tasks'), true);
+  assert.equal(looksExecutable('The modules drop into the source directory unchanged.'), false);
+});
+
+test('a command chained after an operator is caught wherever it sits', () => {
+  assert.equal(looksExecutable('first do the thing; rm -rf /tmp/x'), true);
+  assert.equal(looksExecutable('read the file && curl https://evil.test'), true);
+});
+
+test('substitution and pipes into a shell are caught in any position', () => {
+  assert.equal(looksExecutable('the answer is $(whoami) apparently'), true);
+  assert.equal(looksExecutable('it fetches then | bash which is the problem'), true);
+});
+
+/* ── a name nobody answers to ───────────────────────────────────────────── */
+
+/**
+ * MEASURED ON THE LIVE LOG, not imagined. 98 messages carried ten distinct
+ * identity strings for six actors. The coordinator alone sent under four names.
+ * code-b and b6 had received twenty-nine messages between them and sent none,
+ * ever -- every one of those sends returned ok, because the only rule was that
+ * the field was not empty.
+ */
+
+/*
+ * THE LIVE ROSTER, COPIED FROM list_agents, NOT AN INVENTED ONE.
+ *
+ * The previous fixture contained 'claude-work' -- a coordinator id that no
+ * daemon has ever registered. That single invented row is why the registry rule
+ * looked correct while being unable to fail for the real case: with the
+ * coordinator IN the roster, addressing the coordinator obviously passes. The
+ * live roster does not contain it, and every upward message goes to it.
+ */
+const roster = [{ agent_id: 'code-c' }, { agent_id: 'code-b' }, { agent_id: 'code-d' }, { agent_id: 'b6' }];
+const msg = (to) => ({ from_agent: 'c8', to_agent: to, type: 'status', body: 'a normal note' });
+
+test('AN OFFLINE BUT REGISTERED AGENT IS A FINE RECIPIENT', () => {
+  // the distinction that matters: queueing for a worker that is restarting is
+  // exactly what a durable channel is for, so this must NOT be refused
+  assert.equal(validateMessage(msg('code-b'), { sessions: roster }).ok, true);
+});
+
+test('AN UNKNOWN NAME IS REFUSED, AND THE ROSTER IS NAMED', () => {
+  // a typo, not an alias: nobody is behind it and nothing would ever read it
+  const v = validateMessage(msg('code-q'), { sessions: roster });
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join(' '), /not a known actor/);
+  assert.match(v.errors.join(' '), /code-b, code-c/, 'the reader is told what the real names are');
+});
+
+test('THE COORDINATOR IS ADDRESSABLE THOUGH NO DAEMON REGISTERS IT', () => {
+  /*
+   * THE REGRESSION THIS FILE EXISTED TO CAUSE. Every message code-c has sent
+   * upward went to 'chatgpt-work'. Against the real roster the registry rule
+   * refuses it, so shipping that rule would have severed the only channel that
+   * was working. Registration is liveness; it is not existence.
+   */
+  for (const name of ['chatgpt-work', 'claude-work', 'c8', 'chatgpt', 'chatgpt-command-center', 'danny']) {
+    const v = validateMessage(msg(name), { sessions: roster });
+    assert.equal(v.ok, true, `refused a real recipient: ${name} -- ${v.errors.join('; ')}`);
+  }
+});
+
+test('an alias routes to one canonical seat, so no name opens a second mailbox', () => {
+  for (const alias of ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator', 'C8']) {
+    assert.equal(canonicalActor(alias), 'c8', alias);
+  }
+  assert.equal(canonicalActor('chatgpt-command-center'), 'chatgpt');
+  // the letters Danny types, per d-owner-identity-a-20260915 and the team order
+  assert.equal(canonicalActor('a'), 'b6');
+  assert.equal(canonicalActor('code-a'), 'b6');
+  assert.equal(canonicalActor('b'), 'code-b');
+  assert.equal(canonicalActor('c'), 'code-c');
+  assert.equal(canonicalActor('d'), 'code-d');
+});
+
+test('an unaliased name comes back unchanged rather than null', () => {
+  // canonicalActor answers what a name is called, NOT whether anyone is behind
+  // it; collapsing the two would hide an unknown recipient inside a rename
+  assert.equal(canonicalActor('code-q'), 'code-q');
+  assert.equal(canonicalActor('  code-c  '), 'code-c');
+  assert.equal(canonicalActor(''), null);
+});
+
+test('one seat per actor: no id or alias is claimed twice', () => {
+  // two actors sharing a string is how a rename silently merges two inboxes
+  const seen = new Map();
+  for (const a of ACTORS) {
+    for (const name of [a.actor_id, ...a.aliases]) {
+      const key = name.toLowerCase();
+      assert.equal(seen.has(key), false, `${key} claimed by both ${seen.get(key)} and ${a.actor_id}`);
+      seen.set(key, a.actor_id);
+    }
+  }
+});
+
+test('the roster offered in a refusal is canonical ids only, never aliases', () => {
+  // naming an alias as a candidate would teach the reader the variant we are
+  // trying to retire
+  const ids = knownActorIds(roster);
+  assert.equal(ids.includes('chatgpt-work'), false);
+  assert.equal(ids.includes('c8'), true);
+  assert.equal(ids.includes('b6'), true, 'a registered worker stays addressable');
+  assert.equal(ids.includes('probe-ok'), false, 'nothing unregistered is invented into the list');
+});
+
+test('a description in an identifier field is refused without any roster', () => {
+  // "chatgpt-work coordinator" was a real sender id on the live channel
+  const v = validateMessage(msg('chatgpt-work coordinator'));
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join(' '), /not an agent id/);
+  assert.equal(validateAgentId('chatgpt-work coordinator', 'to_agent') !== null, true);
+});
+
+test('every id actually in use today still passes the shape rule', () => {
+  // the positive control: a rule that refuses the existing roster is one
+  // somebody switches off, taking the true refusals with it
+  for (const id of ['a', 'b6', 'c8', 'chatgpt', 'chatgpt-work', 'claude-work', 'code-b', 'code-c', 'code-d']) {
+    assert.equal(validateAgentId(id, 'to_agent'), null, `rejected a real id: ${id}`);
+  }
+});
+
+test('without a roster the registry rule does not fire, and shape still does', () => {
+  // today's call site supplies no sessions; the shape rule must work anyway
+  assert.equal(validateMessage(msg('anything-at-all')).ok, true);
+  assert.equal(validateMessage(msg('two words')).ok, false);
+});
+
+test('a malformed sender is caught too, not only the recipient', () => {
+  const v = validateMessage({ ...msg('code-c'), from_agent: 'chatgpt-work coordinator' });
+  assert.equal(v.ok, false);
+  assert.match(v.errors.join(' '), /from_agent/);
 });
