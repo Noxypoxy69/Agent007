@@ -7,6 +7,8 @@ import { runAttempt } from '../src/attemptPipeline.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
 import { run as execRun } from '../src/exec.mjs';
 import { createFakeReviewer } from './fakeReviewer.mjs';
+import { createLoopState } from '../src/loopDetector.mjs';
+import { createReadCache } from '../src/readCache.mjs';
 
 /**
  * THE ACCEPTANCE TEST FOR "ZERO INTERACTIVE PROMPTS", RUN FOR REAL.
@@ -485,4 +487,92 @@ test('THE CONTEXT DIGEST IS COMPUTED, AND A CALLER\'S CLAIM DOES NOT WIN', async
   assert.notEqual(saved, null, 'no attempt row was written');
   assert.notEqual(saved.contextDigest, LIE, "the caller's claim was recorded as fact");
   assert.match(saved.contextDigest, /^[0-9a-f]{64}$/);
+});
+
+test('A REPEATED FAILURE IS CAUGHT AS A LOOP EVEN THOUGH THE CONTEXT DIGEST MOVED', async (t) => {
+  /*
+   * A DECISION PINNED, BECAUSE THE OBVIOUS IMPROVEMENT WOULD BREAK IT.
+   *
+   * The attempt fingerprint covers task, base, files changed, outcome, exit
+   * code, test counts and the normalised failure. It does NOT cover the context
+   * digest, and now that the pipeline computes one, adding it looks like an
+   * upgrade: two attempts are "the same" only if they were given the same
+   * thing.
+   *
+   * It would disable loop detection completely. The context compiler sends an
+   * unchanged file as a reference on the second read, so the sent form -- and
+   * therefore the digest -- differs between attempt one and attempt two BY
+   * DESIGN. A fingerprint including it never repeats, `observe` never fires,
+   * and an agent burns every attempt it has on the identical failure while the
+   * detector reports nothing. Silent, and exactly backwards.
+   *
+   * So this test asserts both halves: the digests really do differ, and the
+   * loop is caught anyway.
+   */
+  const { dir, sha } = await scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'agent-'));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const agent = path.join(agentDir, 'fails.mjs');
+  // fails the same way every time, which is what a stuck agent looks like
+  writeFileSync(agent, "process.stderr.write('TypeError: cannot read x of undefined');process.exit(3);");
+
+  const cache = createReadCache();
+  const rows = [];
+  const records = { start: async (r) => rows.push(r), finish: async () => {} };
+  let loopState = createLoopState();
+
+  const once = (attemptNo) => runAttempt({
+    task: {
+      task_id: 't1-loops', base_sha: sha, branch: 'work/t1', attempt: attemptNo,
+      lease_ms: 120000, timeout_ms: 30000,
+      env: { PATH: process.env.PATH ?? '' },
+      argv: [process.execPath, agent],
+      context_files: [{ path: 'value.txt', load: async () => '1\n' }],
+      routing: {
+        engine: 'local', model: 'none', roleProfile: 'builder',
+        workerSlotId: 'slot-1', sessionId: 'sess-1', leaseId: 'lease-1',
+        fenceToken: '1', repo: 'agentbridge', baseSha: sha,
+        taskClass: 'code', riskClass: 'routine', environmentDigest: 'b'.repeat(64),
+      },
+    },
+    executor: createLocalExecutor(),
+    workspaces: workspacesFor(dir),
+    loopState,
+    io: {
+      now: () => Date.now(), records, readCache: cache,
+      git: { headSha: async () => sha, changedFiles: async () => [] },
+    },
+  });
+
+  const first = await once(0);
+  loopState = first.loopState;
+  const second = await once(1);
+  loopState = second.loopState;
+
+  assert.equal(first.envelope.outcome, 'exited');
+  assert.equal(first.envelope.exitCode, 3);
+  assert.equal(first.fingerprint, second.fingerprint, 'the same failure fingerprinted differently');
+
+  /*
+   * TWO IS NOT YET A LOOP, and the threshold of three is a judgement worth
+   * pinning from both sides: two identical failures can be one flaky thing
+   * happening twice, and declaring a loop there burns an attempt an agent might
+   * have needed. A test that only checks the firing side would pass just as
+   * happily against a detector that fires on the first failure.
+   */
+  assert.equal(second.loop, null, 'two identical failures were called a loop');
+
+  const third = await once(2);
+  assert.equal(third.fingerprint, first.fingerprint);
+
+  // the premise: the context digest really did move across the attempts
+  assert.equal(rows.length, 3);
+  assert.notEqual(rows[0].contextDigest, rows[1].contextDigest,
+    'the dedupe did not kick in, so this test is not exercising what it claims');
+
+  // and the loop is caught regardless of that
+  assert.notEqual(third.loop, null, 'three identical failures were not recognised as a loop');
+  assert.equal(third.loop.kind, 'repeat');
+  assert.equal(third.loop.count, 3);
 });
