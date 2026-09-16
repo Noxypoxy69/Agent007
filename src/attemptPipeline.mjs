@@ -27,6 +27,7 @@
 
 import { execute } from './executorAdapter.mjs';
 import { guardExecution, OUTCOME } from './preExecutionGuard.mjs';
+import { permissionScope, agentLaunch } from './agentPermissions.mjs';
 import { collectEvidence } from './evidenceCollector.mjs';
 import { verdictFor } from './resultEnvelope.mjs';
 import { fingerprintAttempt } from './fingerprint.mjs';
@@ -55,6 +56,26 @@ export const DISPOSAL = Object.freeze({
  * a machine verdict -- review is a second opinion, not the only opinion, and a
  * missing reviewer must not make a failing attempt look unjudged.
  */
+/**
+ * `io.now` IS A CLOCK FUNCTION EVERYWHERE ELSE IN THIS FILE, and both places
+ * below want an ISO timestamp instead.
+ *
+ * I passed the function straight through and the policy classifier, which
+ * parses its `now`, got NaN and refused every request as unclassifiable. It
+ * surfaced as "now is not a function" one layer further on, from a caller that
+ * did supply the clock -- so the guard wiring committed earlier today would
+ * have thrown for every real caller and passed every test, because the tests
+ * supplied no clock at all and the `?? new Date()` fallback covered it.
+ *
+ * One name, two types, and the default hid the collision. Converted in one
+ * place so the two callers cannot drift.
+ */
+function isoNow(io) {
+  const t = typeof io?.now === 'function' ? io.now() : io?.now;
+  if (typeof t === 'string') return t;
+  return new Date(typeof t === 'number' ? t : Date.now()).toISOString();
+}
+
 export async function runAttempt({
   task,
   contract = null,
@@ -120,7 +141,7 @@ export async function runAttempt({
       project: task.project, repo: task.repo, lane: task.lane,
     };
     for (const c of task.commands) {
-      const verdict = guardExecution(c, placement, ledger ?? [], { now: io.now ?? new Date().toISOString() });
+      const verdict = guardExecution(c, placement, ledger ?? [], { now: isoNow(io) });
       if (verdict.outcome !== OUTCOME.ALLOW) {
         /*
          * WAITING_APPROVAL, not a prompt and not a silent skip. The attempt
@@ -146,10 +167,40 @@ export async function runAttempt({
 
   const workspace = await workspaces.create({ taskId, baseSha: task.base_sha, attempt });
 
+  /*
+   * AN AGENT IS LAUNCHED ALREADY KNOWING WHAT IT MAY DO.
+   *
+   * The guard above covers commands the task named. An agent choosing commands
+   * as it goes never reaches that check -- it asks its OWN permission system,
+   * whose only answer is a prompt on a machine nobody is watching. So when the
+   * task names an engine rather than an argv, the argv is BUILT here from the
+   * same guard: the scope is derived, never transcribed, so a policy change
+   * moves both halves together instead of leaving two lists to disagree.
+   */
+  const launched = (!task.argv && task.engine)
+    ? agentLaunch(task.engine, {
+        binary: task.binary ?? null,
+        scope: permissionScope(
+          {
+            isDisposable: true,
+            branch: task.branch ?? null,
+            leaseValid: task.lease_valid !== false,
+            fenceCurrent: task.fence_current !== false,
+            task_id: taskId,
+            project: task.project, repo: task.repo, lane: task.lane,
+          },
+          ledger ?? [],
+          { now: isoNow(io) },
+        ),
+        extraArgs: task.engine_args ?? [],
+      })
+    : null;
+
   const spec = {
     taskId,
     attempt,
     cwd: workspace.path,
+    ...(launched ? { argv: [launched.file, ...launched.args] } : {}),
     timeoutMs: task.timeout_ms ?? DEFAULT_TIMEOUT_MS,
     ...(task.argv ? { argv: task.argv } : {}),
     ...(task.prompt ? { prompt: task.prompt } : {}),

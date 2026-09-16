@@ -50,6 +50,19 @@ export function createLocalExecutor({ run = execRun, maxOutputBytes = 256 * 1024
       const stdout = answer.stdout ?? '';
       const stderr = answer.stderr ?? '';
 
+      /*
+       * A PROMPT IS CHECKED BEFORE THE EXIT CODE, because the dangerous case is
+       * the one that succeeded. An agent that asked, got end-of-file and took
+       * its default exits zero, and reading the code first files that as a
+       * clean run of work nobody authorised.
+       */
+      if (answer.interactivePrompt) {
+        return {
+          outcome: 'prompted',
+          prompt: answer.interactivePrompt,
+          stdout, stderr, durationMs,
+        };
+      }
       if (answer.killed) {
         /*
          * The runner enforced the deadline. Whatever the platform reported as an
