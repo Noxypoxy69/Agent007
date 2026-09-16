@@ -1044,7 +1044,7 @@ const SEGMENT = /^[^\\/]+$/;
  * `reason: 'head-sha'`. `p_lease_token` is the only non-text parameter on any
  * call site in this file.
  */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// UUID is declared once at the top of this file and used by both call sites.
 
 function validateRegistration(b) {
   const errors = [];
