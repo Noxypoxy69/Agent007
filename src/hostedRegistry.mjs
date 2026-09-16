@@ -115,6 +115,20 @@ export async function closeHttp() {
  *   5xx         UNREACHABLE  answered but cannot serve -- retry may help
  */
 export function classifyStatus(status) {
+  /*
+   * A 2xx IS NOT UNREACHABLE. It is not a failure at all.
+   *
+   * This returned UNREACHABLE for every status below 400. Harmless where it is
+   * called -- the daemon only reaches it after a failed publish -- and a trap
+   * for the next caller, who will pass a status without checking whether it
+   * failed first and be told a success is an outage.
+   *
+   * null means "nothing went wrong", which is exactly what interpretHttp
+   * already returns for a 2xx. The two now agree on EVERY status rather than on
+   * every status somebody happened to try, which is the difference between a
+   * shared rule and two rules that have not disagreed yet.
+   */
+  if (status >= 200 && status < 400) return null;
   if (status === 401 || status === 403) return HOSTED.REJECTED;
   if (status >= 400 && status < 500) return HOSTED.REFUSED;
   return HOSTED.UNREACHABLE;
