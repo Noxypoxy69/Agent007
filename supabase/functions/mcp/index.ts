@@ -4,7 +4,7 @@ import {
   messagesQuery, canReturn, returnRecord, canAccept, acceptRecord, canCancel, cancelRecord,
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
-  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
+  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
   ownTask, ownTasks,
 } from './_shared.js';
@@ -176,7 +176,16 @@ const listSessions = async () => {
     lastSeenAt: r.heartbeat_at ?? null,
     sessionId: r.session_id,
     repoId: r.repo_id ?? null,
-    capacity: r.capacity ?? null,
+    /*
+     * DERIVED, NOT REPORTED. A worker that claimed "idle" and then died says
+     * "idle" in its last row forever -- code-b sat in this roster for fifteen
+     * hours as idle, 898 minutes stale, and it was the only real agent among
+     * the stale rows. The write paths already derived this through
+     * registryFromSessions; only the READ surface handed the stored column
+     * straight out, so the bug could never cause a bad assignment and could
+     * only ever misinform whoever was reading.
+     */
+    capacity: observedCapacity(r, { now: new Date().toISOString() }),
   }));
 };
 

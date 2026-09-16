@@ -426,6 +426,52 @@ export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
   return age >= 0 && age <= staleAfterMs;
 }
 
+/**
+ * WHAT CAPACITY A READER SHOULD BE TOLD, AS OPPOSED TO WHAT THE ROW SAYS.
+ *
+ * ═══ THE ROSTER WAS LYING ABOUT THE ONLY ROW THAT MATTERED ═══
+ *
+ * Found by code-d probing the live endpoint, filed at 23:28, unfixed for
+ * fifteen hours, and demonstrated the moment Danny asked me to confirm every
+ * agent was connected:
+ *
+ *     code-b   danny-win-f1   last seen 898.8 MINUTES AGO   capacity: idle
+ *
+ * Every other stale row in that roster read `offline` correctly — b6 and eight
+ * probes. They were right for the wrong reason: they DECLARED offline on their
+ * way out. code-b never did. It just stopped, so its last self-description
+ * stands forever.
+ *
+ * So the one row that was a real agent rather than a probe was also the only
+ * wrong one, and taken at face value the roster answered "is code-b connected?"
+ * with "yes, idle". That is the question the data cannot answer being answered
+ * anyway, in the vocabulary of one it can.
+ *
+ * ═══ WHY IT EXISTED: THE RULE WAS APPLIED IN ONLY ONE DIRECTION ═══
+ *
+ * `registryFromSessions` already overrode declared capacity with derived
+ * liveness, and assignTask, confirmProposal and the dispatcher all go through
+ * it — which is why the bug could never produce a bad assignment. The WRITE
+ * paths were correct and the READ path was not: the edge function mapped
+ * `capacity` straight off the stored column.
+ *
+ * The blast radius was therefore not corrupted state. It was every human and
+ * every agent reading a roster that described a dead worker as available.
+ *
+ * ═══ ONE RULE, ONE PLACE ═══
+ *
+ * This function is now the single definition, and registryFromSessions calls
+ * it. Writing the derivation inline at the read site would have been three
+ * lines and a second source of truth for "what does a reader see", and the two
+ * would disagree the first time somebody changed one.
+ */
+export function observedCapacity(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  return isLive(row, { now, staleAfterMs })
+    ? (CAPACITIES.includes(row?.capacity) ? row.capacity : 'idle')
+    : 'offline';
+}
+
+
 export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('registryFromSessions requires an array');
   if (!str(now)) throw new TypeError('registryFromSessions requires a `now` timestamp');
@@ -447,9 +493,7 @@ export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS 
       lane_id: str(r?.lane_id),
       head_sha: str(r?.head_sha),
       heartbeat_at: r?.heartbeat_at ?? r?.lastSeenAt ?? r?.last_seen_at ?? null,
-      capacity: isLive(r, { now, staleAfterMs })
-        ? (CAPACITIES.includes(r?.capacity) ? r.capacity : 'idle')
-        : 'offline',
+      capacity: observedCapacity(r, { now, staleAfterMs }),
     });
   }
 
