@@ -19,14 +19,40 @@ correctly behind the loop, not in front of it.
 
 ## Blocking the loop
 
-**0. Deploy the edge function.** — DANNY, and only Danny
-`/task`, `/renew` and the permission path are committed and undeployed. Reported
-by code-c at 04:53: *"until they ship a worker cannot read its task, cannot renew,
-and cannot close the loop."* Every item below is downstream of this. It is an
-owner gate by the repository's own rules and nobody else may clear it.
+**0. ~~Deploy the edge function.~~ ALREADY LIVE — closed 2026-09-16 08:18.**
+`/task` and `/renew` are in the deployed version 20 right now, with `/dispatch`,
+`/register`, `/return`, `/wait` and `/health`. code-c's 04:53 report — *"until
+they ship a worker cannot read its task, cannot renew"* — was true against
+version 17 and stopped being true when version 20 shipped the outage fix and
+carried those routes with it. **Nothing downstream was ever waiting on this.**
 
-**1. Merge the two ready branches to master.** — code-c *(assigned)*
-`work/recover-orphan-branches` then `work/support-modules`. Both green.
+*I put it at the top of this list on the strength of that report and never
+checked it against the live function. Read the deployed source; a report about
+production ages the moment somebody deploys.*
+
+**0b. What is actually live, measured against the platform's own copy.**
+Version 20 is byte-identical to `origin/code-b/fifth-hosted-path` at `bb899fc`
+in both `index.ts` and `_shared.js`. So production DOES correspond to a commit —
+better than this morning's reading, where the outage looked like it had shipped
+from an uncommitted tree; the fix was committed to that branch.
+
+**Against production, master is 0 ahead and 14 BEHIND.** Deploying master would
+ship nothing new and would REMOVE 232 lines currently serving traffic — the
+single-transaction claim path, the rpc shape check, the refusal-reason mapping —
+reinstating the read-decide-write race code-d found. *A pure regression wearing a
+fresh version number, which is what a successful deploy looks like from outside.*
+
+**So the merge is not queued behind a deploy. The merge IS the deploy**, and any
+tree that ships must contain `fifth-hosted-path` or it goes backwards.
+
+**1. Merge THREE branches and deploy the result.** — code-c *(assigned)*
+`code-b/fifth-hosted-path` (what is live, 14 ahead), then
+`work/recover-orphan-branches` (11 ahead), then `work/support-modules`
+(22 ahead, ends at `50f28a2`). Each contains master entire, so none drops
+anything. Danny authorised one deploy at 08:18; that is one deploy, not a
+standing grant. `code-b/lease-wiring` is NOT an ancestor of `fifth-hosted-path`
+despite its merge commit being in that history — it has moved since, so check it
+rather than assuming it is covered. Both green.
 Nothing below can start until the pipeline is on master, because the worker
 cannot call what is on a branch. *This is first and it is nobody's favourite
 task, which is exactly why it gets skipped.*
