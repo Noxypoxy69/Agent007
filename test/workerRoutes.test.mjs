@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   taskConfig, renewConfig, fetchOwnTask, renewLease, HOSTED,
 } from '../src/hostedRegistry.mjs';
+import { heartbeatDeps } from '../src/workerDeps.mjs';
 
 /**
  * THE THREE ROUTES A WORKER NEEDS, TWO OF WHICH DID NOT EXIST.
@@ -170,4 +171,64 @@ test('fetchOwnTask omits task_id entirely rather than sending null', async () =>
   });
   assert.deepEqual(body, { session_id: 's-me' });
   assert.ok(!('task_id' in body), 'a null task_id would read as "that one" rather than "all of them"');
+});
+
+// ── the heartbeat client ───────────────────────────────────────────────────
+
+test('A LOCAL-ONLY WORKER IS NOT A FAILING WORKER', async () => {
+  /*
+   * FOUND BY MUTATION. The runtime tests fake the heartbeat dep, so nothing
+   * exercised heartbeatDeps itself — making NOT_CONFIGURED count as a failure
+   * left every one of them green.
+   *
+   * It matters because the false alarm would be PERMANENT: a worker with no
+   * hosted config never beats successfully, so every cycle increments, and
+   * after three it announces it is going dark. Forever. The log that exists to
+   * warn about a real outage would be full of a worker that is fine.
+   *
+   * Local-only is a legitimate setup. NOT_CONFIGURED is an answer, not a fault
+   * — the same distinction as UNREACHABLE versus REFUSED, one layer up.
+   */
+  const { heartbeat } = heartbeatDeps({}, { session_id: 's-me', agent_id: 'code-b' });
+  const out = await heartbeat({ capacity: 'busy' });
+
+  assert.equal(out.ok, true, 'a local-only worker was reported as failing to beat');
+  assert.notEqual(out.goingDark, true);
+
+  // And it does not accumulate, which is what would make the alarm permanent.
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal((await heartbeat({})).ok, true, `failed on beat ${i + 2}`);
+  }
+});
+
+test('A REAL REFUSAL COUNTS, and three in a row means going dark', async () => {
+  /*
+   * The positive control for the rule above: NOT_CONFIGURED must not count,
+   * and everything else must. A guard that forgives every failure is not a
+   * guard.
+   *
+   * The threshold is the staleness window, not a round number. Sessions go
+   * stale at ten minutes and the driver cycles far faster, so three
+   * consecutive misses means the roster is about to be right about us.
+   */
+  const { heartbeat } = heartbeatDeps(ENV, { session_id: 's-me', agent_id: 'code-b' });
+  const refuse = stub(409, { error: 'nope' });
+
+  const a = await heartbeat({}, { fetchImpl: refuse });
+  await heartbeat({}, { fetchImpl: refuse });
+  const c = await heartbeat({}, { fetchImpl: refuse });
+
+  assert.equal(a.ok, false, 'a refused heartbeat was reported as landing');
+  assert.notEqual(a.goingDark, true, 'one miss was treated as going dark');
+  assert.equal(c.goingDark, true, 'three consecutive misses did not raise going-dark');
+  assert.equal(c.consecutiveFailures, 3);
+});
+
+test('a successful beat RESETS the counter', async () => {
+  // Otherwise a worker that recovers still announces it is going dark, and the
+  // warning stops meaning anything.
+  const { heartbeat } = heartbeatDeps({}, { session_id: 's-me', agent_id: 'code-b' });
+  const ok = await heartbeat({});
+  assert.equal(ok.ok, true);
+  assert.notEqual(ok.goingDark, true);
 });

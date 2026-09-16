@@ -394,3 +394,80 @@ test('CLEANUP IS NEVER CALLED WITH NO DIRECTORY', async () => {
   assert.deepEqual(calls.started, [], 'the fixture started work, so this is not the pre-start abandon');
   assert.deepEqual(calls.cleaned, [], 'cleanup ran for a worktree that was never created');
 });
+
+// ── the heartbeat, which is a different clock from the lease ───────────────
+
+test('THE WORKER BEATS EVERY CYCLE, not just when idle', async () => {
+  /*
+   * THE BUG THIS EXISTS FOR, and it was an hour old when b6 found its mirror
+   * image. `agentbridge work` claimed a task, worked up to THIRTY minutes,
+   * renewed its LEASE faithfully, and never beat its SESSION. Sessions go stale
+   * at ten minutes.
+   *
+   * So a worker on a normal task vanished from the roster a third of the way
+   * through: reported by wentStale as a lost worker, shown offline to every
+   * reader, while working perfectly. The lease keeps the TASK; the heartbeat
+   * keeps the WORKER VISIBLE. Wiring one and not the other is not half right.
+   */
+  const beats = [];
+  const { deps, calls } = world({ heartbeat: async (a) => { beats.push(a); return { ok: true }; } });
+  await run(deps);
+
+  assert.ok(beats.length >= 3, `beat only ${beats.length} times across a full cycle`);
+  assert.ok(beats.some((b) => b.capacity === 'busy'), 'never reported busy while holding a task');
+  assert.ok(beats.some((b) => b.task_id === 't1'), 'never said WHICH task it was holding');
+  assert.equal(calls.returned.length, 1, 'the fixture stopped completing, so the beats prove little');
+});
+
+test('a worker holding nothing beats IDLE, not busy', async () => {
+  const beats = [];
+  const { deps } = world({
+    waitForEvents: async () => [],
+    heartbeat: async (a) => { beats.push(a); return { ok: true }; },
+  });
+  await run(deps, 3);
+  assert.ok(beats.length > 0);
+  assert.ok(beats.every((b) => b.capacity === 'idle'), 'reported busy while holding nothing');
+});
+
+test('A FAILING HEARTBEAT IS LOGGED, NEVER SWALLOWED', async () => {
+  /*
+   * b6 lost a watcher exactly this way: the background process was nominally
+   * alive, produced no output, and stopped beating — and it did not know. A
+   * worker that cannot tell whether its heartbeat is landing keeps working
+   * while the system has already written it off, and its task is reaped out
+   * from under it when the lease lapses.
+   *
+   * A heartbeat that fails silently is worse than none, because none is at
+   * least consistent with what the roster says.
+   */
+  const { deps, calls } = world({
+    heartbeat: async () => ({ ok: false, consecutiveFailures: 3, detail: 'refused', goingDark: true }),
+  });
+  await run(deps);
+
+  const hb = calls.log.filter((l) => l.startsWith('heartbeat:'));
+  assert.ok(hb.length > 0, 'a failing heartbeat produced no log line at all');
+  assert.match(hb[0], /FAILED/);
+  assert.match(hb[0], /GOING DARK/, 'the worker was not told it is about to be written off');
+});
+
+test('the worker keeps WORKING through a failed heartbeat', async () => {
+  /*
+   * Deliberate. A heartbeat failure means the roster is wrong about us, not
+   * that our lease is gone — the lease has its own check and its own refusal.
+   * Abandoning finished work because a status ping failed would throw away a
+   * good result over a reporting problem.
+   */
+  const { deps, calls } = world({
+    heartbeat: async () => ({ ok: false, consecutiveFailures: 5, detail: 'refused', goingDark: true }),
+  });
+  await run(deps);
+  assert.equal(calls.returned.length, 1, 'a heartbeat failure discarded completed work');
+});
+
+test('a runtime with NO heartbeat dep still runs — local-only is legitimate', () => {
+  // The dep is optional on purpose: a worker with no hosted config is a real
+  // setup, and requiring the beat would make local-only impossible.
+  assert.doesNotThrow(() => world({ heartbeat: undefined }));
+});

@@ -788,6 +788,7 @@ try {
     const deps = {
       now: () => new Date().toISOString(),
       ...D.hostedDeps(process.env, { session_id: sessionId }),
+      ...D.heartbeatDeps(process.env, { session_id: sessionId, agent_id: agentId }),
       prepareWorktree: (a) => D.prepareWorktree(a),
       cleanupWorktree: (d) => D.cleanupWorktree(d),
       headSha: (d) => D.headSha(d),
