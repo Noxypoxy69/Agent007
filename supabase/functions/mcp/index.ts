@@ -1707,6 +1707,24 @@ Deno.serve(async (request) => {
      * is needed.
      */
     const autoConfirm = (Deno.env.get('DISPATCH_AUTOCONFIRM') ?? 'on').toLowerCase() !== 'off';
+
+    /*
+     * THE DISPATCHER CONFIRMS AS ITSELF, AND THIS LINE IS WHY THE LOOP DID NOT RUN.
+     *
+     * This block used to call `store`, which is declared far below at the
+     * coordinator entrypoint. `const` is not hoisted, so every confirmation
+     * threw "Cannot access 'store' before initialization" -- on every proposal,
+     * on every tick, once a minute. The throw was caught and recorded in
+     * `refused`, the handler returned ok:true, and pg_cron logged SUCCEEDED, so
+     * from the outside the dispatcher looked perfectly healthy while confirming
+     * nothing. The only place it was visible was the response body in
+     * net._http_response, which nothing reads.
+     *
+     * Building the store HERE also fixes the attribution: a confirmation is now
+     * stamped with the dispatcher's own token label, the same one already used
+     * for prepared_by, instead of whatever the coordinator entrypoint resolved.
+     */
+    const dispatchStore = coordinatorStore(dispatchLabel);
     const confirmed = [];
     const refused = [];
     if (autoConfirm) {
@@ -1714,7 +1732,7 @@ Deno.serve(async (request) => {
         if (row?.kind !== 'assign') continue;
         if (row?.would_be_accepted !== true) continue;
         try {
-          const out = await store.confirmProposal({ proposal_id: row.proposal_id });
+          const out = await dispatchStore.confirmProposal({ proposal_id: row.proposal_id });
           if (out?.ok) confirmed.push(row.proposal_id);
           else refused.push({ proposal_id: row.proposal_id, errors: out?.errors ?? ['unknown'] });
         } catch (e) {
