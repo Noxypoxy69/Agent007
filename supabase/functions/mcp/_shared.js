@@ -1007,9 +1007,26 @@ export function looksExecutable(text) {
  */
 export const ACTORS = [
   { actor_id: 'code-c', actor_type: 'worker', display_name: 'C', aliases: ['c'] },
-  { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b'] },
+  /*
+   * ONE ACTOR, TWO REGISTRATIONS. Danny settled it in d-owner-identity-b6-20260916:
+   * "b6 is b". That supersedes d-owner-identity-a-20260915, which had said b6 was
+   * Agent A -- and the earlier decision is kept, not edited, because the history of
+   * what the owner said is the point of an append-only ledger.
+   *
+   * So b6 is not a separate seat and never was. It is a second registration of B,
+   * on a second worktree, and the two mailboxes have been splitting B's mail
+   * between them: nineteen messages to code-b, ten to b6, and no reply from either
+   * string ever. Two registrations of one actor is normal and stays normal; two
+   * MAILBOXES for one actor is the bug.
+   *
+   * NOBODY IS AGENT A NOW. d-owner-team-order-20260915 names a team of C, B, D and
+   * A, and with b6 folded into B there is no registration behind A at all. That is
+   * recorded here rather than papered over by promoting somebody: an empty seat is
+   * a fact about the team, and inventing an occupant for it would be the identity
+   * guess this whole table exists to stop.
+   */
+  { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b', 'b6'] },
   { actor_id: 'code-d', actor_type: 'worker', display_name: 'D', aliases: ['d'] },
-  { actor_id: 'b6', actor_type: 'worker', display_name: 'A', aliases: ['a', 'code-a'] },
   {
     actor_id: 'c8',
     actor_type: 'coordinator',
@@ -1054,6 +1071,56 @@ export function knownActorIds(sessions, actors = ACTORS) {
   for (const s of arr(sessions)) if (s?.agent_id) ids.add(canonicalActor(s.agent_id, actors));
   for (const a of arr(actors)) if (a?.actor_type !== 'worker') ids.add(a.actor_id);
   return [...ids].sort();
+}
+
+/**
+ * EVERY STRING AN ACTOR MUST POLL TO SEE ALL OF ITS OWN MAIL.
+ *
+ * CANONICALISING ON THE WAY IN IS ONLY HALF OF IT, AND THE HALF I HAD DONE.
+ * A message is stored under the literal recipient string it was sent with, and a
+ * reader asks for its own id. So folding b6 into code-b fixes what a SENDER may
+ * write and fixes nothing about what B can READ: mail addressed to code-b sits
+ * in a string the live b6 session never queries, and mail addressed to b6 sits
+ * in one the other registration never queries. That is how one actor with two
+ * registrations ends up with nineteen unread in one pile and ten in the other.
+ *
+ * Until every reader expands its own aliases, a canonical id is the RIGHT name
+ * and not always the REACHABLE one, and the two have to be said separately
+ * rather than hoped to coincide.
+ */
+export function inboxNames(value, actors = ACTORS) {
+  const id = canonicalActor(value, actors);
+  if (!id) return [];
+  const actor = arr(actors).find((a) => a?.actor_id === id);
+  if (!actor) return [id];
+  return [...new Set([actor.actor_id, ...arr(actor.aliases)])];
+}
+
+/**
+ * The line every message opens with, naming who is speaking and what that is worth.
+ *
+ * WRITTEN BECAUSE THE TEAM READ MY MESSAGES AS DANNY'S. Four handoffs went out
+ * this morning and came back reported as instructions from the owner. The
+ * envelope carries from_agent correctly; whatever surfaces these to a worker
+ * does not show it, so the body is the only place provenance survives, and a
+ * body that does not say who is speaking gets attributed to whoever pasted it.
+ *
+ * THIS IS NOT A COURTESY, IT IS THE AUTHORITY BOUNDARY. An owner decision is
+ * recorded, superseded rather than edited, and binding. A coordinator handoff is
+ * prose with no authority at all, and the entire decision ledger is worthless if
+ * the two are indistinguishable on arrival -- a worker that takes coordination
+ * for a ruling has been given an owner it never checked. Advisory text must
+ * never be able to become authority just by being read.
+ */
+export function messagePreamble(from, actors = ACTORS) {
+  const id = canonicalActor(from, actors);
+  const actor = arr(actors).find((a) => a?.actor_id === id);
+  const kind = actor?.actor_type ?? 'unknown';
+  const weight = kind === 'owner'
+    ? 'This is the owner speaking. It is binding, and it is in the decision ledger.'
+    : 'This is coordination and carries NO owner authority. Only the decision '
+      + 'ledger does. If it reads like a ruling from Danny, it is not one.';
+  return `[from ${id ?? 'unknown'} -- ${kind}] ${weight}`;
 }
 
 export const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canAssign, validateMessage, validateAgentId, looksExecutable, executableMatch, assignmentRecord,
-  ACTORS, canonicalActor, knownActorIds,
+  ACTORS, canonicalActor, knownActorIds, inboxNames, messagePreamble,
   MESSAGE_TYPES, ASSIGNABLE_FROM,
 } from '../src/coordination.mjs';
 import { isLive } from '../src/liveRegistry.mjs';
@@ -367,9 +367,8 @@ test('an alias routes to one canonical seat, so no name opens a second mailbox',
     assert.equal(canonicalActor(alias), 'c8', alias);
   }
   assert.equal(canonicalActor('chatgpt-command-center'), 'chatgpt');
-  // the letters Danny types, per d-owner-identity-a-20260915 and the team order
-  assert.equal(canonicalActor('a'), 'b6');
-  assert.equal(canonicalActor('code-a'), 'b6');
+  // the letters Danny types, per the team order and d-owner-identity-b6-20260916
+  assert.equal(canonicalActor('b6'), 'code-b', 'b6 is b, per the superseding decision');
   assert.equal(canonicalActor('b'), 'code-b');
   assert.equal(canonicalActor('c'), 'code-c');
   assert.equal(canonicalActor('d'), 'code-d');
@@ -401,7 +400,8 @@ test('the roster offered in a refusal is canonical ids only, never aliases', () 
   const ids = knownActorIds(roster);
   assert.equal(ids.includes('chatgpt-work'), false);
   assert.equal(ids.includes('c8'), true);
-  assert.equal(ids.includes('b6'), true, 'a registered worker stays addressable');
+  assert.equal(ids.includes('code-b'), true, 'a registered worker stays addressable');
+  assert.equal(ids.includes('b6'), false, "b6 is B's second registration, not a candidate name");
   assert.equal(ids.includes('probe-ok'), false, 'nothing unregistered is invented into the list');
 });
 
@@ -431,4 +431,64 @@ test('a malformed sender is caught too, not only the recipient', () => {
   const v = validateMessage({ ...msg('code-c'), from_agent: 'chatgpt-work coordinator' });
   assert.equal(v.ok, false);
   assert.match(v.errors.join(' '), /from_agent/);
+});
+
+test('B HAS TWO REGISTRATIONS AND THEY COLLAPSE TO ONE SEAT', () => {
+  /*
+   * THE MEASURED BUG: nineteen messages to code-b, ten to b6, no reply from
+   * either string ever. Two registrations of one actor is normal; two mailboxes
+   * for one actor is what split the mail.
+   */
+  const live = [{ agent_id: 'code-b' }, { agent_id: 'b6' }, { agent_id: 'code-c' }];
+  const ids = knownActorIds(live);
+  assert.equal(ids.filter((x) => x === 'code-b').length, 1, 'one seat, not two');
+  assert.equal(ids.includes('b6'), false, 'the second registration is not a second actor');
+  for (const name of ['code-b', 'b6', 'b']) {
+    assert.equal(validateMessage(msg(name), { sessions: live }).ok, true, name);
+  }
+});
+
+test('NOBODY IS AGENT A, AND THE TABLE SAYS SO RATHER THAN INVENTING ONE', () => {
+  // d-owner-team-order-20260915 names a team of C, B, D and A. With b6 folded
+  // into B, no registration is behind A. An empty seat is a fact; promoting
+  // somebody into it would be exactly the identity guess this table forbids.
+  assert.equal(ACTORS.some((a) => a.display_name === 'A'), false);
+  assert.equal(canonicalActor('a'), 'a', 'an unclaimed letter resolves to nobody');
+});
+
+test('THE READ HALF: a canonical id is not always the reachable one', () => {
+  /*
+   * Canonicalising on the way IN fixes what a sender may write and nothing about
+   * what B can read: mail is stored under the literal string it was sent with,
+   * and a reader queries its own id. Both piles have to be polled.
+   */
+  const names = inboxNames('code-b');
+  for (const n of ['code-b', 'b6', 'b']) assert.equal(names.includes(n), true, n);
+  assert.deepEqual(inboxNames('b6'), inboxNames('b'), 'an alias polls the same set as its seat');
+  assert.deepEqual(inboxNames('code-q'), ['code-q'], 'an unknown name polls only itself');
+  assert.deepEqual(inboxNames(''), []);
+});
+
+test('EVERY MESSAGE SAYS WHO IS SPEAKING AND WHAT THAT IS WORTH', () => {
+  /*
+   * Four handoffs went out this morning and came back reported as instructions
+   * from Danny. The envelope carries from_agent; whatever surfaces a message to
+   * a worker does not show it. A worker that takes coordination for an owner
+   * ruling has been handed an authority nobody granted.
+   */
+  const mine = messagePreamble('c8');
+  assert.match(mine, /c8/);
+  assert.match(mine, /coordinator/);
+  assert.match(mine, /NO owner authority/);
+  assert.match(mine, /not one/, 'it must deny the specific misreading, not merely omit it');
+
+  const owner = messagePreamble('danny');
+  assert.match(owner, /owner/);
+  assert.match(owner, /binding/);
+  assert.notEqual(mine, owner, 'the two weights must not render identically');
+
+  // an alias still renders its canonical seat, so the old names stop teaching
+  // readers a sender who does not exist
+  assert.equal(messagePreamble('chatgpt-work'), mine);
+  assert.equal(messagePreamble('claude-work'), mine);
 });

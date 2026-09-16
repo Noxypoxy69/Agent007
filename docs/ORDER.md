@@ -60,6 +60,17 @@ dropped assignment looks identical to one that is still working.
 Alias table, canonical id per seat, unknown recipient refused, offline
 distinguished from unknown. On `work/support-modules`; ships with item 1.
 
+*Two things learned since, both from the live system rather than from the spec.*
+*B has two registrations, `code-b` and `b6`, and canonicalising on the way in*
+*fixes what a sender may write and nothing about what B can read — a message is*
+*stored under the literal string it was sent with. The read half is `inboxNames`*
+*and no reader uses it yet, so a canonical id is the right name and not always*
+*the reachable one. And four handoffs sent this morning came back reported as*
+*instructions from Danny: the envelope carries the sender, whatever surfaces it*
+*to a worker does not, so every body now opens by naming who is speaking and*
+*saying that coordination is not a ruling. A worker that cannot tell the two*
+*apart has an owner nobody appointed, which would make the ledger decorative.*
+
 **6. A hard deploy gate.** — unassigned
 NEW. Deploy accepts only a promoted immutable commit, records the artifact
 digest, and reads it back. Today `wrangler deploy` ships a working tree, which
