@@ -214,26 +214,136 @@ test('a REAL collected payload is scanned ephemerally and never becomes a fixtur
   );
 });
 
+/*
+ * A SERVICE ACCOUNT IS NOT SOMEBODY, and that distinction is the fix for a CI
+ * failure that stayed anonymous for a day.
+ *
+ * The check below asks whether this machine's identity is sitting in the
+ * committed fixtures. It asked with a bare substring search for the username,
+ * and on every GitHub-hosted runner the username is `runner` -- a word that
+ * appears in leakShapes.mjs as `the runner finished in 4s`, whose entire job is
+ * to be the baseline proving that ordinary prose scans clean. The one string in
+ * the fixture asserting cleanliness was read as the operator's name. Master went
+ * red on a suite that is green on every desktop in the project, because no human
+ * account is called `runner` and `os.userInfo()` cannot be faked with an env
+ * var, so nobody could reproduce it.
+ *
+ * TIGHTENING THE MATCHER DOES NOT FIX IT, and the dead end is recorded so nobody
+ * walks it twice. A word boundary still matches `the runner finished`. A
+ * path-segment rule still matches `D:\build\artifacts` for an account named
+ * `build`, `/src/app` for one named `app`, and `C:\Users\` for one named `users`
+ * -- all load-bearing fixture content that exists precisely to be realistic. No
+ * string rule separates a generic word used as prose from the same generic word
+ * used as a login.
+ *
+ * So the QUESTION changes rather than the matcher. This test exists to stop a
+ * real PERSON being disclosed; the comment on it says so -- "the machine whose
+ * owner would be disclosed". A shared service account has no owner to disclose,
+ * so skipping these names costs no disclosure protection at all. Home directory
+ * and hostname are still searched for unconditionally, which is what actually
+ * catches a paste: a payload genuinely captured on a runner carries
+ * `/home/runner/work/...`. That is asserted below, not argued here.
+ *
+ * Do not "fix" this by editing the fixture. The `runner` line is now the
+ * permanent regression case for this bug: remove the word and the next person
+ * to change this rule has nothing to watch fail.
+ */
+const GENERIC_ACCOUNTS = new Set([
+  'runner', 'runneradmin', 'root', 'admin', 'administrator', 'user', 'users',
+  'ubuntu', 'debian', 'build', 'builder', 'deploy', 'agent', 'app', 'node', 'ci',
+  'jenkins', 'docker', 'vagrant', 'worker', 'guest', 'service', 'travis',
+  'circleci', 'buildkite', 'ec2-user', 'azureuser', 'containeradmin',
+]);
+
+/**
+ * A home directory as it would appear IN SOURCE, which is not how it appears in
+ * a payload.
+ *
+ * Found while writing the control below, and it is a real hole rather than a
+ * detail: this check reads leakShapes.mjs as TEXT, and a Windows path written in
+ * a JavaScript string literal is escaped -- `C:\\Users\\jdoe` on disk for
+ * `C:\Users\jdoe` in the value. Searching for the unescaped spelling therefore
+ * missed every Windows home directory ever pasted into this file, on the one
+ * platform the operators actually use. Both spellings, plus the forward-slash
+ * form, exactly as payloadGuard does for payloads.
+ */
+function sourceFormsOf(p) {
+  const s = String(p).toLowerCase();
+  return [...new Set([s.replace(/\//g, '\\'), s.replace(/\\/g, '/'), s.replace(/\\/g, '\\\\')])];
+}
+
+/**
+ * WHICH identity field this text discloses, or null. Named rather than boolean
+ * on purpose: the assertion this replaces said only "a real identity value is
+ * present", so the CI log could not say which of three fields had matched, and
+ * that is most of why the failure survived several attempts to read it.
+ *
+ * Identity is a parameter so the rule can be tested against somebody else's
+ * name -- the same reason payloadGuard takes one.
+ */
+function disclosedField(text, identity) {
+  const low = text.toLowerCase();
+  const { username = '', hostname = '', homedir = '' } = identity ?? {};
+  if (username.length >= 3 && !GENERIC_ACCOUNTS.has(username.toLowerCase()) && low.includes(username.toLowerCase())) {
+    return 'username';
+  }
+  if (hostname.length >= 3 && low.includes(hostname.toLowerCase())) return 'hostname';
+  if (homedir.length >= 3 && sourceFormsOf(homedir).some((form) => low.includes(form))) return 'homedir';
+  return null;
+}
+
+/** A name no fixture contains, proven so in the control below rather than assumed. */
+const ABSENT = 'zzqqxx';
+
+function fixtureText() {
+  return fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
+}
+
 test('this suite committed no real identity: the fixtures name nobody on this machine', () => {
   /*
    * The guard on the guard. If somebody ever pastes a real payload into
-   * leakShapes.mjs, this fails on the machine it was pasted from — which is the
+   * leakShapes.mjs, this fails on the machine it was pasted from -- which is the
    * machine whose owner would be disclosed.
    */
-  const text = fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
-  const me = machineIdentity();
-  const real = [me.username, me.hostname, me.homedir].filter((s) => s && s.length >= 3);
-  for (const needle of real) {
-    assert.equal(
-      text.toLowerCase().includes(needle.toLowerCase()),
-      false,
-      'a real identity value is present in the committed fixtures',
-    );
-  }
+  const field = disclosedField(fixtureText(), machineIdentity());
+  assert.equal(field, null, `the committed fixtures contain this machine's ${field}`);
+
   // And the 8.3 alias of the home directory, which is the spelling that would
   // slip in through a copied temp path.
   const short = os.tmpdir().split(/[\\/]/).find((seg) => seg.includes('~'));
   if (short) {
-    assert.equal(text.toLowerCase().includes(short.toLowerCase()), false, 'a real 8.3 identity segment is present in the committed fixtures');
+    assert.equal(fixtureText().toLowerCase().includes(short.toLowerCase()), false, 'a real 8.3 identity segment is present in the committed fixtures');
   }
+});
+
+test('CONTROL: the identity guard still fires, on all three fields', () => {
+  /*
+   * Without this the test above passes on a machine named nobody, which is every
+   * machine, and proves nothing. Each of these names an INVENTED identity that
+   * the fixtures genuinely contain, so each must be caught. If the relaxation
+   * above ever switches the check off, these go red and the one above does not.
+   */
+  const text = fixtureText();
+  /*
+   * The placeholder has to be absent from the fixture, and the first draft used
+   * "nobody" -- which appears in it three times, in the very sentence naming
+   * this test. It reported a username disclosure for a machine called nobody.
+   * That is the same collision this whole change is about, one layer up, so the
+   * sentinel is asserted absent rather than assumed absent.
+   */
+  assert.equal(text.toLowerCase().includes(ABSENT), false, 'the sentinel must not occur in the fixture or these controls prove nothing');
+  assert.equal(disclosedField(text, { username: 'jdoe', hostname: ABSENT, homedir: '/nowhere' }), 'username');
+  assert.equal(disclosedField(text, { username: ABSENT, hostname: 'build-box-7', homedir: '/nowhere' }), 'hostname');
+  assert.equal(disclosedField(text, { username: ABSENT, hostname: ABSENT, homedir: 'C:\\Users\\jdoe' }), 'homedir');
+});
+
+test('CONTROL: a generic account has its username skipped and its HOME searched anyway', () => {
+  /*
+   * The exact GitHub-runner shape, both directions. The prose that reddened
+   * master is clean; a payload actually captured on that runner is not, and it
+   * is the home directory that catches it.
+   */
+  const runner = { username: 'runner', hostname: 'pkrvmabc123', homedir: '/home/runner' };
+  assert.equal(disclosedField('the runner finished in 4s', runner), null, 'prose naming a service account is not a disclosure');
+  assert.equal(disclosedField("value: '/home/runner/work/Agent007/src'", runner), 'homedir', 'a real capture from that runner must still be caught');
 });
