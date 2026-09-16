@@ -622,3 +622,133 @@ export function mergeRegistrations(local = [], hosted = []) {
   return [...bySession.values()].sort((a, b) =>
     String(a.session_id).localeCompare(String(b.session_id)));
 }
+
+/**
+ * ═══ THE THREE ROUTES A WORKER RUNTIME NEEDS, AND WHY THEY WERE MISSING ═══
+ *
+ * A worker holds a REGISTRATION token, which reaches only /register, /wait and
+ * /return. Building the runtime turned up three things it had to do and could
+ * not:
+ *
+ *   READ ITS OWN TASK    the assigned event says "enough to know WHICH task,
+ *                        never enough to act without reading it" — and there
+ *                        was nothing to read from. /task.
+ *   RENEW ITS LEASE      renew_lease existed as a granted SECURITY DEFINER
+ *                        function reachable from no endpoint at all. The
+ *                        default lease is 900s and the default run timeout
+ *                        1800s, so a worker doing a normal task would have lost
+ *                        its lease EVERY TIME. /renew.
+ *   RETURN ITS WORK      /return, which already existed.
+ *
+ * All three configs derive from the register URL for the same reason
+ * returnConfig does: one hosted base, and an override per route for the tests
+ * and for anyone running a split deployment.
+ */
+
+const derived = (env, suffix, override) => {
+  const reg = registrationConfig(env);
+  if (!reg) return null;
+  const raw = env[override];
+  if (typeof raw === 'string' && raw.trim()) return { url: raw.trim(), token: reg.token };
+  if (!/\/register$/.test(reg.url)) return null;
+  return { url: reg.url.replace(/\/register$/, suffix), token: reg.token };
+};
+
+export function taskConfig(env = {}) { return derived(env, '/task', 'AGENTBRIDGE_TASK_URL'); }
+export function renewConfig(env = {}) { return derived(env, '/renew', 'AGENTBRIDGE_RENEW_URL'); }
+
+/**
+ * Read the caller's own task, or everything it holds when no id is given.
+ *
+ * The "everything it holds" form is the one a restarted worker needs: after a
+ * crash the cursor is gone with the process, so there is no event to replay,
+ * and without it the worker sits idle while its lease runs down on work nobody
+ * else can take.
+ */
+export async function fetchOwnTask(env = {}, { session_id, task_id = null } = {},
+  { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = taskConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        connection: 'close',
+      },
+      body: JSON.stringify(task_id ? { session_id, task_id } : { session_id }),
+    });
+
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
+
+    const b = await res.json().catch(() => ({}));
+    return { state: HOSTED.OK, task: b?.task ?? null, tasks: Array.isArray(b?.tasks) ? b.tasks : null };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Extend the lease on work still in progress.
+ *
+ * A REFUSAL HERE IS FINAL AND MUST NOT BE RETRIED. It means this process is no
+ * longer the holder — the task was reaped and re-claimed, or the token is not
+ * one the task will accept. The runtime treats it as ABANDON, discards the
+ * result, and stops; retrying would at best succeed against a lease it does not
+ * own. That is why a malformed token answers 409 like a superseded one rather
+ * than 500: a 500 reads as transient and invites exactly the retry that must
+ * not happen.
+ */
+export async function renewLease(env = {}, { task_id, lease_token, lease_seconds = 900 } = {},
+  { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = renewConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        connection: 'close',
+      },
+      body: JSON.stringify({ task_id, lease_token, lease_seconds }),
+    });
+
+    const answered = await interpretHttp(res, { credential: 'registration token' });
+    if (answered) return answered;
+
+    const b = await res.json().catch(() => ({}));
+    /*
+     * A 200 CARRYING ok:false IS STILL A REFUSAL. The function answers with its
+     * own verdict; treating any 2xx as success would renew nothing and report
+     * that it had, which is the worst possible outcome here — the worker keeps
+     * working on a lease it has lost.
+     */
+    if (b?.ok === false) return { state: HOSTED.REFUSED, detail: b?.reason ?? 'refused', errors: [] };
+    return { state: HOSTED.OK, lease_expires_at: b?.lease_expires_at ?? null };
+  } catch (e) {
+    if (e?.name === 'AbortError') return { state: HOSTED.UNREACHABLE, detail: 'timeout' };
+    return { state: HOSTED.UNREACHABLE, detail: String(e?.message ?? e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}

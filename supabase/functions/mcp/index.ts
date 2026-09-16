@@ -117,6 +117,38 @@ async function patch(pathAndQuery, body) {
   return res.json();
 }
 
+/**
+ * A LEASE TOKEN IS A uuid, AND A MALFORMED ONE IS A REFUSAL.
+ *
+ * `renew_lease(p_lease_token uuid)` and `return_with_lease(p_lease_token uuid)`
+ * both take a typed parameter. Validating only "non-empty string" and handing it
+ * to Postgres fails the cast, PostgREST answers non-2xx, and the caller sees a
+ * 500 — while a SUPERSEDED token returns a clean 409.
+ *
+ * Those read oppositely. A 409 is final; a 500 is transient and invites a retry.
+ * And the worker most likely to send a damaged token is one that crashed or
+ * resumed from a stale file — the same population as the zombies. So the one
+ * refusal shaped like "try again later" would be aimed precisely at the caller
+ * that must not retry. That is the fencing property leaking out through an
+ * error code.
+ *
+ * Found by code-d on /return and fixed by c8 at d3ff685. This constant exists on
+ * master so /renew is born with the guard rather than acquiring it after the
+ * same 500 is reported a second time — the class, not the instance.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Call a SECURITY DEFINER function. The service role is the only grantee. */
+async function rpc(fn, args) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: restHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) throw new Error(`rpc-failed:${fn}:${res.status}:${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
 const sha256Hex = async (s) => {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -1337,6 +1369,94 @@ Deno.serve(async (request) => {
    * that matters is the assignment itself -- which only a coordinator could
    * have arranged.
    */
+  /**
+   * /renew — HOLD THE LEASE WHILE THE WORK IS STILL RUNNING.
+   *
+   * ═══ THE THIRD OMISSION IN THE SAME FAMILY ═══
+   *
+   * `renew_lease` has existed as a SECURITY DEFINER function, granted to
+   * service_role, since the lease migration. NOTHING EXPOSED IT. Reachable from
+   * no endpoint, no CLI command, and no test outside the migration.
+   *
+   * That is not cosmetic. The default lease is 900 seconds and the default run
+   * timeout is 1800. A worker doing a normal-length task on a normal-length
+   * lease would lose it EVERY TIME, discard completed work as a zombie result,
+   * and be entirely right to — the runtime's whole design assumes renewal
+   * works, and renewal could not be called.
+   *
+   * Three omissions found the same way, by building the consumer: the lease
+   * token was never delivered, a worker had nowhere to read its own task, and
+   * renewal had no route. All three existed as correct, tested, unreachable
+   * code. Nothing had noticed because nothing had ever been a worker.
+   *
+   * ═══ THE SQL FUNCTION IS THE AUTHORITY, NOT THIS HANDLER ═══
+   *
+   * It would be shorter to do a conditional PATCH here with the token in the
+   * predicate. That would be a SECOND implementation of "may this lease be
+   * extended", and they would disagree the first time one changed. renew_lease
+   * already encodes compare-and-set against the token and refuses an expired
+   * lease; canRenew in src/leases.mjs is its tested pure twin. This handler
+   * authenticates, validates shape, and calls them.
+   */
+  if (path === '/renew') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let renewLabel = null;
+    try {
+      renewLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!renewLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const taskId = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+    if (!taskId) return json({ error: 'invalid_request', detail: 'task_id is required' }, 400);
+
+    const leaseToken = typeof body?.lease_token === 'string' ? body.lease_token.trim() : '';
+    if (!leaseToken) {
+      return json({ error: 'invalid_request', detail: 'lease_token is required' }, 400);
+    }
+
+    /*
+     * A MALFORMED TOKEN IS A REFUSAL, NOT A SERVER ERROR, and it answers with
+     * the SAME shape and status as a superseded one. To a worker the two mean
+     * the same thing: this credential is not one the task will accept, and
+     * retrying will not change that.
+     */
+    if (!UUID.test(leaseToken)) {
+      return json({
+        ok: false,
+        reason: 'stale-lease',
+        detail: 'lease_token is not a valid token; re-read the task with /task',
+      }, 409);
+    }
+
+    const asked = Number.parseInt(body?.lease_seconds ?? '900', 10);
+    const seconds = Number.isFinite(asked) ? asked : 900;
+
+    let out;
+    try {
+      out = await rpc('renew_lease', {
+        p_task_id: taskId, p_lease_token: leaseToken, p_lease_seconds: seconds,
+      });
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+
+    /*
+     * THE FUNCTION'S OWN VERDICT IS THE ANSWER. A refusal is a decision the
+     * authority made, so it comes back as 409 rather than 500 — the same
+     * distinction as everywhere else on this surface: an answer is not a
+     * transport failure.
+     */
+    if (out?.ok === false) return json(out, 409);
+    return json(out ?? { ok: false, reason: 'no-answer' }, out?.ok ? 200 : 409);
+  }
+
   if (path === '/task') {
     if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
 
