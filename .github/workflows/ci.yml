@@ -37,8 +37,15 @@ jobs:
 
       - name: Suite
         run: |
-          set -o pipefail
-          npm test 2>&1 | tee /tmp/suite.txt || true
+          # REDIRECT, NEVER PIPE. `npm test | tee` HANGS HERE, and the reason is
+          # a real defect rather than a shell detail: a test leaves an orphaned
+          # child process holding the write end of the pipe, so tee never sees
+          # EOF and waits forever even though the suite has finished. The first
+          # CI run ended with "Cleaning up orphan processes" and this one sat at
+          # 5+ minutes against a 68s suite. A file redirect has no such reader,
+          # so the orphan is invisible here -- which is exactly why it has never
+          # been noticed locally.
+          npm test > /tmp/suite.txt 2>&1 || true
 
           echo ""
           echo "================ COUNTS ================"
