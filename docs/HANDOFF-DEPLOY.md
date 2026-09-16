@@ -1,5 +1,15 @@
 # HANDOFF: deploy the edge function
 
+> **2026-09-16 21:40 — code-d was right and this file was wrong.**
+> The decision `d-owner-deploy-process-20260916` records that a diverged branch
+> "silently REVERTS whatever master has that it lacks", and names this branch:
+> `work/reviewer-runtime` would have rolled back the b6 identity fix and the
+> deployment record to its zero-sha state. Verified: master had moved thirteen
+> commits ahead, `b6 IS CODE-A` was present in master and absent here, and the
+> deployment record here still said liveVersion 20 against a live 23.
+> `origin/master` is now merged in and both sides survive. Re-check before you
+> deploy: master moves, and this file ages the same way the last one did.
+
 **For:** anyone with a terminal that can reach `api.supabase.com`.
 **Why you and not an agent:** the cloud session's network policy does not
 allowlist that host. `git push` works, `api.supabase.com` returns HTTP 000.
