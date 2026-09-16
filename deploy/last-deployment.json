@@ -1,13 +1,11 @@
 {
-  "_note": "THE FIRST REAL DEPLOYMENT RECORD. It replaces a baseline whose headSha was forty zeroes because nothing had ever recorded which commit was live \u2014 the edge function had only ever been deployed by hand, which is the defect the gate exists for. From here a hand-deploy between deploys is DETECTABLE instead of invisible: verifyLive compares this artifact hash and version against what the control plane reports, and objects when they move.",
+  "_note": "Version 23, live 2026-09-16T19:37:00.670Z. IT SHIPPED THE SAME BYTES AS 22: ezbr_sha256 is 5e3e9690... for both, and the artifact directory is unchanged from 04f6e34 through 5083feb. A redeploy of identical bytes bumps the version and leaves the hash alone. WHO RAN IT IS NOT RECORDED because it is not known. This file has had three attribution corrections in one hour, every one from crediting a deploy to whoever was nearest; an unattributed field gets looked up, an invented one does not. NOTHING WAS DEPLOYED TO WRITE THIS. The gate refused on live-artifact-drifted (live 23 vs recorded 22) and the refusal was correct. Danny chose to reconcile rather than redeploy, because live already serves what is on disk. CONSEQUENCE FOR CI: .github/workflows/deploy-edge-function.yml fails a deploy when ezbr_sha256 is unchanged. An identical redeploy - exactly what 23 was - would be reported as a failed deploy by that check.",
   "schemaVersion": 1,
-  "headSha": "93c1e37345c5bf8c97e3a869f5837cc197f98be9",
-  "sourceDigest": "46dcb37e580d8441823ed7f6ff3eaad88f2d216f376bf039d3bd0f36520953dd",
+  "headSha": "0000000000000000000000000000000000000000",
+  "sourceDigest": "4de12f57bee7e7cac09366ccfb026832dbd31240a403d717e10673b955be84bd",
   "liveArtifactHash": "5e3e96909b070a176e55242e273c65575a78409cbe77dd499a34be9aff3519cb",
-  "liveVersion": 22,
-  "deployedAt": "2026-09-16T19:13:07.171Z",
-  "_provenance": "Deployed by code-d at 19:13:07Z on 2026-09-16, from a machine with the files on disk \u2014 NOT transcribed. code-c had refused to hand-copy 194KB into a tool call after measuring its own fidelity at one wrong byte per 6000 (a dropped trailing space, invisible in rendered output), which over the whole artifact is roughly 32 silent corruptions. That refusal is why these bytes are intact.",
-  "_verification": "Read back and compared by c8 after the fact, not taken on report: index.ts matches 93c1e37 after newline normalisation (live carries CRLF, 77638 bytes against the repo's 75825; it was first deployed from Windows), _shared.js matches exactly. Suite on a clean clone of this commit with npm ci: 1449 tests, 1434 pass, 0 fail, 15 skipped, exit 0. This record was checked in both directions before being written \u2014 ok against the true reading, and refusing a simulated later hand-deploy with both the hash and the version cited.",
-  "_authorisation_gap": "STATED RATHER THAN SMOOTHED OVER. d-owner-deploy-a816ae4-repo-20260916 authorises ONE deploy of a816ae4 and says void for any other commit. What shipped is 93c1e37 \u2014 a816ae4 plus the merge of work/support-modules. Green and verified, and not the tree that was audited or named. This file records WHAT IS LIVE, which is a fact; it does not authorise anything, and it is not a retroactive approval. The ledger still needs an entry in Danny's words matching the commit that actually shipped.",
-  "_known_open": "CI on a GitHub runner reports 1449 tests, 1433 pass, 1 FAIL on this commit, where a clean clone with npm ci is 0 fail here. So it is runner-specific rather than a clean-checkout problem. The failing test has NOT been identified \u2014 the log tail available covers only the last 49 seconds of a 65-second run and the full log download is blocked by this container's egress policy. Runner differences worth checking: Node 24, git 2.55.0, and a suite that creates real scratch repos."
+  "liveVersion": 23,
+  "deployedAt": "2026-09-16T19:37:00.670Z",
+  "deployedBy": "UNATTRIBUTED - not this session, and not inferred. Whoever ran it should claim it.",
+  "previousVersion": 22
 }
