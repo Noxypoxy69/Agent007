@@ -210,6 +210,59 @@ confirmed proposal assigned work without a human. The half after it is unproven.
 
 ---
 
+## The self-correction ingest — absorbed 2026-09-16, NOT started
+
+Danny handed over `agent_bridge_self_correction_oss_code_ingest_1.md` on the
+evening of the 16th and asked whether it was in this map. It was not, and that
+is recorded rather than quietly fixed: the pack is a roadmap, and a roadmap that
+lives only in an upload is a roadmap nobody is working from.
+
+Absorbed at `docs/SELF_CORRECTION_INGEST.md`, with every claim about what exists
+measured against master rather than remembered. **It is a different axis from
+`RELIABILITY_INGEST.md`** -- that one asks how work survives a crash, this one
+asks how a wrong patch fails to become a trusted patch. They meet at the attempt
+record and nowhere else, so neither substitutes for the other.
+
+**The honest position: twelve modules already implement the shape under
+different names**, so this is reconciliation, not greenfield. What does not exist
+at all is the evidence layer: no `AttemptStep`, no `FailureClass`, no clean-SHA
+verification, no `VerificationProof`. Nothing has been copied from any upstream
+project yet -- verified by search -- and `THIRD_PARTY_CODE.md` now exists empty
+so the first copy lands with its attribution instead of after it.
+
+**SC1. One real attempt row.** — blocks everything below
+The `attempts` table held 0 rows at 2026-09-16 22:33, against a writer merged at
+18:49 in `2e34c48`. The writer is merged and unreached, or reached and failing
+silently, and nobody has established which. Until one real row lands, a repair
+loop has nothing to read, a classifier has nothing to classify and a proof has
+nothing to prove. This is the smallest item on the list and the only one that
+gates the rest.
+
+**SC2. `AttemptStep` persistence, then `FailureClass`.** — after SC1
+The trajectory, then the taxonomy. Section 4 of the pack begins with "classify",
+so the repair loop cannot be written before the classes exist. Every failed
+validation produces a typed failure artifact or the loop is reading prose.
+
+**SC3. Clean-SHA verification and `VerificationProof`.** — independent of SC1
+The one item worth pulling forward, because it is a live hole rather than a
+missing feature. **Nothing in this repository does a fresh checkout of an exact
+SHA and re-runs the suite.** `deployGate.mjs` checks that a commit was promoted
+and asks the far end what it serves; it never establishes that the commit passes
+from a clean tree. So `worktree passing != promotable` is currently unenforced,
+and the sibling repo grew `check:clean-checkout` because that exact gap shipped a
+route importing a module that was never committed.
+
+**SC4 onward.** Agentless localization, the typed reviewer loop
+(`ReviewFinding`, no plain "looks good"), Symphony reconciliation and bounded
+concurrency, mechanical invariants whose lint text says how to fix them, the
+`agentbridge inspect` surface, failure injection, and multi-candidate patches
+last. Ordering and rationale in the ingest doc.
+
+**Owner: the autonomous-loop lane.** Danny moved auto and dispatcher to code-a
+on the evening of the 16th. This sits squarely in that lane and is code-a's to
+sequence; it is written down here so it is sequenced by somebody rather than by
+nobody.
+
 ## Then harden it — the ingest's Phase B
 
 None of this is startable before 9, and all of it is cheaper than discovering

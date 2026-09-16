@@ -138,6 +138,21 @@ to ignore red.
 
 # The rest of the traps
 
+**TWO SOURCE FILES ARE INVISIBLE TO `grep` AND `git grep`.**
+`src/deployGate.mjs` and `src/auditRange.mjs` contain literal NUL bytes — real
+`\x00` characters, not the escape — used deliberately as length framing in a
+digest (`${path}\x00${len}\x00${body}\x00`). That is correct and must stay;
+without the framing, two different file lists can hash the same. The cost is
+that grep classifies both files as binary and **silently skips them**, reporting
+`binary file matches` at best and nothing at all with `-l`.
+
+So any repo-wide audit built on `git grep` has a two-file blind spot and will
+report a clean sweep it did not perform. This was found while scrubbing the
+operator's real home directory out of the tree — a scrub driven entirely by
+`git grep`. Both files were checked afterwards by reading the bytes in Python
+and were clean, so nothing was missed that time. Next time, read the files;
+`git grep -a` also works. A check that skips a file must not print a pass.
+
 **`_shared.js` IS A HAND-MAINTAINED SPLICE** of `src/` and `bridge/`, because a
 Supabase edge function cannot import from outside its own directory. The tests
 exercise the **originals**. Every edit to a spliced module must be applied to
