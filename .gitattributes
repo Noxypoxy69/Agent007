@@ -1,0 +1,33 @@
+# LINE ENDINGS ARE LF, IN THE INDEX AND ON DISK.
+#
+# WHAT THIS FIXES, MEASURED. A FRESH CLONE OF THIS REPO ON WINDOWS FAILED ITS
+# OWN TEST SUITE. core.autocrlf is true on the machine this project runs on and
+# nothing overrode it, so a new clone or `git worktree add` checked every text
+# file out as CRLF -- while the long-lived clone, whose files were written by
+# tools rather than by checkout, held them as LF. The two disagreed by accident
+# of history: 139 LF-only files and 106 containing CRLF in the same working
+# copy.
+#
+# test/deployCheckTree.test.mjs builds a fake "live" bundle to compare against,
+# and does it by converting LF to CRLF in the repo's own source. Handed a file
+# that is ALREADY CRLF that produces a doubled carriage return, so every line
+# differs, and two assertions fail -- on a clean checkout, with nobody having
+# changed anything. A suite that is red out of the box is one people learn to
+# ignore, and this repository has written down twice what that costs.
+#
+# eol=lf overrides core.autocrlf per repository, so it holds regardless of how
+# any given machine is configured. That matters here because this project is
+# checked out many times on one Windows box -- fifteen worktrees at the time of
+# writing -- and half of them were getting different bytes than the other half.
+#
+# ADDING THIS DOES NOT FLOOD `git status`, which was the reason to hesitate and
+# it was checked rather than assumed. `text=auto` cleans CRLF to LF when git
+# reads a working file, so existing CRLF checkouts compare equal to the index
+# and show nothing modified. Probed on a fully-CRLF worktree before committing:
+# 0 tracked files reported modified. Files already on disk keep their CRLF until
+# something checks them out again; that is cosmetic, and any re-checkout fixes
+# it.
+#
+# The same rule, and the same reason, as the social-sparks repo beside this one,
+# where an unpinned eol produced 48,607 phantom lint errors in one afternoon.
+* text=auto eol=lf
