@@ -27,6 +27,31 @@ import { homedir } from 'node:os';
  * which half it certifies so nobody reads one as the other. Both are honoured
  * below. b6 did not get to it; the assembly line is over, so I have.
  *
+ * ═══ DO NOT ASSERT A TOOL COUNT HERE. ONLY A DIFFERENCE. ═══
+ *
+ * I reported the reader surface as 10 tools, measured 12 later, and blamed the
+ * gap on there being two servers. b6 refused that: "two different servers
+ * explains why the numbers MAY differ; it does not explain why they DO. Until
+ * the difference is named, the count is not a control — and a scope leak that
+ * added exactly two tools would look like the gap you already decided not to
+ * worry about."
+ *
+ * Diffed by NAME across both surfaces: IDENTICAL, zero either way. The two
+ * "extra" tools are request_permission and list_permission_requests, which sit
+ * on the reader surface by design — the thing blocked on a permission is a
+ * worker, and a worker holds no coordinator token.
+ *
+ * MY 10 WAS STALE. It was measured before ebfdcec shipped. I compared two
+ * points in TIME and attributed the difference to WHICH SERVER. The control was
+ * the broken half, not the thing under test.
+ *
+ * So nothing below asserts a number. Counts move whenever a tool is added, and
+ * a test pinned to one goes red for a correct change and teaches people to edit
+ * the number until it stops meaning anything. The assertions here are
+ * MEMBERSHIP and SUBSET: which write tools are absent, and that the reader
+ * surface is strictly contained in the coordinator one. Those are the
+ * properties. The count never was.
+ *
  * ═══ IT READS. IT NEVER WRITES. ═══
  *
  * Every call here is tools/list. Nothing is assigned, accepted, cancelled,
