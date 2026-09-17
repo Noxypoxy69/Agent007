@@ -350,8 +350,72 @@ test('REGRESSION: known writers are refused by exact shape', async () => {
     'git remote set-url origin http://evil', 'npm ci', 'npm run build', 'npx cowsay',
     'node scripts/anything.mjs', 'env rm -rf src',
     'find . -name x -fprintf out.txt %p', 'sed -n "w target.txt" CLAUDE.md',
-    'git -c core.pager=rm log', 'git log --output=x', 'npm test',
+    'git -c core.pager=rm log', 'git log --output=x',
   ]) {
     assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
   }
+});
+
+/* ============ THE CLASS, NOT THE INSTANCE ============
+ * Two reviews and this repository's own history say the same thing: filtering a
+ * programming language does not converge. Tokenising missed node -e and friends.
+ * Approving binaries missed nine of ten writers. Exact shapes missed
+ * `sort -o package.json package.json` -- no metacharacter, approved shape, plain
+ * arguments, rewrites in place -- and a thirty-second audit then found five more.
+ * These tests pin the instances AND the framing, so nobody reads a green run as
+ * a boundary.
+ * ==================================================== */
+
+test('write flags on otherwise read-only tools are refused', async () => {
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  for (const command of [
+    'sort -o package.json package.json',      // rewrites in place, reported by review
+    'sort --output=CLAUDE.md a',
+    'jq -f evil.jq package.json',
+    'jq --argfile x /etc/passwd .',
+    'diff --to-file=CLAUDE.md a b',
+    'column -o x',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
+  }
+});
+
+test('test running is ALLOWED even though it executes repository code', async () => {
+  /*
+   * Deliberate, and the reason matters more than the rule. Refusing node and npm
+   * outright makes iterative debugging impossible, and a rail that blocks
+   * ordinary work is disabled by the first person in a hurry -- which loses the
+   * Stop gate too. An override incentive is a vulnerability. A malicious test is
+   * caught by Stop, not here.
+   */
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  assert.equal(judgeShellCommand('node --test test/a.test.mjs').allowed, true);
+  assert.equal(judgeShellCommand('npm test').allowed, true);
+  // ...but not the arbitrary-execution forms, which buy nothing for iteration.
+  assert.equal(judgeShellCommand('node -e "x"').allowed, false);
+  assert.equal(judgeShellCommand('npm run build').allowed, false);
+  assert.equal(judgeShellCommand('npm ci').allowed, false);
+});
+
+test('THE BOUNDARY: Stop catches what the rail lets through', async () => {
+  /*
+   * The load-bearing test of the whole design. PreToolUse allowed
+   * `sort -o package.json package.json` before the write-flag rule existed; the
+   * file was rewritten; the Stop gate blocked -- knowing nothing about `sort` or
+   * `-o`. A check that inspects the RESULT does not need to enumerate the ways
+   * of producing it, which is why the rail may leak and the gate may not.
+   */
+  const { writeFileSync } = await import('node:fs');
+  const root = repoFixture();
+  writeFileSync(path.join(root, 'package.json'), '{"name":"before"}');
+  const snapshot = buildSnapshot(root);
+
+  // However it happened -- any tool, any spelling, any bypass.
+  writeFileSync(path.join(root, 'package.json'), '{"name":"after"}');
+
+  const drift = protectedDrift(root, snapshot);
+  assert.ok(
+    drift.some((d) => d.file === 'package.json' && d.now === 'changed'),
+    'the boundary must not depend on knowing which command did it',
+  );
 });

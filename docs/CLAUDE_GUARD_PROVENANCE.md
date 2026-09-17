@@ -162,3 +162,56 @@ environment — a `PreToolUse` hook in a sibling project blocked a deliberately
 triggered command — but that was a different project's hook. Two simultaneous
 sessions have not been exercised. Until both are, "the logic refuses correctly
 when invoked" is the claim, and "it gets invoked" is not.
+
+## 2026-09-17 — the verdict: this is a rail, and the boundary is elsewhere
+
+Two independent reviews converged, and this repository's own history is the
+evidence. Three successive designs, each closing the reported instances, each
+producing new ones within minutes:
+
+| design | what walked past it |
+|---|---|
+| tokenise filenames | `node -e`, `python3 -c`, `eval`, `find -delete`, `perl -e` |
+| approve binaries, subtract sub-commands | nine of ten known writers |
+| exact command shapes | `sort -o package.json package.json`, plus five siblings found in a thirty-second audit |
+
+`sort -o` is the one worth remembering: no metacharacter, an approved shape,
+plain-looking arguments, and it rewrites the file in place. Nothing about it
+looks like a write.
+
+**That is not a list of bugs. It is what filtering a programming language looks
+like from the inside.** The POSIX writer surface is open-ended and the agent runs
+as the same OS user with the same permissions.
+
+### The measurement that decided it
+
+```
+PreToolUse : ALLOWED  sort -o package.json package.json
+filesystem : package.json rewritten in place
+Stop gate  : BLOCKED  protected-control-changed: package.json: changed
+```
+
+The Stop gate caught it **knowing nothing about `sort` or about `-o`.** A check
+that inspects the RESULT does not need to enumerate the ways of producing it.
+
+### So the claims are now aligned with what each layer can do
+
+- **`src/shellAllowlist.mjs` is a fast-feedback rail.** It catches the honest
+  mistake early, while the agent can still act on it. It is not a security
+  boundary and its header says so.
+- **The Stop gate is the boundary.** Content against a pre-session snapshot,
+  which is indifferent to how the change arrived — shell, MCP write, subagent,
+  or a test file the session wrote.
+- **Real containment is neither.** It is an ephemeral container or a read-only
+  mount where the agent works in scratch space and only a patch comes back.
+  Nothing here substitutes for that.
+
+### And the rail was made MORE permissive, on purpose
+
+`node --test` and `npm test` are allowed again. They execute repository
+JavaScript and can delete this guard. They are allowed because refusing them
+makes iterative debugging impossible, and a rail that blocks ordinary work is
+disabled by the first person in a hurry — losing the Stop gate along with it.
+
+**An override incentive is a vulnerability.** A permissive rail plus a strict
+boundary beats a strict rail nobody leaves switched on.

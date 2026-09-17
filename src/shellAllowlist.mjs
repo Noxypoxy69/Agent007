@@ -1,34 +1,44 @@
 /**
- * EXACT COMMAND SHAPES. The previous version called itself an allowlist and was
- * a first-token allowlist with a subcommand denylist bolted on. Measured against
- * it, nine of ten known writers were allowed:
+ * A FAST-FEEDBACK RAIL. NOT A SECURITY BOUNDARY. Read this before trusting it.
  *
- *     git fetch origin            writes refs/FETCH_HEAD, supports --upload-pack
- *     git branch newref           writes a ref
- *     git remote set-url ...      writes configuration
- *     npm ci                      writes node_modules, runs lifecycle scripts
- *     npm run build               executes arbitrary repository commands
- *     npx cowsay                  downloads and executes arbitrary programs
- *     node scripts/anything.mjs   executes arbitrary repository code
- *     find . -fprintf out %p      writes a file with no -delete and no -exec
- *     sed -n 'w target' file      writes a file without -i
+ * Two independent reviews converged on the same verdict and the evidence is in
+ * this repository's own history. The first version tokenised filenames; node -e,
+ * python3 -c, eval, find -delete and perl -e all walked past it. The second
+ * approved binaries and subtracted dangerous sub-commands; nine of ten known
+ * writers walked past that. The third -- exact command shapes -- was handed
+ * `sort -o package.json package.json`, which contains no metacharacter, matches
+ * an approved shape, carries only plain-looking arguments, and rewrites the file
+ * in place. A thirty-second audit of the remaining approved binaries then found
+ * five more: sort --output=, jq -f, jq --argfile, diff --to-file=, column -o.
  *
- * Approving a BINARY and then subtracting its dangerous sub-commands is a
- * denylist wearing the other word: the list of writers is open-ended and every
- * omission is a hole. So nothing is approved by binary. A command must match one
- * of the exact shapes below, anchored end to end, or it is refused.
+ * THAT IS NOT A LIST OF BUGS. It is what filtering a programming language looks
+ * like from the inside. Every round closed the reported instances and the next
+ * round produced new ones in minutes, because the writer surface of POSIX is
+ * open-ended and the agent runs as the same user with the same permissions.
  *
- * WHAT THIS COSTS, SAID PLAINLY. No `node`, no `npm`, no `npx`, no `env`, no
- * `awk`, no `find`, no `sed`. The agent cannot run the test suite from Bash.
- * That is deliberate: running tests IS executing repository code, and the Stop
- * gate already runs the suite itself, in a process the turn does not control.
- * An agent that wants a suite run gets it at Stop, not on demand.
+ * SO THE BOUNDARY IS NOT HERE. It is the Stop gate, which compares CONTENT
+ * against a pre-session snapshot. Measured on the same attack: PreToolUse
+ * allowed `sort -o package.json package.json`, the file was rewritten, and the
+ * Stop gate blocked -- knowing nothing about `sort` or about `-o`. A check that
+ * inspects the RESULT does not need to enumerate the ways of producing it.
  *
- * SHELL METACHARACTERS ARE REFUSED OUTRIGHT, including inside quotes. `grep -E
- * 'a|b'` is refused. Deciding whether a metacharacter is quoted means writing a
- * shell parser, and a guard whose correctness depends on out-parsing bash has
- * already lost. A refused command can be rephrased; a mis-parsed one cannot be
- * recalled.
+ * WHAT THIS FILE IS FOR, THEN. Catching the honest mistake early, while the
+ * agent can still act on the feedback, instead of at the end of a turn. That is
+ * worth having and it is all this is.
+ *
+ * AND IT IS DELIBERATELY PERMISSIVE ABOUT TEST RUNNING. A previous version
+ * refused node and npm outright. That makes iterative debugging impossible, and
+ * a guard that makes ordinary work impossible gets disabled by the first person
+ * in a hurry -- which removes every guarantee at once, including the Stop gate.
+ * An override incentive is a vulnerability. `node --test` and `npm test` execute
+ * repository JavaScript and can do anything; they are allowed anyway, because
+ * the boundary that catches them is Stop, and refusing them buys nothing except
+ * a reason to turn the rail off.
+ *
+ * REAL CONTAINMENT lives outside this checkout: an ephemeral container or a
+ * read-only mount where the agent works in scratch space and only a patch comes
+ * back. Nothing in this file substitutes for that, and this header exists so
+ * nobody reads a green run here as if it did.
  */
 
 /** Tokens that make a command unjudgeable wherever they appear. */
@@ -39,6 +49,13 @@ const FORBIDDEN_CHARS = /[$`;|&<>(){}\n\\]/;
  * redirection flags, nothing that names an executable.
  */
 const SAFE_ARG = /^[A-Za-z0-9._/@:=+,^~[\]?*%-]+$/;
+
+/**
+ * Write flags on tools that are otherwise read-only. Named instances, and the
+ * header is explicit that naming instances is not closing the class: `sort -o`
+ * rewrites in place, and five siblings turned up in the audit that found it.
+ */
+const WRITE_FLAGS = /(^|\s)(-o|--output|--output-file|--to-file|--from-file|-f|--argfile|--rawfile|--slurpfile)(=|\s|$)/;
 
 /** Flags that turn an otherwise-read-only git invocation into something else. */
 const GIT_POISON = /(^|\s)(-c|--exec-path|--upload-pack|--receive-pack|--output|-o|--config-env|--git-dir|--work-tree|--namespace)(=|\s|$)/;
@@ -57,6 +74,17 @@ const SHAPES = Object.freeze([
   ['true', null], ['false', null], ['test', null],
   ['grep', null], ['rg', null], ['sort', null], ['uniq', null], ['cut', null],
   ['tr', null], ['comm', null], ['diff', null], ['column', null], ['jq', null],
+  /*
+   * TEST RUNNING IS ALLOWED, AND IT EXECUTES REPOSITORY CODE.
+   *
+   * `node --test <paths>` and `npm test` can do anything a .mjs file can do,
+   * including deleting this guard. They are here because refusing them makes
+   * iterative debugging impossible and the first person in a hurry disables the
+   * rail entirely -- losing the Stop gate too. The boundary that catches a
+   * malicious test is Stop, not this list.
+   */
+  ['node', /^--test$/],
+  ['npm', /^test$/],
 ]);
 
 /**
@@ -85,6 +113,10 @@ export function judgeShellCommand(command) {
       allowed: false,
       reason: 'the command contains a shell metacharacter (substitution, redirection, chaining or escaping)',
     };
+  }
+
+  if (WRITE_FLAGS.test(command)) {
+    return { allowed: false, reason: 'a flag that writes or reads a side file (-o, --output, --to-file, -f, --argfile, ...)' };
   }
 
   const tokens = command.trim().split(/\s+/);
