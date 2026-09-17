@@ -292,6 +292,19 @@ const KNOWN = {
   'src/moduleGraph.mjs':
     'This gate itself, not yet wired to a command. Becomes test-only once its test lands, ' +
     'and reachable when a caller exists.',
+  'src/sessionCredential.mjs':
+    'SLICE 1, THE DECISION HALF, LANDED AHEAD OF THE HALF THAT CALLS IT — and that ' +
+    'asymmetry is deliberate rather than unfinished. The caller is credential-derived route ' +
+    'identity in supabase/functions/mcp/index.ts, which needs the §3.1 tables ' +
+    '(sessions.credential_digest, agent_aliases) to exist first, and a migration plus a ' +
+    'deploy is the owner\'s decision, not a worker\'s. Landing the decision where the suite ' +
+    'can reach it is the rule this repo already has: a guard that cannot be imported is a ' +
+    'guard nobody has watched fail, and the edge function cannot be imported. So it is ' +
+    'proven here — six mutations, each measured on its own named assertion — and wired ' +
+    'later. THIS ENTRY IS THE OPEN HALF, NOT A DISPENSATION: while it stands, the shared ' +
+    'registration token is still what production authenticates with, and nothing below is ' +
+    'enforcing anything. Delete this entry the moment the route calls resolveCaller; if the ' +
+    'route ships without calling it, that is the finding, not this line.',
 };
 
 test('THE REAL REPO HAS NO ORPHAN BEYOND THE KNOWN LIST', () => {
