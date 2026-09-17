@@ -333,7 +333,7 @@ test('substitution and pipes into a shell are caught in any position', () => {
  * live roster does not contain it, and every upward message goes to it.
  */
 const roster = [{ agent_id: 'code-c' }, { agent_id: 'code-b' }, { agent_id: 'code-d' }, { agent_id: 'b6' }];
-const msg = (to) => ({ from_agent: 'c8', to_agent: to, type: 'status', body: 'a normal note' });
+const msg = (to) => ({ from_agent: 'main', to_agent: to, type: 'status', body: 'a normal note' });
 
 test('AN OFFLINE BUT REGISTERED AGENT IS A FINE RECIPIENT', () => {
   // the distinction that matters: queueing for a worker that is restarting is
@@ -363,8 +363,8 @@ test('THE COORDINATOR IS ADDRESSABLE THOUGH NO DAEMON REGISTERS IT', () => {
 });
 
 test('an alias routes to one canonical seat, so no name opens a second mailbox', () => {
-  for (const alias of ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator', 'C8']) {
-    assert.equal(canonicalActor(alias), 'c8', alias);
+  for (const alias of ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator', 'C8', 'c8']) {
+    assert.equal(canonicalActor(alias), 'main', alias);
   }
   assert.equal(canonicalActor('chatgpt-command-center'), 'chatgpt');
   /*
@@ -408,7 +408,7 @@ test('the roster offered in a refusal is canonical ids only, never aliases', () 
   // trying to retire
   const ids = knownActorIds(roster);
   assert.equal(ids.includes('chatgpt-work'), false);
-  assert.equal(ids.includes('c8'), true);
+  assert.equal(ids.includes('main'), true);
   assert.equal(ids.includes('code-b'), true, 'a registered worker stays addressable');
   assert.equal(ids.includes('b6'), false, "b6 is B's second registration, not a candidate name");
   assert.equal(ids.includes('probe-ok'), false, 'nothing unregistered is invented into the list');
@@ -551,8 +551,8 @@ test('EVERY MESSAGE SAYS WHO IS SPEAKING AND WHAT THAT IS WORTH', () => {
    * a worker does not show it. A worker that takes coordination for an owner
    * ruling has been handed an authority nobody granted.
    */
-  const mine = messagePreamble('c8');
-  assert.match(mine, /c8/);
+  const mine = messagePreamble('main');
+  assert.match(mine, /main/);
   assert.match(mine, /coordinator/);
   assert.match(mine, /NO owner authority/);
   assert.match(mine, /not one/, 'it must deny the specific misreading, not merely omit it');

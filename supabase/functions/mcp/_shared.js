@@ -1080,11 +1080,22 @@ export const ACTORS = [
   { actor_id: 'code-a', actor_type: 'worker', display_name: 'A', aliases: ['a', 'b6'] },
   { actor_id: 'code-b', actor_type: 'worker', display_name: 'B', aliases: ['b'] },
   { actor_id: 'code-d', actor_type: 'worker', display_name: 'D', aliases: ['d'] },
+  /*
+   * c8 IS main. Renamed 2026-09-16 when this lane moved onto the Windows
+   * terminal, per d-owner-identity-main-20260916 -- read that row, do not take
+   * this comment as the authority, for the reason the b6 note above exists.
+   *
+   * THE OLD NAME STAYS AS AN ALIAS AND IS NOT DELETED. A day of messages,
+   * tasks and decisions are addressed to c8, and a rename that drops the old id
+   * does not tidy those up -- it makes them unroutable while looking like a
+   * successful rename. An alias resolves history; it may not authenticate or
+   * send, which is the same rule b6 already follows.
+   */
   {
-    actor_id: 'c8',
+    actor_id: 'main',
     actor_type: 'coordinator',
     display_name: 'Work lane / execution lead',
-    aliases: ['claude-work', 'chatgpt-work', 'chatgpt-work-coordinator'],
+    aliases: ['c8', 'claude-work', 'chatgpt-work', 'chatgpt-work-coordinator'],
   },
   {
     actor_id: 'chatgpt',
