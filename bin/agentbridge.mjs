@@ -2041,9 +2041,27 @@ try {
     const W = await import('../src/workEvidence.mjs');
 
     const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
-    const hours = Number.isFinite(Number(args.hours)) && Number(args.hours) > 0 ? Number(args.hours) : 6;
-    const recentMin = Number.isFinite(Number(args['recent-min'])) && Number(args['recent-min']) > 0
-      ? Number(args['recent-min']) : 30;
+
+    /*
+     * A FLAG THAT IS IGNORED SILENTLY IS WORSE THAN ONE THAT IS REFUSED, and
+     * the first version of this defaulted every bad value. `--hours abc`
+     * printed "the last 6h" under a confident header. The dangerous one was
+     * `--registry-live`: mistype it and the disagreement alarm -- the entire
+     * reason to run this -- simply never fires, and the output looks normal.
+     * Absent means take the default; PRESENT AND UNUSABLE means stop.
+     */
+    const num = (name, fallback, ok) => {
+      const raw = args[name];
+      if (raw === undefined || raw === true || raw === '') return fallback;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || !ok(n)) {
+        console.error(`--${name}: ${JSON.stringify(String(raw))} is not usable; refusing rather than quietly using ${fallback}`);
+        process.exit(2);
+      }
+      return n;
+    };
+    const hours = num('hours', 6, (n) => n > 0);
+    const recentMin = num('recent-min', 30, (n) => n > 0);
 
     let stdout;
     try {
@@ -2062,9 +2080,9 @@ try {
      * is passed by a caller that already has the number; guessing it here would
      * put a fabricated figure next to a measured one in the same table.
      */
-    const declared = args['registry-live'];
-    const liveCount = Number.isInteger(Number(declared)) && String(declared).trim() !== ''
-      ? Number(declared) : null;
+    const liveCount = args['registry-live'] === undefined
+      ? null
+      : num('registry-live', null, (n) => Number.isInteger(n) && n >= 0);
     const rec = W.reconcile(evidence, liveCount);
 
     if (args.json) {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  LOG_FORMAT, FIELD_SEP, RECORD_SEP, RECENT_MS,
+  LOG_FORMAT, FIELD_SEP, FIELDS_PER_RECORD, RECENT_MS,
   sessionFromTrailer, parseLog, workEvidence, reconcile,
 } from '../src/workEvidence.mjs';
 
@@ -14,8 +14,9 @@ import {
 const NOW = '2026-09-17T00:00:00.000Z';
 const ago = (ms) => new Date(Date.parse(NOW) - ms).toISOString();
 
+const SHA = (seed) => String(seed).repeat(40).slice(0, 40).replace(/[^0-9a-f]/g, 'a');
 const rec = (sha, at, session, subject = 'x') =>
-  [sha, at, session ? `https://claude.ai/code/${session}` : '', subject].join(FIELD_SEP) + RECORD_SEP;
+  [SHA(sha), at, session ? `https://claude.ai/code/${session}` : '', subject].join(FIELD_SEP) + FIELD_SEP;
 
 test('the trailer is a URL and the session is the id inside it', () => {
   assert.equal(sessionFromTrailer('https://claude.ai/code/session_01Bo9xY'), 'session_01Bo9xY');
@@ -24,19 +25,60 @@ test('the trailer is a URL and the session is the id inside it', () => {
   assert.equal(sessionFromTrailer(null), null);
 });
 
-test('a record with no sha or no date is DROPPED, never defaulted', () => {
-  const text = rec('', NOW, 'session_a') + rec('abc', '', 'session_b') + rec('def', NOW, 'session_c');
+test('a record with no sha, no date or a non-sha is DROPPED, never defaulted', () => {
+  // Exactly four NUL-terminated fields each, so grouping stays aligned. git
+  // always emits four; a hand-built record with a different count would shift
+  // every record after it, which is a property of counted fields, not a bug.
+  const raw4 = (a, b, c, d) => [a, b, c, d].join(FIELD_SEP) + FIELD_SEP;
+  const text = raw4('', NOW, '', 'x')
+    + raw4(SHA('b'), '', '', 'x')
+    + raw4('not-a-sha', NOW, '', 'x')
+    + rec('c', NOW, 'session_c');
   const parsed = parseLog(text);
-  assert.deepEqual(parsed.map((c) => c.sha), ['def']);
+  assert.deepEqual(parsed.map((c) => c.sha), [SHA('c')]);
 });
 
-test('the format string and the parser agree, which is why the format is exported', () => {
+test('the format emits exactly the field count the parser reads in', () => {
   // A format defined in the CLI and parsed here would be the splice problem:
-  // two copies, edited apart. Assert the separators the parser splits on are
-  // the ones the exported format emits.
-  assert.ok(LOG_FORMAT.includes(FIELD_SEP), 'format must use the field separator the parser splits on');
-  assert.ok(LOG_FORMAT.endsWith(RECORD_SEP), 'format must terminate records with the separator the parser splits on');
-  assert.equal(LOG_FORMAT.split(FIELD_SEP).length, 4, 'four fields: sha, date, trailer, subject');
+  // two copies, edited apart. git renders %x00 as the separator, so count those.
+  assert.equal(FIELD_SEP, '\x00', 'the delimiter must be the one git cannot put in a message');
+  assert.equal((LOG_FORMAT.match(/%x00/g) || []).length, FIELDS_PER_RECORD,
+    'the format must terminate every field the parser reads');
+});
+
+test('FORGERY: a commit SUBJECT cannot manufacture a second commit', () => {
+  /*
+   * The defect this replaced, found by attacking the parser rather than by
+   * testing it. The first version split records on \x1e and fields on \x1f,
+   * under a comment asserting neither "occurs in a subject line". A subject
+   * containing \x1e ended the record early and the remainder parsed as a whole
+   * new commit -- so anyone who can write a commit message to this repository
+   * could name a session that never existed, or inflate another's count. It
+   * produced two records, the second attributed to session_EVIL.
+   *
+   * NUL is the fix because git REFUSES it at object creation: checked by trying
+   * to build one with git commit-tree, which answers
+   * "a NUL byte in commit log message not allowed". There is no delimiter left
+   * in the data to forge with.
+   */
+  const evil = rec('1', NOW, 'session_good',
+    `subj\x1e${SHA('2')}\x1f${NOW}\x1fhttps://claude.ai/code/session_EVIL\x1fforged`);
+  const parsed = parseLog(evil);
+  assert.equal(parsed.length, 1, 'a subject must never become a second record');
+  assert.equal(parsed[0].session, 'session_good', 'and must never carry a forged session');
+  assert.match(parsed[0].subject, /session_EVIL/, 'the subject is kept WHOLE, not truncated at a separator');
+  const e = workEvidence(parsed, { now: NOW });
+  assert.deepEqual(e.sessions.map((s) => s.session), ['session_good']);
+});
+
+test('a truncated stream drops the partial record rather than padding it', () => {
+  // execFile throws on maxBuffer overflow, but a short read must not invent a
+  // commit out of three fields and an undefined.
+  const good = rec('1', NOW, 'session_a');
+  const partial = [SHA('2'), NOW].join(FIELD_SEP);
+  const parsed = parseLog(good + partial);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].sha, SHA('1'));
 });
 
 test('THE REGRESSION: sessions committing while the registry reports nobody', () => {

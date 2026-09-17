@@ -43,16 +43,39 @@
 /** Newer than this, and a session is still at the keyboard. */
 export const RECENT_MS = 30 * 60 * 1000;
 
-/** Field and record separators, chosen because neither occurs in a subject line. */
-export const FIELD_SEP = '\x1f';
-export const RECORD_SEP = '\x1e';
+/**
+ * NUL, BECAUSE A COMMIT MESSAGE CANNOT CONTAIN ONE AND I HAD TO BE SHOWN THAT.
+ *
+ * The first version of this used \x1f and \x1e, with a comment asserting that
+ * "neither occurs in a subject line". That was an assumption written as a fact,
+ * and it was wrong in the worst available direction. A commit SUBJECT carrying
+ * a \x1e ended the record early and the rest of the subject was parsed as a
+ * fresh commit -- so anyone able to write a commit message to this repository
+ * could make `agentbridge who` report a session that never existed, or pad
+ * another session's count. A subject carrying a \x1f silently truncated.
+ * Demonstrated, not theorised: a crafted subject produced two records, the
+ * second attributed to session_EVIL.
+ *
+ * This report exists to be believed, and its entire input is text that other
+ * agents write. A delimiter that can appear in the data is therefore not a
+ * formatting choice, it is a forgery surface.
+ *
+ * NUL cannot appear. Git refuses it at object creation --
+ * `error: a NUL byte in commit log message not allowed` -- which was checked by
+ * trying to make one with git commit-tree rather than by reading documentation.
+ * So every field is NUL-terminated and records are read in fixed groups of
+ * four. There is no record delimiter to forge, because there are no records:
+ * there are fields, counted.
+ */
+export const FIELD_SEP = '\x00';
 
 /**
  * The `git log` format this module parses. Exported so the caller cannot drift
  * from it: a format string in one file and a parser in another is the splice
  * problem in miniature.
  */
-export const LOG_FORMAT = `%H${FIELD_SEP}%cI${FIELD_SEP}%(trailers:key=Claude-Session,valueonly)${FIELD_SEP}%s${RECORD_SEP}`;
+export const FIELDS_PER_RECORD = 4;
+export const LOG_FORMAT = '%H%x00%cI%x00%(trailers:key=Claude-Session,valueonly)%x00%s%x00';
 
 const str = (v) => (typeof v === 'string' && v.trim().length ? v.trim() : null);
 
@@ -70,17 +93,23 @@ export function sessionFromTrailer(value) {
  * into a report whose only purpose is being trustworthy.
  */
 export function parseLog(text) {
+  const fields = String(text ?? '').split(FIELD_SEP);
   const out = [];
-  for (const raw of String(text ?? '').split(RECORD_SEP)) {
-    const chunk = raw.replace(/^[\r\n]+/, '');
-    if (!chunk.trim()) continue;
-    const [sha, at, trailer, subject] = chunk.split(FIELD_SEP);
-    if (!str(sha) || !str(at)) continue;
+  // Fixed groups of four. A trailing partial group is a truncated stream --
+  // dropped, never padded, because a half-read record is not a commit.
+  for (let i = 0; i + FIELDS_PER_RECORD - 1 < fields.length; i += FIELDS_PER_RECORD) {
+    // git separates commits with a newline, so the first field of each record
+    // after the first carries it. Trimming is safe: none of these fields may
+    // contain leading or trailing whitespace that means anything.
+    const sha = str(fields[i]);
+    const at = str(fields[i + 1]);
+    if (!sha || !at) continue;
+    if (!/^[0-9a-f]{7,40}$/.test(sha)) continue;
     out.push({
-      sha: str(sha),
-      at: str(at),
-      session: sessionFromTrailer(trailer),
-      subject: str(subject) ?? '',
+      sha,
+      at,
+      session: sessionFromTrailer(fields[i + 2]),
+      subject: str(fields[i + 3]) ?? '',
     });
   }
   return out;
