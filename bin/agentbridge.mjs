@@ -31,7 +31,16 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         show the lane registry, or explain one path
   agentbridge check-first <topic> [--hours 24] [--repo <dir>] [--json]
              [--paths a,b]              also reports FILE collisions with unmerged branches
-  agentbridge verify-sha <sha> [--repo <dir>] [--json]
+  agentbridge verify-sha ...              REMOVED — renamed to observe-sha, and its
+                                        exit codes changed. Refuses with a pointer
+                                        rather than aliasing silently.
+  agentbridge observe-sha <rev> [--repo <dir>] [--json]
+                                        (was verify-sha, renamed: it observes, it
+                                        does not verify)
+             EXIT CODES: 0 promotable — unreachable today, by design.
+                         3 observed cleanly but NOT promotable.
+                         1 the observation itself was refused.
+                         2 could not run.
                                         clone the sha into a fresh directory, npm ci there,
                                         run the command that commit DECLARES, and mint a
                                         VerificationProof. There is no --suite flag on
@@ -2071,7 +2080,23 @@ try {
    * what it could not establish as loudly as what it could, and it no longer
    * uses the word verified for a run it cannot vouch for.
    */
+  /*
+   * THE OLD NAME REFUSES RATHER THAN ALIASING.
+   *
+   * `verify-sha` said the thing that was not true, and the rename is the point.
+   * A silent alias would leave every existing script calling a command whose
+   * meaning and exit codes both changed underneath it, which is worse than an
+   * error telling them exactly what happened.
+   */
   if (cmd === 'verify-sha') {
+    console.error('verify-sha was renamed to observe-sha, and its exit codes changed.');
+    console.error('  It observes a commit. It does not verify one, and it never authorised promotion.');
+    console.error('  0 is now reserved for a promotable observation, which nothing can currently produce.');
+    console.error('  Use: agentbridge observe-sha <rev>');
+    handled = true; done(2);
+  }
+
+  if (cmd === 'observe-sha') {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const { mkdtemp, rm, readFile } = await import('node:fs/promises');
@@ -2084,7 +2109,7 @@ try {
     const vWords = positionals(process.argv.slice(3));
     const want = vWords[0] ?? '';
     if (want === '' || want.startsWith('-')) {
-      console.error('verify-sha: name a commit, e.g. agentbridge verify-sha HEAD');
+      console.error('observe-sha: name a commit, e.g. agentbridge observe-sha HEAD');
       console.error('            any revision git understands: a sha, a branch, a tag, master~3');
       handled = true; done(2);
     }
@@ -2104,7 +2129,7 @@ try {
         const { stdout: full } = await run('git', ['rev-parse', `${want}^{commit}`], { cwd: repo });
         sha = full.trim();
       } catch (e) {
-        console.error(`verify-sha: ${JSON.stringify(want)} did not resolve to a commit in ${repo}`);
+        console.error(`observe-sha: ${JSON.stringify(want)} did not resolve to a commit in ${repo}`);
         console.error(`  git said: ${`${e?.stderr || e?.message || e}`.split('\n')[0]}`);
         handled = true; done(2);
       }
@@ -2155,7 +2180,7 @@ try {
         declared = typeof pkg?.scripts?.test === 'string' ? pkg.scripts.test : null;
       } catch { declared = null; }
       if (!declared) {
-        console.error('verify-sha: the checked-out commit declares no npm test script; nothing to observe');
+        console.error('observe-sha: the checked-out commit declares no npm test script; nothing to observe');
         handled = true; done(1);
       }
 
@@ -2214,9 +2239,23 @@ try {
         isolated: false,
       });
 
+      /*
+       * EXIT 0 MEANS PROMOTABLE, NOT "the command worked".
+       *
+       * A successful observation exiting 0 is precisely how automation comes to
+       * treat observation as verification: a CI step, a merge script or a future
+       * agent reads the status and proceeds. So 0 is reserved for promotable,
+       * which nothing in this repository can currently produce, and a clean but
+       * unpromotable observation exits 3 -- distinguishable from a refused
+       * observation (1) and from a command that could not run (2).
+       */
+      const exitCode = !verdict.ok ? 1 : (verdict.promotable ? 0 : 3);
+
       if (args.json) {
-        console.log(JSON.stringify({ ...verdict, sourcePath: repo, depsError }, null, 2));
-        handled = true; done(verdict.ok ? 0 : 1);
+        console.log(JSON.stringify({
+          ...verdict, blockerPolicyVersion: V.BLOCKER_POLICY_VERSION, sourcePath: repo, depsError,
+        }, null, 2));
+        handled = true; done(exitCode);
       }
 
       if (verdict.ok) {
@@ -2234,10 +2273,11 @@ try {
        * PRINTED ON EVERY RUN, PASS OR FAIL. A clean observation is still not a
        * certificate, and the reader must not have to know that already.
        */
-      console.error(`\nNOT A PROMOTION GATE — ${verdict.promotionBlockers.length} blocker(s):`);
+      console.error(`\nNOT A PROMOTION GATE — policy v${V.BLOCKER_POLICY_VERSION}, ${verdict.promotionBlockers.length} mandatory blocker(s) standing:`);
       for (const b of verdict.promotionBlockers) console.error(`  ${b.code}: ${b.detail}`);
+      console.error(`  exiting ${exitCode}: a clean observation is not authorisation to merge, integrate, accept or complete.`);
 
-      handled = true; done(verdict.ok ? 0 : 1);
+      handled = true; done(exitCode);
     } finally {
       if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => {});
     }

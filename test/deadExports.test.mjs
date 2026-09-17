@@ -4,7 +4,9 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deadExports, stripNonCode } from '../src/moduleGraph.mjs';
+import {
+  deadExports, stripNonCode, classifyExports, EXPORT_CATEGORIES, DEFAULT_SPLICES,
+} from '../src/moduleGraph.mjs';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -31,31 +33,118 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 const IS_CONSTANT = /^[A-Z][A-Z0-9_]*$/;
 
-/** Functions and values, excluding exported frozen constants. */
-function deadFunctions(root) {
-  return deadExports(root).filter((d) => !IS_CONSTANT.test(d.name));
+/** Exported functions and values, by category, excluding frozen constants. */
+function fnsByCategory(root, { excludeGateMachinery = false } = {}) {
+  const all = classifyExports(root)
+    .filter((d) => !IS_CONSTANT.test(d.name))
+    .filter((d) => !(excludeGateMachinery && GATE_MACHINERY.includes(d.file)));
+  const by = {};
+  for (const c of EXPORT_CATEGORIES) by[c] = all.filter((d) => d.category === c);
+  return by;
 }
 
-const BASELINE_DEAD_FUNCTIONS = 158;
+/*
+ * THE BASELINES, RECALCULATED AFTER A REVIEW FOUND THE OLD ONE INVALID.
+ *
+ * It was 158 "dead functions" and that number conflated three different things:
+ * 133 referenced only by tests, 13 deliberately spliced into the edge function,
+ * and 14 genuinely unreferenced. A ratchet at 158 was over eleven times looser
+ * than it appeared -- decoration wearing the shape of a gate.
+ *
+ * TEST_ONLY IS THE ONE THAT MATTERS FOR CONTRACT ITEM 1. An export with tests
+ * and no production caller is exactly the completion.mjs shape: correct, proven,
+ * and called by nothing. UNREFERENCED is worse but rarer. Both ratchet down only.
+ *
+ * SPLICED_ONLY IS NOT DEBT and is not ratcheted. Those names are carried into
+ * supabase/functions/mcp/_shared.js as declared, verified copies; counting them
+ * as dead was the misclassification the review caught.
+ */
+const BASELINE_UNREFERENCED = 13;
+const BASELINE_TEST_ONLY = 124;
 
-test('the dead-export ratchet does not increase', () => {
-  const dead = deadFunctions(REPO_ROOT);
+/*
+ * GATE MACHINERY IS TEST-ONLY BY NATURE, and excluding it makes the number mean
+ * something. src/moduleGraph.mjs exists to be run BY gates; its consumers are
+ * tests because that is its job, and counting its exports as unwired debt would
+ * make the ratchet rise every time a gate gains a helper -- punishing exactly
+ * the work that closes the other categories.
+ *
+ * NOT SPECIAL PLEADING: noOrphanModules already carries src/moduleGraph.mjs in
+ * its KNOWN list for this reason ("This gate itself, not yet wired to a
+ * command"). This applies the same judgement per export.
+ *
+ * Excluding it LOWERED the baseline from 133 to 124 rather than raising it,
+ * which is the direction a ratchet is allowed to move. The alternative on the
+ * table was bumping 133 to 134 to accommodate this commit's own new exports,
+ * and a baseline raised to fit the change it was meant to catch is not a gate.
+ */
+const GATE_MACHINERY = ['src/moduleGraph.mjs'];
+
+test('the unreferenced ratchet does not increase', () => {
+  const by = fnsByCategory(REPO_ROOT);
   assert.ok(
-    dead.length <= BASELINE_DEAD_FUNCTIONS,
-    `dead exported functions rose to ${dead.length} from a baseline of ${BASELINE_DEAD_FUNCTIONS}.\n` +
-      'A new export with no production caller is contract item 1 unmet. Wire it or do not export it.\n' +
-      dead.slice(0, 12).map((d) => `  ${d.file} -> ${d.name}`).join('\n'),
+    by.unreferenced.length <= BASELINE_UNREFERENCED,
+    `unreferenced exported functions rose to ${by.unreferenced.length} from ${BASELINE_UNREFERENCED}:\n` +
+      by.unreferenced.slice(0, 12).map((d) => `  ${d.file} -> ${d.name}`).join('\n'),
   );
 });
 
-test('the baseline is honest: it matches what is actually there', () => {
-  // A baseline set above the real count is a gate that permits a regression
-  // silently. If this fails LOW, lower the constant -- that is the ratchet working.
-  const dead = deadFunctions(REPO_ROOT);
+test('the test-only ratchet does not increase — contract item 1', () => {
+  const by = fnsByCategory(REPO_ROOT, { excludeGateMachinery: true });
+  assert.ok(
+    by['test-only'].length <= BASELINE_TEST_ONLY,
+    `exports with tests but no production caller rose to ${by['test-only'].length} from ${BASELINE_TEST_ONLY}.\n` +
+      'That is "correct, proven, and called by nothing" — name the production caller or do not export it.\n' +
+      by['test-only'].slice(0, 12).map((d) => `  ${d.file} -> ${d.name}`).join('\n'),
+  );
+});
+
+test('both baselines are honest: they match what is actually there', () => {
+  // A baseline above the real count silently permits a regression. Failing LOW
+  // means lower the constant -- that is the ratchet working.
+  assert.equal(fnsByCategory(REPO_ROOT).unreferenced.length, BASELINE_UNREFERENCED, 'unreferenced drifted');
   assert.equal(
-    dead.length,
-    BASELINE_DEAD_FUNCTIONS,
-    `baseline drift: measured ${dead.length}. If lower, lower BASELINE_DEAD_FUNCTIONS to match.`,
+    fnsByCategory(REPO_ROOT, { excludeGateMachinery: true })['test-only'].length,
+    BASELINE_TEST_ONLY,
+    'test-only drifted',
+  );
+});
+
+test('the gate-machinery exclusion is narrow and each entry is really gate machinery', () => {
+  // An exclusion list is how a ratchet quietly stops meaning anything, so it is
+  // asserted rather than trusted: every entry must be consumed ONLY by tests.
+  assert.ok(GATE_MACHINERY.length <= 2, 'keep this list tiny or the number stops meaning anything');
+  const all = classifyExports(REPO_ROOT);
+  for (const file of GATE_MACHINERY) {
+    const own = all.filter((d) => d.file === file);
+    assert.ok(own.length > 0, `${file} must exist and export something`);
+    assert.equal(
+      own.filter((d) => d.category === 'production-referenced').length,
+      0,
+      `${file} is excluded as gate machinery but has production-referenced exports; it is not test-support code`,
+    );
+  }
+});
+
+test('spliced-only is a category, not debt', () => {
+  const by = fnsByCategory(REPO_ROOT);
+  assert.ok(by['spliced-only'].length > 0, 'the splice into _shared.js is real and must be visible');
+  for (const d of by['spliced-only']) {
+    assert.ok(
+      DEFAULT_SPLICES['supabase/functions/mcp/_shared.js'].includes(d.file),
+      `${d.file} was called spliced-only but is not a declared splice source`,
+    );
+  }
+});
+
+test('a name appearing ONLY in a splice target is spliced-only, never production', () => {
+  const c = classifyExports(REPO_ROOT);
+  const canConfirm = c.find((d) => d.file === 'src/dispatch.mjs' && d.name === 'canConfirm');
+  assert.ok(canConfirm, 'canConfirm must be classified');
+  assert.notEqual(
+    canConfirm.category,
+    'production-referenced',
+    '_shared.js defines its OWN canConfirm; a copy is not a caller',
   );
 });
 

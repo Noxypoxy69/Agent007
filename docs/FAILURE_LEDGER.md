@@ -106,3 +106,76 @@ agent wrote a root cause into is still `observed`; only regression and mutation
 evidence moves it, and only `regression_proven` may be quoted to a future attempt
 as fact. A ledger that lets a guess read as a finding is worse than no ledger,
 because the guess arrives with the authority of a database row.
+
+---
+
+# Record 1 — the first `regression_proven` failure
+
+**The table does not exist yet and this is not a row.** It is the record written
+by hand, in the schema above, because the failure it describes is the one this
+ledger was specified to hold and losing it while waiting for attempt persistence
+would be the point of the whole thing missed. Entered at the owner's direction.
+
+```yaml
+failure_id: F-0001
+failure_class: gate_defect
+symptom: a failing zero-test script minted a VERIFIED proof
+failure_fingerprint: hash(agent007 + gate_defect + [src/verificationProof.mjs,bin/agentbridge.mjs] + "verified despite nonzero exit and unreconciled counts")
+affected_files:
+  - src/verificationProof.mjs
+  - bin/agentbridge.mjs
+command: agentbridge verify-sha <sha>
+exit_code: 0            # the defect: it should never have been 0
+root_cause:
+  - candidate controlled the verification command
+  - suite exit status ignored
+  - incomplete count reconciliation
+  - unsigned digest mistaken for attestation
+missing_observation:
+  - process exit status, termination signal and timeout were not captured
+  - tracked-tree state after install and after the suite was not measured
+gate_that_should_have_caught_it:
+  - malicious candidate-owned suite mutation
+repair:
+  - observation-only contract
+  - mandatory versioned promotion blockers, failing closed
+  - exact count reconciliation including cancelled and todo
+  - exit / signal / timeout binding
+  - full semantic revalidation on read
+  - exit 0 reserved for promotable; renamed verify-sha -> observe-sha
+status: regression_proven
+introduced_sha: 5f08a17
+fixed_sha: f7e9939      # mechanical repair; authority and exit semantics followed
+evidence_refs:
+  - reproduction: a clone whose package.json set scripts.test to
+    'printf "# tests 1662\n# pass 1647\n# fail 0\n# skipped 15\n"; exit 1'
+    was reported VERIFIED with a proof minted, having run zero tests
+  - the exit-0 variant of the same attack is STILL observed and is refused
+    promotion by the candidate-controlled-suite blocker, not by a refusal
+  - six mutations, each restoring one original defect, each red on the tests
+    that exist for it; restores diffed byte-identical
+```
+
+## Why this one earns `regression_proven`
+
+The state machine says `observed -> reproduced -> diagnosed -> repaired ->
+regression_proven`, and only the last may instruct future attempts as fact. This
+record walked all five:
+
+- **reproduced** against a real clone before any repair, not argued from the
+  review text. A defect list accepted from prose is the same error pointed the
+  other way.
+- **diagnosed** to four independent failures that had to line up together.
+- **repaired** narrowly, and the parts that could not be repaired -- signing, a
+  trusted policy store, isolation -- became mandatory blockers instead of being
+  quietly dropped.
+- **regression_proven** by putting each original defect back and watching the
+  tests go red, then restoring byte-identical.
+
+## The part that is NOT proven, recorded so it cannot be read as fact
+
+The exit-0 variant of the attack still produces an observation. It runs zero
+tests and says so to nobody. It is not refused and cannot be while the candidate
+defines its own suite. That is a live, known hole with a named blocker, not a
+solved problem, and no future attempt may quote this record as evidence that
+candidate-supplied suites are safe.

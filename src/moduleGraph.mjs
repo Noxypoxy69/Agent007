@@ -521,6 +521,25 @@ export function formatOrphans(findings) {
  *   prose somewhere. Comments and strings are stripped before matching.
  */
 
+/**
+ * Remove comments ONLY, keeping string literals intact.
+ *
+ * Separate from stripNonCode because the two answer opposite questions.
+ * deadExports must drop strings -- a name inside a string is not a call site.
+ * A structural check asserting that a caller hardcodes `suiteSource: 'candidate'`
+ * must KEEP them, because the string is the value under assertion.
+ *
+ * Written after a structural test used stripNonCode, searched the result for a
+ * string literal that had just been removed, and got an empty slice. Two of its
+ * assertions then failed loudly; the third -- a negative -- would have passed
+ * vacuously against nothing at all, which is the hollow-gate shape again.
+ */
+export function stripComments(source) {
+  return String(source ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+}
+
 /** Remove line comments, block comments and string bodies. Crude and sufficient. */
 export function stripNonCode(source) {
   return String(source ?? '')
@@ -544,6 +563,82 @@ export function stripNonCode(source) {
  * the edge functions cannot be the missing caller. If that ever changes, add
  * the directory here or this gate starts reporting live exports as dead.
  */
+/**
+ * CATEGORIES, because "dead" was a single bucket hiding at least four things.
+ *
+ * An independent review caught this: the gate excluded supabase/ entirely, and I
+ * had claimed that exclusion was CHECKED. It was not -- my grep looked only for
+ * relative imports of src/ and found none, so I concluded the edge functions
+ * could not be consumers. 34 dead-reported names DO appear in supabase source.
+ *
+ * But they are not callers either, which matters for the fix. _shared.js is a
+ * DECLARED SPLICE: DEFAULT_SPLICES lists ten source modules deliberately ported
+ * into it and checked by verifySplices. So the edge function carries verified
+ * COPIES. Adding supabase/ to the reference universe would count a copy as a
+ * caller and mask exactly the duplication the splice mechanism exists to manage.
+ *
+ * Hence categories rather than a bigger universe, and a baseline drawn only from
+ * the one that means what the old number pretended to mean.
+ */
+export const EXPORT_CATEGORIES = Object.freeze([
+  'production-referenced',
+  'edge-referenced',
+  'spliced-only',
+  'test-only',
+  'unreferenced',
+]);
+
+export function classifyExports(root, { allowed = {} } = {}) {
+  const PROD = ['src', 'bin', 'bridge', 'mcp'];
+  const read = (f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } };
+  const mentions = (text, name) =>
+    new RegExp(`(^|[^A-Za-z0-9_$])${name}([^A-Za-z0-9_$]|$)`).test(text);
+
+  const prodFiles = PROD.flatMap((d) => walkDir(path.join(root, d)));
+  const testFiles = walkDir(path.join(root, 'test'));
+  const edgeFiles = walkDir(path.join(root, 'supabase')).filter((f) => /\.(ts|js|mjs)$/.test(f));
+
+  const prod = prodFiles.map((f) => [f, stripNonCode(read(f))]);
+  const testText = testFiles.map(read).map(stripNonCode).join('\n');
+  const edgeText = edgeFiles.map(read).map(stripNonCode).join('\n');
+
+  // Which source modules are declared splice SOURCES, and into which target.
+  const spliceSourceOf = new Map();
+  for (const [target, sources] of Object.entries(DEFAULT_SPLICES)) {
+    for (const src of sources) spliceSourceOf.set(src, target);
+  }
+
+  const out = [];
+  for (const [f, _text] of prod) {
+    const relPath = rel(root, f);
+    if (!relPath.startsWith('src/')) continue;
+    let names = [];
+    try { names = exportedNames(read(f)); } catch { continue; }
+    for (const name of names) {
+      if (!name || name === 'default') continue;
+      if ((allowed[relPath] ?? []).includes(name)) continue;
+
+      const inProd = prod.some(([other, text]) => other !== f && mentions(text, name));
+      if (inProd) { out.push({ file: relPath, name, category: 'production-referenced' }); continue; }
+
+      const inEdge = mentions(edgeText, name);
+      if (inEdge) {
+        // A splice source's name appearing in its own splice target is a COPY,
+        // not a call. Only a non-spliced module counts as genuinely edge-used.
+        out.push({
+          file: relPath, name,
+          category: spliceSourceOf.has(relPath) ? 'spliced-only' : 'edge-referenced',
+        });
+        continue;
+      }
+
+      if (mentions(testText, name)) { out.push({ file: relPath, name, category: 'test-only' }); continue; }
+      out.push({ file: relPath, name, category: 'unreferenced' });
+    }
+  }
+  return out.sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name));
+}
+
 export function deadExports(root, { dirs = ['src', 'bin', 'bridge', 'mcp'], allowed = {} } = {}) {
   // walkDir and readFileSync, the same helpers buildGraph uses. The first draft
   // of this invoked a nodeFs()/collectFiles() pair that does not exist in this

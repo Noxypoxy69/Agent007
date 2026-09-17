@@ -58,11 +58,30 @@ export const REFUSALS = Object.freeze([
   'version-mismatch',
 ]);
 
-/** Why an observation is not a promotion authority. None of these are closable here. */
-export const PROMOTION_BLOCKERS = Object.freeze([
-  'unsigned',
+/**
+ * MANDATORY, VERSIONED PROMOTION BLOCKERS. They fail CLOSED.
+ *
+ * Every one of these must be explicitly evaluated on every observation. A
+ * blocker that is absent, unknown, or not evaluated does not mean "cleared" --
+ * it means the observation cannot authorise anything, which is the opposite
+ * default from the one that produced the false green.
+ *
+ * NONE OF THEM ARE CLEARABLE BY THE CANDIDATE. Each is decided from a trust
+ * input supplied by the CALLER -- a signature, the provenance of the suite
+ * command, the isolation of the execution environment. Nothing here is read out
+ * of the repository under test, because a candidate that can clear its own
+ * blockers has not been checked by anything.
+ *
+ * The version exists so a stored observation cannot be re-interpreted under a
+ * later, weaker policy. An observation carrying a different policy version is
+ * not promotable, full stop.
+ */
+export const BLOCKER_POLICY_VERSION = 1;
+
+export const REQUIRED_BLOCKERS = Object.freeze([
+  'unsigned-observation',
   'candidate-controlled-suite',
-  'unisolated-execution',
+  'untrusted-execution-environment',
 ]);
 
 export const PROOF_VERSION = 2;
@@ -199,6 +218,61 @@ function validate(o) {
 }
 
 /**
+ * Which mandatory blockers still stand, and whether the policy was fully applied.
+ *
+ * EVERY REQUIRED BLOCKER IS VISITED. The result records a verdict for each name
+ * in REQUIRED_BLOCKERS; if any name has no verdict the policy is incomplete and
+ * `policyOk` is false, so an evaluator that silently stopped covering a blocker
+ * cannot yield a promotable observation. That is the difference between failing
+ * closed and merely having a list.
+ */
+function evaluateBlockers(o) {
+  const CLEARED_BY = {
+    // A signature from a verifier identity. Not the digest -- an unkeyed hash
+    // says nothing about who ran anything.
+    'unsigned-observation': () => isNonEmpty(o.signature),
+    // The suite command came from a trusted policy stored OUTSIDE the candidate.
+    'candidate-controlled-suite': () => o.suiteSource === 'trusted-policy',
+    // Install and suite ran somewhere the candidate cannot reach credentials.
+    'untrusted-execution-environment': () => o.isolated === true,
+  };
+  const DETAIL = {
+    'unsigned-observation':
+      'the observation is unsigned: an unkeyed digest cannot establish who verified, or that anyone did',
+    'candidate-controlled-suite':
+      'the suite command came from the commit under test, so the candidate defines what "the suite" means',
+    'untrusted-execution-environment':
+      'install and suite ran on the host with ambient credentials and network; unsafe for untrusted commits',
+  };
+
+  const blockers = [];
+  let evaluated = 0;
+  for (const code of REQUIRED_BLOCKERS) {
+    const clears = CLEARED_BY[code];
+    if (typeof clears !== 'function') continue;   // unevaluated -> policyOk goes false below
+    evaluated += 1;
+    if (!clears()) blockers.push({ code, detail: DETAIL[code] ?? 'no detail recorded' });
+  }
+
+  /*
+   * A CALLER-SUPPLIED POLICY VERSION MUST MATCH. A stored observation must not
+   * become promotable later under a weaker policy, and a caller asking for a
+   * version this module does not implement gets a refusal rather than today's
+   * rules applied to yesterday's question.
+   */
+  const versionOk = o.blockerPolicyVersion === undefined
+    || o.blockerPolicyVersion === BLOCKER_POLICY_VERSION;
+  if (!versionOk) {
+    blockers.push({
+      code: 'unsigned-observation',
+      detail: `blocker policy version ${o.blockerPolicyVersion} requested, this module implements ${BLOCKER_POLICY_VERSION}`,
+    });
+  }
+
+  return { blockers, policyOk: evaluated === REQUIRED_BLOCKERS.length && versionOk };
+}
+
+/**
  * What this run OBSERVED. Never what may be promoted.
  *
  * `promotable` is false whenever any blocker stands, and at least one always
@@ -214,28 +288,10 @@ export function assertObserved(observation = {}) {
    * even a clean run cannot authorise promotion, for reasons outside the run.
    * Collapsing them would let "nothing went wrong" read as "ship it".
    */
-  const blockers = [];
-  if (!isNonEmpty(o.signature)) {
-    blockers.push({
-      code: 'unsigned',
-      detail: 'the observation is unsigned: an unkeyed digest cannot establish who verified, or that anyone did',
-    });
-  }
-  if (o.suiteSource !== 'trusted-policy') {
-    blockers.push({
-      code: 'candidate-controlled-suite',
-      detail: 'the suite command came from the commit under test, so the candidate defines what "the suite" means',
-    });
-  }
-  if (o.isolated !== true) {
-    blockers.push({
-      code: 'unisolated-execution',
-      detail: 'install and suite ran on the host with ambient credentials and network; unsafe for untrusted commits',
-    });
-  }
+  const { blockers, policyOk } = evaluateBlockers(o);
 
   if (refusals.length > 0) {
-    return { ok: false, promotable: false, refusals, promotionBlockers: blockers, proof: null };
+    return { ok: false, promotable: false, blockerPolicyComplete: policyOk, blockerPolicyVersion: BLOCKER_POLICY_VERSION, refusals, promotionBlockers: blockers, proof: null };
   }
 
   const proof = {
@@ -262,7 +318,22 @@ export function assertObserved(observation = {}) {
   };
   return {
     ok: true,
-    promotable: blockers.length === 0,
+    /*
+     * FAILS CLOSED: clean run, COMPLETE policy, and nothing standing.
+     *
+     * The `policyOk` term is defence-in-depth and is NOT independently reachable
+     * from outside this module -- measured, not assumed. Every externally
+     * producible way to make the policy incomplete (a version mismatch) also
+     * raises a blocker, so the second term already refuses. The only case where
+     * policyOk alone decides is an evaluator being deleted from the map, which a
+     * caller cannot do. A mutation removing this term therefore stays green, and
+     * that is recorded here rather than papered over with a test that would only
+     * appear to cover it: the guarantee is that a future blocker added to
+     * REQUIRED_BLOCKERS without an evaluator cannot silently read as cleared.
+     */
+    promotable: policyOk && blockers.length === 0,
+    blockerPolicyComplete: policyOk,
+    blockerPolicyVersion: BLOCKER_POLICY_VERSION,
     refusals: [],
     promotionBlockers: blockers,
     proof: { ...proof, digest: proofDigest(proof) },

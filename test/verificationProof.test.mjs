@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertObserved, verifyProof, proofDigest, PROOF_VERSION,
+  BLOCKER_POLICY_VERSION, REQUIRED_BLOCKERS,
 } from '../src/verificationProof.mjs';
 
 /**
@@ -118,7 +119,7 @@ test('a fully clean run is OBSERVED and still NOT promotable', () => {
   const codes = r.promotionBlockers.map((b) => b.code);
   assert.deepEqual(
     codes.sort(),
-    ['candidate-controlled-suite', 'unisolated-execution', 'unsigned'],
+    [...REQUIRED_BLOCKERS].sort(),
     'every blocker must be named on a passing run, not only on a failing one',
   );
 });
@@ -188,4 +189,117 @@ test('the digest is NOT a signature, and the module says so where it counts', ()
   forged.digest = proofDigest(forged);
   assert.equal(verifyProof(forged).ok, true, 'an unkeyed digest cannot detect authorship');
   assert.equal(assertObserved(CLEAN).promotable, false, 'which is why nothing unsigned is promotable');
+});
+
+/* ------------------------------------- MANDATORY BLOCKERS, FAILING CLOSED */
+
+test('every required blocker is reported on a clean run, by its policy name', () => {
+  const r = assertObserved(CLEAN);
+  assert.equal(r.ok, true);
+  assert.equal(r.blockerPolicyVersion, BLOCKER_POLICY_VERSION);
+  assert.deepEqual(
+    r.promotionBlockers.map((b) => b.code).sort(),
+    [...REQUIRED_BLOCKERS].sort(),
+    'a blocker missing from the output is indistinguishable from one that was cleared',
+  );
+});
+
+test('a blocker cleared by the CANDIDATE would still not promote — trust inputs come from the caller', () => {
+  /*
+   * The three trust inputs are signature, suiteSource and isolated. None is read
+   * from the repository under test; a candidate that could set them has not been
+   * checked by anything. This asserts the module honours only those three and
+   * ignores anything else offered alongside them.
+   */
+  const pretend = assertObserved({
+    ...CLEAN,
+    trusted: true, verified: true, promotable: true, skipBlockers: true,
+    promotionBlockers: [], signed: true,
+  });
+  assert.equal(pretend.promotable, false, 'no field but the three trust inputs may clear a blocker');
+  assert.equal(pretend.promotionBlockers.length, REQUIRED_BLOCKERS.length);
+});
+
+test('an unknown blocker policy version cannot produce a promotable observation', () => {
+  const trusted = { ...CLEAN, signature: 'sig', suiteSource: 'trusted-policy', isolated: true };
+  assert.equal(assertObserved(trusted).promotable, true, 'control: this WOULD promote');
+  assert.equal(
+    assertObserved({ ...trusted, blockerPolicyVersion: 99 }).promotable,
+    false,
+    'a stored observation must not become promotable under a policy this module does not implement',
+  );
+  assert.equal(
+    assertObserved({ ...trusted, blockerPolicyVersion: 0 }).promotable,
+    false,
+  );
+});
+
+test('each trust input clears exactly one blocker and no others', () => {
+  const only = (extra) => assertObserved({ ...CLEAN, ...extra }).promotionBlockers.map((b) => b.code).sort();
+  assert.deepEqual(only({ signature: 'sig' }), ['candidate-controlled-suite', 'untrusted-execution-environment']);
+  assert.deepEqual(only({ suiteSource: 'trusted-policy' }), ['unsigned-observation', 'untrusted-execution-environment']);
+  assert.deepEqual(only({ isolated: true }), ['candidate-controlled-suite', 'unsigned-observation']);
+});
+
+test('a refused observation still reports its blockers', () => {
+  // Otherwise a reader of a failing run learns nothing about why even a passing
+  // one would not have been enough.
+  const r = assertObserved({ ...CLEAN, suiteExitCode: 1 });
+  assert.equal(r.ok, false);
+  assert.equal(r.promotable, false);
+  assert.equal(r.promotionBlockers.length, REQUIRED_BLOCKERS.length);
+});
+
+/* ------------------------------------------- THE CALLER'S SIDE, STRUCTURAL */
+
+test('the CLI never derives a trust input from the candidate repository', async () => {
+  /*
+   * This is a property of the CALLER, not the module, so it is checked against
+   * the shipped source. Comments are stripped first: a structural gate in this
+   * repository once failed against correct code by matching its own explanation.
+   */
+  const { readFile } = await import('node:fs/promises');
+  const { fileURLToPath } = await import('node:url');
+  const { stripComments } = await import('../src/moduleGraph.mjs');
+  const cli = stripComments(await readFile(fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url)), 'utf8'));
+
+  const block = cli.slice(cli.indexOf("cmd === 'observe-sha'"));
+  const call = block.slice(block.indexOf('assertObserved'), block.indexOf('assertObserved') + 1200);
+
+  // A NEGATIVE NEEDS THE POSITIVE FIRST. Asserting "no signature appears" against
+  // an empty slice passes and proves nothing -- which is exactly what happened
+  // when this used the string-stripping variant.
+  assert.ok(block.length > 0, 'the observe-sha block must be found at all');
+  assert.ok(call.length > 100, `the assertObserved call must be found; got ${call.length} chars`);
+
+  assert.match(call, /suiteSource:\s*'candidate'/, 'suite provenance must be hardcoded, never read from the clone');
+  assert.match(call, /isolated:\s*false/, 'isolation must be hardcoded false while it is false');
+  assert.ok(!/signature/.test(call), 'no signature may be supplied until a verifier identity exists');
+});
+
+test('a future required blocker with no evaluator cannot read as cleared', () => {
+  /*
+   * The fail-closed guarantee, stated as what it actually protects. Every
+   * externally producible incompleteness (a version mismatch) ALSO raises a
+   * blocker, so `blockers.length` already refuses and a mutation removing the
+   * policyOk term stays green -- measured, and written into the module rather
+   * than covered by a test that would only appear to reach it.
+   *
+   * What is assertable from here: completeness is REPORTED, so adding a name to
+   * REQUIRED_BLOCKERS without an evaluator is visible instead of silent.
+   */
+  const trusted = { ...CLEAN, signature: 'sig', suiteSource: 'trusted-policy', isolated: true };
+  const r = assertObserved(trusted);
+  assert.equal(r.blockerPolicyComplete, true, 'every required blocker has an evaluator today');
+  assert.equal(r.promotable, true);
+
+  const stale = assertObserved({ ...trusted, blockerPolicyVersion: 99 });
+  assert.equal(stale.blockerPolicyComplete, false, 'an unimplemented policy version is incomplete');
+  assert.equal(stale.promotable, false);
+
+  assert.equal(
+    assertObserved(CLEAN).blockerPolicyComplete,
+    true,
+    'completeness is about the POLICY, not about whether blockers stand',
+  );
 });
