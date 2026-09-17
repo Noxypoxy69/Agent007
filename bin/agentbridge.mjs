@@ -2060,50 +2060,28 @@ try {
    * fixing a lane file should not discover its faults one run at a time.
    */
   /*
-   * verify-sha — THE COMMIT PASSES, NOT YOUR DESK.
+   * verify-sha — AN OBSERVATION, NOT A PROMOTION GATE.
    *
-   * docs/SELF_CORRECTION_INGEST.md measured the hole: "nothing in the repository
-   * does a fresh checkout of the exact SHA and re-runs the suite", so the pack's
-   * invariant TEST_PASS_IN_DIRTY_WORKTREE != PROMOTABLE was unenforced. Being
-   * written down stopped nothing -- the author of this command ran a green suite
-   * in a tree with uncommitted changes and pushed on the strength of it, twice,
-   * in the session that wrote the module underneath.
+   * An independent review of the first version demonstrated a complete false
+   * green: a commit whose package.json replaced the test script with a printf
+   * of a fake TAP summary followed by `exit 1` was reported VERIFIED, with a
+   * proof minted, having run zero tests. Reproduced here before repairing.
    *
-   * EVERY JUDGEMENT IS IN src/verificationProof.mjs. This clones, checks out,
-   * runs and parses; it decides nothing. The refusal branches therefore stay
-   * reachable in a millisecond instead of requiring a broken repository.
+   * This command now OBSERVES and src/verificationProof.mjs decides. It reports
+   * what it could not establish as loudly as what it could, and it no longer
+   * uses the word verified for a run it cannot vouch for.
    */
   if (cmd === 'verify-sha') {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
-    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { mkdtemp, rm, readFile } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');
     const path = (await import('node:path')).default;
     const run = promisify(execFile);
     const V = await import('../src/verificationProof.mjs');
-
-    /*
-     * POSITIONALS ONLY, THE SAME WAY check-first DOES IT. The first version used
-     * find(a => !a.startsWith('--')), which returns the VALUE of a preceding
-     * flag: `verify-sha --repo /path ef67863` resolved to "/path". check-first
-     * documents this exact trap twenty lines from here and I reused the broken
-     * shape anyway. A flag's value is never a positional.
-     */
     const { positionals } = await import('../src/argv.mjs');
+
     const vWords = positionals(process.argv.slice(3));
-    /*
-     * ANY REVISION GIT UNDERSTANDS, NOT JUST A HEX SHA.
-     *
-     * This refused `verify-sha HEAD` on a hex-only regex while git rev-parse
-     * resolves HEAD, branch names, tags and `master~3` perfectly well. The guard
-     * was written to give a clean error instead of a raw git one and ended up
-     * rejecting the most obvious invocation there is -- found by typing it.
-     *
-     * So the shape check only rejects what cannot be a revision at all, and
-     * rev-parse below is the real arbiter. It still resolves in the SOURCE
-     * repository, before the clone, because a name means different things in
-     * different clones and the proof is keyed on the full 40.
-     */
     const want = vWords[0] ?? '';
     if (want === '' || want.startsWith('-')) {
       console.error('verify-sha: name a commit, e.g. agentbridge verify-sha HEAD');
@@ -2111,117 +2089,155 @@ try {
       handled = true; done(2);
     }
     const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+    /*
+     * LIFECYCLE SCRIPTS ARE OFF BY DEFAULT. `npm ci` runs arbitrary code from
+     * the commit under test, on this host, with whatever credentials this
+     * process has. Until that runs in a disposable container the default must
+     * be --ignore-scripts, and turning it back on is an explicit, recorded act.
+     */
+    const allowScripts = args['allow-lifecycle-scripts'] === true;
 
     let tmp = null;
     try {
-      /*
-       * RESOLVED IN THE SOURCE REPOSITORY, BEFORE THE CLONE. A short sha is
-       * ambiguous across clones, and the proof is keyed on the full 40.
-       */
       let sha = null;
       try {
         const { stdout: full } = await run('git', ['rev-parse', `${want}^{commit}`], { cwd: repo });
         sha = full.trim();
       } catch (e) {
-        // THE CAUSE SURVIVES. "not a commit" and "not a repository" are
-        // different problems and the operator should not have to guess which.
         console.error(`verify-sha: ${JSON.stringify(want)} did not resolve to a commit in ${repo}`);
         console.error(`  git said: ${`${e?.stderr || e?.message || e}`.split('\n')[0]}`);
         handled = true; done(2);
       }
+
+      /*
+       * CANONICAL REPOSITORY IDENTITY, not the local directory name. The digest
+       * binds this, and a local path differs between machines -- so two honest
+       * verifications of one commit would not have agreed, contrary to what the
+       * old test asserted. The remote is normalised; the local path is kept
+       * beside it as diagnostics and is NOT part of the identity.
+       */
+      let repoId = '';
+      try {
+        const { stdout: url } = await run('git', ['remote', 'get-url', 'origin'], { cwd: repo });
+        repoId = url.trim().toLowerCase()
+          .replace(/^git\+/, '').replace(/\.git$/, '')
+          .replace(/^ssh:\/\/git@/, '').replace(/^git@([^:]+):/, '$1/')
+          .replace(/^https?:\/\//, '');
+      } catch { repoId = ''; }
 
       tmp = await mkdtemp(path.join(tmpdir(), 'agentbridge-verify-'));
       const work = path.join(tmp, 'src');
       await run('git', ['clone', '--no-local', '--quiet', repo, work], { maxBuffer: 3.2e7 });
       await run('git', ['-C', work, 'checkout', '--quiet', '--detach', sha], { maxBuffer: 8e6 });
 
-      const { stdout: head } = await run('git', ['-C', work, 'rev-parse', 'HEAD']);
-      /*
-       * THE CLONE'S OWN CLEANLINESS, MEASURED IN THE CLONE. Asking the source
-       * tree whether it is clean would be asking the wrong repository -- the
-       * whole point is that the source may be dirty and the verification must
-       * not be.
-       */
-      const { stdout: dirt } = await run('git', ['-C', work, 'status', '--porcelain'], { maxBuffer: 8e6 });
-      const sourceClean = dirt.trim() === '';
+      const headOf = async () => (await run('git', ['-C', work, 'rev-parse', 'HEAD'])).stdout.trim();
+      const dirtyOf = async () =>
+        (await run('git', ['-C', work, 'status', '--porcelain', '--untracked-files=no'], { maxBuffer: 8e6 })).stdout.trim();
 
-      /*
-       * DEPENDENCIES FIRST, AND A FAILED INSTALL IS A REFUSAL. Measured: a fresh
-       * clone of a sound commit reports two failures, both "Cannot find package
-       * @modelcontextprotocol/sdk". Running the suite without installing would
-       * fail a good commit for a reason that says nothing about it.
-       */
+      const checkoutHead = await headOf();
+      const sourceClean = (await dirtyOf()) === '';
+
       let depsInstalled = false;
       let depsError = null;
       try {
-        await run('npm', ['ci', '--silent'], { cwd: work, maxBuffer: 6.4e7, timeout: 9e5 });
+        const ciArgs = ['ci', '--silent'];
+        if (!allowScripts) ciArgs.push('--ignore-scripts');
+        await run('npm', ciArgs, { cwd: work, maxBuffer: 6.4e7, timeout: 9e5 });
         depsInstalled = true;
       } catch (e) {
-        // THE CAUSE SURVIVES. A bare catch here left the operator with
-        // "dependencies were not installed" and no reason -- offline, a bad
-        // lockfile and a registry outage are three different problems and one
-        // of them is the commit's fault.
         depsInstalled = false;
         depsError = `${e?.stderr || e?.message || e}`.split('\n').slice(0, 3).join(' ').slice(0, 300);
       }
 
-      /*
-       * THE REPO'S OWN DECLARED COMMAND, READ FROM THE CLONE'S package.json.
-       * The first version invented `node --test test/`, which on this Node
-       * resolves `test/` as a module path and dies instantly -- while the proof
-       * recorded "npm test", a command that never ran, inside its own digest.
-       * A verifier must run what the repository says it runs.
-       */
-      const { readFile } = await import('node:fs/promises');
       let declared = null;
       try {
         const pkg = JSON.parse(await readFile(path.join(work, 'package.json'), 'utf8'));
         declared = typeof pkg?.scripts?.test === 'string' ? pkg.scripts.test : null;
       } catch { declared = null; }
       if (!declared) {
-        console.error('verify-sha: the checked-out commit declares no npm test script; nothing to verify against');
+        console.error('verify-sha: the checked-out commit declares no npm test script; nothing to observe');
         handled = true; done(1);
       }
 
+      /*
+       * STATUS, SIGNAL AND TIMEOUT ARE KEPT. The first version caught the
+       * rejection, kept stdout and threw the status away, so a suite that
+       * printed a green summary and then died -- posttest failure, a signal, a
+       * timeout after printing -- was indistinguishable from one that passed.
+       */
       let out = '';
-      const ran = `npm test  (${declared})`;
+      let suiteExitCode = null;
+      let terminationSignal = null;
+      let timedOut = false;
       try {
         const r = await run('npm', ['test', '--silent'], { cwd: work, maxBuffer: 6.4e7, timeout: 1.8e6 });
-        out = r.stdout;
+        out = r.stdout; suiteExitCode = 0;
       } catch (e) {
-        // A failing suite exits nonzero and its output is still the evidence.
         out = `${e?.stdout ?? ''}`;
+        terminationSignal = e?.signal ?? null;
+        timedOut = e?.killed === true || e?.code === 'ETIMEDOUT';
+        suiteExitCode = typeof e?.code === 'number' ? e.code : (timedOut || terminationSignal ? null : 1);
       }
-      const num = (label) => {
-        const m = out.match(new RegExp(`^# ${label} (\\d+)$`, 'm'));
-        return m && m[1] !== undefined ? Number(m[1]) : null;
-      };
 
-      const verdict = V.assertProvable({
-        sha,
-        repo,
-        sourceClean,
-        checkoutHead: head.trim(),
-        depsInstalled,
-        tests: num('tests'),
-        pass: num('pass'),
-        fail: num('fail'),
-        skip: num('skipped') ?? 0,
-        suiteCommand: ran,
+      /*
+       * RE-MEASURED AFTER THE RUN. Cleanliness was checked only before install
+       * and the suite, so a lifecycle script or a test could rewrite tracked
+       * source and the verifier would still report it had tested the commit.
+       * Untracked files are excluded: node_modules and build output are not
+       * source mutation.
+       */
+      const headAfter = await headOf().catch(() => null);
+      const treeCleanAfter = (await dirtyOf().catch(() => 'unreadable')) === '';
+
+      /*
+       * EXACTLY ONE SUMMARY PER FIELD. Taking the first match anywhere in stdout
+       * let a candidate print a convincing summary before the real runner spoke.
+       * Two summaries means the output cannot be trusted to say which is real.
+       */
+      let ambiguousSummary = false;
+      const num = (label) => {
+        const all = [...out.matchAll(new RegExp(`^# ${label} (\\d+)$`, 'gm'))];
+        if (all.length > 1) { ambiguousSummary = true; return null; }
+        return all.length === 1 ? Number(all[0][1]) : null;
+      };
+      const tests = num('tests'); const pass = num('pass'); const fail = num('fail');
+      const skip = num('skipped') ?? 0; const cancelled = num('cancelled') ?? 0; const todo = num('todo') ?? 0;
+
+      const verdict = V.assertObserved({
+        sha, repoId, checkoutHead, headAfter,
+        sourceClean, treeCleanAfter, depsInstalled,
+        lifecycleScriptsRan: allowScripts,
+        suiteExitCode, terminationSignal, timedOut, ambiguousSummary,
+        tests, pass, fail, skip, cancelled, todo,
+        suiteCommand: `npm test  (${declared})`,
+        suiteSource: 'candidate',
+        isolated: false,
       });
 
-      if (args.json) { console.log(JSON.stringify({ ...verdict, depsError }, null, 2)); handled = true; done(verdict.ok ? 0 : 1); }
+      if (args.json) {
+        console.log(JSON.stringify({ ...verdict, sourcePath: repo, depsError }, null, 2));
+        handled = true; done(verdict.ok ? 0 : 1);
+      }
 
       if (verdict.ok) {
-        console.log(`VERIFIED ${verdict.proof.sha}`);
-        console.log(`  ${verdict.proof.pass}/${verdict.proof.tests} pass, ${verdict.proof.fail} fail, ${verdict.proof.skip} skipped, from a clean clone`);
-        console.log(`  proof ${verdict.proof.digest}`);
-        handled = true; done(0);
+        const p = verdict.proof;
+        console.log(`OBSERVED ${p.sha}`);
+        console.log(`  ${p.pass}/${p.tests} pass, ${p.fail} fail, ${p.skip} skipped, exit 0, from a clean clone`);
+        console.log(`  digest ${p.digest}`);
+      } else {
+        console.error(`NOT PROMOTABLE ${sha} — ${verdict.refusals.length} refusal(s):`);
+        for (const r of verdict.refusals) console.error(`  ${r.code}: ${r.detail}`);
+        if (depsError) console.error(`  install said: ${depsError}`);
       }
-      console.error(`NOT PROMOTABLE ${sha} — ${verdict.refusals.length} refusal(s):`);
-      for (const r of verdict.refusals) console.error(`  ${r.code}: ${r.detail}`);
-      if (depsError) console.error(`  install said: ${depsError}`);
-      handled = true; done(1);
+
+      /*
+       * PRINTED ON EVERY RUN, PASS OR FAIL. A clean observation is still not a
+       * certificate, and the reader must not have to know that already.
+       */
+      console.error(`\nNOT A PROMOTION GATE — ${verdict.promotionBlockers.length} blocker(s):`);
+      for (const b of verdict.promotionBlockers) console.error(`  ${b.code}: ${b.detail}`);
+
+      handled = true; done(verdict.ok ? 0 : 1);
     } finally {
       if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => {});
     }

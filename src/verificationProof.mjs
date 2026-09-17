@@ -1,30 +1,39 @@
 /**
- * TEST_PASS_IN_DIRTY_WORKTREE != PROMOTABLE.
+ * VERIFICATION OBSERVATIONS — AND WHY THIS IS NOT A PROMOTION GATE.
  *
- * One of six identities in docs/SELF_CORRECTION_INGEST.md, each of which has
- * already cost this project a day. This module enforces that one, and it exists
- * because the author of it broke it twice in one session: a suite run green in a
- * working tree carrying uncommitted changes, and a commit pushed on the strength
- * of it. The gap was already written down -- "nothing in the repository does a
- * fresh checkout of the exact SHA and re-runs the suite" -- and being written
- * down stopped nothing, which is the argument for a gate rather than a sentence.
+ * Built to enforce TEST_PASS_IN_DIRTY_WORKTREE != PROMOTABLE. An independent
+ * review of the first version found it could mint a false green, and the
+ * demonstration was decisive: a commit whose package.json replaced the test
+ * script with `printf "# tests 1662\n# pass 1647\n# fail 0\n"; exit 1` was
+ * VERIFIED. Zero tests ran. The process exited 1. A proof was minted.
  *
- * THE RULE FROM THE PACK, KEPT VERBATIM BECAUSE IT IS THE WHOLE POINT:
+ * THE FOUR LINKS IN THAT CHAIN, ALL PRESENT AT ONCE:
+ *   the candidate controlled the command that defines "the suite";
+ *   the exit code was parsed out of existence -- stdout was kept, status dropped;
+ *   reconciliation only rejected pass+fail+skip > tests, so 1 of 1662 passed;
+ *   the digest was an unkeyed hash anybody can recompute over anything.
  *
- *     bad patch can be proposed
- *     -> bad patch cannot become trusted
+ * WHAT CHANGED, AND WHAT DELIBERATELY HAS NOT.
  *
- * We are not trying to make the model stop writing bugs. A model that writes a
- * bad patch is working as designed; a system that lets a bad patch become a
- * TRUSTED patch is not. So nothing here asks the agent to be more careful. It
- * asks for a proof, and refuses prose.
+ * The mechanical false greens are closed below: exit status, signal and timeout
+ * are load-bearing, counts must reconcile EXACTLY, cancelled must be zero, the
+ * version is bound into the digest, and verifyProof re-runs the whole semantic
+ * validator instead of trusting a hash.
  *
- * SELF_REFLECTION != MACHINE_EVIDENCE. An agent saying "I audited this" is the
- * hollow gate in one line, and this module will not accept it in any field.
+ * The other three defects cannot be closed by arithmetic and are NOT pretended
+ * away. A proof is unsigned, so it proves nothing about WHO ran the verification
+ * or that it ran at all. The suite command still comes from the candidate. The
+ * run executes candidate-controlled code on the host. Those need a credential,
+ * a trusted policy store and container isolation respectively -- none of which
+ * exist here yet.
  *
- * PURE. No clone, no spawn, no clock, no filesystem. The CLI does the I/O and
- * hands the observations here. That split is what makes the REFUSAL branches
- * reachable in a millisecond instead of needing a broken repository to exist.
+ * SO THIS MODULE NO LONGER CLAIMS TO PROMOTE ANYTHING. assertObserved() returns
+ * an observation plus an explicit, non-empty list of promotionBlockers. Callers
+ * that want a promotion decision must read `promotable`, which is false in every
+ * configuration this repository can currently produce. An honest tool that
+ * refuses to certify is worth more than one whose certificate is forgeable.
+ *
+ * PURE. No clone, no spawn, no clock. The CLI observes; this decides.
  */
 
 import { createHash } from 'node:crypto';
@@ -32,202 +41,261 @@ import { createHash } from 'node:crypto';
 /** Each a distinct defect, never collapsed into one "invalid". */
 export const REFUSALS = Object.freeze([
   'dirty-source',
+  'source-mutated',
   'sha-mismatch',
   'not-a-sha',
   'deps-unavailable',
   'suite-not-run',
   'suite-failed',
+  'suite-nonzero-exit',
+  'suite-signalled',
+  'suite-timed-out',
+  'counts-do-not-reconcile',
+  'tests-cancelled',
   'zero-tests',
+  'ambiguous-summary',
   'digest-mismatch',
+  'version-mismatch',
 ]);
 
-export const PROOF_VERSION = 1;
+/** Why an observation is not a promotion authority. None of these are closable here. */
+export const PROMOTION_BLOCKERS = Object.freeze([
+  'unsigned',
+  'candidate-controlled-suite',
+  'unisolated-execution',
+]);
+
+export const PROOF_VERSION = 2;
 
 const isSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
 const isNonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 const isCount = (v) => Number.isInteger(v) && v >= 0;
 
 /**
- * The content address of a proof.
+ * The content address of an observation.
  *
- * WHY CONTENT-ADDRESSED AT ALL. "no immutable artifact records that a SHA
- * passed" was the measured gap. A proof stored as a plain JSON blob is a
- * sentence an agent can write, and REVIEW_TEXT != REVIEW_PROOF. Hashing the
- * load-bearing fields means an edited proof stops verifying, so tampering is a
- * detectable event rather than an undetectable one.
+ * `v:` now reads the RECORD's version, not the module constant. Hashing the
+ * constant meant an attacker could rewrite proof.version to anything and the
+ * digest still matched -- the field was recorded but not bound. Every field the
+ * verdict depends on is bound; only diagnostics (timings, local paths) are not,
+ * so two honest verifications of one commit still agree.
  *
- * ONLY THE FIELDS THAT DECIDE. Timings and the runner label are recorded on the
- * proof but excluded from the digest: including them would make two honest
- * verifications of one SHA produce different addresses, and a proof that cannot
- * be compared to another proof of the same commit is not much of a proof.
+ * THIS IS AN UNKEYED HASH AND THEREFORE NOT A SIGNATURE. It detects editing. It
+ * cannot establish that verification happened or who ran it, because anyone can
+ * construct an object and compute its digest. Signing needs a verifier identity
+ * and a credential, which is the identity slice, not this one.
  */
 export function proofDigest(proof) {
   const parts = [
-    `v:${PROOF_VERSION}`,
+    `v:${proof?.version ?? ''}`,
+    `repo:${proof?.repoId ?? ''}`,
     `sha:${proof?.sha ?? ''}`,
-    `repo:${proof?.repo ?? ''}`,
-    `clean:${proof?.sourceClean === true ? 'yes' : 'no'}`,
     `headAt:${proof?.checkoutHead ?? ''}`,
+    `headAfter:${proof?.headAfter ?? ''}`,
+    `clean:${proof?.sourceClean === true ? 'yes' : 'no'}`,
+    `cleanAfter:${proof?.treeCleanAfter === true ? 'yes' : 'no'}`,
     `deps:${proof?.depsInstalled === true ? 'yes' : 'no'}`,
-    `tests:${proof?.tests ?? ''}`,
-    `pass:${proof?.pass ?? ''}`,
-    `fail:${proof?.fail ?? ''}`,
-    `skip:${proof?.skip ?? ''}`,
+    `scripts:${proof?.lifecycleScriptsRan === true ? 'yes' : 'no'}`,
+    `exit:${proof?.suiteExitCode}`,
+    `signal:${proof?.terminationSignal ?? 'none'}`,
+    `timeout:${proof?.timedOut === true ? 'yes' : 'no'}`,
+    `tests:${proof?.tests}`,
+    `pass:${proof?.pass}`,
+    `fail:${proof?.fail}`,
+    `skip:${proof?.skip}`,
+    `cancelled:${proof?.cancelled}`,
+    `todo:${proof?.todo}`,
     `suite:${proof?.suiteCommand ?? ''}`,
+    `suiteFrom:${proof?.suiteSource ?? ''}`,
   ];
   return createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 
 /**
- * Is this SHA promotable on the strength of this run?
+ * Everything wrong with this run, all at once.
  *
- * EVERY REASON AT ONCE, never the first one found. Four restarts to learn four
- * facts that were all knowable on the first is a maze, not a diagnostic -- the
- * same argument the worker config already makes.
+ * Split out so verifyProof() can re-run the IDENTICAL semantics over a record
+ * that arrived from elsewhere. The first version checked three fields on the way
+ * in and a different three on the way out, so a proof could fail minting and
+ * pass reading. One validator, both directions.
  */
-export function assertProvable({
-  sha,
-  repo = '',
-  sourceClean,
-  checkoutHead,
-  depsInstalled,
-  tests,
-  pass,
-  fail,
-  skip = 0,
-  suiteCommand = '',
-} = {}) {
+function validate(o) {
   const refusals = [];
+  const add = (code, detail) => refusals.push({ code, detail });
 
+  if (!isSha(o.sha)) add('not-a-sha', `${o.sha ?? 'absent'} is not a full 40-character sha`);
+
+  if (o.sourceClean !== true) {
+    add('dirty-source', 'the checkout carried uncommitted changes before the run; that proves nothing about the commit');
+  }
   /*
-   * DEPENDENCIES ARE PART OF "FROM CLEAN", AND SKIPPING THEM MINTS A LIE.
-   *
-   * Measured while building this: a fresh clone of a sound commit reports two
-   * failures, both `Cannot find package '@modelcontextprotocol/sdk'`. A verifier
-   * that shrugged at an install it could not perform would either refuse a good
-   * commit for the wrong reason or -- worse, if the failures happened not to
-   * surface -- pass a commit whose lockfile does not resolve. Absent is not zero
-   * here either: an install that did not run is a refusal, not a footnote.
+   * MEASURED AFTER THE RUN TOO. Cleanliness was checked only before npm ci and
+   * the suite, so lifecycle scripts or tests could rewrite tracked source and
+   * the verifier would still report it had tested the commit.
    */
-  if (depsInstalled !== true) {
-    refusals.push({
-      code: 'deps-unavailable',
-      detail: 'dependencies were not installed in the clean checkout; the run does not cover resolution',
-    });
+  if (o.treeCleanAfter !== true) {
+    add('source-mutated', 'tracked files changed during install or the suite; what ran is not the commit');
+  }
+
+  if (!isSha(o.checkoutHead)) {
+    add('sha-mismatch', 'the checkout did not report a usable HEAD');
+  } else if (isSha(o.sha) && o.checkoutHead !== o.sha) {
+    add('sha-mismatch', `checked out ${o.checkoutHead}, asked for ${o.sha}`);
+  }
+  if (isSha(o.checkoutHead) && o.headAfter !== undefined && o.headAfter !== o.checkoutHead) {
+    add('source-mutated', `HEAD moved during the run: ${o.checkoutHead} -> ${o.headAfter}`);
+  }
+
+  if (o.depsInstalled !== true) {
+    add('deps-unavailable', 'dependencies were not installed; the run does not cover resolution');
+  }
+
+  if (!isNonEmpty(o.suiteCommand)) {
+    add('suite-not-run', 'no suite command recorded; an observation must name what ran');
   }
 
   /*
-   * A SUITE COMMAND IS PART OF THE CLAIM, SO IT MUST BE THE ONE THAT RAN.
-   *
-   * The first version of the CLI recorded suiteCommand "npm test" while
-   * executing `node --test test/` -- which on this Node resolves `test/` as a
-   * module path and fails instantly. The proof would have attested, inside its
-   * own digest, to a command that never ran. An empty command is refused rather
-   * than defaulted for the same reason.
+   * THE EXIT STATUS IS LOAD-BEARING. The first version caught the failure,
+   * kept stdout and dropped the status, so a suite that printed a green summary
+   * and then died -- posttest failure, timeout after printing, a signal, npm
+   * failing after the runner finished -- was indistinguishable from success.
    */
-  if (!isNonEmpty(suiteCommand)) {
-    refusals.push({ code: 'suite-not-run', detail: 'no suite command was recorded; a proof must name what ran' });
+  if (o.suiteExitCode !== 0) {
+    add('suite-nonzero-exit', `the suite exited ${o.suiteExitCode === null || o.suiteExitCode === undefined ? 'with an unrecorded status' : o.suiteExitCode}`);
   }
-
-  if (!isSha(sha)) refusals.push({ code: 'not-a-sha', detail: `${sha ?? 'absent'} is not a full 40-character sha` });
+  if (o.terminationSignal !== null && o.terminationSignal !== undefined) {
+    add('suite-signalled', `the suite was killed by ${o.terminationSignal}`);
+  }
+  if (o.timedOut === true) add('suite-timed-out', 'the suite did not finish inside its limit');
 
   /*
-   * THE ONE THAT CAUGHT ITS OWN AUTHOR. A suite run against a tree with
-   * uncommitted changes proves something about that tree and nothing about the
-   * commit. It is not a warning: a proof produced from a dirty source is
-   * refused, because the whole value of the artifact is that it describes a
-   * commit somebody else can fetch.
+   * EXACTLY ONE SUMMARY. Parsing the first matching line anywhere in stdout let
+   * a candidate print a convincing summary before the real runner spoke.
    */
-  if (sourceClean !== true) {
-    refusals.push({
-      code: 'dirty-source',
-      detail: 'the suite ran against a tree with uncommitted changes; that proves nothing about the commit',
-    });
+  if (o.ambiguousSummary === true) {
+    add('ambiguous-summary', 'more than one suite summary appeared in the output; which one is real cannot be decided');
   }
 
-  /*
-   * ABSENT IS NOT MATCHING. A missing checkoutHead must refuse rather than be
-   * skipped -- "we could not confirm the checkout landed on the right commit"
-   * is the same risk as "it landed on the wrong one".
-   *
-   * THIS FIRST BRANCH IS DEFENSIVE, NOT LOAD-BEARING, and saying so is the point
-   * of the note. A mutation that deleted it alone left every test green: with a
-   * valid `sha`, `undefined !== sha` is true, so the else-if below already
-   * refuses an absent head. It earns its place only by giving that case a
-   * specific code instead of a generic mismatch. Anyone deleting it as dead code
-   * should delete BOTH branches to see the protection actually disappear -- that
-   * mutation reddens two tests.
-   */
-  if (!isSha(checkoutHead)) {
-    refusals.push({ code: 'sha-mismatch', detail: 'the verified checkout did not report a usable HEAD' });
-  } else if (isSha(sha) && checkoutHead !== sha) {
-    refusals.push({ code: 'sha-mismatch', detail: `verified ${checkoutHead}, asked for ${sha}` });
-  }
-
-  if (!isCount(tests) || !isCount(pass) || !isCount(fail)) {
-    refusals.push({ code: 'suite-not-run', detail: 'the suite produced no usable counts' });
+  const counts = ['tests', 'pass', 'fail', 'skip', 'cancelled', 'todo'];
+  const missing = counts.filter((k) => !isCount(o[k]));
+  if (missing.length) {
+    add('suite-not-run', `the suite produced no usable counts for: ${missing.join(', ')}`);
   } else {
+    if (o.tests === 0) add('zero-tests', 'the suite ran 0 tests; that is not a pass');
+    if (o.fail > 0) add('suite-failed', `${o.fail} failing test(s)`);
+    if (o.cancelled > 0) add('tests-cancelled', `${o.cancelled} test(s) cancelled; the suite did not complete`);
     /*
-     * A RUN THAT CHECKED NOTHING MUST NOT PRINT A PASS. Zero tests with zero
-     * failures satisfies "no failures" and is exactly the shape of a suite whose
-     * glob stopped matching. The sibling repo's gates-can-fail harness fails
-     * outright when every mutation was skipped for the same reason.
+     * EXACT EQUALITY, BOTH DIRECTIONS. Rejecting only `>` accepted
+     * tests 1600 / pass 1 / fail 0 -- a direct false green, and one a fake TAP
+     * printer produces by accident.
      */
-    if (tests === 0) refusals.push({ code: 'zero-tests', detail: 'the suite ran 0 tests; that is not a pass' });
-    if (fail > 0) refusals.push({ code: 'suite-failed', detail: `${fail} failing test(s)` });
-    if (pass + fail + skip > tests) {
-      refusals.push({ code: 'suite-not-run', detail: `counts do not reconcile: ${pass}+${fail}+${skip} > ${tests}` });
+    const accounted = o.pass + o.fail + o.skip + o.cancelled + o.todo;
+    if (accounted !== o.tests) {
+      add('counts-do-not-reconcile',
+        `${o.pass}+${o.fail}+${o.skip}+${o.cancelled}+${o.todo} = ${accounted}, but the suite reported ${o.tests} tests`);
     }
   }
-
-  const ok = refusals.length === 0;
-  if (!ok) return { ok, refusals, proof: null };
-
-  const proof = {
-    version: PROOF_VERSION,
-    sha,
-    repo,
-    sourceClean: true,
-    checkoutHead,
-    depsInstalled: true,
-    tests,
-    pass,
-    fail,
-    skip,
-    suiteCommand,
-  };
-  return { ok, refusals: [], proof: { ...proof, digest: proofDigest(proof) } };
+  return refusals;
 }
 
 /**
- * Does this proof still describe what it claims to?
+ * What this run OBSERVED. Never what may be promoted.
  *
- * The reader's half. assertProvable MINTS a proof; this checks one that arrived
- * from somewhere else -- a file, a branch, another agent. Recomputing the digest
- * is the only reason the artifact is worth more than the sentence "it passed".
+ * `promotable` is false whenever any blocker stands, and at least one always
+ * does in this repository today. That is the honest state, not a placeholder:
+ * the observation is real evidence and it is not a certificate.
+ */
+export function assertObserved(observation = {}) {
+  const o = { skip: 0, cancelled: 0, todo: 0, ...observation };
+  const refusals = validate(o);
+
+  /*
+   * BLOCKERS ARE NOT REFUSALS. A refusal means this run failed. A blocker means
+   * even a clean run cannot authorise promotion, for reasons outside the run.
+   * Collapsing them would let "nothing went wrong" read as "ship it".
+   */
+  const blockers = [];
+  if (!isNonEmpty(o.signature)) {
+    blockers.push({
+      code: 'unsigned',
+      detail: 'the observation is unsigned: an unkeyed digest cannot establish who verified, or that anyone did',
+    });
+  }
+  if (o.suiteSource !== 'trusted-policy') {
+    blockers.push({
+      code: 'candidate-controlled-suite',
+      detail: 'the suite command came from the commit under test, so the candidate defines what "the suite" means',
+    });
+  }
+  if (o.isolated !== true) {
+    blockers.push({
+      code: 'unisolated-execution',
+      detail: 'install and suite ran on the host with ambient credentials and network; unsafe for untrusted commits',
+    });
+  }
+
+  if (refusals.length > 0) {
+    return { ok: false, promotable: false, refusals, promotionBlockers: blockers, proof: null };
+  }
+
+  const proof = {
+    version: PROOF_VERSION,
+    repoId: o.repoId ?? '',
+    sha: o.sha,
+    checkoutHead: o.checkoutHead,
+    headAfter: o.headAfter ?? o.checkoutHead,
+    sourceClean: true,
+    treeCleanAfter: true,
+    depsInstalled: true,
+    lifecycleScriptsRan: o.lifecycleScriptsRan === true,
+    suiteExitCode: 0,
+    terminationSignal: null,
+    timedOut: false,
+    tests: o.tests,
+    pass: o.pass,
+    fail: o.fail,
+    skip: o.skip,
+    cancelled: o.cancelled,
+    todo: o.todo,
+    suiteCommand: o.suiteCommand,
+    suiteSource: o.suiteSource ?? 'candidate',
+  };
+  return {
+    ok: true,
+    promotable: blockers.length === 0,
+    refusals: [],
+    promotionBlockers: blockers,
+    proof: { ...proof, digest: proofDigest(proof) },
+  };
+}
+
+/**
+ * Does a record that arrived from elsewhere still describe what it claims?
+ *
+ * RE-RUNS THE WHOLE VALIDATOR, then checks the digest. The first version checked
+ * a handful of fields and trusted the hash for the rest, so a record could carry
+ * a wrong version, a mismatched head or counts that did not reconcile and still
+ * read as valid. A digest proves a record is unedited; it says nothing about
+ * whether the record was ever acceptable.
  */
 export function verifyProof(proof) {
-  const refusals = [];
   if (!proof || typeof proof !== 'object') {
     return { ok: false, refusals: [{ code: 'digest-mismatch', detail: 'not a proof object' }] };
   }
+  const refusals = validate({
+    ...proof,
+    skip: proof.skip,
+    // A minted proof records these as the passing values; validate() re-checks
+    // them rather than assuming the minting path was the one that produced it.
+  });
+
+  if (proof.version !== PROOF_VERSION) {
+    refusals.push({ code: 'version-mismatch', detail: `proof version ${proof.version}, this reader speaks ${PROOF_VERSION}` });
+  }
   if (!isNonEmpty(proof.digest)) {
-    refusals.push({ code: 'digest-mismatch', detail: 'the proof carries no digest' });
+    refusals.push({ code: 'digest-mismatch', detail: 'the record carries no digest' });
   } else if (proofDigest(proof) !== proof.digest) {
-    refusals.push({
-      code: 'digest-mismatch',
-      detail: 'the proof does not hash to its own digest; a field was changed after it was minted',
-    });
+    refusals.push({ code: 'digest-mismatch', detail: 'the record does not hash to its own digest; a field changed after it was written' });
   }
-  if (proof.sourceClean !== true) {
-    refusals.push({ code: 'dirty-source', detail: 'a proof minted from a dirty source is not a proof' });
-  }
-  if (proof.depsInstalled !== true) {
-    refusals.push({ code: 'deps-unavailable', detail: 'the recorded run did not install dependencies' });
-  }
-  if (Number.isInteger(proof.fail) && proof.fail > 0) {
-    refusals.push({ code: 'suite-failed', detail: `${proof.fail} failing test(s) recorded` });
-  }
-  if (proof.tests === 0) refusals.push({ code: 'zero-tests', detail: 'the recorded run asserted nothing' });
   return { ok: refusals.length === 0, refusals };
 }

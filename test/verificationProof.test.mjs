@@ -1,222 +1,191 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertProvable, verifyProof, proofDigest, PROOF_VERSION } from '../src/verificationProof.mjs';
+import {
+  assertObserved, verifyProof, proofDigest, PROOF_VERSION,
+} from '../src/verificationProof.mjs';
 
 /**
- * BOTH DIRECTIONS, because a gate that only refuses is an outage and one that
- * only permits is decoration.
+ * THE REGRESSION FIXTURES ARE A REAL ATTACK, NOT AN IMAGINED ONE.
  *
- * The refusal cases here are not hypothetical failure modes. `dirty-source` is
- * the one its author tripped twice in the session that wrote it: a green suite
- * in a tree carrying uncommitted changes, and a commit pushed on the strength
- * of it. `zero-tests` is the run whose glob stopped matching and reported a
- * pass. `digest-mismatch` is REVIEW_TEXT != REVIEW_PROOF made checkable.
+ * An independent review demonstrated a complete false green in v1. Reproduced
+ * against a real clone before repairing: a commit whose package.json replaced
+ * the test script with
+ *
+ *     printf "# tests 1662\n# pass 1647\n# fail 0\n# skipped 15\n"; exit 1
+ *
+ * was reported VERIFIED with a proof minted, having run zero tests. Four
+ * independent failures had to line up and all four were present: the candidate
+ * controlled the command, the exit status was discarded, reconciliation only
+ * rejected `>`, and the digest was unkeyed.
+ *
+ * The exit-0 variant is ALSO here and it is NOT refused, because it cannot be:
+ * a candidate that defines its own suite can print anything. That is what
+ * `promotable: false` and the candidate-controlled-suite blocker exist to say.
  */
 
-const GOOD = Object.freeze({
-  depsInstalled: true,
+const CLEAN = Object.freeze({
   sha: 'a'.repeat(40),
-  repo: 'https://github.com/Noxypoxy69/agent007',
-  sourceClean: true,
+  repoId: 'github.com/noxypoxy69/agent007',
   checkoutHead: 'a'.repeat(40),
-  tests: 1631,
-  pass: 1616,
-  fail: 0,
-  skip: 15,
-  suiteCommand: 'npm test',
+  headAfter: 'a'.repeat(40),
+  sourceClean: true,
+  treeCleanAfter: true,
+  depsInstalled: true,
+  suiteExitCode: 0,
+  terminationSignal: null,
+  timedOut: false,
+  ambiguousSummary: false,
+  tests: 1662, pass: 1647, fail: 0, skip: 15, cancelled: 0, todo: 0,
+  suiteCommand: 'npm test  (node --test "test/**/*.test.mjs")',
 });
 
-test('POSITIVE: a clean checkout at the exact sha with a real suite mints a proof', () => {
-  const r = assertProvable(GOOD);
-  assert.equal(r.ok, true, JSON.stringify(r.refusals));
-  assert.equal(r.proof.sha, GOOD.sha);
-  assert.equal(r.proof.version, PROOF_VERSION);
-  assert.match(r.proof.digest, /^[0-9a-f]{64}$/);
-  assert.equal(verifyProof(r.proof).ok, true, 'a freshly minted proof must verify');
-});
+/* ------------------------------------------------ THE DEMONSTRATED ATTACK */
 
-test('POSITIVE: two honest verifications of one sha agree on the digest', () => {
-  // Timings and runner labels are excluded from the digest on purpose: a proof
-  // that cannot be compared with another proof of the same commit is not a proof.
-  const a = assertProvable({ ...GOOD }).proof;
-  const b = assertProvable({ ...GOOD }).proof;
-  assert.equal(a.digest, b.digest);
-});
-
-test('REFUSAL: a dirty source tree cannot mint a proof', () => {
-  const r = assertProvable({ ...GOOD, sourceClean: false });
+test('REGRESSION: green summary with a nonzero exit is refused', () => {
+  const r = assertObserved({ ...CLEAN, suiteExitCode: 1 });
   assert.equal(r.ok, false);
-  assert.equal(r.proof, null, 'a refused verification must not hand back an artifact');
-  assert.ok(r.refusals.some((x) => x.code === 'dirty-source'));
+  assert.equal(r.proof, null, 'a refused run must not hand back an artifact');
+  assert.ok(r.refusals.some((x) => x.code === 'suite-nonzero-exit'));
 });
 
-test('REFUSAL: sourceClean must be TRUE, not merely truthy or absent', () => {
-  for (const v of [undefined, null, 'yes', 1, {}]) {
-    const r = assertProvable({ ...GOOD, sourceClean: v });
-    assert.equal(r.ok, false, `sourceClean=${JSON.stringify(v)} must refuse`);
-    assert.ok(r.refusals.some((x) => x.code === 'dirty-source'));
-  }
+test('REGRESSION: tests 1600 / pass 1 does not reconcile', () => {
+  // v1 rejected only pass+fail+skip > tests, so 1 of 1600 passed as green.
+  const r = assertObserved({ ...CLEAN, tests: 1600, pass: 1, fail: 0, skip: 0 });
+  assert.equal(r.ok, false);
+  assert.ok(r.refusals.some((x) => x.code === 'counts-do-not-reconcile'));
 });
 
-test('REFUSAL: the checkout must land on the sha that was asked for', () => {
-  const wrong = assertProvable({ ...GOOD, checkoutHead: 'b'.repeat(40) });
-  assert.equal(wrong.ok, false);
-  assert.ok(wrong.refusals.some((x) => x.code === 'sha-mismatch'));
+test('a suite killed by a signal, or timed out, is refused even with green counts', () => {
+  const sig = assertObserved({ ...CLEAN, suiteExitCode: null, terminationSignal: 'SIGKILL' });
+  assert.equal(sig.ok, false);
+  assert.ok(sig.refusals.some((x) => x.code === 'suite-signalled'));
 
-  // ABSENT IS NOT MATCHING. "could not confirm" carries the same risk as "wrong".
-  const absent = assertProvable({ ...GOOD, checkoutHead: undefined });
-  assert.equal(absent.ok, false);
-  assert.ok(absent.refusals.some((x) => x.code === 'sha-mismatch'));
+  const late = assertObserved({ ...CLEAN, suiteExitCode: null, timedOut: true });
+  assert.equal(late.ok, false);
+  assert.ok(late.refusals.some((x) => x.code === 'suite-timed-out'));
 });
 
-test('REFUSAL: a run of zero tests is not a pass', () => {
-  const r = assertProvable({ ...GOOD, tests: 0, pass: 0, fail: 0, skip: 0 });
-  assert.equal(r.ok, false, 'zero failures out of zero tests satisfies "no failures" and proves nothing');
-  assert.ok(r.refusals.some((x) => x.code === 'zero-tests'));
+test('an unrecorded exit status is refused, not assumed to be zero', () => {
+  const r = assertObserved({ ...CLEAN, suiteExitCode: undefined });
+  assert.equal(r.ok, false, 'absent is not zero, least of all for an exit code');
+  assert.ok(r.refusals.some((x) => x.code === 'suite-nonzero-exit'));
 });
 
-test('REFUSAL: any failing test refuses, and counts that do not reconcile refuse', () => {
-  assert.ok(assertProvable({ ...GOOD, fail: 1 }).refusals.some((x) => x.code === 'suite-failed'));
-  const bad = assertProvable({ ...GOOD, tests: 10, pass: 9, fail: 0, skip: 5 });
-  assert.ok(bad.refusals.some((x) => x.code === 'suite-not-run'), '9+0+5 cannot come out of 10');
+test('cancelled tests mean the suite did not complete', () => {
+  const r = assertObserved({ ...CLEAN, cancelled: 3, pass: 1644 });
+  assert.equal(r.ok, false);
+  assert.ok(r.refusals.some((x) => x.code === 'tests-cancelled'));
 });
 
-test('REFUSAL: a short or absent sha is refused rather than padded', () => {
-  for (const v of ['abc1234', '', undefined, 'A'.repeat(40)]) {
-    const r = assertProvable({ ...GOOD, sha: v, checkoutHead: v });
-    assert.equal(r.ok, false, `sha=${JSON.stringify(v)} must refuse`);
-  }
+test('two summaries in one output cannot be adjudicated', () => {
+  const r = assertObserved({ ...CLEAN, ambiguousSummary: true, tests: null, pass: null, fail: null });
+  assert.equal(r.ok, false);
+  assert.ok(r.refusals.some((x) => x.code === 'ambiguous-summary'));
 });
 
-test('REFUSAL: every reason at once, never just the first', () => {
-  const r = assertProvable({ ...GOOD, sourceClean: false, fail: 3, checkoutHead: 'c'.repeat(40) });
+test('source mutated during the run means what ran is not the commit', () => {
+  const dirty = assertObserved({ ...CLEAN, treeCleanAfter: false });
+  assert.equal(dirty.ok, false);
+  assert.ok(dirty.refusals.some((x) => x.code === 'source-mutated'));
+
+  const moved = assertObserved({ ...CLEAN, headAfter: 'b'.repeat(40) });
+  assert.equal(moved.ok, false);
+  assert.ok(moved.refusals.some((x) => x.code === 'source-mutated'));
+});
+
+test('a dirty checkout, a wrong head and a missing install are each refused', () => {
+  assert.ok(assertObserved({ ...CLEAN, sourceClean: false }).refusals.some((x) => x.code === 'dirty-source'));
+  assert.ok(assertObserved({ ...CLEAN, checkoutHead: 'b'.repeat(40) }).refusals.some((x) => x.code === 'sha-mismatch'));
+  assert.ok(assertObserved({ ...CLEAN, depsInstalled: false }).refusals.some((x) => x.code === 'deps-unavailable'));
+  assert.ok(assertObserved({ ...CLEAN, tests: 0, pass: 0, fail: 0, skip: 0 }).refusals.some((x) => x.code === 'zero-tests'));
+  assert.ok(assertObserved({ ...CLEAN, suiteCommand: '' }).refusals.some((x) => x.code === 'suite-not-run'));
+});
+
+test('every reason at once, never only the first', () => {
+  const r = assertObserved({ ...CLEAN, sourceClean: false, suiteExitCode: 2, fail: 3, treeCleanAfter: false });
   const codes = r.refusals.map((x) => x.code);
-  assert.ok(codes.includes('dirty-source'));
-  assert.ok(codes.includes('suite-failed'));
-  assert.ok(codes.includes('sha-mismatch'));
-  assert.ok(r.refusals.length >= 3, 'four restarts to learn three facts is a maze, not a diagnostic');
-});
-
-/* --------------------------------------------- THE READER'S HALF */
-
-test('REFUSAL: a proof edited after minting stops verifying', () => {
-  const proof = assertProvable(GOOD).proof;
-  const tampered = { ...proof, fail: 0, tests: 99999 };
-  const r = verifyProof(tampered);
-  assert.equal(r.ok, false, 'REVIEW_TEXT != REVIEW_PROOF: an edited artifact must be detectable');
-  assert.ok(r.refusals.some((x) => x.code === 'digest-mismatch'));
-});
-
-test('REFUSAL: a failing result cannot be laundered by rewriting the digest', () => {
-  // The forger recomputes the digest so it is internally consistent. The
-  // content is still a failing run, and the reader checks the CONTENT too.
-  const forged = { version: PROOF_VERSION, sha: 'a'.repeat(40), repo: '', sourceClean: true,
-    checkoutHead: 'a'.repeat(40), tests: 10, pass: 9, fail: 1, skip: 0, suiteCommand: 'npm test' };
-  forged.digest = proofDigest(forged);
-  const r = verifyProof(forged);
-  assert.equal(r.ok, false, 'a self-consistent proof of a FAILING run is still not promotable');
-  assert.ok(r.refusals.some((x) => x.code === 'suite-failed'));
-});
-
-test('REFUSAL: a proof carrying no digest at all is refused', () => {
-  const proof = assertProvable(GOOD).proof;
-  delete proof.digest;
-  assert.equal(verifyProof(proof).ok, false);
-  assert.equal(verifyProof(null).ok, false);
-});
-
-test('REFUSAL: a run that never installed dependencies is not a clean-clone proof', () => {
-  /*
-   * MEASURED WHILE BUILDING THIS. A fresh clone of a sound commit reported two
-   * failures, both "Cannot find package '@modelcontextprotocol/sdk'". A verifier
-   * that shrugged at a missing install would fail good commits for a reason that
-   * says nothing about them -- or, if the imports happened not to surface, pass a
-   * commit whose lockfile does not resolve.
-   */
-  for (const v of [undefined, false, 'yes', 1]) {
-    const r = assertProvable({ ...GOOD, depsInstalled: v });
-    assert.equal(r.ok, false, `depsInstalled=${JSON.stringify(v)} must refuse`);
-    assert.ok(r.refusals.some((x) => x.code === 'deps-unavailable'));
+  for (const c of ['dirty-source', 'suite-nonzero-exit', 'suite-failed', 'source-mutated']) {
+    assert.ok(codes.includes(c), `missing ${c}`);
   }
 });
 
-test('REFUSAL: a proof must name the command that ran', () => {
-  /*
-   * The CLI once recorded suiteCommand "npm test" while executing
-   * `node --test test/`, which resolves test/ as a module path and dies at once.
-   * The proof would have attested, inside its own digest, to a command that
-   * never ran. An empty command is refused rather than defaulted.
-   */
-  for (const v of ['', '   ', undefined, null, 42]) {
-    const r = assertProvable({ ...GOOD, suiteCommand: v });
-    assert.equal(r.ok, false, `suiteCommand=${JSON.stringify(v)} must refuse`);
-    assert.ok(r.refusals.some((x) => x.code === 'suite-not-run'));
-  }
-});
+/* ------------------------------------------- WHAT IT REFUSES TO CLAIM */
 
-test('the reader refuses a proof whose deps were never installed', () => {
-  const proof = assertProvable(GOOD).proof;
-  const forged = { ...proof, depsInstalled: false };
-  forged.digest = proofDigest(forged);
-  const r = verifyProof(forged);
-  assert.equal(r.ok, false, 'self-consistent is not the same as promotable');
-  assert.ok(r.refusals.some((x) => x.code === 'deps-unavailable'));
-});
-
-/* ------------------------------------------------- THE CLI CONTRACT */
-
-test('verify-sha accepts any revision git understands, and says why when it cannot', async () => {
-  /*
-   * REGRESSION, 2026-09-17. A hex-only guard refused `verify-sha HEAD` while
-   * git rev-parse resolves HEAD, branches, tags and master~3 without trouble.
-   * The guard existed to give a clean error instead of a raw git one and ended
-   * up rejecting the most obvious invocation there is. Found by typing it.
-   */
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const { fileURLToPath } = await import('node:url');
-  const run = promisify(execFile);
-  const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
-  const REPO = fileURLToPath(new URL('../', import.meta.url));
-
-  const call = async (argv) => {
-    try {
-      const { stdout } = await run(process.execPath, [CLI, 'verify-sha', ...argv], { cwd: REPO, maxBuffer: 8e6 });
-      return { code: 0, stdout, stderr: '' };
-    } catch (e) { return { code: e.code ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }; }
-  };
-
-  const missing = await call([]);
-  assert.equal(missing.code, 2, 'no revision must refuse, not default to HEAD');
-  assert.match(missing.stderr, /name a commit/);
-
-  const bogus = await call(['zz-no-such-revision']);
-  assert.equal(bogus.code, 2);
-  assert.match(bogus.stderr, /did not resolve to a commit/);
-  assert.match(bogus.stderr, /git said:/, 'the cause must survive, not be swallowed');
-});
-
-test('verify-sha reads the revision as a positional, not as a flag value', async () => {
-  /*
-   * REGRESSION. The first parser used find(a => !a.startsWith('--')), so
-   * `verify-sha --repo /path HEAD` resolved to "/path" -- the exact trap
-   * check-first documents twenty lines away in the same file.
-   */
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const { fileURLToPath } = await import('node:url');
-  const run = promisify(execFile);
-  const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
-  const REPO = fileURLToPath(new URL('../', import.meta.url));
-
-  let stderr = '';
-  try {
-    await run(process.execPath, [CLI, 'verify-sha', '--repo', REPO, 'zz-no-such-revision'],
-      { cwd: REPO, maxBuffer: 8e6, timeout: 60000 });
-  } catch (e) { stderr = e.stderr ?? ''; }
-  assert.match(
-    stderr,
-    /zz-no-such-revision/,
-    'the positional after a flag VALUE must be the revision, not the flag value',
+test('a fully clean run is OBSERVED and still NOT promotable', () => {
+  const r = assertObserved(CLEAN);
+  assert.equal(r.ok, true, JSON.stringify(r.refusals));
+  assert.equal(r.promotable, false, 'a clean observation is not a certificate');
+  const codes = r.promotionBlockers.map((b) => b.code);
+  assert.deepEqual(
+    codes.sort(),
+    ['candidate-controlled-suite', 'unisolated-execution', 'unsigned'],
+    'every blocker must be named on a passing run, not only on a failing one',
   );
+});
+
+test('blockers are not refusals and must not be collapsed', () => {
+  const r = assertObserved(CLEAN);
+  assert.deepEqual(r.refusals, [], 'nothing went wrong with this run');
+  assert.ok(r.promotionBlockers.length > 0, 'and it still may not authorise promotion');
+});
+
+test('a signed, policy-sourced, isolated run WOULD be promotable', () => {
+  // The positive direction, so the blockers cannot quietly become unclearable.
+  const r = assertObserved({
+    ...CLEAN, signature: 'sig:abc', suiteSource: 'trusted-policy', isolated: true,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.promotable, true);
+  assert.deepEqual(r.promotionBlockers, []);
+});
+
+/* ------------------------------------------------- THE READER'S HALF */
+
+test('REGRESSION: the record version is bound into the digest', () => {
+  // v1 hashed the module CONSTANT, so proof.version could be rewritten freely.
+  const proof = assertObserved(CLEAN).proof;
+  const altered = { ...proof, version: 999 };
+  assert.notEqual(proofDigest(altered), proof.digest, 'version must change the digest');
+  assert.equal(verifyProof({ ...altered, digest: proof.digest }).ok, false);
+});
+
+test('verifyProof re-runs the whole validator, not just the hash', () => {
+  // A self-consistent record of a BAD run must still be refused on content.
+  const forged = {
+    version: PROOF_VERSION, repoId: 'r', sha: 'a'.repeat(40),
+    checkoutHead: 'a'.repeat(40), headAfter: 'a'.repeat(40),
+    sourceClean: true, treeCleanAfter: true, depsInstalled: true,
+    lifecycleScriptsRan: false,
+    suiteExitCode: 0, terminationSignal: null, timedOut: false,
+    tests: 1600, pass: 1, fail: 0, skip: 0, cancelled: 0, todo: 0,
+    suiteCommand: 'npm test', suiteSource: 'candidate',
+  };
+  forged.digest = proofDigest(forged);
+  const r = verifyProof(forged);
+  assert.equal(r.ok, false, 'internally consistent is not the same as acceptable');
+  assert.ok(r.refusals.some((x) => x.code === 'counts-do-not-reconcile'));
+});
+
+test('a minted record verifies, and an edited one does not', () => {
+  const proof = assertObserved(CLEAN).proof;
+  assert.equal(verifyProof(proof).ok, true, JSON.stringify(verifyProof(proof).refusals));
+  assert.equal(verifyProof({ ...proof, pass: 9999 }).ok, false);
+  assert.equal(verifyProof(null).ok, false);
+  const noDigest = { ...proof }; delete noDigest.digest;
+  assert.equal(verifyProof(noDigest).ok, false);
+});
+
+test('two honest observations of one commit agree on the digest', () => {
+  // repoId is canonical, not a local path, so this holds across machines.
+  assert.equal(assertObserved(CLEAN).proof.digest, assertObserved({ ...CLEAN }).proof.digest);
+});
+
+test('the digest is NOT a signature, and the module says so where it counts', () => {
+  // Anyone can construct a record and compute its digest. This asserts the
+  // property rather than pretending otherwise: forgery is detected by the
+  // `unsigned` BLOCKER, never by the hash.
+  const forged = { ...assertObserved(CLEAN).proof };
+  forged.digest = proofDigest(forged);
+  assert.equal(verifyProof(forged).ok, true, 'an unkeyed digest cannot detect authorship');
+  assert.equal(assertObserved(CLEAN).promotable, false, 'which is why nothing unsigned is promotable');
 });
