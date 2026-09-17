@@ -62,6 +62,15 @@ export const DEFAULT_ENTRY_POINTS = [
   /* Claude invokes this from a PreToolUse hook. It is a shipped process entry,
    * not merely a test import. */
   'bin/agentbridge-claude-guard.mjs',
+  /* AND THE STOP HOOK, for the same reason and from the same authority.
+   * classifyExports below has counted `scripts` as production since omitting it
+   * reported discoverTests, protectedDrift and snapshotPath as unreferenced
+   * while a hook was calling them. buildGraph did not, so the two halves of this
+   * file gave opposite answers about one directory -- and the half that was
+   * wrong is the one that decides whether a module is an orphan. A module
+   * imported only by this gate read as unreferenced, which invites a permanent
+   * allowlist entry for something that is in fact wired. */
+  'scripts/claude-stop-gate.mjs',
   /* A human runs this before hand-deploying the edge function. It is an entry
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */
@@ -364,7 +373,7 @@ const walkDir = (dir, out = []) => {
  * Returns edges as repo-relative paths, so nothing downstream has to know where
  * the checkout lives — and so no absolute path can end up in a report.
  */
-export function buildGraph(root, { dirs = ['src', 'bin', 'bridge', 'mcp', 'test'] } = {}) {
+export function buildGraph(root, { dirs = ['src', 'bin', 'bridge', 'mcp', 'scripts', 'test'] } = {}) {
   const files = dirs.flatMap((d) => walkDir(path.join(root, d)));
   const graph = new Map();
   const dynamicOnly = new Map();
