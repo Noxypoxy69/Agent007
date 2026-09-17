@@ -122,6 +122,49 @@ test('worktree enumeration sees every registered worktree', async () => {
   assert.ok(branches.includes('code-c/messaging-gates'));
 });
 
+test('REGRESSION: a branch pushed to its OWN ref is not unpushed just because it leads main', async () => {
+  /*
+   * THE CASE THE TWO READINGS DISAGREE ON, and the only one that does.
+   *
+   * gitState used to compute unpushed as `rev-list --count upstream..HEAD`.
+   * When a feature branch's upstream is origin/main -- which is how several
+   * worktrees on this machine are configured -- that counts the branch's whole
+   * length while every one of those commits is safely on origin/<branch>.
+   *
+   * On 2026-09-17 that reported `unpushed 14` for d-claims-authz-b6 whose
+   * origin ref was byte-identical to local HEAD. Nothing was stranded. The
+   * number was read by two agents as lost work and acted on.
+   *
+   * The two assertions that matter are the pair: unpushed is 0, AND the old
+   * expression is non-zero. Without the second this test would pass against the
+   * old implementation on any branch that happened to be level with main, which
+   * would make it a regression test that cannot catch the regression.
+   */
+  await g(wtC, 'branch', '--set-upstream-to=origin/main');
+
+  const s = await gitState(wtC);
+  assert.equal(s.upstream, 'origin/main', 'precondition: upstream must point at main for this case');
+
+  const oldReading = Number(
+    (await g(wtC, 'rev-list', '--count', 'origin/main..HEAD')).stdout.trim(),
+  );
+  assert.ok(
+    oldReading > 0,
+    'precondition: this fixture must actually lead main, or the two readings cannot diverge '
+    + 'and the test proves nothing',
+  );
+
+  assert.equal(
+    s.unpushed, 0,
+    `unpushed reported ${s.unpushed} for a branch fully pushed to its own remote ref. `
+    + `That is the ahead-of-upstream count (${oldReading}), which is a different question.`,
+  );
+  assert.equal(s.unpushedReason, 'not-on-any-remote');
+
+  /* The divergence figures are still reported, and were never the bug. */
+  assert.ok(s.aheadOfMain >= 1, 'ahead-of-main should still be reported alongside');
+});
+
 test('lock files are discovered with holder and age', async () => {
   await mkdir(path.join(wtC, '.agentbridge/locks'), { recursive: true });
   await writeFile(path.join(wtC, '.agentbridge/locks/gates-can-fail.json'),
