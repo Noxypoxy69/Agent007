@@ -141,6 +141,21 @@ const READ_ONLY_TOOLS = new Set([
   // same hook, so it is judged call by call rather than trusted wholesale.
   'Task', 'Agent', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskOutput', 'TaskStop',
   'SendMessage', 'ListAgents',
+  /*
+   * REPORTING OUT. Neither writes a repository file, and both were REFUSED for
+   * naming one -- measured 2026-09-17, and both refusals landed on exactly the
+   * work this guard is for.
+   *
+   * SendUserFile could not send CLAUDE.md or .claude/settings.json: the two
+   * files a person most wants in front of them while debugging the guard.
+   * ReportFindings was refused whenever a finding named src/claudeGuard.mjs, so
+   * a security review OF THE GUARD could not be filed through the normal
+   * channel. Read of the same path was allowed throughout, which is the tell:
+   * the backstop was treating "names a protected path" as "writes one", the
+   * same conflation this file already records for path regexes reused as
+   * command regexes.
+   */
+  'SendUserFile', 'ReportFindings',
 ]);
 
 const STRUCTURED_EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -157,10 +172,18 @@ const SHELL_TOOL_NAMES = new Set(['Bash', 'PowerShell', 'Shell', 'Cmd', 'Termina
  * `script` NEARLY CAME OUT OF THIS LIST AND SHOULD NOT HAVE. The Workflow tool
  * carries a JavaScript workflow script under that name, so this list routed it
  * to the shell rail and refused it -- measured against a real 54-tool roster,
- * 2026-09-17. The fix is Workflow's entry in READ_ONLY_TOOLS above, which is
- * consulted FIRST, not the removal of `script`: dropping it would have let a
- * shell tool that happens to use that field name through unjudged, trading a
- * loud false positive for a silent false negative.
+ * 2026-09-17. The fix is Workflow's OWN deny below -- workflow-exec-untrusted,
+ * which is reached before this list is consulted -- not the removal of `script`:
+ * dropping it would have let a shell tool that happens to use that field name
+ * through unjudged, trading a loud false positive for a silent false negative.
+ *
+ * THIS COMMENT SAID "Workflow's entry in READ_ONLY_TOOLS above" AND THERE IS NO
+ * SUCH ENTRY. Workflow must never be in that list; it carries executable script
+ * content. The sentence described a fix that was never made, for a tool that is
+ * in fact handled correctly, which is the second time in this file pair that a
+ * comment has claimed a mechanism that does not exist -- shellAllowlist.mjs
+ * records the same defect about sed. A comment naming the wrong control is how
+ * the next reader "fixes" something that was already right.
  */
 const COMMAND_FIELDS = ['command', 'script', 'cmd'];
 const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
@@ -251,8 +274,22 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
   }
 
   /*
-   * MCP tools keep the posture they already had: not blocked here, detected at
-   * Stop by protected-file drift. Blocking them at PreToolUse is a separate
+   * MCP tools keep the posture they already had: not blocked here, and detected
+   * at Stop by protected-file drift ONLY WHEN THEY TOUCH A REPOSITORY FILE.
+   *
+   * FOR EVERYTHING ELSE THERE IS NO SECOND LAYER, AND SAYING "detected at Stop"
+   * WITHOUT THIS SENTENCE WAS AN OVERCLAIM. A production migration, a deploy, a
+   * sent email, a scheduled run: none of them writes a file in this repository,
+   * so protected-file drift has nothing to compare and reports nothing. The
+   * fallback named here is not a weaker layer for that class of action, it is no
+   * layer at all.
+   *
+   * That is a fourth delegation to the Stop gate, after shellAllowlist's and the
+   * two below -- and the only one where the destination structurally cannot see
+   * what it is being asked to catch. Closing it needs a control that judges the
+   * ACTION rather than the file it leaves behind, which is not this file's shape
+   * and is not attempted here. Named so that nobody reads the posture above as
+   * coverage it does not provide. (Found by an independent audit of 61bbeb2.) Blocking them at PreToolUse is a separate
    * decision with its own blast radius, and smuggling it into this repair would
    * make a security change nobody reviewed for that.
    */

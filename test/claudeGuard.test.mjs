@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -612,4 +612,59 @@ test('AND IT STILL MINTS on a clean tree — a gate that only refuses is an outa
   const root = repoFixture();
   const r = writeSnapshot(root, 'sess-E');
   assert.equal(r.ok, true, `a clean committed tree must still mint: ${r.reason ?? ''}`);
+});
+
+test('REPORTING A PROTECTED FILE IS NOT WRITING ONE', () => {
+  /*
+   * Both of these were REFUSED for naming a protected path, and both refusals
+   * landed on the work this guard exists to support: SendUserFile could not send
+   * CLAUDE.md or .claude/settings.json, and ReportFindings was refused whenever a
+   * finding named src/claudeGuard.mjs -- so a security review of the guard could
+   * not be filed through the normal channel.
+   *
+   * THE NEGATIVE NEEDS THE POSITIVE, so the writes are asserted in the same test.
+   * "SendUserFile is allowed" alone would also pass on a guard that allowed
+   * everything, and that is the failure direction that matters here.
+   */
+  const root = repoFixture();
+  const at = (tool, input) => evaluateClaudeTool({ tool_name: tool, tool_input: input, cwd: root });
+
+  for (const f of ['CLAUDE.md', '.claude/settings.json', 'src/claudeGuard.mjs']) {
+    assert.equal(at('SendUserFile', { files: [f] }).allowed, true, `sending ${f} is a read, not a write`);
+  }
+  assert.equal(
+    at('ReportFindings', { findings: [{ file: 'src/claudeGuard.mjs', summary: 's', failure_scenario: 'f' }] }).allowed,
+    true,
+    'a finding about the guard must be reportable',
+  );
+
+  /* The same paths, actually written, are still refused. */
+  for (const [tool, input] of [
+    ['Edit', { file_path: 'src/claudeGuard.mjs', old_string: 'a', new_string: 'b' }],
+    ['Write', { file_path: '.claude/settings.json', content: '{}' }],
+    ['Write', { file_path: 'CLAUDE.md', content: 'x' }],
+  ]) {
+    const r = at(tool, input);
+    assert.equal(r.allowed, false, `${tool} on ${input.file_path} must still be refused`);
+    assert.equal(r.id, 'protected-control');
+  }
+});
+
+test('Workflow is NOT read-only, and the comment about it names the real control', () => {
+  /*
+   * The comment above COMMAND_FIELDS claimed the fix was "Workflow's entry in
+   * READ_ONLY_TOOLS above". There is no such entry and there must never be one:
+   * Workflow carries executable script content. The tool is in fact handled by
+   * its own deny. This asserts both halves, because a comment naming the wrong
+   * control is how the next reader "fixes" something that was already right.
+   */
+  const src = readFileSync(new URL('../src/claudeGuard.mjs', import.meta.url), 'utf8');
+  const list = src.slice(src.indexOf('const READ_ONLY_TOOLS'), src.indexOf('const COMMAND_FIELDS'));
+  assert.equal(/'Workflow'/.test(list), false, 'Workflow must never be listed as read-only');
+
+  const r = evaluateClaudeTool({
+    tool_name: 'Workflow', tool_input: { script: 'export const meta = {}' }, cwd: repoFixture(),
+  });
+  assert.equal(r.allowed, false);
+  assert.equal(r.id, 'workflow-exec-untrusted', 'and it is refused by its own rule, not by the shell rail');
 });
