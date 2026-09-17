@@ -2,7 +2,16 @@
 
 ## 2026-09-17. Written for an outside reader with no access to this repo or database.
 
-**Every number here was measured on 2026-09-17, not remembered.** Where something
+**Every number here was measured on 2026-09-17, not remembered.**
+
+**AND EVERY COUNT IS A SNAPSHOT, WHICH IS THE SAME DISEASE THIS DOCUMENT
+DESCRIBES.** One of them — proposals — moves about once a minute, and three
+separate stale versions of that one number survived three separate passes over
+this file. It is now written as a rate rather than a total, because a total was
+wrong within the hour, every hour. The others are slower but not different in
+kind: treat them as "this was true at that moment" and re-measure before acting
+on any of them. The gates in §5 catch stale deployed-version literals; they do
+not catch stale counts, and nothing does. Where something
 could not be established, it says so rather than guessing. If you are reading
 this to help: the numbers are the argument, and several of them are the problem.
 
@@ -18,7 +27,7 @@ others, and four of them disagreed with reality in a single night.
 |---|---|---|---|---|
 | 1 | `agentbridge.tasks` (Postgres) | units of work, lease, state | dispatcher + workers | **4 rows** |
 | 2 | `agentbridge.attempts` | one row per execution attempt | `attemptPipeline` | **0 rows** |
-| 3 | `agentbridge.proposals` | dispatcher suggestions awaiting confirm | dispatcher | **1,353 rows** |
+| 3 | `agentbridge.proposals` | dispatcher suggestions awaiting confirm | dispatcher | **climbing ~61/hour** — a count here would be stale before you read it |
 | 4 | `agentbridge.messages` | agent-to-agent prose | coordinators, workers | **175 rows** |
 | 5 | `agentbridge.owner_decisions` | append-only authority ledger | coordinators, on owner's word | **27 rows** |
 | 6 | `agentbridge.session_registrations` | the roster: who is registered and alive | workers at registration | **4 rows** (see §3 — I first documented the wrong table) |
@@ -33,8 +42,16 @@ everything if false.
 
 ## 1. The headline numbers, and what each one means
 
-**`attempts` = 0.** No execution attempt has ever been recorded. This does NOT
-mean nothing has run — see §2, which is the single most important section here.
+**`attempts` = 0, and `attempt_steps` = 0.** No execution attempt has ever been
+recorded, at either grain. This does NOT mean nothing has run — see §2.
+
+**THE DISTINCTION THAT MISLED ME FOR HOURS, WRITTEN DOWN SO IT MISLEADS NOBODY
+ELSE:** the `attempt` field on a task row is a COUNTER, not a record. A task
+shows `attempt: 2` because something incremented it twice; no row exists
+describing either one. The counter climbs while the ledger stays empty. I read
+that counter as evidence of execution and said the loop had run, then read the
+empty table and said it never had. Both readings came from the same number.
+A count of tries is not a record of what happened.
 
 **`proposals` = 1,357 against `tasks` = 4, AND IT IS STILL CLIMBING.** Measured
 1,353 at one point and 1,357 forty minutes later: 15 in the last fifteen
@@ -237,16 +254,55 @@ moment. None came from a gate.
 
 ---
 
-## 7. What help is actually wanted
+## 7. What is still open — and what an outside review already closed
 
-1. **The 1,353 proposals against 4 tasks.** Nobody has explained it. Start here.
-2. **Which loop survives** (§2) — that decision unblocks the plan's top item and
-   nobody has made it.
-3. **Whether the roster's 0-rows-to-one-role, 14-rows-to-another** (§3) is RLS or
-   something else. It was not resolved.
-4. **The structural question in §5** — moving measurable state out of prose
-   entirely, and which of the twelve documents should simply be deleted.
+**This document has been wrong twice, and both are recorded rather than edited
+away.** §3 explained a roster mystery that did not exist. This section then kept
+asking the question §3 had closed, because I patched one section and re-sent the
+file without re-reading it. If you are reading a copy, check it is at least
+commit `3b11231`.
+
+### Closed since first publication
+
+- **The roster.** Resolved: it lives in `session_registrations`. There was no
+  RLS mystery, and the fix for the stale-heartbeat behaviour is deployed (v27).
+- **Which loop survives.** An outside review answered it, and the answer is
+  convergence rather than choice: one path — lease worker → `runAttempt` →
+  guarded pipeline → reviewer → terminal result — with the direct
+  `workerDeps.startRun` bypass removed. That is the right target and it is not
+  in dispute here.
+
+### Still genuinely open
+
+1. **The proposal runaway, and it is running now.** The review's framing is
+   better than the one this document originally offered: this is missing
+   idempotency and backoff, not a reporting curiosity. An identical pending
+   proposal should update a heartbeat and back off, not create another row. The
+   invariant worth stating is one open proposal per (task, task generation,
+   proposal fingerprint). Whether confirmation is also never being called is a
+   second question and does not change the invariant.
+2. **The sequencing of the loop merge, which is the one place this document
+   pushes back.** Loop A is the only path that has ever executed work against
+   the real bridge. Loop B has run in tests and never in production. Removing
+   the bypass before Loop B has completed one real task end-to-end trades "runs
+   unguarded" for "does not run at all", on the strength of a path with no
+   production evidence. Prove one real attempt through Loop B first, then cut
+   over, then delete the bypass. The destination is not in question; the order
+   is.
+3. **Making `attempts` mandatory needs a stated failure mode.** "No attempt row,
+   no execution" is correct and must say what happens when the row cannot be
+   written — a worker that silently proceeds has no gate, and one that halts on
+   an unreachable database is a new outage. Fail closed, loudly, and say so in
+   the contract.
+4. **Claiming a task before editing needs an enforcement point, not an honour
+   rule.** It is the only thing that would have caught the nine-minute
+   duplication, and as a convention it will be forgotten exactly as reliably as
+   everything else in this document has been.
+5. **The prose restructure**: which of the twelve documents should be deleted
+   outright rather than gated. Regex gates cannot make prose authoritative —
+   this document's own gates cover a fraction of it, by measurement — so the
+   answer is removal, and somebody has to decide what goes.
 
 **What is NOT wanted:** a new ledger. There are eight. A ninth place to forget
-would make this worse, and every fix above was deliberately built to store
+would make this worse, and every fix made so far was deliberately built to store
 nothing new.
