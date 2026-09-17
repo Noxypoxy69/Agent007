@@ -497,3 +497,82 @@ export function formatOrphans(findings) {
     })
     .join('\n');
 }
+
+/*
+ * ------------------------------------------------------------------------
+ * PER-EXPORT REACHABILITY: THE GAP THAT LET A DEAD SEAM SHIP.
+ *
+ * findOrphans above answers "does anything import this MODULE". That is the
+ * wrong granularity and it passed while being wrong: src/completion.mjs was
+ * reachable through one helper, so the gate went green while workFingerprint,
+ * resolveWork and canComplete -- the three functions that ARE the completion
+ * seam -- had no caller anywhere. A module is not wired because one of its
+ * exports is.
+ *
+ * TWO WAYS TO GET THIS WRONG, BOTH ALREADY PAID FOR HERE:
+ *
+ *   SUBSTRING MATCHING. A hand grep for "resolveWork" reported 13 callers. Every
+ *   one was "resolveWorker". Identifiers are matched on word boundaries, and the
+ *   test plants exactly that pair.
+ *
+ *   COMMENTS COUNTING AS USES. A structural gate in this repo once failed
+ *   against correct code because it matched its own explanatory comment. This
+ *   repository is densely commented by policy, and every export is named in
+ *   prose somewhere. Comments and strings are stripped before matching.
+ */
+
+/** Remove line comments, block comments and string bodies. Crude and sufficient. */
+export function stripNonCode(source) {
+  return String(source ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+    .replace(/`(?:\\[\s\S]|[^\\`])*`/g, ' `` ')
+    .replace(/'(?:\\.|[^\\'])*'/g, " '' ")
+    .replace(/"(?:\\.|[^\\"])*"/g, ' "" ');
+}
+
+/**
+ * Exports of `dirs` modules that no NON-TEST module mentions.
+ *
+ * WHAT THIS PROVES AND WHAT IT DOES NOT. A name appearing in shipped code means
+ * something references it; it does not mean that code path ever runs. That is
+ * contract item 1 (name the caller), not item 6 (run it end to end). A gate
+ * cannot do item 6 and must not be read as having done it.
+ *
+ * SCOPE: src, bin, bridge and mcp. supabase/ is excluded, which was CHECKED
+ * rather than assumed -- no file under supabase/functions imports from src/, so
+ * the edge functions cannot be the missing caller. If that ever changes, add
+ * the directory here or this gate starts reporting live exports as dead.
+ */
+export function deadExports(root, { dirs = ['src', 'bin', 'bridge', 'mcp'], allowed = {} } = {}) {
+  // walkDir and readFileSync, the same helpers buildGraph uses. The first draft
+  // of this invoked a nodeFs()/collectFiles() pair that does not exist in this
+  // module -- invented while writing, caught by running it.
+  const files = dirs.flatMap((d) => walkDir(path.join(root, d)));
+
+  const corpus = new Map();
+  for (const f of files) {
+    try { corpus.set(f, stripNonCode(readFileSync(f, 'utf8'))); } catch { /* unreadable */ }
+  }
+
+  const findings = [];
+  for (const f of files) {
+    const relPath = rel(root, f);
+    if (!relPath.startsWith('src/')) continue;          // only library modules have this question
+    let names = [];
+    try { names = exportedNames(readFileSync(f, 'utf8')); } catch { continue; }
+    for (const name of names) {
+      if (!name || name === 'default') continue;
+      if ((allowed[relPath] ?? []).includes(name)) continue;
+      // WORD BOUNDARIES. resolveWork must not be satisfied by resolveWorker.
+      const re = new RegExp(`(^|[^A-Za-z0-9_$])${name}([^A-Za-z0-9_$]|$)`);
+      let used = false;
+      for (const [other, text] of corpus) {
+        if (other === f) continue;
+        if (re.test(text)) { used = true; break; }
+      }
+      if (!used) findings.push({ file: relPath, name });
+    }
+  }
+  return findings.sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name));
+}
