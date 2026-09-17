@@ -1,3 +1,5 @@
+import { isProtectedRelPath } from './guardSession.mjs';
+
 /**
  * A FAST-FEEDBACK RAIL. NOT A SECURITY BOUNDARY. Read this before trusting it.
  *
@@ -41,8 +43,29 @@
  * nobody reads a green run here as if it did.
  */
 
-/** Tokens that make a command unjudgeable wherever they appear. */
-const FORBIDDEN_CHARS = /[$`;|&<>(){}\n\\]/;
+/*
+ * Tokens that make a command unjudgeable wherever they appear.
+ *
+ * `;` `|` and `&` USED TO BE IN HERE AND THAT WAS THE WRONG CALL. They do not
+ * make a command unjudgeable, they make it SEVERAL commands -- and refusing the
+ * whole line meant `git status ; ls` and `npm test 2>&1` were refused as though
+ * they were attacks. That is the false-positive rate that gets a rail switched
+ * off, and switching it off loses the Stop gate with it. They are split points
+ * now (see judgeShellCommand) and every segment is judged on its own, so
+ * `git status && rm CLAUDE.md` still dies on its second half.
+ *
+ * What remains is genuinely unjudgeable: substitution and expansion build the
+ * command at runtime, redirection writes a file that never appears as an
+ * argument, and a backslash escapes whatever analysis follows it.
+ */
+const FORBIDDEN_CHARS = /[$`<>(){}\n\\]/;
+
+/*
+ * Redirection to a file DESCRIPTOR rather than a file. `2>&1` writes nothing,
+ * and refusing it made every attempt to capture output look hostile. Stripped
+ * before the check above; a redirect to a PATH is still refused.
+ */
+const FD_REDIRECTS = /\s*\d?>&\d\s*/g;
 
 /**
  * Arguments a read-only command may carry. No absolute-path writes, no output
@@ -86,6 +109,37 @@ const SHAPES = Object.freeze([
   ['node', /^--test$/],
   ['npm', /^test$/],
 ]);
+
+/*
+ * ORDINARY WRITES. THE ORIGINAL CRITERION WAS WRONG.
+ *
+ * This rail refused everything not provably READ-ONLY, which also refused
+ * `git pull`, `git commit`, `git checkout` and `npm install` -- the things
+ * agents do all day. On 2026-09-17 that stopped all work on the operator's
+ * machine. A guard that blocks Tuesday is not a guard; it is an outage waiting
+ * for the first person in a hurry to switch it off.
+ *
+ * What actually needed stopping was DESTRUCTION OF THE CONTROL FILES, not
+ * writing in general. These shapes can touch the repository, and two of them
+ * (checkout, restore) can overwrite a protected file -- which is caught at Stop
+ * by protected-file drift, the same posture `npm test` and MCP writes already
+ * have. Caught afterwards, not blocked.
+ *
+ * What stays out: rm, mv, cp, Remove-Item and the other destructive verbs, and
+ * every interpreter, because an interpreter builds its target at runtime and
+ * cannot be judged from the command string.
+ */
+const GIT_WRITE = /^(pull|fetch|push|add|commit|checkout|switch|merge|rebase|stash|restore|cherry-pick|tag|apply|revert)$/;
+
+const NPM_SHAPE = /^(test|install|ci|run|list|ls|view|why|outdated|audit|version)$/;
+
+/*
+ * `node <file>` is allowed and `node -e` is not, which looks inconsistent until
+ * you notice `npm test` already runs arbitrary repository JavaScript. A script
+ * in the repo is visible, reviewable, and covered by baseline-test drift at
+ * Stop. A -e string is composed on the spot and is none of those things.
+ */
+const NODE_EVAL = /^(-e|--eval|-p|--print)$/;
 
 /**
  * `git branch` is a WRITER unless it is explicitly listing.
@@ -161,9 +215,42 @@ export const ALLOWED_FIRST_TOKENS = Object.freeze([
   'sed',
 ]);
 
-/** Returns { allowed } or { allowed: false, reason }. */
+/**
+ * Returns { allowed } or { allowed: false, reason }.
+ *
+ * EVERY SEGMENT MUST PASS, AND THE VERDICT IS THE STRICTEST OF THEM. A chained
+ * line is several commands, so it is judged as several commands. `segments()`
+ * sat in this file unused for weeks while the separators it splits on were being
+ * refused outright one function below -- the answer was already written down and
+ * nothing called it.
+ */
 export function judgeShellCommand(command) {
   if (typeof command !== 'string' || command.trim() === '') {
+    return { allowed: false, reason: 'no command string was supplied' };
+  }
+  /*
+   * STRIPPED BEFORE SPLITTING, NOT AFTER. segments() splits on `&`, so `2>&1`
+   * is torn into "... 2>" and "1" and the strip below never matches it -- which
+   * left `npm test 2>&1` refused for containing a redirect it no longer had.
+   */
+  const parts = segments(String(command).replace(FD_REDIRECTS, ' '));
+  if (parts.length === 0) {
+    return { allowed: false, reason: 'no command string was supplied' };
+  }
+  for (const part of parts) {
+    const verdict = judgeOneSegment(part);
+    if (!verdict.allowed) {
+      return parts.length === 1
+        ? verdict
+        : { allowed: false, reason: `${verdict.reason} (in "${part}")` };
+    }
+  }
+  return { allowed: true };
+}
+
+function judgeOneSegment(segment) {
+  const command = String(segment).replace(FD_REDIRECTS, ' ').trim();
+  if (command === '') {
     return { allowed: false, reason: 'no command string was supplied' };
   }
   if (FORBIDDEN_CHARS.test(command)) {
@@ -192,6 +279,73 @@ export function judgeShellCommand(command) {
         ? { allowed: true }
         : { allowed: false, reason: 'git branch writes a ref unless it is listing' };
     }
+    if (tokens[1] === 'push') {
+      /*
+       * PUSH IS A WRITE TO SOMEBODY ELSE'S HISTORY. Allowing `git push` wholesale
+       * let `git push origin master` and `git push --force origin feature`
+       * through -- caught by a baseline test that has asserted both since before
+       * this rail existed, and it was right. Nothing here owns the default branch,
+       * and a force push destroys work that is not this session's to destroy.
+       *
+       * --force is checked explicitly because WRITE_FLAGS only carries `-f`, and
+       * a leading `+` on a refspec is the same thing spelled differently.
+       */
+      if (/(^|\s)(--force|--force-with-lease|--mirror|--delete)(=|\s|$)/.test(command)) {
+        return { allowed: false, reason: 'a force, mirror or delete push rewrites history that is not this session\'s to rewrite' };
+      }
+      const badRef = tokens.slice(2).find((t) => /^\+/.test(t) || /^(master|main)$/.test(t) || /:(master|main)$/.test(t));
+      if (badRef) {
+        return { allowed: false, reason: `pushing "${badRef}" targets the default branch or forces a refspec; nothing here owns main` };
+      }
+    }
+    if (GIT_WRITE.test(tokens[1] ?? '')) {
+      /*
+       * A GIT WRITE MAY NOT NAME A PROTECTED PATH. `git restore
+       * src/claudeGuard.mjs` and `git checkout <old> -- src/guardSession.mjs`
+       * overwrite the guard's own source, and the hook re-reads that module on
+       * every invocation -- so the guard is disarmed for the rest of the session
+       * the moment the command returns. "Caught at Stop" is the right posture for
+       * `npm test`, which nobody can do without; it is the wrong posture for a
+       * command whose entire effect is to replace the control being evaded.
+       *
+       * This is path detection, which the header above says loses -- and it does,
+       * AS A BOUNDARY. Here it is not the boundary: the shape had to be approved
+       * first, and the general case is still Stop's job. It closes the one route
+       * that turns a permitted write into a disarm.
+       */
+      const named = tokens.slice(2)
+        .map((t) => t.replace(/^['"]|['"]$/g, ''))
+        .map((t) => t.split('\\').join('/'))
+        /*
+         * BASELINE TESTS COUNT TOO. `git restore test/real.test.mjs` overwrites
+         * a test the session inherited, and only test/claudeGuard.test.mjs is a
+         * PROTECTED path -- so the protected check alone let every other one
+         * through. Same omission the Stop gate's git check had, found the same
+         * way: a baseline test that has asserted this for longer than this rail
+         * has existed.
+         */
+        .find((t) => t !== '' && t !== '--'
+          && (isProtectedRelPath(t) || /^test\/.+\.test\.mjs$/i.test(t)));
+      if (named) {
+        return {
+          allowed: false,
+          reason: `"git ${tokens[1]}" names ${named}, which is a guard or completion control`,
+        };
+      }
+      return { allowed: true };
+    }
+  }
+
+  if (first === 'npm') {
+    return NPM_SHAPE.test(tokens[1] ?? '')
+      ? { allowed: true }
+      : { allowed: false, reason: `"npm ${tokens[1] ?? '(none)'}" is not an approved shape` };
+  }
+
+  if (first === 'node') {
+    return NODE_EVAL.test(tokens[1] ?? '')
+      ? { allowed: false, reason: 'node -e composes its target at runtime and cannot be judged from the command string' }
+      : { allowed: true };
   }
 
   if (first.toLowerCase() === 'sed') {

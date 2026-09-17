@@ -346,11 +346,72 @@ test('REGRESSION: a snapshot from another repo or session is not adopted', async
 test('REGRESSION: known writers are refused by exact shape', async () => {
   const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
   for (const command of [
-    'git fetch origin', 'git branch newref', 'git branch -D main',
-    'git remote set-url origin http://evil', 'npm ci', 'npm run build', 'npx cowsay',
-    'node scripts/anything.mjs', 'env rm -rf src',
+    'git branch newref', 'git branch -D main',
+    'git remote set-url origin http://evil', 'npx cowsay', 'env rm -rf src',
     'find . -name x -fprintf out.txt %p', 'sed -n "w target.txt" CLAUDE.md',
     'git -c core.pager=rm log', 'git log --output=x',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
+  }
+});
+
+/*
+ * FOUR COMMANDS LEFT THE LIST ABOVE ON 2026-09-17, AND THE REASON IS AN OUTAGE
+ * RATHER THAN A PREFERENCE.
+ *
+ * This rail refused everything not provably READ-ONLY, which also refused
+ * `git pull`, `git fetch`, `git commit`, `npm ci` and `npm run` -- the things
+ * agents do all day. That stopped all work on the operator's machine; every
+ * terminal blocked at once. The rail's own comments say an override incentive is
+ * a vulnerability and that a guard blocking ordinary work gets switched off,
+ * losing the Stop gate with it. This is that, measured.
+ *
+ * The criterion was wrong. What needed stopping was DESTRUCTION OF THE CONTROL
+ * FILES, not writing. These execute repository code or move the tree, which is
+ * the risk `npm test` already carries and which the test below accepts by name.
+ * Caught at Stop by protected-file and baseline-test drift.
+ *
+ * The nine above stay refused, so this is a narrowing of the rule, not its
+ * removal.
+ */
+test('ordinary writes are allowed, because a rail that blocks Tuesday gets switched off', async () => {
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  for (const command of [
+    'git fetch origin', 'git pull origin main', 'git commit -m msg', 'git checkout a-branch',
+    'npm ci', 'npm run build', 'node scripts/anything.mjs',
+    'git status ; ls', 'git status && ls -la', 'npm test 2>&1',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, true, `REFUSED: ${command}`);
+  }
+});
+
+/*
+ * AND THE LINE THE WIDENING MUST NOT CROSS: a permitted write may not be turned
+ * into a DISARM. `git restore src/claudeGuard.mjs` overwrites the guard's own
+ * source, and the hook re-reads that module on every invocation -- so the guard
+ * is gone for the rest of the session the moment the command returns. "Caught at
+ * Stop" is the right posture for `npm test` and the wrong one for a command
+ * whose whole effect is replacing the control being evaded.
+ *
+ * Every one of these passed when the widening was first written, and each was
+ * caught by a baseline test older than this rail. That is the whole argument for
+ * not editing inherited tests to make a change look clean.
+ */
+test('a permitted git write may not name a control or a baseline test', async () => {
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  for (const command of [
+    'git restore src/claudeGuard.mjs',
+    'git checkout HEAD~5 -- src/guardSession.mjs',
+    'git checkout -- .claude/settings.json',
+    'git add CLAUDE.md',
+    'git restore test/real.test.mjs',
+    'git checkout -- test/a.test.mjs',
+    'git push origin master',
+    'git push origin main',
+    'git push --force origin feature',
+    'git push --force-with-lease origin feature',
+    'git push origin HEAD:master',
+    'git push --mirror origin',
   ]) {
     assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
   }
@@ -391,10 +452,29 @@ test('test running is ALLOWED even though it executes repository code', async ()
   const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
   assert.equal(judgeShellCommand('node --test test/a.test.mjs').allowed, true);
   assert.equal(judgeShellCommand('npm test').allowed, true);
-  // ...but not the arbitrary-execution forms, which buy nothing for iteration.
+
+  /*
+   * `npm run build` AND `npm ci` USED TO BE ASSERTED REFUSED HERE, AND THE
+   * REASONING ABOVE IS WHY THEY NO LONGER ARE. They execute repository code --
+   * so does `npm test`, two lines up, and this test's own comment accepts that
+   * risk on the grounds that refusing it gets the rail switched off. Refusing
+   * install and build drew the line in a place that stopped all work on the
+   * operator's machine on 2026-09-17 while `npm test` sat permitted beside it.
+   * Both are caught at Stop, by the same drift checks, for the same reason.
+   */
+  assert.equal(judgeShellCommand('npm run build').allowed, true);
+  assert.equal(judgeShellCommand('npm ci').allowed, true);
+
+  /*
+   * The arbitrary-execution forms stay refused, and the distinction is not
+   * arbitrary: a script in the repository is visible, reviewable and covered by
+   * baseline-test drift at Stop. A -e string is composed on the spot and is none
+   * of those things -- there is nothing for any later check to compare against.
+   */
   assert.equal(judgeShellCommand('node -e "x"').allowed, false);
-  assert.equal(judgeShellCommand('npm run build').allowed, false);
-  assert.equal(judgeShellCommand('npm ci').allowed, false);
+  assert.equal(judgeShellCommand('node --eval x').allowed, false);
+  assert.equal(judgeShellCommand('node -p 1+1').allowed, false);
+  assert.equal(judgeShellCommand('npm publish').allowed, false);
 });
 
 test('THE BOUNDARY: Stop catches what the rail lets through', async () => {
