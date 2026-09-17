@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { runAttempt } from '../src/attemptPipeline.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
@@ -668,6 +669,22 @@ execFileSync('git', ['commit', '--quiet', '-m', 'raise the value'], {cwd});
   });
   assert.equal(result.envelope.outcome, 'exited', 'the attempt this review depends on did not run');
   assert.notEqual(result.envelope.commit, null, 'the attempt produced no commit to review');
+
+  /*
+   * A REAL REMOTE, AND THE ATTEMPT'S COMMIT PUSHED TO IT.
+   *
+   * These repos had no remote at all, so the reachability gate answered UNKNOWN
+   * for them -- correctly: with nothing to fetch from, "unpushed" and "my clone
+   * is stale" cannot be told apart. Giving them one makes the test say more
+   * than it did before, not less: the reviewer now reviews a commit a second
+   * machine could fetch, which is the property the gate exists to require.
+   */
+  const bare = mkdtempSync(path.join(tmpdir(), 'reviewremote-')) + '/remote.git';
+  execFileSync('git', ['init', '--quiet', '--bare', '-b', 'master', bare], { stdio: 'pipe' });
+  t.after(() => rmSync(path.dirname(bare), { recursive: true, force: true }));
+  await git(dir, 'remote', 'add', 'origin', bare);
+  await git(dir, 'push', '--quiet', 'origin', 'HEAD:refs/heads/master');
+
   return { dir, sha, result };
 };
 
@@ -704,6 +721,7 @@ test('A RETURNED TASK IS REVIEWED IN A FRESH WORKTREE AND ACCEPTED ON THE LEASE'
     workspaces,
     bridge,
     envelopeFor: async () => result.envelope,
+    repoPath: dir,
     contract: { allowed: ['value.txt'], forbidden: [] },
     io: { workspaceGit: realWorkspaceGit, now: () => Date.now() },
   });
@@ -777,6 +795,7 @@ test('A REVIEWER THAT COMMITS IN ITS OWN WORKTREE IS CAUGHT BY GIT, NOT BY TRUST
     workspaces,
     bridge,
     envelopeFor: async () => result.envelope,
+    repoPath: dir,
     io: { workspaceGit: realWorkspaceGit, now: () => Date.now() },
   });
 
@@ -823,6 +842,7 @@ test('FIX_REQUIRED MAKES A SEPARATE TASK OFF THE REVIEWED COMMIT, AND THE ORIGIN
     workspaces,
     bridge,
     envelopeFor: async () => result.envelope,
+    repoPath: dir,
     contract: { allowed: ['value.txt'], forbidden: [] },
     io: { workspaceGit: realWorkspaceGit, now: () => Date.now() },
   });

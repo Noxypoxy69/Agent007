@@ -42,6 +42,8 @@ import { buildReviewerPacket } from './reviewerPacket.mjs';
 import {
   decideReview, fixTaskFor, mutationBetween, resolveFindings, REVIEW_DECISION,
 } from './reviewDecision.mjs';
+import { canReviewReturn, HEAD_REACHABILITY } from './headReachability.mjs';
+import { probeReturnedHead } from './probeReturnedHead.mjs';
 
 /** Where a review stopped, so a caller branches on a value and not on prose. */
 export const STAGE = Object.freeze({
@@ -141,6 +143,13 @@ export async function runReview({
   contract = null,
   leaseSeconds = 1800,
   timeoutMs = DEFAULT_REVIEW_TIMEOUT_MS,
+  /*
+   * Injected so the suite can construct answers real git cannot be made to
+   * give here -- a fetch that fails, a commit on no remote ref. The default is
+   * the real probe, so a caller that passes nothing still gets the check.
+   */
+  probeHead = probeReturnedHead,
+  repoPath = null,
   io = {},
 }) {
   if (!task?.task_id) fail('runReview: task.task_id required');
@@ -217,6 +226,41 @@ export async function runReview({
       reason: 'evidence:absent',
       detail: 'no result envelope for the returned attempt; there is nothing machine-checkable '
         + 'to review, and the agent\'s notes are not a substitute',
+      submitted: null,
+    });
+  }
+
+  /*
+   * IS THE COMMIT ANYBODY ELSE CAN SEE? Asked before a workspace is built, and
+   * it is not the same question as "is there an envelope".
+   *
+   * t-wire-gate-scripts, 2026-09-17T01:12:04: returned by the dispatcher's
+   * first unattended assignment with returned_head_sha d8c1e0ee and notes
+   * saying it committed. The commit is in no remote ref and the change is on no
+   * branch. Nothing refused it, because nothing asked -- a 40-hex string in the
+   * right column looks exactly like evidence.
+   *
+   * IT STOPS RATHER THAN SUBMITTING, the same shape as `evidence:absent` above
+   * and for the same reason: this is not a verdict on the work, it is the
+   * discovery that the work cannot be read. Submitting a REJECT here would
+   * record a judgement of a diff nobody has seen. The lease is left to the
+   * reaper exactly as the evidence gate leaves it.
+   */
+  const reach = canReviewReturn({
+    task,
+    probe: probeHead(
+      typeof task.returned_head_sha === 'string' ? task.returned_head_sha : '',
+      repoPath ? { cwd: repoPath } : {},
+    ),
+  });
+  if (!reach.ok) {
+    return Object.freeze({
+      ok: false,
+      stage: STAGE.EVIDENCE,
+      taskId,
+      reviewToken,
+      reason: `head-not-reviewable:${reach.reachability}`,
+      detail: reach.reason,
       submitted: null,
     });
   }

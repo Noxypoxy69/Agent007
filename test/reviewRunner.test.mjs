@@ -87,10 +87,28 @@ const harness = (over = {}) => {
       bridge,
       envelopeFor: over.envelopeFor ?? (async () => goodEnvelope()),
       contract: { allowed: ['src/thing.mjs'], forbidden: [] },
+      /*
+       * THE RETURNED HEAD IS REACHABLE UNLESS A TEST SAYS OTHERWISE.
+       *
+       * These fixtures carry invented shas, so the real probe refuses every one
+       * of them -- correctly, since a sha nobody can fetch is exactly what the
+       * reachability gate exists to stop. Injecting it keeps this file about
+       * the runner's own behaviour, the same way bridge and workspaces are
+       * injected, and `over.probeHead` lets the refusal be exercised.
+       */
+      probeHead: over.probeHead ?? (() => ({ ran: true, existsLocally: true, remoteRefs: ['origin/master'] })),
       io: { workspaceGit: over.gitProbe ?? probe(), now: () => 1_700_000_000_000 },
     },
   };
 };
+
+/*
+ * THESE FIXTURES CARRY INVENTED SHAS, so the real reachability probe refuses
+ * every one of them. That refusal is correct and is tested in its own file and
+ * at the bottom of this one; here it is injected away so each test stays about
+ * the behaviour it names.
+ */
+const REACHABLE = () => ({ ran: true, existsLocally: true, remoteRefs: ['origin/master'] });
 
 /* ── both directions, because one direction proves nothing ───────────── */
 
@@ -310,6 +328,7 @@ test('A REVIEWER CRASH SUBMITS NOTHING, AND THE WORK IS RECLAIMABLE AFTER THE RE
   const workspaces = fakeWorkspaces();
 
   const crashed = await runReview({
+    probeHead: REACHABLE,
     task, reviewerSession: 'reviewer-one',
     reviewer: { id: 'dies', async review() { throw new Error('reviewer died mid-read'); } },
     workspaces, bridge,
@@ -324,6 +343,7 @@ test('A REVIEWER CRASH SUBMITS NOTHING, AND THE WORK IS RECLAIMABLE AFTER THE RE
   // STATE ONE: the lease is still held by the dead reviewer, so nobody else can
   // take it yet. That is the outage this test has to prove recovery FROM.
   const blocked = await runReview({
+    probeHead: REACHABLE,
     task, reviewerSession: 'reviewer-two',
     reviewer: createFakeReviewer(), workspaces, bridge,
     envelopeFor: async () => goodEnvelope(),
@@ -340,6 +360,7 @@ test('A REVIEWER CRASH SUBMITS NOTHING, AND THE WORK IS RECLAIMABLE AFTER THE RE
   assert.ok(row.review_lease_expires_at <= clock);
 
   const reclaimed = await runReview({
+    probeHead: REACHABLE,
     task, reviewerSession: 'reviewer-two',
     reviewer: createFakeReviewer(), workspaces, bridge,
     envelopeFor: async () => goodEnvelope(),
@@ -364,6 +385,7 @@ test('AND STATE THREE: after the reaper nulls the columns, the work is still rec
   assert.equal(row.state, 'returned', 'the reaper moved the row as well as the lease');
 
   const r = await runReview({
+    probeHead: REACHABLE,
     task, reviewerSession: 'reviewer-two',
     reviewer: createFakeReviewer(), workspaces: fakeWorkspaces(), bridge,
     envelopeFor: async () => goodEnvelope(),
@@ -386,6 +408,7 @@ test('A SUPERSEDED REVIEW TOKEN IS A REFUSAL, NOT A QUIET PASS', async () => {
   const workspaces = fakeWorkspaces();
 
   const r = await runReview({
+    probeHead: REACHABLE,
     task, reviewerSession: 'reviewer-slow',
     reviewer: {
       id: 'slow',
@@ -779,19 +802,26 @@ test('ACCEPTING A FIX CLOSES THE FINDINGS IT CARRIED', async () => {
    */
   const fixTask = {
     task_id: 't-review+fix@aaaa', state: 'returned', lane_id: 'agentbridge',
-    base_sha: SHA, returned_by: 'fixer-session', returned_head_sha: SHA,
+    /*
+     * THE FIX'S HEAD IS NOT ITS BASE. It was, and the reachability gate caught
+     * it: a returned head equal to the base is an attempt that committed
+     * nothing, which is a state a real fixer never hands in and therefore a
+     * fixture that could not fail for the real case. The shas differ now.
+     */
+    base_sha: SHA, returned_by: 'fixer-session', returned_head_sha: 'c'.repeat(40),
     allowed_paths: ['src/thing.mjs'], forbidden_paths: [], shared_paths: [],
     attempt: 1, depends_on: [],
     fix_of: 't-review', findings: ['reviewer:policy:too-many-files:1'],
   };
   const bridge = createFakeBridge({ tasks: [fixTask] });
   const r = await runReview({
+    probeHead: REACHABLE,
     task: fixTask,
     reviewerSession: 'reviewer-session',
     reviewer: createFakeReviewer(),
     workspaces: fakeWorkspaces(),
     bridge,
-    envelopeFor: async () => goodEnvelope({ taskId: 't-review+fix@aaaa' }),
+    envelopeFor: async () => goodEnvelope({ taskId: 't-review+fix@aaaa', commit: 'c'.repeat(40) }),
     contract: { allowed: ['src/thing.mjs'], forbidden: [] },
     io: { workspaceGit: probe(), now: () => 1 },
   });
@@ -807,4 +837,40 @@ test('ACCEPTING A FIX CLOSES THE FINDINGS IT CARRIED', async () => {
   const h = harness();
   const plain = await runReview(h.args);
   assert.equal(plain.resolved, null, 'a task that fixes nothing reported a resolution');
+});
+
+/* ── the reachability gate, in the runner rather than only in its own unit ── */
+
+test('A RETURN NOBODY CAN FETCH IS NOT REVIEWED, AND NO WORKSPACE IS BUILT FOR IT', async () => {
+  /*
+   * t-wire-gate-scripts. The lease is claimed -- the runner has no release verb
+   * and does not invent one -- but nothing is checked out, nothing is read, and
+   * no decision is submitted, because a verdict on a diff nobody has seen is
+   * not a review. The reaper returns the work.
+   */
+  const h = harness({ probeHead: () => ({ ran: true, existsLocally: false, remoteRefs: [] }) });
+  const r = await runReview(h.args);
+
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'head-not-reviewable:unpushed');
+  assert.match(r.detail, /no remote ref/);
+  assert.ok(r.reviewToken, 'the lease was claimed, so the fence still has an owner');
+  assert.equal(r.submitted, null, 'a decision was submitted about a diff nobody could fetch');
+  assert.equal(
+    h.workspaces.log.filter(([verb]) => verb === 'create').length,
+    0,
+    'a workspace was built at a commit that cannot be checked out',
+  );
+});
+
+test('AND AN OFFLINE PROBE REFUSES DIFFERENTLY FROM AN UNPUSHED COMMIT', async () => {
+  /*
+   * The two must not collapse: one is the worker's fault and one is the
+   * reviewer's network. A runner that reported both as "unpushed" would have a
+   * broken reviewer generating accusations against working workers.
+   */
+  const h = harness({ probeHead: () => ({ ran: false, existsLocally: null, error: 'fetch failed' }) });
+  const r = await runReview(h.args);
+  assert.equal(r.reason, 'head-not-reviewable:unknown');
+  assert.match(r.detail, /fetch failed/);
 });
