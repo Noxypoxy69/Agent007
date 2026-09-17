@@ -1996,8 +1996,42 @@ export function proposalsMatch(a, b) {
  * spared; its clock is reset, and a test asserts the reset rather than trusting
  * the caller to remember.
  */
-export function reconcileProposals({ open = [], fresh = [], now } = {}) {
+export function reconcileProposals({ open = [], fresh = [], now, openTruncated = false } = {}) {
   if (!nonEmpty(now)) throw new TypeError('reconcileProposals requires a `now` timestamp');
+
+  /*
+   * A TRUNCATED READ CANNOT RECONCILE, AND MUST NOT PRETEND TO.
+   *
+   * FOUND BY AUDITING MY OWN DIFF AFTER THE SUITE WENT GREEN, which is the only
+   * reason it is here: 1611 tests passed over this bug, because no test can see
+   * a PostgREST `limit` in a file the suite cannot import.
+   *
+   * The caller reads the open set with a limit. The old writer did not care --
+   * `patch(state=eq.open)` closed every open row whether or not anybody had
+   * counted them. Reconciling does care: a row past the limit is invisible, so
+   * it is never matched and never superseded, and the fresh proposal that would
+   * have matched it gets INSERTED instead. Two open proposals for one task, one
+   * of them unreachable. That is the stale-authority bug the original writer
+   * existed to prevent, reintroduced by the fix for its other half.
+   *
+   * So a saturated read degrades to exactly what the code did before: replace
+   * the whole open set. The churn comes back until somebody raises the limit,
+   * which is noisy, visible, and correct -- and strictly better than the
+   * alternative, which is silent and wrong. `replaceAll` says which happened so
+   * the caller cannot confuse the two.
+   */
+  if (openTruncated) {
+    return {
+      replaceAll: true,
+      reason: 'the open proposal set was read up to its limit, so it may be incomplete; '
+        + 'reconciling a partial set would leave unseen rows open forever and insert duplicates '
+        + 'beside them. Falling back to replacing the whole set.',
+      reaffirm: [],
+      reaffirmed_at: now,
+      supersede: [],
+      insert: arr(fresh).filter(Boolean),
+    };
+  }
 
   const openRows = arr(open).filter(Boolean);
   const claimed = new Set();
@@ -2031,7 +2065,7 @@ export function reconcileProposals({ open = [], fresh = [], now } = {}) {
     .filter((o) => !claimed.has(o.proposal_id))
     .map((o) => o.proposal_id);
 
-  return { reaffirm, reaffirmed_at: now, supersede, insert };
+  return { replaceAll: false, reason: null, reaffirm, reaffirmed_at: now, supersede, insert };
 }
 
 /** How long a worker may be silent before its absence is a finding, not a gap. */

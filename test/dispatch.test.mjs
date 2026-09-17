@@ -425,3 +425,35 @@ test('A ROW PREDATING reaffirmed_at STILL AGES, RATHER THAN BECOMING IMMORTAL', 
     'a pre-column row an hour old was not called stale, so the fallback swallowed the check',
   );
 });
+
+test('A TRUNCATED OPEN READ FALLS BACK TO REPLACING THE SET, NOT TO A PARTIAL ONE', () => {
+  /*
+   * FOUND BY AUDITING THE DIFF AFTER 1611 TESTS WENT GREEN OVER IT. The caller
+   * reads the open set with a PostgREST `limit`, in a file the suite cannot
+   * import, so nothing here could have seen it.
+   *
+   * A row past the limit is invisible: never matched, so never superseded, and
+   * the fresh proposal that would have matched it is inserted beside it. Two
+   * open proposals for one task, one unreachable -- the stale-authority bug the
+   * original writer existed to prevent, reintroduced by the fix for its other
+   * half.
+   */
+  const plan = reconcileProposals({
+    open: [openRow()], fresh: [freshRow()], now: NOW, openTruncated: true,
+  });
+  assert.equal(plan.replaceAll, true, 'a partial read was reconciled as though it were complete');
+  assert.deepEqual(plan.reaffirm, [], 'a row was reaffirmed on the strength of a set that may be incomplete');
+  assert.equal(plan.insert.length, 1, 'the fallback must still write what the dispatcher derived');
+  assert.match(String(plan.reason), /incomplete|limit/i, 'the fallback does not say why it happened');
+});
+
+test('THE COMPLETE-READ PLAN SAYS SO, SO THE CALLER CANNOT CONFUSE THE TWO', () => {
+  /*
+   * The positive half. A flag that is only ever read when true is one typo away
+   * from being read the wrong way round, and `undefined` is falsy, so a plan
+   * that simply omitted the field would silently take the reconcile path.
+   */
+  const plan = reconcileProposals({ open: [openRow()], fresh: [freshRow()], now: NOW });
+  assert.equal(plan.replaceAll, false, 'a complete read did not state that it was complete');
+  assert.deepEqual(plan.reaffirm, ['p-1']);
+});

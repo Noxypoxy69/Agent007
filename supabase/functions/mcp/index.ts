@@ -1813,16 +1813,78 @@ Deno.serve(async (request) => {
      * Confirmed rows are never touched: they are the record of what was
      * actually done.
      */
-    const openNow = await get('proposals?select=*&state=eq.open&limit=200');
-    const plan = reconcileProposals({ open: openNow, fresh: proposals, now });
+    /*
+     * THE LIMIT IS PART OF THE CORRECTNESS NOW, WHICH IT WAS NOT BEFORE.
+     *
+     * The old writer closed the open set with `patch(state=eq.open)` and never
+     * counted it, so a read limit could not hurt it. Reconciling is different: a
+     * row past the limit is invisible, therefore never matched and never
+     * superseded, and the fresh proposal that would have matched it is inserted
+     * beside it instead. Two open proposals for one task, one unreachable.
+     * reconcileProposals refuses to reconcile a possibly-partial set and says so
+     * through `replaceAll`.
+     */
+    const OPEN_READ_LIMIT = 1000;
+    const openNow = await get(
+      `proposals?select=*&state=eq.open&order=prepared_at.asc&limit=${OPEN_READ_LIMIT}`,
+    );
+    const plan = reconcileProposals({
+      open: openNow,
+      fresh: proposals,
+      now,
+      openTruncated: openNow.length >= OPEN_READ_LIMIT,
+    });
 
     /*
-     * BOTH WRITES KEEP state=eq.open, AND I DROPPED IT ON THE FIRST ATTEMPT.
+     * REAFFIRM RUNS FIRST, AND THE ORDER IS THE WHOLE POINT.
      *
-     * Narrowing from `state=eq.open` to a list of ids is necessary: the unscoped
-     * patch would close the very rows just reaffirmed, the churn re-entering
-     * through the cleanup step. But narrowing is not REPLACING, and an id list
-     * on its own has lost the precondition.
+     * This is the only write that touches a column a migration adds. Deploy this
+     * function ahead of its migration and the PATCH answers PGRST204, `patch`
+     * throws, and the tick dies -- every minute, forever. Run it AFTER the
+     * supersede and that tick has already emptied the open set before dying, so
+     * a deploy in the wrong order does not merely fail, it destroys the queue
+     * once a minute and writes nothing back. Running it first means the failure
+     * happens before anything destructive.
+     *
+     * AND IT DEGRADES RATHER THAN DIES. A missing column is not a reason to stop
+     * dispatching: it is a reason to do what this code did last week. So the
+     * missing-column case falls back to replacing the whole open set -- the
+     * churn returns, which is noisy and visible and was the status quo an hour
+     * ago -- and it self-heals the moment the migration lands. Any OTHER failure
+     * rethrows, because swallowing an unrecognised write error is how a dead
+     * writer reports success.
+     *
+     * prepared_at IS NOT TOUCHED by the reaffirm. It is how long this has been
+     * waiting for a human, and that number is the one whose absence let the pile
+     * grow unnoticed. Only the freshness clock moves.
+     */
+    let degradedTo: string | null = plan.replaceAll ? plan.reason : null;
+
+    if (!degradedTo && plan.reaffirm.length) {
+      const ids = plan.reaffirm.map((id) => encodeURIComponent(id)).join(',');
+      try {
+        await patch(
+          `proposals?proposal_id=in.(${ids})&state=eq.open`,
+          { reaffirmed_at: plan.reaffirmed_at },
+        );
+      } catch (err) {
+        const text = String((err as Error)?.message ?? err);
+        if (/PGRST204|42703|reaffirmed_at/i.test(text)) {
+          degradedTo = `reaffirmed_at is not in the proposals table yet (${text.slice(0, 120)}). `
+            + 'This function has been deployed ahead of its migration. Replacing the whole open set, '
+            + 'as it did before, until the migration lands.';
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    /*
+     * BOTH SCOPED WRITES KEEP state=eq.open, AND I DROPPED IT ON THE FIRST
+     * ATTEMPT. Narrowing from `state=eq.open` to a list of ids is necessary --
+     * the unscoped patch would close the very rows just reaffirmed, the churn
+     * re-entering through the cleanup step -- but narrowing is not REPLACING,
+     * and an id list on its own has lost the precondition.
      *
      * The window is real. The open set is read, reconciled, then written, and a
      * coordinator may confirm one of those proposals in between. Without the
@@ -1834,11 +1896,14 @@ Deno.serve(async (request) => {
      *
      * An empty result here is the lost race rather than a success: PostgREST
      * answers a PATCH whose predicate matched nothing with 200 and an empty
-     * array. Neither of these writes is load-bearing enough to refuse on -- the
-     * next tick re-derives the same plan a minute later and converges -- but the
-     * predicate is what keeps the record honest in the meantime.
+     * array. Neither write is load-bearing enough to refuse on -- the next tick
+     * re-derives the same plan a minute later and converges -- but the predicate
+     * is what keeps the record honest in the meantime.
      */
-    if (plan.supersede.length) {
+    if (degradedTo) {
+      console.warn(`dispatch: reconcile unavailable, replacing the open set. ${degradedTo}`);
+      await patch('proposals?state=eq.open', { state: 'superseded', superseded_at: now });
+    } else if (plan.supersede.length) {
       const ids = plan.supersede.map((id) => encodeURIComponent(id)).join(',');
       await patch(
         `proposals?proposal_id=in.(${ids})&state=eq.open`,
@@ -1846,22 +1911,21 @@ Deno.serve(async (request) => {
       );
     }
 
-    if (plan.reaffirm.length) {
-      /*
-       * prepared_at IS NOT TOUCHED. It is how long this has been waiting for a
-       * human, and that number is the one whose absence let the pile grow
-       * unnoticed. Only the freshness clock moves.
-       */
-      const ids = plan.reaffirm.map((id) => encodeURIComponent(id)).join(',');
-      await patch(
-        `proposals?proposal_id=in.(${ids})&state=eq.open`,
-        { reaffirmed_at: plan.reaffirmed_at },
-      );
-    }
+    /*
+     * WHEN DEGRADED, EVERYTHING IS WRITTEN, NOT THE RECONCILED SUBSET.
+     *
+     * plan.insert excludes whatever was going to be reaffirmed. If the reaffirm
+     * failed and the open set was replaced instead, those rows are now closed --
+     * so writing only plan.insert would drop them, and a returned task would
+     * silently have no open proposal at all. That is worse than the churn and
+     * exactly the shape of bug the fallback exists to avoid, so the fallback
+     * falls all the way back.
+     */
+    const toInsert = degradedTo ? proposals : plan.insert;
 
     let written = [];
-    if (plan.insert.length) {
-      written = await write('proposals', plan.insert.map((p) => ({
+    if (toInsert.length) {
+      written = await write('proposals', toInsert.map((p) => ({
         kind: p.kind,
         task_id: p.task_id,
         agent_id: p.agent_id ?? null,
