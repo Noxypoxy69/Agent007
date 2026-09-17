@@ -53,22 +53,37 @@ that counter as evidence of execution and said the loop had run, then read the
 empty table and said it never had. Both readings came from the same number.
 A count of tries is not a record of what happened.
 
-**`proposals` = 1,357 against `tasks` = 4, AND IT IS STILL CLIMBING.** Measured
-1,353 at one point and 1,357 forty minutes later: 15 in the last fifteen
-minutes, the newest 52 seconds old. Roughly one a minute, around 60 an hour,
-recently all for a single task.
+**The proposal churn: ~60/hour, and the cause is now KNOWN — this section's
+first explanation was wrong.**
 
-1,350 superseded, 5 ever confirmed, 1 open. **Every one carries
-`would_be_accepted = true`** — the dispatcher repeatedly finds the same work
-acceptable, prepares a proposal, and supersedes it a minute later. This is 99.6%
-of the ledger by volume and it is running as you read this.
+Measured breakdown, which is what settled it:
 
-The leading hypothesis, stated as a hypothesis: preparation is automated and
-confirmation is not. `confirm_proposal` is a coordinator action, and if no
-coordinator is running a confirm loop the dispatcher will re-propose forever
-without anything being wrong with the dispatcher itself. That would make this an
-unfinished handoff rather than a bug. **It has not been verified, and it is the
-first thing worth an outside pair of eyes.**
+| kind | state | rows | in the last hour |
+|---|---|---:|---:|
+| assign | superseded | 688 | **0** |
+| review | superseded | 676 | **59** |
+| assign | confirmed | 4 | 0 |
+| review | confirmed | 1 | 0 |
+| review | open | 1 | 1 |
+
+**Assignment churn has stopped dead.** Auto-confirm was implemented and works —
+zero assign proposals in the last hour, four confirmed. The entire live flood is
+`review`, and it is one task: a returned task re-proposing a review every minute
+because no reviewer ever claims it.
+
+This document originally guessed that confirmation was not automated and that
+the dispatcher was re-proposing forever because nobody answered. **That guess is
+disproven** — assignment confirmation is automated and closed. The right
+diagnosis, from an outside review and verified here: the review machinery exists
+in the database (`claim_review`, `renew_review_lease`, `submit_review`,
+self-review refusal, review fencing, fix-task creation) and **has no consumer**.
+The dispatcher creates a review proposal every minute and nothing routes it to a
+reviewer.
+
+So this is not a queue problem and replacing the queue would be the wrong fix.
+Two separate defects sit on top of each other: a missing reviewer runtime, and a
+proposal writer that records history instead of updating a heartbeat when
+nothing has semantically changed. Both are fixable in place.
 
 **`tasks` = 4**, of which two are demo fixtures (`t-demo-runnable`,
 `t-demo-blocked`), one is labelled `PROOF ONLY`, and one is a real task
@@ -274,14 +289,19 @@ commit `3b11231`.
 
 ### Still genuinely open
 
-1. **The proposal runaway, and it is running now.** The review's framing is
-   better than the one this document originally offered: this is missing
-   idempotency and backoff, not a reporting curiosity. An identical pending
-   proposal should update a heartbeat and back off, not create another row. The
-   invariant worth stating is one open proposal per (task, task generation,
-   proposal fingerprint). Whether confirmation is also never being called is a
-   second question and does not change the invariant.
-2. **The sequencing of the loop merge, which is the one place this document
+1. **The missing reviewer consumer, which is what the churn actually is.** A
+   returned task re-proposes a review every minute because nothing claims it.
+   The database already has `claim_review`, `renew_review_lease`,
+   `submit_review`, self-review refusal, review fencing and fix-task creation.
+   The consumer does not exist. Building it is the fix; replacing the queue
+   would discard working machinery.
+2. **Proposal idempotency, which is the second defect underneath the first.**
+   Even with a reviewer, an identical pending proposal should update a heartbeat
+   and back off rather than supersede-and-insert. The invariant: one open
+   proposal per (kind, task, task generation, semantic fingerprint), and no
+   regeneration while a valid review lease is held. This is independent of
+   whether a reviewer exists, which is why it is listed separately.
+3. **The sequencing of the loop merge, which is the one place this document
    pushes back.** Loop A is the only path that has ever executed work against
    the real bridge. Loop B has run in tests and never in production. Removing
    the bypass before Loop B has completed one real task end-to-end trades "runs
@@ -289,16 +309,16 @@ commit `3b11231`.
    production evidence. Prove one real attempt through Loop B first, then cut
    over, then delete the bypass. The destination is not in question; the order
    is.
-3. **Making `attempts` mandatory needs a stated failure mode.** "No attempt row,
+4. **Making `attempts` mandatory needs a stated failure mode.** "No attempt row,
    no execution" is correct and must say what happens when the row cannot be
    written — a worker that silently proceeds has no gate, and one that halts on
    an unreachable database is a new outage. Fail closed, loudly, and say so in
    the contract.
-4. **Claiming a task before editing needs an enforcement point, not an honour
+5. **Claiming a task before editing needs an enforcement point, not an honour
    rule.** It is the only thing that would have caught the nine-minute
    duplication, and as a convention it will be forgotten exactly as reliably as
    everything else in this document has been.
-5. **The prose restructure**: which of the twelve documents should be deleted
+6. **The prose restructure**: which of the twelve documents should be deleted
    outright rather than gated. Regex gates cannot make prose authoritative —
    this document's own gates cover a fraction of it, by measurement — so the
    answer is removal, and somebody has to decide what goes.
