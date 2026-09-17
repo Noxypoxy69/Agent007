@@ -26,6 +26,16 @@ const ORDER = new URL('../docs/ORDER.md', import.meta.url);
  * with no way to notice it had drifted. Nothing re-measured because nothing
  * could -- prose has no handle to check.
  *
+ * THIS GATE IS PARTIAL AND THE NUMBER IS WRITTEN DOWN SO NOBODY OVER-TRUSTS IT.
+ * It matches a FORMAT -- `**N. ~~thing~~ DONE` -- and across every document in
+ * this repository it sees four claims, while ORDER.md alone carries thirty-seven
+ * state-ish lines. Two genuinely stale claims (a table cell reading "still v20"
+ * against a live v26, and a sentence saying "deployed version 20 right now")
+ * were invisible to it, because prose has infinite shapes and a regex has one.
+ * Widening it chases an infinite set. The complementary gate is
+ * test/measurableStateInProse.test.mjs, which lints the rot-prone VALUE rather
+ * than the sentence, and that is the direction that scales.
+ *
  * So a done-claim needs an EVIDENCE line, and the git-checkable kinds are
  * re-verified on every run. `unverifiable` is allowed on purpose, because
  * forcing a machine-checkable token where none exists produces a fake one; it

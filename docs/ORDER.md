@@ -21,7 +21,7 @@ correctly behind the loop, not in front of it.
 
 **0. ~~Deploy the edge function.~~ ALREADY LIVE — closed 2026-09-16 08:18.**
 EVIDENCE: unverifiable live state is not in git; the provider is the only authority. deploy/last-deployment.json records what was shipped and has been reconciled after the fact four times today, which is itself the argument for asking the far end rather than the file.
-`/task` and `/renew` are in the deployed version 20 right now, with `/dispatch`,
+`/task` and `/renew` SHIPPED in version 20, along with `/dispatch`,
 `/register`, `/return`, `/wait` and `/health`. code-c's 04:53 report — *"until
 they ship a worker cannot read its task, cannot renew"* — was true against
 version 17 and stopped being true when version 20 shipped the outage fix and
