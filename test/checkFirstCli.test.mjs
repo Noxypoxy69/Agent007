@@ -48,6 +48,31 @@ test('a topic with no prior work does NOT cry wolf', async () => {
   assert.match(r.stdout, /\(none\)/);
 });
 
+test('an unreadable path contract degrades the overlap, not the topic verdict', async () => {
+  /*
+   * REGRESSION, 2026-09-17. The overlap check pushed its per-branch failures
+   * into the same `errors` array that decides whether the PRIOR-WORK lookup can
+   * be trusted. This repository has a branch, `main`, whose history is unrelated
+   * to master, so `git merge-base main HEAD` fails as an ordinary condition --
+   * and that one shrug marked the entire topic lookup UNKNOWN and exited 2.
+   *
+   * Two questions, two error channels. A branch whose contract cannot be read
+   * is reported as unchecked and counted; it never votes on whether the topic
+   * answer is sound.
+   */
+  const r = await cf(['roster liveness heartbeat', '--json']);
+  const d = JSON.parse(r.stdout);
+  assert.notEqual(d.verdict, 'unknown', 'a path-read failure must not void the topic answer');
+  assert.equal(r.code, 0);
+  assert.ok(Array.isArray(d.pathErrors), 'path failures are surfaced on their own channel');
+  assert.ok(Array.isArray(d.overlaps), 'and overlaps remain a first-class field');
+  assert.equal(
+    typeof d.unreadableFronts,
+    'number',
+    'branches that could not be checked are COUNTED, never silently treated as clean',
+  );
+});
+
 test('a flag value is not swallowed into the topic', async () => {
   // `check-first roster --hours 24` must not search for "roster 24".
   const r = await cf(['roster', '--hours', '24', '--json']);

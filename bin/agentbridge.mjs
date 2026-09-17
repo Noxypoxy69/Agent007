@@ -2054,13 +2054,24 @@ try {
      * Two duplications in one session, both preventable by looking:
      * code-a fixed CI on master at 19:59Z and I pushed a second fix at 21:04Z;
      * code-b committed the roster fix at 00:15Z and I committed another at 00:24Z.
-     * Nothing caught either, because collisionGuard compares PATHS and we
-     * touched different files to answer the same question.
+     *
+     * THIS COMMENT USED TO SAY "we touched different files", AND THAT WAS FALSE.
+     * Measured 2026-09-17 with comm(1) over both commits' name-only output:
+     * 5083feb and 066d32e BOTH changed test/leakRegression.test.mjs. A path
+     * comparison would have caught that duplication on the first look. The
+     * wrong sentence was load-bearing -- it argued the fleet out of the one
+     * check that worked, and it sat here while the same shape happened again.
+     *
+     * So this command now runs BOTH: topic matching over prose, which catches
+     * re-proposals, and a path overlap over unmerged branches, which catches
+     * two agents walking at the same files while describing the work
+     * differently. src/completion.mjs owns the second one.
      */
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const run = promisify(execFile);
     const P = await import('../src/priorWork.mjs');
+    const C = await import('../src/completion.mjs');
 
     // Positionals only. A bare token that FOLLOWS a --flag is that flag's value,
     // not part of the topic; without this, `check-first roster --hours 24` would
@@ -2083,6 +2094,18 @@ try {
     })();
 
     const errors = [];
+    /*
+     * A SEPARATE ERROR CHANNEL, BECAUSE THESE ARE DIFFERENT QUESTIONS.
+     *
+     * `errors` decides whether the PRIOR-WORK lookup can be trusted, and an
+     * untrustworthy one is UNKNOWN and exits 2. Failing to read one branch's
+     * path contract says nothing about that: it degrades the OVERLAP check for
+     * that branch alone. Folding the two together made a single branch with no
+     * merge-base -- `main`, whose history is unrelated to master here, which is
+     * an ordinary condition and not a fault -- report the entire topic lookup
+     * as unknown. One subsystem's shrug must not mark another's answer void.
+     */
+    const pathErrors = [];
     let branches = [];
     let commits = [];
 
@@ -2128,7 +2151,27 @@ try {
           try { await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: repo }); merged = true; }
           catch { merged = false; }
         }
-        branches.push({ name, subject, at, merged });
+        /*
+         * THE PATH CONTRACT OF AN UNMERGED BRANCH: what that branch changes
+         * relative to where it left HEAD. Only for branches we actually have
+         * locally and that are not merged -- a merged branch is not an open
+         * front, and a branch whose object is absent cannot be diffed. Absent
+         * stays absent rather than becoming an empty contract, because an empty
+         * contract silently cannot collide with anything.
+         */
+        let paths = null;
+        if (have && !merged) {
+          try {
+            const { stdout: base } = await run('git', ['merge-base', sha, 'HEAD'], { cwd: repo });
+            const { stdout: files } = await run(
+              'git', ['diff', '--name-only', base.trim(), sha], { cwd: repo, maxBuffer: 8e6 },
+            );
+            paths = files.split('\n').map((f) => f.trim()).filter((f) => f !== '');
+          } catch (e) {
+            pathErrors.push(`paths for ${name}: ${e?.message ?? e}`);
+          }
+        }
+        branches.push({ name, subject, at, merged, paths });
       }
     } catch (e) {
       errors.push(`ls-remote: ${e?.message ?? e}`);
@@ -2143,9 +2186,44 @@ try {
       }).filter((c) => c.sha);
     } catch (e) { errors.push(`git log: ${e?.message ?? e}`); }
 
+    /*
+     * MY OWN PATH CONTRACT. --paths when you know it; otherwise the files you
+     * have already touched, which is the state you are actually in when you
+     * stop to ask whether somebody else is on this. Nothing is guessed from the
+     * topic: prose is what varies between two agents doing one job, and reading
+     * a contract out of it would reintroduce the failure this half exists for.
+     */
+    let myPaths = [];
+    if (typeof args.paths === 'string' && args.paths.trim() !== '') {
+      myPaths = args.paths.split(',').map((x) => x.trim()).filter((x) => x !== '');
+    } else if (args.paths !== undefined) {
+      console.error('--paths: expected a comma-separated list of repository paths');
+      process.exit(2);
+    } else {
+      try {
+        const { stdout } = await run('git', ['diff', '--name-only', 'HEAD'], { cwd: repo, maxBuffer: 8e6 });
+        myPaths = stdout.split('\n').map((f) => f.trim()).filter((f) => f !== '');
+      } catch (e) { pathErrors.push(`working tree paths: ${e?.message ?? e}`); }
+    }
+
+    /*
+     * An open front whose paths could not be read is carried with paths:null and
+     * is NOT passed to the overlap check, because overlapping() treats a missing
+     * contract as "no paths" and would report it clean. Counting them lets the
+     * output say how many questions it could not answer instead of implying it
+     * answered them.
+     */
+    const repoId = repo.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'repo';
+    const frontsWithPaths = branches
+      .filter((b) => !b.merged && Array.isArray(b.paths))
+      .map((b) => ({ repo: repoId, work_item_id: b.name, agent_id: null, paths: b.paths }));
+    const unreadableFronts = branches.filter((b) => !b.merged && b.paths === null).length;
+    // pathErrors is surfaced, never swallowed -- see the NOTE line in the output.
+    const overlaps = C.overlapping({ repo: repoId, paths: myPaths, items: frontsWithPaths });
+
     const result = P.priorWork({ branches, commits, query: topic, ok: errors.length === 0, errors });
 
-    if (args.json) { console.log(JSON.stringify({ topic, hours, ...result }, null, 2)); handled = true; done(result.verdict === 'unknown' ? 2 : 0); }
+    if (args.json) { console.log(JSON.stringify({ topic, hours, myPaths, overlaps, unreadableFronts, pathErrors, ...result }, null, 2)); handled = true; done(result.verdict === 'unknown' ? 2 : 0); }
 
     if (!topic) {
       console.log('check-first: name the topic you are about to work on, e.g.\n  agentbridge check-first "roster liveness heartbeat"\n');
@@ -2161,6 +2239,30 @@ try {
       }
     }
 
+    /*
+     * PRINTED BEFORE THE VERDICT, AND IT EXITS NON-ZERO ON ITS OWN. A path
+     * collision is a harder fact than a topic match: prose similarity is a
+     * guess, a shared file is not. Measured on the pair that started all this --
+     * 5083feb and 066d32e both changed test/leakRegression.test.mjs.
+     */
+    if (overlaps.length) {
+      console.log(`\nPATH OVERLAP — ${overlaps.length} unmerged branch(es) already change files you are touching:`);
+      for (const o of overlaps) {
+        console.log(`  ${String(o.work_item_id).padEnd(44)} ${o.shared_paths.length} shared`);
+        for (const sp of o.shared_paths.slice(0, 6)) console.log(`      ${sp}`);
+      }
+      console.log('\nThis is a FILE collision, not a guess. Read those branches before you write.');
+    } else if (myPaths.length === 0) {
+      console.log('\npath overlap: not checked — no paths given and your working tree is clean.');
+      console.log('  Pass --paths a,b to ask before you start rather than after.');
+    } else {
+      console.log(`\npath overlap: none, across ${frontsWithPaths.length} unmerged branch(es) (${myPaths.length} path(s) of yours).`);
+    }
+    if (unreadableFronts > 0) {
+      console.log(`  NOTE: ${unreadableFronts} unmerged branch(es) could not be read and were NOT checked.`);
+      for (const e of pathErrors.slice(0, 3)) console.log(`        ${e}`);
+    }
+
     if (result.verdict === 'unknown') {
       console.error(`\nLOOKUP INCOMPLETE — this is NOT "nothing found". ${result.errors.length} error(s):`);
       for (const e of result.errors.slice(0, 5)) console.error(`  ${e}`);
@@ -2169,6 +2271,26 @@ try {
     if (result.verdict === 'prior-work-found') {
       console.log('\nSOMEBODY MAY ALREADY BE ON THIS. Read the branch or the commit before you start.');
     }
+    /*
+     * AN OVERLAP DOES NOT CHANGE THE EXIT CODE, AND THAT IS DELIBERATE.
+     *
+     * This command's contract is 0 = I answered, 2 = I could NOT answer. Prior
+     * work found already exits 0, because finding something is a successful
+     * answer rather than an error. A first version of the overlap check exited
+     * 2 on a collision, which made "I found a file collision" indistinguishable
+     * from "the server was unreachable" -- the conflation of a substantive
+     * answer with an unknown that this repository keeps paying for.
+     *
+     * It is also unstable. With no --paths the contract comes from the WORKING
+     * TREE, so a nonzero exit would depend on what happens to be uncommitted.
+     * checkFirstCli.test.mjs already warns, in its own header, about assertions
+     * that pass on the machine they were written on; an exit code that moves
+     * with a dirty tree is that defect with a different costume.
+     *
+     * The signal is the output, which is loud and names the branch and the
+     * files. Anything wanting a machine-readable answer reads --json, where
+     * overlaps is a first-class field.
+     */
     handled = true; done(0);
   }
 
