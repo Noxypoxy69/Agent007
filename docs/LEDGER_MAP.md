@@ -269,6 +269,55 @@ moment. None came from a gate.
 
 ---
 
+## 6b. The completion seam — the finding that explains the duplications
+
+An outside review named the thing this document had been circling. The ledger
+does not merely duplicate tables; **work gets recreated because nothing can
+answer one question:**
+
+> Has this exact work already been completed and accepted, under this context
+> and base commit?
+
+`attempts` being empty is the proof. Tasks carry attempt counters, proposals
+cycle, commits exist — and no record connects **requested → executed →
+evidenced → reviewed → integrated**. So every new session can read the same
+requirement as unfinished, which is exactly what happened twice in one night.
+
+Four states are currently blurred into one word, "done":
+
+| state | means |
+|---|---|
+| `implemented` | an attempt produced machine-valid work |
+| `reviewed` | an independent reviewer accepted it |
+| `integrated` | the accepted SHA is reachable from the target branch |
+| `completed` | integration verified and the capability still holds |
+
+Agents recreate work because "accepted", "merged" and "still on HEAD today" get
+treated as interchangeable. They are not, and only the third is checkable with
+`git merge-base --is-ancestor <result_sha> <target-head>` — ancestry verified by
+the daemon rather than asserted by an agent.
+
+**THIS SUPERSEDES PART OF WHAT I BUILT TONIGHT, AND THE DIFFERENCE IS WORTH
+BEING PRECISE ABOUT.** `check-first` (§4) matches a topic against branch names
+and commit subjects. That is a **heuristic over wording** — it would have caught
+both of tonight's duplications, and it misses any case where two agents describe
+the same work differently, which is the normal case. A work fingerprint over
+normalised machine inputs (repo, target branch, requirement, acceptance
+contract, allowed paths) is **authoritative**, because it does not depend on
+anyone choosing the same words. `check-first` is a cheap thing that works today
+with no schema change; the fingerprint is the real answer. Keep the first until
+the second exists, then delete the first rather than maintaining both.
+
+So the repair is three seams, not one:
+
+1. **Execution** — the production worker must use the guarded attempt pipeline.
+2. **Review** — returned work must reach an independent reviewer that exists.
+3. **Completion** — accepted and integrated work must be recorded, and checked
+   *before* equivalent work is proposed or run again.
+
+**Without the third, a correctly guarded runtime would safely duplicate the same
+work.** That is the sentence worth keeping.
+
 ## 7. What is still open — and what an outside review already closed
 
 **This document has been wrong twice, and both are recorded rather than edited
