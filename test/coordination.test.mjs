@@ -414,6 +414,59 @@ test('the roster offered in a refusal is canonical ids only, never aliases', () 
   assert.equal(ids.includes('probe-ok'), false, 'nothing unregistered is invented into the list');
 });
 
+test('A DECLARED WORKER IS ADDRESSABLE WHILE IT IS ASLEEP', () => {
+  /*
+   * THE REGRESSION, AND IT REACHED PRODUCTION. knownActorIds built its worker
+   * list from the live roster instead of from the actor table, so a worker was
+   * addressable only while it was heartbeating. The check shipped in version 24
+   * having never run in production before, and its FIRST act was to refuse a
+   * message to a teammate as "not a known actor" -- while chatgpt, removed from
+   * the team, stayed addressable forever because it is not typed as a worker.
+   *
+   * It contradicted the rule written directly above validateMessage's call
+   * site: an unknown recipient is refused, a KNOWN one that is offline is a
+   * note, because queueing work for a worker that is restarting is what a
+   * durable channel is for. Existence is the actor table; liveness is the
+   * reachability note. Conflating them broke the durability.
+   *
+   * An empty roster is not a contrived fixture. It is the state this project
+   * was actually in when the bug was found: zero live workers.
+   */
+  const asleep = [];
+  const ids = knownActorIds(asleep);
+  for (const worker of ACTORS.filter((a) => a.actor_type === 'worker')) {
+    assert.ok(
+      ids.includes(worker.actor_id),
+      `${worker.actor_id} is declared in the actor table and vanished when it stopped heartbeating`,
+    );
+  }
+
+  const say = (to) => ({ from_agent: 'code-d', to_agent: to, type: 'status', body: 'an ordinary sentence' });
+  const now = '2026-09-16T23:59:00Z';
+
+  // ACCEPTED: the whole point of a durable channel
+  const sleeping = validateMessage(say('code-c'), { sessions: asleep, now });
+  assert.equal(sleeping.ok, true, sleeping.errors.join(', '));
+
+  // STILL REFUSED: the fix must not make every string addressable
+  const typo = validateMessage(say('code-zzz'), { sessions: asleep, now });
+  assert.equal(typo.ok, false, 'a typo was accepted, so the check now proves nothing');
+
+  /*
+   * AND THE WARNING STILL FIRES, which is the half worth keeping: a worker with
+   * a stale registration is accepted AND noted, so "stored" is never mistaken
+   * for "delivered".
+   */
+  const stale = [{
+    agent_id: 'code-c', session_id: 'danny-win-10', capacity: 'idle',
+    heartbeat_at: '2026-09-16T12:30:46Z',
+  }];
+  const noted = validateMessage(say('code-c'), { sessions: stale, now });
+  assert.equal(noted.ok, true);
+  assert.equal(noted.notes.length, 1, 'an offline worker was accepted with no warning at all');
+  assert.match(noted.notes[0], /not live/);
+});
+
 test('a description in an identifier field is refused without any roster', () => {
   // "chatgpt-work coordinator" was a real sender id on the live channel
   const v = validateMessage(msg('chatgpt-work coordinator'));
@@ -576,4 +629,154 @@ test('only the last segment is examined, and the shape rule still applies', () =
   assert.notEqual(validateSessionId('anything-c', 'code-b'), null);
   assert.notEqual(validateSessionId('two words', 'code-b'), null, 'the shape rule runs first');
   assert.notEqual(validateSessionId('', 'code-b'), null);
+});
+
+/* ── a message to somebody who stopped listening ─────────────────────── */
+
+test('A MESSAGE TO A STALE RECIPIENT IS DELIVERED AND SAID SO', async () => {
+  /*
+   * WRITTEN AFTER IT HAPPENED FIVE TIMES IN ONE EVENING. Three reports went to
+   * code-b at 17:43, 17:46 and 18:10; its sessions had last been seen at 17:19
+   * and 17:07. Two went to code-c at 18:58 and 19:34; it had been silent since
+   * 12:30. Every one was accepted, stored and read by nobody, and nothing told
+   * the sender. docs/ORDER.md item 5 predicted exactly this and counted
+   * twenty-nine before these.
+   *
+   * KNOWN AND REACHABLE ARE DIFFERENT QUESTIONS. Both recipients were known
+   * actors, so the only check that existed passed.
+   */
+  const now = '2026-09-16T20:00:00Z';
+  const sessions = [
+    { agent_id: 'code-c', session_id: 'danny-win-10', capacity: 'idle',
+      heartbeat_at: '2026-09-16T12:30:00Z' },
+  ];
+  const m = {
+    from_agent: 'code-a', to_agent: 'code-c', type: 'status',
+    body: 'an ordinary handoff paragraph with nothing unusual in it at all',
+  };
+  const v = validateMessage(m, { sessions, now });
+
+  // DELIVERED, not refused: queueing for a worker that is restarting is what a
+  // durable channel is for, and refusing would break the case it exists for.
+  assert.equal(v.ok, true, `a stale recipient was refused: ${v.errors.join('; ')}`);
+  assert.equal(v.notes.length, 1);
+  assert.match(v.notes[0], /code-c is not live/);
+  assert.match(v.notes[0], /27000s/, 'the note does not say how long the silence is');
+  assert.match(v.notes[0], /do not treat this as delivered/);
+});
+
+test('AND A LIVE RECIPIENT PRODUCES NO NOTE', async () => {
+  // The positive the warning needs. A note on every message is a note nobody
+  // reads, and then the one that matters is indistinguishable from the noise.
+  const now = '2026-09-16T20:00:00Z';
+  const sessions = [
+    { agent_id: 'code-c', session_id: 'danny-win-10', capacity: 'idle',
+      heartbeat_at: '2026-09-16T19:58:00Z' },
+  ];
+  const v = validateMessage(
+    { from_agent: 'code-a', to_agent: 'code-c', type: 'status', body: 'a perfectly ordinary sentence' },
+    { sessions, now },
+  );
+  assert.equal(v.ok, true);
+  assert.deepEqual(v.notes, []);
+});
+
+test('ONE LIVE SESSION IS ENOUGH, because an agent may hold several', async () => {
+  /*
+   * b6 and code-b are the same actor with two registrations, which is the case
+   * that made canonical identity item 5 in the first place. Warning because the
+   * OLDEST of them is stale would cry wolf about a worker that is answering.
+   */
+  const now = '2026-09-16T20:00:00Z';
+  const sessions = [
+    { agent_id: 'code-b', session_id: 'old', capacity: 'idle', heartbeat_at: '2026-09-16T09:00:00Z' },
+    { agent_id: 'code-b', session_id: 'new', capacity: 'idle', heartbeat_at: '2026-09-16T19:59:00Z' },
+  ];
+  const v = validateMessage(
+    { from_agent: 'code-a', to_agent: 'code-b', type: 'status', body: 'a perfectly ordinary sentence' },
+    { sessions, now },
+  );
+  assert.deepEqual(v.notes, [], 'an agent with one live session was reported stale');
+});
+
+test('AN ACTOR THAT NEVER HEARTBEATS IS NOT STALE', async () => {
+  /*
+   * A coordinator or an owner is a known actor with no session row. Reporting
+   * them offline on every message is how the warning becomes furniture.
+   */
+  const now = '2026-09-16T20:00:00Z';
+  const sessions = [
+    { agent_id: 'code-c', session_id: 's', capacity: 'idle', heartbeat_at: now },
+  ];
+  const roster = knownActorIds(sessions);
+  const nonWorker = roster.find((id) => id !== 'code-c');
+  assert.ok(nonWorker, 'the roster carries no non-worker actor, so this proves nothing');
+
+  const v = validateMessage(
+    { from_agent: 'code-a', to_agent: nonWorker, type: 'status', body: 'a perfectly ordinary sentence' },
+    { sessions, now },
+  );
+  assert.equal(v.ok, true);
+  assert.deepEqual(v.notes, [], `${nonWorker} was reported stale for never heartbeating`);
+});
+
+test('SESSIONS WITHOUT A CLOCK REPORTS THAT IT COULD NOT CHECK', async () => {
+  // Absent is not live. A caller that forgets `now` would otherwise get silence,
+  // which reads exactly like "the recipient is fine".
+  const sessions = [
+    { agent_id: 'code-c', session_id: 's', capacity: 'idle', heartbeat_at: '2026-09-16T12:30:00Z' },
+  ];
+  const v = validateMessage(
+    { from_agent: 'code-a', to_agent: 'code-c', type: 'status', body: 'a perfectly ordinary sentence' },
+    { sessions },
+  );
+  assert.equal(v.ok, true);
+  assert.equal(v.notes.length, 1);
+  assert.match(v.notes[0], /was not checked/);
+});
+
+test('AN UNKNOWN RECIPIENT IS STILL REFUSED, not merely noted', async () => {
+  // The note must not have softened the refusal it sits next to.
+  const now = '2026-09-16T20:00:00Z';
+  const sessions = [{ agent_id: 'code-c', session_id: 's', capacity: 'idle', heartbeat_at: now }];
+  const v = validateMessage(
+    { from_agent: 'code-a', to_agent: 'nobody-at-all', type: 'status', body: 'a perfectly ordinary sentence' },
+    { sessions, now },
+  );
+  assert.equal(v.ok, false);
+  assert.ok(v.errors.some((e) => /not a known actor/.test(e)));
+});
+
+test('THE DEPLOYED SPLICE AGREES ABOUT ALL OF IT', async () => {
+  /*
+   * _shared.js is a hand-maintained copy and NOTHING compared validateMessage
+   * between the two until now -- so a change made here and forgotten there
+   * would ship a Bridge that still accepts a dead address silently. The
+   * fixtures below reach the new branch, which is the condition the splice
+   * tests keep failing to meet.
+   */
+  const shared = await import('../supabase/functions/mcp/_shared.js');
+  const now = '2026-09-16T20:00:00Z';
+  const cases = [
+    { sessions: [{ agent_id: 'code-c', session_id: 's', capacity: 'idle', heartbeat_at: '2026-09-16T12:30:00Z' }], now },
+    { sessions: [{ agent_id: 'code-c', session_id: 's', capacity: 'idle', heartbeat_at: '2026-09-16T19:59:00Z' }], now },
+    { sessions: [{ agent_id: 'code-c', session_id: 's', capacity: 'offline', heartbeat_at: now }], now },
+    { sessions: [{ agent_id: 'code-c', session_id: 's', capacity: 'idle', heartbeat_at: '2026-09-16T12:30:00Z' }] },
+  ];
+  for (const opts of cases) {
+    const m = { from_agent: 'code-a', to_agent: 'code-c', type: 'status', body: 'a perfectly ordinary sentence' };
+    assert.deepEqual(
+      shared.validateMessage(m, opts), validateMessage(m, opts),
+      `the splice disagrees for ${JSON.stringify(opts)}`,
+    );
+  }
+  // the premise: at least one of those cases actually produced a note, or this
+  // compares two functions that both did nothing
+  assert.ok(
+    validateMessage(
+      { from_agent: 'code-a', to_agent: 'code-c', type: 'status', body: 'a perfectly ordinary sentence' },
+      cases[0],
+    ).notes.length > 0,
+    'no fixture reached the new branch',
+  );
 });

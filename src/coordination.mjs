@@ -1,3 +1,4 @@
+import { isLive, heartbeatAgeMs, STALE_AFTER_MS } from './liveRegistry.mjs';
 /**
  * THE COORDINATION GUARD: what may be assigned, to whom, and what may be said.
  *
@@ -299,7 +300,27 @@ export function canonicalActor(value, actors = ACTORS) {
 export function knownActorIds(sessions, actors = ACTORS) {
   const ids = new Set();
   for (const s of arr(sessions)) if (s?.agent_id) ids.add(canonicalActor(s.agent_id, actors));
-  for (const a of arr(actors)) if (a?.actor_type !== 'worker') ids.add(a.actor_id);
+  /*
+   * EVERY DECLARED ACTOR IS KNOWN, WORKER OR NOT. The roster decides whether a
+   * recipient is LIVE, never whether it EXISTS.
+   *
+   * This line used to skip workers, so a worker was addressable only while it
+   * was heartbeating. With nobody registered -- which is the state this project
+   * was in the first time the check ever ran in production -- knownActorIds
+   * returned only the non-workers, and a message to code-c was refused as "not
+   * a known actor" while chatgpt, removed from the team, stayed addressable
+   * forever because it is not typed as a worker.
+   *
+   * That contradicted the rule written directly above validateMessage's call
+   * site: an unknown recipient is refused, a KNOWN one that is offline is a
+   * note, because queueing work for a worker that is restarting is what a
+   * durable channel is for. Existence comes from this table; liveness comes
+   * from reachabilityNote, and conflating them broke the durability.
+   *
+   * A genuine typo is still refused: an id that is in neither the table nor the
+   * roster resolves to nothing and is not invented into the list.
+   */
+  for (const a of arr(actors)) if (a?.actor_id) ids.add(a.actor_id);
   return [...ids].sort();
 }
 
@@ -378,9 +399,18 @@ export function messagePreamble(from, actors = ACTORS) {
  *
  * AN ALIAS OF YOUR OWN ACTOR IS FINE, and this is the case that shows the rule
  * is about identity rather than about strings: `social-sparks-app-b6`
- * registering as `code-b` is correct, because `b6` IS code-b by
- * d-owner-identity-b6-20260916. The same table that resolves a recipient
- * answers this, so the two cannot drift apart.
+ * registering as `code-a` is correct, because `b6` IS code-a by
+ * d-owner-identity-b6-20260916b, ACTIVE since 08:30:48Z. The same table that
+ * resolves a recipient answers this, so the two cannot drift apart.
+ *
+ * THIS COMMENT CITED THE SUPERSEDED DECISION UNTIL 2026-09-17, and said b6 was
+ * code-b. The commit that introduced it is titled "I built the alias table on a
+ * decision that had already been superseded" -- the TABLE was corrected and the
+ * same stale citation was left standing beside it, justifying the old answer.
+ * Nothing behaved wrongly, because the code and the tests both followed the
+ * active row; the risk was purely that a later reader would trust the prose and
+ * revert a correct table. Read the ledger, do not quote the decision you
+ * remember: a superseded statement still reads perfectly true on its own.
  */
 export function validateSessionId(sessionId, agentId, actors = ACTORS) {
   const shape = validateAgentId(sessionId, 'session_id');
@@ -428,8 +458,73 @@ export function validateAgentId(value, field) {
  * Fixed fields only. There is no free-form envelope, no attachment, and no
  * field whose contents are interpreted by anything.
  */
-export function validateMessage(m = {}, { sessions = null } = {}) {
+
+/**
+ * IS ANYBODY GOING TO READ THIS? Reported, never refused.
+ *
+ * WRITTEN AFTER SENDING FIVE REPORTS INTO A DEAD INBOX. Three went to code-b
+ * and two to code-c on 2026-09-16; code-b's sessions had last been seen at
+ * 17:19 and 17:07 and the first message went at 17:43, and code-c had been
+ * silent since 12:30 when it was written to at 18:58 and 19:34. Nobody read any
+ * of them. Nothing said so. docs/ORDER.md item 5 had predicted exactly this --
+ * "with no chat open, a message to a name nobody reads is undetectable" -- and
+ * counted twenty-nine before these.
+ *
+ * THE GAP WAS NEVER THE ROSTER CHECK. `to_agent` was validated as a KNOWN actor
+ * and both recipients were known. Known and reachable are different questions
+ * and only one of them was being asked.
+ *
+ * IT IS A NOTE AND NOT AN ERROR, and the comment above this function has said
+ * so since the day it was written: queueing work for a worker that is
+ * restarting is what a durable channel is for. Refusing would break the case
+ * the channel exists for. So the message lands and the sender is told what it
+ * landed in.
+ *
+ * THE WINDOW IS THE SHARED ONE. test/oneStalenessWindow.test.mjs exists because
+ * two windows disagreed about the same rows in the same second and demoted a
+ * live lane; a third private window here would be that bug again.
+ */
+function reachabilityNote(to, sessions, { now, staleAfterMs }) {
+  const rows = arr(sessions).filter((s) => s?.agent_id && canonicalActor(s.agent_id) === to);
+
+  /*
+   * NO SESSION ROW IS NOT STALENESS. A coordinator or an owner is a known actor
+   * that never heartbeats, and warning that they look offline on every message
+   * is how a warning gets ignored -- which costs more than it saves, because the
+   * one that matters is then indistinguishable from the noise.
+   */
+  if (rows.length === 0) return null;
+
+  /*
+   * WITHOUT A CLOCK, LIVENESS IS UNKNOWN AND UNKNOWN IS NOT LIVE. A caller that
+   * passes sessions and forgets `now` would otherwise get silence, which reads
+   * exactly like "the recipient is fine".
+   */
+  if (!nonEmpty(now)) {
+    return `reachability of ${to} was not checked: sessions were supplied without a clock, `
+      + 'so this message may be addressed to a worker that stopped';
+  }
+
+  if (rows.some((r) => isLive(r, { now, staleAfterMs }))) return null;
+
+  const freshest = rows
+    .map((r) => ({ id: r.session_id ?? '(no session id)', age: heartbeatAgeMs(r, now) }))
+    .sort((a, b) => (a.age ?? Infinity) - (b.age ?? Infinity))[0];
+  const silence = freshest?.age == null
+    ? 'has never heartbeated'
+    : `has been silent for ${Math.round(freshest.age / 1000)}s`;
+
+  return `${to} is not live: its freshest session (${freshest.id}) ${silence}, past the `
+    + `${Math.round(staleAfterMs / 1000)}s window. The message is stored and will be there if it `
+    + 'comes back, but nothing is reading it now -- do not treat this as delivered';
+}
+
+export function validateMessage(
+  m = {},
+  { sessions = null, now = null, staleAfterMs = STALE_AFTER_MS } = {},
+) {
   const errors = [];
+  const notes = [];
 
   const fromBad = validateAgentId(m.from_agent, 'from_agent');
   if (fromBad) errors.push(fromBad);
@@ -449,6 +544,9 @@ export function validateMessage(m = {}, { sessions = null } = {}) {
         `to_agent ${JSON.stringify(m.to_agent)} is not a known actor, so nothing would `
           + `ever read it. Known actors: ${roster.join(', ') || '(none)'}`,
       );
+    } else {
+      const note = reachabilityNote(to, sessions, { now, staleAfterMs });
+      if (note) notes.push(note);
     }
   }
   if (!MESSAGE_TYPES.includes(m.type)) {
@@ -475,7 +573,7 @@ export function validateMessage(m = {}, { sessions = null } = {}) {
   }
   if (m.task_id != null && !nonEmpty(m.task_id)) errors.push('task_id must be a string when present');
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, notes };
 }
 
 /**

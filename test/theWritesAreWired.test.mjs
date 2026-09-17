@@ -318,3 +318,75 @@ test('the expectations are DERIVED from the guards, not copied beside them', () 
     }
   }
 });
+
+test('THE REGISTRY REFUSES A BORROWED SESSION ID, AND THE ENTRYPOINT ACTUALLY CALLS IT', () => {
+  /*
+   * validateSessionId shipped in the artifact with ZERO production callers --
+   * correct, tested, and reachable from nothing, which is the shape this repo
+   * keeps rediscovering. Wiring it is only half; this asserts the SHIPPED
+   * entrypoint calls it, because a guard that exists and is not invoked reads
+   * identically to one that is, from anywhere except here.
+   *
+   * What it prevents is measured, not imagined: social-sparks-app-c8 registered
+   * as code-b, so t-loop-proof -- the first end-to-end loop this system ran --
+   * is stored with returned_by "social-sparks-app-c8" and reads as c8's work.
+   */
+  assert.ok(
+    /validateSessionId/.test(source),
+    'validateSessionId is not referenced by the entrypoint at all -- it is dead code again',
+  );
+
+  const reg = source.indexOf('function validateRegistration');
+  assert.notEqual(reg, -1, 'validateRegistration is gone from the entrypoint');
+  const body = source.slice(reg, reg + 2400);
+
+  assert.ok(
+    /validateSessionId\s*\(/.test(body),
+    'validateRegistration does not CALL validateSessionId: a session may register under another actor name',
+  );
+  assert.ok(
+    /errors\.push\(\s*borrowed\s*\)|errors\.push\(borrowed\)/.test(body),
+    'the result of validateSessionId is computed and then thrown away, which refuses nothing',
+  );
+});
+
+test('THE DISPATCHER CONFIRMS WITH A STORE THAT EXISTS AT THAT POINT IN THE FILE', () => {
+  /*
+   * THIS IS WHY THE LOOP DID NOT RUN, AND IT WAS INVISIBLE FROM EVERY SIDE.
+   *
+   * The /dispatch handler confirmed through `store`, which is declared at the
+   * coordinator entrypoint hundreds of lines BELOW it. `const` is not hoisted,
+   * so every confirmation threw "Cannot access 'store' before initialization",
+   * on every proposal, on every tick, once a minute. The throw was caught and
+   * recorded in `refused`, the handler returned ok:true, and pg_cron logged
+   * SUCCEEDED -- so the dispatcher looked healthy while confirming nothing, and
+   * 1,227 proposals accumulated with 2 ever confirmed.
+   *
+   * A type checker would have caught it. There is no type checker on a Deno
+   * entrypoint this suite cannot import, which is why the rule is asserted
+   * against the shipped source instead.
+   */
+  const dispatch = source.indexOf("path === '/dispatch'");
+  assert.notEqual(dispatch, -1, 'the /dispatch route is gone');
+
+  /*
+   * Scoped by POSITION rather than by guessing where the handler ends: the
+   * property that matters is that whatever the dispatcher confirms through is
+   * declared after /dispatch begins and before the call, which is exactly what
+   * the temporal dead zone turns on.
+   */
+  const useAt = source.indexOf('.confirmProposal(', dispatch);
+  assert.notEqual(useAt, -1, 'the dispatcher no longer confirms anything at all');
+
+  const name = /(\w+)\.confirmProposal\($/.exec(source.slice(dispatch, useAt + 17))?.[1];
+  assert.ok(name, 'could not read what the dispatcher confirms through');
+
+  const declAt = source.slice(dispatch, useAt).search(new RegExp(`const\\s+${name}\\s*=`));
+  assert.notEqual(
+    declAt,
+    -1,
+    `/dispatch confirms through "${name}", which is not declared between the route and the call. `
+      + 'That is the temporal-dead-zone bug: it resolves to a const declared later in the file and '
+      + 'throws "Cannot access before initialization" on every proposal, every tick.',
+  );
+});

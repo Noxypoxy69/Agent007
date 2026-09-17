@@ -54,6 +54,11 @@ export const DEFAULT_ENTRY_POINTS = [
   'bin/agentbridge-precommit.mjs',
   'bin/agentbridge-preflight.mjs',
   'bin/agentbridge-attempt.mjs',
+  /* The reviewer runtime. It is the caller claim_review never had, and it is an
+   * entry point in the same sense the others are: something outside the graph
+   * invokes it, so src/reviewRunner.mjs and src/reviewDecision.mjs are shipped
+   * rather than test-only. */
+  'bin/agentbridge-review.mjs',
   /* A human runs this before hand-deploying the edge function. It is an entry
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */

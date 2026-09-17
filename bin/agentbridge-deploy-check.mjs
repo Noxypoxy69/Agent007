@@ -32,6 +32,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 import { artifactDigest, assertPromotable, verifyLive } from '../src/deployGate.mjs';
+import { linesMissingFrom } from '../scripts/check-edge-deploy.mjs';
+import { artifactLoads as checkArtifactLoads } from '../src/artifactLoads.mjs';
 
 const ARTIFACT_DIR = 'supabase/functions/mcp';
 
@@ -65,28 +67,39 @@ try {
 }
 
 /*
- * DOES IT LOAD? `node --check` on each JavaScript file in the artifact.
+ * DOES IT LOAD? Delegated to src/artifactLoads.mjs.
  *
  * This catches the duplicate top-level declaration that took the Bridge down
- * for eleven minutes -- a shape that every one of 1079 passing tests was blind
- * to, because index.ts is an entrypoint nothing in the suite can import.
+ * for eleven minutes -- a shape every one of 1079 passing tests was blind to,
+ * because index.ts is an entrypoint nothing in the suite can import.
  *
- * It does NOT catch everything a Deno isolate refuses at module scope. In the
- * other repository, `crypto.randomUUID()` at global scope threw only when the
- * isolate started, after typecheck, lint and build were all green. So a pass
- * here means "it parses", not "it starts", and that is the honest claim.
+ * THE LOOP THAT USED TO BE HERE SKIPPED .ts. It matched /\.(js|mjs)$/, so the
+ * entrypoint -- the actual file that went down -- was the one file it never
+ * parsed. It also spawned a process per file and could not tell a parse failure
+ * from a duplicate declaration.
+ *
+ * The module additionally handles what that loop could not: an empty artifact
+ * REFUSES rather than reporting a clean check of nothing; a stale shadow copy
+ * beside a real file is reported without refusing; and every non-.mjs file gets
+ * a strict second parse, because node --check is weaker on .ts and .js than on
+ * .mjs and the entrypoint was getting the weakest parse of the three.
+ *
+ * A pass still means "it parses", never "it starts". Nothing here runs a Deno
+ * isolate, and `crypto.randomUUID()` at module scope threw only when the isolate
+ * started, after typecheck, lint and build were all green.
  */
-let artifactLoads = true;
-const loadErrors = [];
-for (const f of files) {
-  if (!/\.(js|mjs)$/.test(f.path)) continue;
-  try {
-    execFileSync(process.execPath, ['--check', f.path], { stdio: 'pipe' });
-  } catch (err) {
-    artifactLoads = false;
-    loadErrors.push(`${f.path}: ${String(err.stderr ?? err.message).split('\n')[0]}`);
-  }
-}
+const loadCheck = checkArtifactLoads(process.cwd(), ARTIFACT_DIR);
+const artifactLoads = loadCheck.ok;
+
+/*
+ * Advisory findings are carried, not dropped. shadow-copy and
+ * weak-parse-coverage do not refuse -- a noisy gate gets switched off and is
+ * then absent for the case that matters -- but they are the reason a human
+ * reads this output at all, so they travel with the blocking ones.
+ */
+const loadErrors = loadCheck.findings.map(
+  (f) => `${f.kind} ${f.file}: ${f.detail}`,
+);
 
 const releaseRef = arg('--ref', 'origin/master');
 let headSha;
@@ -172,6 +185,42 @@ const verdict = assertPromotable({
   liveDrift,
 });
 
+/*
+ * IS THIS EVEN THE RIGHT TREE? The one question this gate could not answer.
+ *
+ * It compares HEAD against the release ref, and live against the RECORD. Both
+ * passed at 19:37 on 2026-09-16 while the deploy shipped nothing: version 22 to
+ * 23, byte-identical, clean success, because the checkout did not carry the
+ * branch. Neither question is "do the bytes about to ship differ from the bytes
+ * already serving", and that is the only one that catches it.
+ *
+ * scripts/check-edge-deploy.mjs could answer it and was invoked by nothing but
+ * its own test. Pass --live-dir <downloaded> and it is answered here, in the
+ * gate people actually run.
+ */
+const liveDirArg = arg('--live-dir');
+let treeCompared = false;
+let treeAdded = 0;
+let treeRemoved = 0;
+if (liveDirArg) {
+  try {
+    for (const f of files) {
+      const name = f.path.split('/').pop();
+      const livePath = path.join(liveDirArg, name);
+      const liveText = readFileSync(livePath, 'utf8');
+      // linesMissingFrom(a, b) is 'present in a, absent from b'. ADDED is therefore
+      // mine-not-in-live, and REMOVED is live-not-in-mine. I had these the wrong way
+      // round first and the gate cheerfully reported +9 -358 for a tree that was a
+      // strict superset of what was live.
+      treeAdded += linesMissingFrom(f.content, liveText).length;
+      treeRemoved += linesMissingFrom(liveText, f.content).length;
+    }
+    treeCompared = true;
+  } catch (err) {
+    console.error(`could not compare against --live-dir: ${err.message}`);
+  }
+}
+
 if (process.argv.includes('--json')) {
   console.log(JSON.stringify({ ...verdict, digest, driftChecked, loadErrors }, null, 2));
 } else {
@@ -190,8 +239,22 @@ if (process.argv.includes('--json')) {
         ? '  live drift none recorded yet, declared explicitly'
         : `  live drift ${liveDrift.ok ? 'none' : 'DRIFTED'}`,
   );
+  if (treeCompared) {
+    console.log(`  tree       +${treeAdded} -${treeRemoved} against the live artifact`);
+  } else {
+    console.log('  tree       NOT COMPARED against what is live. Download the function and');
+    console.log('             pass --live-dir. This is the check that catches the WRONG TREE,');
+    console.log('             and it is the one that was missing when v22 to v23 shipped nothing.');
+  }
   console.log('');
-  if (verdict.ok) {
+  if (treeCompared && treeAdded === 0 && treeRemoved === 0) {
+    console.log('REFUSED:');
+    console.log('  - nothing-would-change: the tree about to ship is identical to what is');
+    console.log('    already serving. A deploy now bumps the version, changes no bytes, and');
+    console.log('    reports success, which is exactly what v23 did. Either this is the wrong');
+    console.log('    checkout, or there is nothing to deploy.');
+    process.exitCode = 1;
+  } else if (verdict.ok) {
     console.log('DEPLOYABLE.');
   } else {
     console.log('REFUSED:');

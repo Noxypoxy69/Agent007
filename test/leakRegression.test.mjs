@@ -163,8 +163,8 @@ test('KNOWN GAP: a home path in its 8.3 alias is NOT recognised as identity', ()
    *
    * Windows gives one directory two names. On the machine this was found on:
    *
-   *   os.homedir()  C:\Users\DANNY GARCIA
-   *   os.tmpdir()   C:\Users\DANNYG~1\AppData\Local\Temp
+   *   os.homedir()  C:\Users\JANE DOE
+   *   os.tmpdir()   C:\Users\JANEDO~1\AppData\Local\Temp
    *   realpathSync.native() resolves BOTH to the same directory
    *
    * The 8.3 form contains no part of the long username, so the username and
@@ -250,21 +250,6 @@ function namesMachine(text, identity) {
     const u = user.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     //  /jane  \jane  ~jane  @jane   or   jane@
     if (new RegExp(`[/\\\\~@]${u}(?![a-z0-9_-])|(?<![a-z0-9_-])${u}@`).test(hay)) return user;
-    /*
-     * AND A MACHINE LABEL BUILT FROM THE NAME — `jane-win`, `jdoe_laptop`.
-     *
-     * THE FIRST VERSION OF THIS NARROWING DROPPED THIS SHAPE SILENTLY, which is
-     * the risk its own comment named and did not cover: separator-anchored
-     * cases were controlled for, a hyphenated label was not, and the fixtures
-     * contained one. `payloadGuard` classifies `jane-win` as a USERNAME leak and
-     * this matcher called it clean — the same question answered two ways in one
-     * repository.
-     *
-     * A DOT IS DELIBERATELY NOT A SEPARATOR HERE. Including it matched
-     * `test.mjs` for an operator called `test`, which is a filename in every
-     * directory of this project.
-     */
-    if (new RegExp(`(?<![a-z0-9_-])${u}[-_][a-z0-9]`).test(hay)) return user;
   }
 
   return null;
@@ -286,9 +271,6 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
     'from: runner@build-01',
     'home: ~runner/.ssh',
     'host DESKTOP-ABC123 reported',
-    // a machine label built from the name — the shape the first narrowing dropped
-    'worker runner-win reported',
-    'slot runner_laptop-3 registered',
   ]) {
     assert.notEqual(namesMachine(leak, me), null, `should have been flagged: ${leak}`);
   }
@@ -304,82 +286,167 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
   }
 });
 
-test('KNOWN COST: an english hyphenation is indistinguishable from a machine label', () => {
+test('KNOWN GAP: a machine label built from the name is NOT caught, and cannot be', () => {
   /*
-   * CHARACTERISATION, NOT APPROVAL, in the style of the two gaps above it.
+   * CHARACTERISATION, AND THE MEASUREMENT THAT KILLED THE OBVIOUS FIX.
    *
-   * `runner-up` and `jane-win` are the SAME SHAPE — a name, a hyphen, a word —
-   * and no lexical rule separates them. So catching the machine label costs a
-   * false positive on the hyphenation, for an operator whose username happens
-   * to be an english word. `root-cause` is the realistic one in this repository.
+   * `jane-win` is a real disclosure shape -- the operator's name with a suffix
+   * -- and this matcher does not catch it, because a username only counts after
+   * a path separator or beside an at-sign. I added the obvious rule for it
+   * (`name` followed by a hyphen or underscore) and measured it against the
+   * tree THIS suite now scans, which is src and docs as well as the fixtures.
+   * It reddens a clean repository for any operator called:
    *
-   * IT IS ACCEPTED RATHER THAN SOLVED, and the reason is the direction of the
-   * damage. Missing `jane-win` publishes a real operator's machine name for
-   * ever; flagging `runner-up` costs one fixture edit and says exactly which
-   * word did it. The first is silent, the second is loud.
+   *     node    -> node_modules          test  -> TEST_ONLY
+   *     work    -> work-tree             deploy -> deploy-check, deploy-gate
    *
-   * MEASURED AGAINST THE COMMITTED FIXTURES: adding this rule reddens NOTHING
-   * that was green. runner, root, admin, test and node all still scan clean
-   * against leakShapes.mjs; the only operator this newly flags is one whose
-   * name is actually in the file, which is the whole point.
+   * Those are ordinary identifiers in this codebase, not leaks. A gate that
+   * fires on a correct repo is the one people learn to skip, which is the exact
+   * failure the runner fix existed to undo -- so the rule came back out. The
+   * shape stays uncovered, deliberately, and this test is the record.
    *
-   * WHEN SOMEBODY FINDS A RULE THAT SEPARATES THEM, this test fails. Assert the
-   * hyphenation is clean, keep the label flagged, and say so in the handoff.
+   * WHAT DOES COVER IT: payloadGuard classifies `jane-win` as a USERNAME leak
+   * when scanning an outgoing payload, where over-flagging is safe because the
+   * cost is a redaction rather than a red suite. Two matchers, two cost
+   * functions, and that difference is the reason they are allowed to differ.
    */
-  const runner = { username: 'runner', hostname: '', homedir: '' };
-  assert.equal(namesMachine('the runner-up was not recorded', runner), 'runner',
-    'GAP CLOSED? if this is clean now, keep the label case flagged and say so');
-  assert.equal(namesMachine('runners up were not recorded', runner), null,
-    'no hyphen, no label: this must stay clean or the CI failure is back');
+  const jane = { username: 'jane', hostname: '', homedir: '' };
+  assert.equal(namesMachine('worker jane-win reported', jane), null,
+    'GAP CLOSED? if this is caught now, check it does not redden node/test/work/deploy');
+
+  // and the naive rule really would redden the tree — asserted, not asserted-about
+  const naive = (text, user) =>
+    new RegExp(`(?<![a-z0-9_-])${user}[-_][a-z0-9]`).test(String(text).toLowerCase());
+  assert.equal(naive('import x from "node_modules/y"', 'node'), true,
+    'the rejected rule no longer matches node_modules — re-measure before reinstating it');
+  assert.equal(naive('export const TEST_ONLY = 1', 'test'), true);
+  assert.equal(naive('worker jane-win reported', 'jane'), true,
+    'the rejected rule must still catch the shape, or this records the wrong reason');
 });
 
-test('KNOWN GAP: a username that collides with a path segment still reddens a clean repo', () => {
+test('KNOWN GAP: an operator whose name is a path segment reddens a clean tree', () => {
   /*
-   * THE HALF THE CI FIX DID NOT REACH, recorded because it is the same defect
-   * class and it is still live.
+   * THE RUNNER BUG, ONE DIRECTORY OVER, AND IT IS LIVE.
    *
-   * The fixtures deliberately contain leak examples with real-looking paths --
-   * `D:\build\artifacts\out` and `https://deploy:hunter2...` among them. The
-   * homedir and hostname rules are bare substrings, correctly, and a username
-   * sitting after a path separator is exactly what the matcher looks for. So an
-   * operator called `build` or `deploy` sees this suite go red on a repository
-   * with nothing wrong with it -- which is what happened to `runner`, one
-   * mechanism over.
+   * The comment above scannedFiles() excludes test/ because the controls there
+   * carry /home/runner and /root, and scanning them "would be red on every
+   * GitHub runner and on any container running as root -- the exact failure
+   * this guard has just been fixed for, reintroduced one directory over".
    *
-   * NOT FIXED HERE because the fix is to change the fixture VALUES, and those
-   * values are asserted by the MUST_LEAK cases above; editing them is a
-   * separate change with its own review. Filed so the next person who sees red
-   * on a clean checkout reads this instead of bisecting.
+   * That reasoning is right and it was applied to test/ only. src/ and docs/
+   * were added to the scan WITHOUT the same measurement, and they carry the
+   * same shape -- not as controls, but as ordinary documentation of Windows
+   * paths. Measured 2026-09-17 against the real tree:
+   *
+   *   node   src/argv.mjs     "Program Files\\nodejs\\node.exe"
+   *   work   src/redact.mjs   "`D:\\work\\repo` has"
+   *   build  leakShapes.mjs   "D:\\build\\artifacts"
+   *   deploy leakShapes.mjs   "https://deploy:hunter2..."
+   *
+   * `node` and `work` are NEW: they became red when the scan widened. An
+   * operator with any of these usernames sees this suite fail on a clean
+   * checkout, and `node` is not a far-fetched name for a service account.
+   *
+   * NOT FIXED HERE because the fix is either a marker comment exempting
+   * documentation lines -- which scannedFiles() already names as the bigger
+   * change it declined -- or editing values the MUST_LEAK cases assert. Filed
+   * so the next person reading red on a clean tree finds this instead of
+   * bisecting, which is the whole reason the runner failure cost a day.
    */
-  const text = fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
-  for (const colliding of ['build', 'deploy']) {
-    assert.notEqual(
-      namesMachine(text, { username: colliding, hostname: '', homedir: '' }), null,
-      `GAP CLOSED for ${colliding}? assert null here and say so in the handoff`,
-    );
+  const names = ['build', 'deploy', 'node', 'work'];
+  for (const colliding of names) {
+    const hit = scannedFiles().some((f) =>
+      namesMachine(fs.readFileSync(f, 'utf8'), { username: colliding, hostname: '', homedir: '' }));
+    assert.equal(hit, true,
+      `GAP CLOSED for ${colliding}? assert false here and say so in the handoff`);
   }
-  // and the ones that are genuinely fixed, asserted so a widening shows up here.
-  // `test` is the dot case: treating `.` as a label separator matches `test.mjs`,
-  // a filename in every directory of this project, and reddens a clean repo again.
-  for (const fine of ['runner', 'root', 'test', 'node', 'admin']) {
-    assert.equal(namesMachine(text, { username: fine, hostname: '', homedir: '' }), null,
-      `a clean repo went red for an operator called ${fine}`);
+  // and the one the CI failure was actually about stays fixed
+  for (const fine of ['runner', 'root', 'admin', 'ci']) {
+    const hit = scannedFiles().some((f) =>
+      namesMachine(fs.readFileSync(f, 'utf8'), { username: fine, hostname: '', homedir: '' }));
+    assert.equal(hit, false, `a clean tree went red for an operator called ${fine}`);
   }
 });
 
-test('this suite committed no real identity: the fixtures name nobody on this machine', () => {
-  /*
-   * The guard on the guard. If somebody ever pastes a real payload into
-   * leakShapes.mjs, this fails on the machine it was pasted from — which is the
-   * machine whose owner would be disclosed.
+/*
+ * WHICH FILES ARE SCANNED, AND WHY NOT ALL OF THEM.
+ *
+ * This check read leakShapes.mjs and nothing else, on the reasonable theory
+ * that a pasted payload lands in a fixture. The disclosure it missed was
+ * somewhere else entirely: the operator's real home directory, and its real 8.3
+ * alias, written into a comment in THIS file, plus the same path in src/redact
+ * and src/collect and a worktree convention in docs. None of it was a pasted
+ * payload. All of it was somebody documenting a bug accurately, which is the
+ * normal way a real path gets committed and is not going to stop happening.
+ *
+ * So src and docs are scanned too. test/ is NOT, and the reason is load-bearing
+ * rather than laziness: the controls for this very guard must contain
+ * identity-shaped strings. leakRegression.test.mjs carries /home/runner and
+ * DESKTOP-ABC123 as the positive control for the runner fix, and three /root
+ * paths live elsewhere under test/. Scanning test/ would therefore be red on
+ * every GitHub runner and on any container running as root -- the exact failure
+ * this guard has just been fixed for, reintroduced one directory over. Measured,
+ * not assumed.
+ *
+ * THE COST IS NAMED: a real path committed into a test file outside this one is
+ * still not caught. The fix for that is a marker comment exempting control lines
+ * so the scan can cover everything, and it is a bigger change than this one.
+ */
+function scannedFiles() {
+  const files = [new URL('./fixtures/leakShapes.mjs', import.meta.url)];
+  for (const dir of ['src', 'docs']) {
+    const base = new URL(`../${dir}/`, import.meta.url);
+    for (const name of fs.readdirSync(base, { recursive: true })) {
+      if (/\.(mjs|js|md)$/.test(name)) files.push(new URL(name.split(/[\\/]/).join('/'), base));
+    }
+  }
+  return files;
+}
+
+test('this suite committed no real identity: the tree names nobody on this machine', () => {  /*
+   * The guard on the guard. If somebody ever pastes a real payload, or writes a
+   * real path into a comment, this fails on the machine it came from -- which is
+   * the machine whose owner would be disclosed.
    */
-  const text = fs.readFileSync(new URL('./fixtures/leakShapes.mjs', import.meta.url), 'utf8');
-  const hit = namesMachine(text, machineIdentity());
-  assert.equal(hit, null, `a real identity value is present in the committed fixtures: ${hit}`);
-  // And the 8.3 alias of the home directory, which is the spelling that would
-  // slip in through a copied temp path.
+  const me = machineIdentity();
+  // The 8.3 alias of the home directory, which is the spelling that slips in
+  // through a copied temp path and contains no part of the long name.
   const short = os.tmpdir().split(/[\\/]/).find((seg) => seg.includes('~'));
-  if (short) {
-    assert.equal(text.toLowerCase().includes(short.toLowerCase()), false, 'a real 8.3 identity segment is present in the committed fixtures');
+
+  for (const file of scannedFiles()) {
+    const text = fs.readFileSync(file, 'utf8');
+    const where = file.pathname.split('/').slice(-2).join('/');
+    const hit = namesMachine(text, me);
+    assert.equal(hit, null, `a real identity value is committed in ${where}: ${hit}`);
+    if (short) {
+      assert.equal(text.toLowerCase().includes(short.toLowerCase()), false, `a real 8.3 identity segment is committed in ${where}`);
+    }
   }
+});
+
+test('CONTROL: the widened scan really does reach src and docs', () => {
+  /*
+   * Without this, deleting a directory from scannedFiles leaves the test above
+   * green, and a check that scans fewer files than it claims is the hollow kind:
+   * it passes because it looked nowhere, and reads exactly like it passed
+   * because there was nothing to find.
+   */
+  const names = scannedFiles().map((u) => u.pathname);
+  assert.ok(names.some((n) => n.endsWith('fixtures/leakShapes.mjs')), 'the fixture must be scanned');
+  assert.ok(names.some((n) => n.includes('/src/redact.mjs')), 'src must be scanned -- it held a real home path');
+  assert.ok(names.some((n) => n.includes('/docs/')), 'docs must be scanned -- it held the worktree convention');
+  assert.ok(names.length > 20, `expected the scan to reach the whole of src and docs, got ${names.length} files`);
+});
+
+test('CONTROL: a real path in a scanned file IS caught, for each identity field', () => {
+  /*
+   * The scan above passes trivially against a matcher that matches nothing. This
+   * fires it first. The identities are invented; the shapes are the real ones
+   * that were actually committed -- a Windows home in a comment, an 8.3 alias,
+   * a hostname.
+   */
+  const jane = { username: 'Jane Doe', hostname: 'DESKTOP-ZZQQXX', homedir: 'C:\\Users\\JANE DOE' };
+  assert.equal(namesMachine(' *   os.homedir()  C:\\Users\\JANE DOE', jane), 'C:\\Users\\JANE DOE');
+  assert.equal(namesMachine('reported by DESKTOP-ZZQQXX at noon', jane), 'DESKTOP-ZZQQXX');
+  assert.equal(namesMachine('nothing identifying in this sentence at all', jane), null);
 });

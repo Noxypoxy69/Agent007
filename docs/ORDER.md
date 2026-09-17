@@ -54,7 +54,24 @@ fresh version number, which is what a successful deploy looks like from outside.
 **So the merge is not queued behind a deploy. The merge IS the deploy**, and any
 tree that ships must contain `fifth-hosted-path` or it goes backwards.
 
-**1. Merge THREE branches and deploy the result.** — code-c *(assigned)*
+**1. ~~Merge THREE branches and deploy the result.~~ DONE — verified 2026-09-17.** — was code-c
+**All six branches are ancestors of master `6c8e181`**, checked with
+`git merge-base --is-ancestor` rather than read off a list: `code-b/fifth-hosted-path`
+(`bb899fc`), `work/recover-orphan-branches` (`1a97aa0`), `work/support-modules`
+(`8793112`), `b/attempt-record` (`a816ae4`), `work/reviewer-runtime` (`e992bec`),
+and `code-b/lease-wiring` (`9ba9c96`) — the one this entry specifically warned to
+check by hand rather than assume.
+
+**THIS ENTRY STAYED RED AFTER IT WAS GREEN, AND THAT IS THE EXPENSIVE PART.** It
+reads "nothing below can start until the pipeline is on master", so item 2 has
+been blocked on paper while being unblocked in fact, for hours, with its assignee
+dark since 12:30Z. Nobody rechecked because the document said not to bother. A
+blocker is a claim about the world and goes stale like any other; re-measure it
+before believing it, especially when it is the reason something is not being
+worked on.
+
+*(original brief kept below)*
+**1a. Merge THREE branches and deploy the result.** — was code-c
 `code-b/fifth-hosted-path` (what is live, 14 ahead), then
 `work/recover-orphan-branches` (11 ahead), then `work/support-modules`
 (22 ahead, ends at `50f28a2`). Each contains master entire, so none drops
@@ -66,7 +83,20 @@ Nothing below can start until the pipeline is on master, because the worker
 cannot call what is on a branch. *This is first and it is nobody's favourite
 task, which is exactly why it gets skipped.*
 
-**2. Wire the lease to the pipeline.** — code-c *(assigned)*
+**2. Wire the lease to the pipeline.** — UNBLOCKED 2026-09-17, needs an owner
+*(was code-c, dark since 12:30Z; the autonomous-loop lane is code-a's as of the
+16th, and this is lease and fence semantics, so it is not c8's to take)*
+
+**DIAGNOSED 2026-09-17, so whoever picks it up does not start at the database.**
+`attempts` holds 0 rows, and it is not a silent write failure. `runAttempt` — the
+only path that writes an attempt record — is imported by exactly one file,
+`bin/agentbridge-attempt.mjs`, and **nothing spawns that binary.** Zero references
+from `daemon.mjs`, `worker.mjs`, `workerLoop.mjs`, `dispatch.mjs`, `runtime.mjs`
+or `bin/agentbridge.mjs`; the only mentions anywhere are its own `package.json`
+bin entry, `moduleGraph.mjs`, a comment in `agentbridge-review.mjs` and this
+document. The writer is fine and is covered by `test/attemptPipeline.test.mjs`
+and `test/unattendedLoop.test.mjs`. The row is missing because the spawn was
+never built, which is exactly this item and nothing else.
 claim → `runAttempt` → return. The daemon owns the lease, never the process it
 starts. `bin/agentbridge-attempt.mjs` is a working caller of everything except
 those three verbs.
@@ -90,13 +120,53 @@ lease, fence — plus all three verdicts stored separately: what the agent
 claimed, what the machine verified, what the reviewer decided. Never one
 `status` column. *Small, and four separate specs bottom out on it.*
 
-**4. A reviewer runtime.** — code-c
-The review lease exists in SQL; nothing claims it. Needs a runner that claims a
-review lease, builds the packet, runs a reviewer in a FRESH workspace, records
-accept / fix-required / reject. Reviewer may not mutate code; a fixer may not
-resolve its own finding; `FIX_REQUIRED` creates a separate task, not a retry
-inside the same attempt. Without this, step 7 is "machine-verified" and not
-"independently reviewed".
+**4. A reviewer runtime.** — code-a *(built; SQL applied; ROUTES NOT DEPLOYED)*
+Branch `work/reviewer-runtime`, head `4b655c8`, based on `work/support-modules`
+at `2e65ed1`. Suite 1449 -> 1497 tests, 0 failures either end.
+
+`src/reviewRunner.mjs` claims the lease, builds the packet, runs a reviewer in a
+fresh worktree at the REVIEWED commit, and submits under the token that
+authorised it. `src/reviewDecision.mjs` holds everything that decides, so the
+suite can import it. The lease is NOT re-implemented in JS -- `claim_review`
+decides and the runner honours refusals it did not predict, per the owner ruling
+that keeps `src/runtime.mjs` orphaned.
+
+**APPLIED TO PRODUCTION**, and the second gap was the one worth finding: a review
+could be claimed, renewed and reaped and COULD NOT BE RECORDED. `submit_review`
+did not exist. Migration `20260916180034` is that fenced write;
+`20260916180146` implements Danny's standing ruling that `claim_task` must
+refuse while a live review lease exists -- which stopped being optional the
+moment `claim_review` acquired a caller. Both verified by probe in transactions
+that rolled back, once before applying and once after.
+
+**NOT DEPLOYED, AND THIS IS THE WHOLE REMAINING GAP.** The two edge routes
+(`/review/claim`, `/review/submit`) exist only on that branch. The database can
+record a review and nothing outside can reach it. The CLI names a 404 as
+`route-absent` rather than as a credential or network fault, so it fails
+honestly, but it fails.
+
+**0b IS STALE — MEASURED 2026-09-16 evening.** Production went 21 -> 22 -> 23
+today from at least two places. The feared regression did NOT happen: the
+deployed entrypoint still carries the single-transaction claim path, the rpc
+shape check and the refusal-reason mapping, checked by name. Two things to carry
+forward. Compare NORMALISED: the deployed bundle is CRLF and the repo is LF, so
+a raw diff reports all 1813 lines of `index.ts` changed and means nothing. And
+v23 is byte-identical to v22 -- a successful deploy that shipped NOTHING,
+because it ran from a checkout without the branch. `scripts/check-edge-deploy.mjs`
+refuses a deploy that removes a line and says so when one would change nothing.
+
+**ONE DESIGN QUESTION I REFUSED TO DECIDE QUIETLY.** On `fix_required` the
+reviewed task goes to `blocked` and depends on the fix task. What happens to it
+once the fix is ACCEPTED is NOT implemented: dependency unlock returns it to the
+pool to be re-attempted from its ORIGINAL base, throwing the fix away, or
+accepting the fix should accept the original. Both defensible. Needs Danny or
+whoever holds item 1.
+
+**THE AUTHORISATION FOR THE MIGRATION IS NOT IN THE LEDGER.** Danny said apply,
+in chat. `resolve_owner_decision` returns `no_decision` for a production
+migration in this context, and a worker cannot record it -- owner and recorder
+must be the same person, which is the mechanism that correctly refused c8 this
+morning. Item 7's complaint, with one more instance.
 
 **5. Canonical identity and recipient validation.** — me *(built, awaiting 1)*
 NEW to this section; it was in "not on the list" this morning and the ingest is
@@ -220,6 +290,60 @@ confirmed proposal assigned work without a human. The half after it is unproven.
 
 ---
 
+## The self-correction ingest — absorbed 2026-09-16, NOT started
+
+Danny handed over `agent_bridge_self_correction_oss_code_ingest_1.md` on the
+evening of the 16th and asked whether it was in this map. It was not, and that
+is recorded rather than quietly fixed: the pack is a roadmap, and a roadmap that
+lives only in an upload is a roadmap nobody is working from.
+
+Absorbed at `docs/SELF_CORRECTION_INGEST.md`, with every claim about what exists
+measured against master rather than remembered. **It is a different axis from
+`RELIABILITY_INGEST.md`** -- that one asks how work survives a crash, this one
+asks how a wrong patch fails to become a trusted patch. They meet at the attempt
+record and nowhere else, so neither substitutes for the other.
+
+**The honest position: twelve modules already implement the shape under
+different names**, so this is reconciliation, not greenfield. What does not exist
+at all is the evidence layer: no `AttemptStep`, no `FailureClass`, no clean-SHA
+verification, no `VerificationProof`. Nothing has been copied from any upstream
+project yet -- verified by search -- and `THIRD_PARTY_CODE.md` now exists empty
+so the first copy lands with its attribution instead of after it.
+
+**SC1. One real attempt row.** — RESOLVED TO ITEM 2; not a separate task
+I wrote this as "merged and unreached, or reached and failing silently, and
+nobody has established which". Established 2026-09-17: **unreached.** `runAttempt`
+is reachable only from `bin/agentbridge-attempt.mjs` and nothing spawns it, so no
+code path in the running system can produce an attempt row. The writer is not
+broken and needs no work. SC1 is therefore item 2 wearing a different name, and
+listing it twice would have had two people converge on a database that was never
+the problem.
+
+**SC2. `AttemptStep` persistence, then `FailureClass`.** — after SC1
+The trajectory, then the taxonomy. Section 4 of the pack begins with "classify",
+so the repair loop cannot be written before the classes exist. Every failed
+validation produces a typed failure artifact or the loop is reading prose.
+
+**SC3. Clean-SHA verification and `VerificationProof`.** — independent of SC1
+The one item worth pulling forward, because it is a live hole rather than a
+missing feature. **Nothing in this repository does a fresh checkout of an exact
+SHA and re-runs the suite.** `deployGate.mjs` checks that a commit was promoted
+and asks the far end what it serves; it never establishes that the commit passes
+from a clean tree. So `worktree passing != promotable` is currently unenforced,
+and the sibling repo grew `check:clean-checkout` because that exact gap shipped a
+route importing a module that was never committed.
+
+**SC4 onward.** Agentless localization, the typed reviewer loop
+(`ReviewFinding`, no plain "looks good"), Symphony reconciliation and bounded
+concurrency, mechanical invariants whose lint text says how to fix them, the
+`agentbridge inspect` surface, failure injection, and multi-candidate patches
+last. Ordering and rationale in the ingest doc.
+
+**Owner: the autonomous-loop lane.** Danny moved auto and dispatcher to code-a
+on the evening of the 16th. This sits squarely in that lane and is code-a's to
+sequence; it is written down here so it is sequenced by somebody rather than by
+nobody.
+
 ## Then harden it — the ingest's Phase B
 
 None of this is startable before 9, and all of it is cheaper than discovering
@@ -288,6 +412,25 @@ converges to one correct durable result with no chat open. Not before.
     harness, neither of which exists.
 
 ---
+
+## What reporting to a dead inbox looks like, since item 5 predicted it
+
+Code-a sent five coordination messages today -- three to `code-b`, two to
+`code-c`. Every one went to a session that was ALREADY OFFLINE: code-b last seen
+17:19, code-c last seen 12:30, the earliest message at 17:43. Nobody read any of
+them, and nothing told the sender.
+
+`send_message` validates that `to_agent` is a KNOWN actor. It does not check
+that it is a LIVE one, and `list_agents` was consulted once at the start of the
+session rather than at each send. That is exactly item 5's "a message to a name
+nobody reads is undetectable", and the twenty-nine it counts are now
+thirty-four.
+
+The cheap fix is not a new subsystem: it is for `send_message` to refuse, or at
+minimum warn, when the recipient's last heartbeat is older than the staleness
+window -- `offline` is already distinguished from `unknown`, and the sender is
+simply never told which one it got. Until then, anything that matters goes in
+the commit or in this file, not in an inbox.
 
 ## Not on the list
 

@@ -24,8 +24,8 @@ process**: the link lets you see and message the session, it does not start one.
 | **b6** = B | `wt-release-verify` | claims | `social-sparks-app-b6` | `07ec32f` |
 
 The Bridge stores worktree **names**, not absolute paths. Danny has pasted
-`C:\Users\DANNY GARCIA\Documents\agentbridge-b12` in this session, so the
-convention is `C:\Users\DANNY GARCIA\Documents\<worktree>` — treat that as very
+`C:\Users\JANE DOE\Documents\agentbridge-b12` in this session, so the
+convention is `C:\Users\JANE DOE\Documents\<worktree>` — treat that as very
 likely and not as verified for every row.
 
 ## To restart one
@@ -40,8 +40,8 @@ takes the most recent without asking.
 Claude Code keeps one folder per working directory under
 `%USERPROFILE%\.claude\projects\`, with a `.jsonl` per session. The folder name
 is the working directory with its separators flattened — on this Linux container
-`/home/user/social-sparks-app` becomes `-home-user-social-sparks-app`. **I have
-not verified how Windows drive letters and the space in `DANNY GARCIA` are
+`/home/<user>/social-sparks-app` becomes `-home-<user>-social-sparks-app`. **I have
+not verified how Windows drive letters and the space in `JANE DOE` are
 escaped**, so list that directory rather than constructing the name; there will
 be one folder per worktree above.
 

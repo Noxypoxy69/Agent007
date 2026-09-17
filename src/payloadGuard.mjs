@@ -13,7 +13,7 @@
  *      name, twice per session
  *   2. the SAME path again in `git.worktree`, spelled with forward slashes,
  *      because git and the OS disagree about separators
- *   3. `machine.label` "danny-win" and `machine.hostname` "DESKTOP-VPIUDEF"
+ *   3. `machine.label` "jane-win" and `machine.hostname` "DESKTOP-ABC123"
  *
  * The payload is clean today, and THAT IS THE PROBLEM THIS FILE EXISTS FOR.
  * Every one of those arrived as a side effect of reporting something else —
@@ -65,8 +65,8 @@ const MIN_NAME = 3;
  *
  * This was found by the regression fixture rather than by reasoning, which is
  * the point of having one. Leak 3 in the real incident was machine.label
- * "danny-win" — the operator's first name with a suffix. An identity of
- * "Danny Garcia" does not appear in that string, so a full-username substring
+ * "jane-win" — the operator's first name with a suffix. An identity of
+ * "Jane Doe" does not appear in that string, so a full-username substring
  * test scans it clean. This scanner would have missed one of the three leaks it
  * was written to catch.
  *

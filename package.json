@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "agentbridge": "./bin/agentbridge.mjs",
-    "agentbridge-attempt": "./bin/agentbridge-attempt.mjs"
+    "agentbridge-attempt": "./bin/agentbridge-attempt.mjs",
+    "agentbridge-review": "./bin/agentbridge-review.mjs"
   },
   "engines": {
     "node": ">=20"

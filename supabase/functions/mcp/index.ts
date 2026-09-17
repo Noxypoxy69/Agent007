@@ -10,7 +10,7 @@ import {
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
-  ownTask, ownTasks,
+  ownTask, ownTasks, validateSessionId,
 } from './_shared.js';
 
 /**
@@ -119,6 +119,140 @@ async function patch(pathAndQuery, body) {
   });
   if (!res.ok) throw new Error(`supabase-write-failed:${res.status}:${(await res.text()).slice(0, 200)}`);
   return res.json();
+}
+/**
+ * ACTIVITY IS LIVENESS, AND UNTIL NOW ONLY A DAEMON COULD SAY SO.
+ *
+ * THE DEFECT. `observedCapacity` reports a registration offline once its
+ * heartbeat is older than the stale window, and the ONLY thing that moved a
+ * heartbeat was `register-session --watch` -- a process the worker starts as a
+ * child of its own shell. When the session ends the watcher dies with it, and
+ * nothing supervises watchers, so nothing restarts one and nothing notices.
+ *
+ * Measured on 2026-09-16: every registration row on this bridge had
+ * `heartbeat_at` exactly equal to `updated_at` -- registered once, never
+ * refreshed. code-d was 163 minutes stale while it was merging to master,
+ * code-c read offline while it was messaging, and code-b sat stale for six
+ * hours while making authenticated calls to this very function. The roster was
+ * not describing agents. It was describing which daemons happened to be alive.
+ *
+ * So a worker that is demonstrably talking to the Bridge is now recorded as
+ * alive by the act of talking. The watcher becomes an optimisation rather than
+ * the only source of truth.
+ *
+ * WHY ONLY THESE CALLS, AND THIS IS THE PART THAT CONSTRAINS THE FIX.
+ *
+ * It would be easy to stamp liveness on every authenticated request. That
+ * would be wrong. A coordinator token can name any agent it likes in
+ * `from_agent`, so stamping on a coordinator call would let the command centre
+ * forge liveness for a worker that died hours ago -- a roster that cannot tell
+ * a live worker from a coordinator talking about one is exactly the control
+ * this project keeps discovering it does not have.
+ *
+ * This is therefore called ONLY where a registration token was presented AND
+ * the caller named a session that is in the registry: /task, /return, /wait and
+ * /review. That is the same evidence /register itself acts on.
+ *
+ * KNOWN LIMIT, STATED RATHER THAN DISCOVERED. The registration token is SHARED
+ * by every worker -- the comment on `registered_by` says so plainly -- so one
+ * worker can refresh another's heartbeat by naming its session. That does not
+ * widen the trust surface, because naming another session already returns that
+ * session's tasks through /task, but it does mean this proves "somebody holding
+ * the worker token spoke for this session", not "this session is alive". Per
+ * agent tokens are what would close it.
+ *
+ * FAILURE IS SILENT ON PURPOSE. A heartbeat is a side effect of the real
+ * request. If the stamp fails, the answer the caller asked for is still
+ * correct, and turning a successful return into an error because a bookkeeping
+ * write failed would be a worse bug than the one this fixes.
+ */
+/**
+ * A NEW SESSION RETIRES THIS AGENT'S DEAD SEATS ON THIS MACHINE.
+ *
+ * THE DEFECT. Registration upserts on `session_id`, but identity is
+ * `agent_id`. Every new session of the same agent therefore ADDS a row rather
+ * than replacing one, and nothing ever removes the old one -- rows do not
+ * expire, they only go stale. So one agent accumulates a seat per session it
+ * has ever had.
+ *
+ * That is not cosmetic. `resolveLiveAgent` refuses with `ambiguous-session`
+ * when an agent has more than one candidate seat, so the accumulated debris
+ * eventually stops the agent being assignable at all. On 2026-09-16 code-b had
+ * two seats, both stale, and clearing one needed direct SQL because
+ * `unregister-session` exits 0 without touching the hosted row when it is run
+ * from a machine that did not create it.
+ *
+ * ONLY STALE SEATS, AND ONLY ON THE SAME MACHINE. Both halves are load-bearing.
+ *
+ * A LIVE second seat is not debris -- one agent can legitimately hold two
+ * worktrees at once, and deleting the other one would silently destroy a
+ * working registration. Ambiguity between two LIVE seats is a real conflict
+ * that a human should see, and `resolveLiveAgent` already refuses it loudly;
+ * quietly deleting one would replace a visible refusal with an invisible
+ * choice, which is the worse of the two.
+ *
+ * And a row belonging to the same agent on a DIFFERENT machine is not this
+ * machine's to retire. `guard_session_owner` already enforces that ownership on
+ * (agent_id, machine_id); this respects the same boundary rather than inventing
+ * a second, weaker one beside it.
+ *
+ * FAILURE IS SILENT, for the same reason as touchLiveness: this is cleanup
+ * attached to a registration that has already succeeded, and failing the
+ * registration because the tidying failed would break the thing that works to
+ * report the thing that does not.
+ */
+async function retireStaleSeats(row) {
+  const agentId = typeof row?.agent_id === 'string' ? row.agent_id : '';
+  const machineId = typeof row?.machine_id === 'string' ? row.machine_id : '';
+  const keep = typeof row?.session_id === 'string' ? row.session_id : '';
+  if (!agentId || !machineId || !keep) return [];
+
+  try {
+    const rows = await get(
+      'session_registrations?select=*'
+      + `&agent_id=eq.${encodeURIComponent(agentId)}`
+      + `&machine_id=eq.${encodeURIComponent(machineId)}`,
+    );
+    const now = new Date().toISOString();
+    const retired = [];
+    for (const r of rows) {
+      if (!r || r.session_id === keep) continue;
+      if (isLive(r, { now })) continue;
+      if (await removeSeat(r.session_id)) retired.push(r.session_id);
+    }
+    return retired;
+  } catch {
+    return [];
+  }
+}
+
+/** DELETE one registration row. Returns whether the far end confirmed it. */
+async function removeSeat(sessionId) {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!id) return false;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/session_registrations?session_id=eq.${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: restHeaders({ prefer: 'return=minimal' }) },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function touchLiveness(sessionId) {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!id) return false;
+  try {
+    const rows = await patch(
+      `session_registrations?session_id=eq.${encodeURIComponent(id)}`,
+      { heartbeat_at: new Date().toISOString() },
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -858,8 +992,48 @@ function coordinatorStore(label) {
     },
 
     async sendMessage(m) {
-      const v = validateMessage(m);
+      /*
+       * THE ROSTER IS FETCHED, AND UNTIL NOW IT WAS NOT.
+       *
+       * validateMessage has taken a `sessions` option since it was written, and
+       * this -- its only caller -- never passed one. So the "unknown recipient
+       * is refused" check has never run in production: the one branch that
+       * could refuse an unreadable address was unreachable from the only path
+       * that reaches it. A guard whose caller withholds its input is not a
+       * weaker guard, it is an absent one.
+       *
+       * The clock goes with it. Without `now` liveness cannot be computed, and
+       * validateMessage says so in a note rather than staying quiet, because
+       * silence there is indistinguishable from "the recipient is fine".
+       */
+      const now = new Date().toISOString();
+      let sessions = [];
+      try {
+        const regs = await get('session_registrations?select=*');
+        sessions = regs.map((r) => ({
+          agent_id: r.agent_id, session_id: r.session_id, lane_id: r.lane_id,
+          capacity: r.capacity, heartbeat_at: r.heartbeat_at,
+        }));
+      } catch (e) {
+        /*
+         * A ROSTER WE COULD NOT READ MUST NOT REFUSE THE MESSAGE. Passing an
+         * empty array would make every recipient look unknown and turn a
+         * registry hiccup into a total coordination outage. Passing null skips
+         * the recipient checks entirely, and the note below says the check did
+         * not happen -- an unchecked send is reported, never silently blessed.
+         */
+        sessions = null;
+      }
+
+      const v = validateMessage(m, { sessions, now });
       if (!v.ok) return { ok: false, errors: v.errors };
+
+      const notes = [...(v.notes ?? [])];
+      if (sessions === null) {
+        notes.push('the roster could not be read, so the recipient was not checked for '
+          + 'existence or liveness; this message may be addressed to nobody');
+      }
+
       const [row] = await write('messages', {
         task_id: m.task_id ?? null,
         from_agent: m.from_agent,
@@ -867,7 +1041,12 @@ function coordinatorStore(label) {
         type: m.type,
         body: m.body,
       });
-      return { ok: true, message: row };
+
+      /*
+       * THE NOTE TRAVELS WITH THE SUCCESS. `ok: true` on its own is what let
+       * five reports land in a dead inbox and read as delivered.
+       */
+      return notes.length ? { ok: true, message: row, notes } : { ok: true, message: row };
     },
 
 
@@ -1059,6 +1238,25 @@ function validateRegistration(b) {
   if (session_id && agent_id && session_id === agent_id) {
     errors.push('session_id must not equal agent_id');
   }
+  /*
+   * AND IT MUST NOT BE NAMED AFTER SOMEBODY ELSE. Its sibling above catches the
+   * defaulted identity; this catches the borrowed one, which is worse because it
+   * looks deliberate.
+   *
+   * MEASURED, NOT HYPOTHETICAL: social-sparks-app-c8 registered as code-b, so
+   * t-loop-proof -- the first end-to-end loop this system ever ran -- is stored
+   * with returned_by "social-sparks-app-c8" and reads on its face as c8's work.
+   * The registration mapped to code-b correctly, so a resolver got the right
+   * answer; the damage was to every human and every log line that reads the
+   * session id and believes it, which is most of them.
+   *
+   * WIRED 2026-09-17 after checking what it would refuse rather than guessing:
+   * of the five registrations then on file, exactly one fails -- that one -- and
+   * it is offline. A returning c8 must rename its session, and the refusal says
+   * so in those words.
+   */
+  const borrowed = session_id && agent_id ? validateSessionId(session_id, agent_id) : null;
+  if (borrowed) errors.push(borrowed);
   if (!str(b?.machine_id)) errors.push('machine_id is required');
 
   const capacity = str(b?.capacity) ?? 'idle';
@@ -1214,6 +1412,9 @@ Deno.serve(async (request) => {
         'session_registrations?on_conflict=session_id', v.row,
         'resolution=merge-duplicates,return=representation',
       );
+
+      // A new session retires this agent's dead seats here. See retireStaleSeats.
+      const retired = await retireStaleSeats(row);
       return json({
         ok: true,
         session_id: row?.session_id,
@@ -1221,6 +1422,7 @@ Deno.serve(async (request) => {
         capacity: row?.capacity,
         heartbeat_at: row?.heartbeat_at,
         verification_state: row?.verification_state,
+        retired_seats: retired,
       });
     } catch (e) {
       const detail = String(e?.message ?? e);
@@ -1301,6 +1503,9 @@ Deno.serve(async (request) => {
         detail: `session "${claimed}" is not registered; register before returning work`,
       }, 409);
     }
+
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(row.session_id);
 
     const verdict = canReturn(task, { agent_id: row.agent_id, session_id: row.session_id },
       { headSha: body?.head_sha });
@@ -1407,6 +1612,134 @@ Deno.serve(async (request) => {
     return json({ ok: true, task: updated });
   }
 
+  // ── the REVIEWER's two verbs ─────────────────────────────────────────────
+  /*
+   * THE REVIEW LEASE HAS EXISTED SINCE 2026-09-15 AND NOTHING HAS EVER CLAIMED
+   * IT. claim_review, renew_review_lease and expire_dead_reviews were written,
+   * granted and scheduled with no caller anywhere -- the migration that added
+   * them says so itself. These two routes are the caller.
+   *
+   * THEY TAKE A REGISTRATION TOKEN, the same credential a worker already holds,
+   * and NOT a fifth token class. A reviewer is a registered session doing a
+   * review; the credential says "this machine is one of ours", and every rule
+   * that decides whether THIS session may review THIS task lives in
+   * claim_review: the work must be 'returned', the returning session may not
+   * review its own work, and a live lease held by somebody else refuses. None
+   * of those is re-implemented here, because a copy of a rule is a copy that
+   * can disagree, and this is the one rule whose violation leaves no trace --
+   * an accepted task does not record who reviewed it against who wrote it.
+   *
+   * SO THIS FILE DECIDES NOTHING. It authenticates, resolves the session from
+   * the registry rather than from the body, forwards, and maps a refusal to a
+   * status. Everything that judges the work is in src/reviewRunner.mjs and
+   * src/reviewDecision.mjs, where the test suite can import it -- a guard that
+   * cannot be imported is a guard nobody has watched fail.
+   */
+  if (path === '/review/claim' || path === '/review/submit') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let regLabel = null;
+    try {
+      regLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!regLabel) return json({ error: 'unauthorized' }, 401);
+
+    let body;
+    try { body = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const taskId = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
+    if (!taskId) return json({ error: 'invalid_request', detail: 'task_id is required' }, 400);
+
+    /*
+     * THE REVIEWER IS RESOLVED FROM THE REGISTRY, NOT TAKEN FROM THE BODY.
+     * Same rule as /return: a session that is not registered cannot review
+     * anything, and a caller does not get to name itself. It matters more here
+     * than there -- claim_review's self-review refusal compares this string to
+     * returned_by, so a caller that could choose it could review its own work
+     * by typing a different name.
+     */
+    const claimed = typeof body?.reviewer_session === 'string' ? body.reviewer_session.trim() : '';
+    const regs = await get('session_registrations?select=*');
+    const row = regs.find((r) => r?.session_id === claimed);
+    if (!row) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${claimed}" is not registered; register before reviewing work`,
+      }, 409);
+    }
+
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(row.session_id);
+
+    if (path === '/review/claim') {
+      const seconds = Number.isInteger(body?.lease_seconds) ? body.lease_seconds : 1800;
+      const claimed_ = await rpc('claim_review', {
+        p_task_id: taskId,
+        p_reviewer_session: row.session_id,
+        p_lease_seconds: seconds,
+      });
+      if (!claimed_.ok) {
+        return json({
+          error: 'review-claim-refused',
+          reason: claimed_.reason ?? null,
+          detail: claimed_.detail ?? null,
+        }, 409);
+      }
+      return json(claimed_);
+    }
+
+    /*
+     * THE FENCED SUBMIT. The token travels with the decision and submit_review
+     * compares it inside the write.
+     *
+     * A MALFORMED TOKEN IS 409, NOT 500 AND NOT 400. Identical reasoning to the
+     * lease_token guard on /return: this shape used to reach Postgres, fail the
+     * uuid cast and surface as a 500 -- the one answer that invites a retry,
+     * handed to the one caller that must not retry. To a reviewer, malformed
+     * and superseded mean the same thing: the credential you hold is not one
+     * this task will accept, and trying again will not change that.
+     */
+    const reviewToken = typeof body?.review_lease_token === 'string'
+      ? body.review_lease_token.trim() : '';
+    if (!reviewToken) {
+      return json({
+        error: 'invalid_request',
+        detail: 'review_lease_token is required. It is the fencing token handed back by '
+          + '/review/claim; without it a decision cannot be told apart from one by a reviewer '
+          + 'whose lease already expired.',
+      }, 400);
+    }
+    if (!UUID.test(reviewToken)) {
+      return json({
+        error: 'review-submit-refused',
+        reason: 'review-lease-not-current',
+        detail: 'review_lease_token is not a well-formed lease token, so it cannot be the '
+          + 'current review lease for this task. Re-read it from the claim rather than retrying.',
+      }, 409);
+    }
+
+    const recorded = await rpc('submit_review', {
+      p_task_id: taskId,
+      p_review_token: reviewToken,
+      p_decision: typeof body?.decision === 'string' ? body.decision : null,
+      p_reasons: Array.isArray(body?.reasons) ? body.reasons : [],
+      p_reviewer_session: row.session_id,
+      p_head_sha: typeof body?.head_sha === 'string' ? body.head_sha : null,
+      p_fix_task: body?.fix_task ?? null,
+    });
+    if (!recorded.ok) {
+      return json({
+        error: 'review-submit-refused',
+        reason: recorded.reason ?? null,
+        detail: recorded.detail ?? null,
+      }, 409);
+    }
+    return json(recorded);
+  }
+
   // ── the DISPATCHER: prepares, never decides ────────────────────────────
   /*
    * THE ONLY ENDPOINT A DISPATCHER TOKEN OPENS.
@@ -1484,9 +1817,91 @@ Deno.serve(async (request) => {
       })));
     }
 
+    /*
+     * THE DISPATCHER CONFIRMS ITS OWN ASSIGN PROPOSALS.
+     *
+     * Danny's ruling, 2026-09-16: "yes, autoconfirm". The number behind it is
+     * 1,227 proposals prepared and TWO ever confirmed -- 1,225 assignments died
+     * waiting for a human to be awake. A queue that only moves when somebody is
+     * watching is not a queue.
+     *
+     * WHAT IS GIVEN UP: the second PARTY. Prepare and confirm stop being
+     * different actors.
+     *
+     * WHAT IS KEPT, and it is the half that ever caught anything: the second
+     * LOOK. confirmProposal re-runs canConfirm against live rows -- the worker
+     * must still be live, still on the SAME session, the task still assignable,
+     * the proposal not stale. A proposal prepared against a worker that has
+     * since died is refused here exactly as before. The guard is not weakened;
+     * it stops waiting for a person to trigger it.
+     *
+     * IT REUSES confirmProposal RATHER THAN REIMPLEMENTING IT. A second copy of
+     * canConfirm is what src/runtime.mjs is kept orphaned to prevent, and the
+     * copy that disagreed would be the one nobody was reading.
+     *
+     * ASSIGN ONLY. A review proposal confirms by ACCEPTING returned work, and
+     * work accepted by the machine that scheduled it has not been independently
+     * reviewed -- the whole of ORDER item 4. Acceptance stays with a reviewer
+     * holding a review lease, or with a person. The dispatcher moves work TO a
+     * worker; it does not sign it off.
+     *
+     * OFF SWITCH IS AN ENVIRONMENT VARIABLE, not a redeploy: set
+     * DISPATCH_AUTOCONFIRM=off and the next tick goes back to preparing only. A
+     * control whose only off switch is a deploy cannot be used in the moment it
+     * is needed.
+     */
+    const autoConfirm = (Deno.env.get('DISPATCH_AUTOCONFIRM') ?? 'on').toLowerCase() !== 'off';
+
+    /*
+     * THE DISPATCHER CONFIRMS AS ITSELF, AND THIS LINE IS WHY THE LOOP DID NOT RUN.
+     *
+     * This block used to call `store`, which is declared far below at the
+     * coordinator entrypoint. `const` is not hoisted, so every confirmation
+     * threw "Cannot access 'store' before initialization" -- on every proposal,
+     * on every tick, once a minute. The throw was caught and recorded in
+     * `refused`, the handler returned ok:true, and pg_cron logged SUCCEEDED, so
+     * from the outside the dispatcher looked perfectly healthy while confirming
+     * nothing. The only place it was visible was the response body in
+     * net._http_response, which nothing reads.
+     *
+     * Building the store HERE also fixes the attribution: a confirmation is now
+     * stamped with the dispatcher's own token label, the same one already used
+     * for prepared_by, instead of whatever the coordinator entrypoint resolved.
+     */
+    const dispatchStore = coordinatorStore(dispatchLabel);
+    const confirmed = [];
+    const refused = [];
+    if (autoConfirm) {
+      for (const row of written) {
+        if (row?.kind !== 'assign') continue;
+        if (row?.would_be_accepted !== true) continue;
+        try {
+          const out = await dispatchStore.confirmProposal({ proposal_id: row.proposal_id });
+          if (out?.ok) confirmed.push(row.proposal_id);
+          else refused.push({ proposal_id: row.proposal_id, errors: out?.errors ?? ['unknown'] });
+        } catch (e) {
+          /*
+           * ONE FAILURE MUST NOT STOP THE TICK. The others are independent, and
+           * a throw here leaves them prepared-but-never-confirmed with nothing
+           * recording why -- the state this change exists to end.
+           */
+          refused.push({ proposal_id: row.proposal_id, errors: [String(e?.message ?? e)] });
+        }
+      }
+    }
+
     return json({
       ok: true,
       prepared: written.length,
+      /*
+       * CONFIRMED AND REFUSED REPORTED SEPARATELY, with reasons. A tick that
+       * prepared five and confirmed none is the failure this change is about,
+       * and a count of "prepared" alone cannot show it -- which is how 1,225
+       * went unnoticed.
+       */
+      autoconfirm: autoConfirm ? 'on' : 'off',
+      confirmed: confirmed.length,
+      refused,
       // The dispatcher answers with the report too, so a cron run has something
       // worth logging without a second authenticated call.
       report: supervisoryReport({ proposals, idle, blocked, tasks, sessions, now }),
@@ -1680,6 +2095,9 @@ Deno.serve(async (request) => {
       }, 409);
     }
 
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(me.session_id);
+
     const rows = await get('tasks?select=*');
     const wanted = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
 
@@ -1731,6 +2149,9 @@ Deno.serve(async (request) => {
         detail: `session "${claimed}" is not registered; register before waiting`,
       }, 409);
     }
+
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(me.session_id);
 
     const MAX_WAIT_MS = 25000;
     const POLL_MS = 2000;

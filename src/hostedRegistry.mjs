@@ -308,6 +308,32 @@ export function waitConfig(env = {}) {
 }
 
 /**
+ * Where a REVIEWER claims a review lease and records its decision.
+ *
+ * Derived from the registration endpoint on the same rule as returnConfig and
+ * waitConfig: one environment variable for a machine, and a REFUSAL rather than
+ * a guess when the base URL is not the shape this expects.
+ *
+ * SAME CREDENTIAL AS A HEARTBEAT, AND DELIBERATELY NOT A FIFTH TOKEN CLASS. A
+ * reviewer is a registered session doing a review, and every rule about whether
+ * THIS session may review THIS task lives in claim_review -- returned state, no
+ * self-review, no live lease held by somebody else. The token says the machine
+ * is one of ours; it does not say the review is allowed, and nothing here
+ * pretends otherwise.
+ */
+export function reviewConfig(env = {}) {
+  const reg = registrationConfig(env);
+  if (!reg) return null;
+
+  const override = env.AGENTBRIDGE_REVIEW_URL;
+  const base = typeof override === 'string' && override.trim()
+    ? override.trim().replace(/\/$/, '')
+    : (/\/register$/.test(reg.url) ? reg.url.replace(/\/register$/, '/review') : null);
+  if (!base) return null;
+  return { claimUrl: `${base}/claim`, submitUrl: `${base}/submit`, token: reg.token };
+}
+
+/**
  * Hold a request open until something is addressed to this session.
  *
  * The timeout here is the CLIENT's patience and must exceed the server's, or

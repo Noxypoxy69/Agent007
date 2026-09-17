@@ -29,6 +29,17 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge heartbeat [--dry-run]      one-shot collect (+publish unless --dry-run)
   agentbridge lanes [--file <f>] [--path <p>] [--json]
                                         show the lane registry, or explain one path
+  agentbridge check-first <topic> [--hours 24] [--repo <dir>] [--json]
+                                        RUN THIS BEFORE STARTING WORK. Has anyone
+                                        already done or started this? Asks the SERVER
+                                        for branches and reads recent commits. A failed
+                                        lookup reports unknown, never "nothing found"
+  agentbridge who [--hours 6] [--recent-min 30] [--repo <dir>] [--json]
+                                        who has PRODUCED work lately, read from commit
+                                        trailers rather than heartbeats. SITUATIONAL
+                                        AWARENESS ONLY -- it never names an agent and
+                                        must not be used to route work; status and the
+                                        lane registry remain the only answer to that
   agentbridge release-risk [--json] [--strict]
                                         exit 1 if any worktree carries release risk
   agentbridge delegate --id <id> --from <session> --to <session> --task <text>
@@ -820,10 +831,28 @@ try {
     const agentId = typeof args.agent === 'string' ? args.agent.trim() : null;
     const once = args.once === true || args.once === 'true';
 
+    /*
+     * RESOLVED HERE, NOT INLINE. loadConfig is async, so `loadConfig().machineId`
+     * reads a property off a Promise and yields undefined -- the same missing
+     * field that sent the first worker dark, reintroduced with extra steps. I
+     * wrote it that way first.
+     */
+    const workerMachineId = (await loadConfig())?.machineId ?? null;
+    if (!workerMachineId) {
+      console.error('error: no machineId in the config; run `agentbridge init` first.');
+      console.error('       Without it every heartbeat is refused and this worker goes dark.');
+      process.exit(2);
+    }
+
     const deps = {
       now: () => new Date().toISOString(),
       ...D.hostedDeps(process.env, { session_id: sessionId }),
-      ...D.heartbeatDeps(process.env, { session_id: sessionId, agent_id: agentId }),
+      ...D.heartbeatDeps(process.env, {
+        session_id: sessionId,
+        agent_id: agentId,
+        // Without this every heartbeat is refused as invalid and the worker goes dark.
+        machine_id: workerMachineId,
+      }),
       prepareWorktree: (a) => D.prepareWorktree(a),
       cleanupWorktree: (d) => D.cleanupWorktree(d),
       headSha: (d) => D.headSha(d),
@@ -2020,6 +2049,191 @@ try {
    * Validation errors exit 2 and print every problem at once: an operator
    * fixing a lane file should not discover its faults one run at a time.
    */
+  if (cmd === 'check-first') {
+    /*
+     * Two duplications in one session, both preventable by looking:
+     * code-a fixed CI on master at 19:59Z and I pushed a second fix at 21:04Z;
+     * code-b committed the roster fix at 00:15Z and I committed another at 00:24Z.
+     * Nothing caught either, because collisionGuard compares PATHS and we
+     * touched different files to answer the same question.
+     */
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const P = await import('../src/priorWork.mjs');
+
+    // Positionals only. A bare token that FOLLOWS a --flag is that flag's value,
+    // not part of the topic; without this, `check-first roster --hours 24` would
+    // search for "roster 24" and quietly find nothing.
+    const argv = process.argv.slice(3);
+    const words = [];
+    for (let i = 0; i < argv.length; i += 1) {
+      const a = argv[i];
+      if (a.startsWith('--')) { if (!a.includes('=') && argv[i + 1] && !argv[i + 1].startsWith('--')) i += 1; continue; }
+      words.push(a);
+    }
+    const topic = words.join(' ').trim();
+    const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+    const hours = (() => {
+      const raw = args.hours;
+      if (raw === undefined || raw === true || raw === '') return 24;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) { console.error(`--hours: ${JSON.stringify(String(raw))} is not usable`); process.exit(2); }
+      return n;
+    })();
+
+    const errors = [];
+    let branches = [];
+    let commits = [];
+
+    // THE SERVER, NOT THE REMOTE-TRACKING REFS. This clone's refspec only
+    // updates origin/main, so origin/master is frozen and `git log --all`
+    // inherits the lie -- which is precisely why the 65-minute duplication
+    // happened. ls-remote cannot be stale.
+    try {
+      const { stdout } = await run('git', ['ls-remote', '--heads', 'origin'], { cwd: repo, maxBuffer: 8e6 });
+      const names = stdout.split('\n').map((l) => l.split(/\s+/)[1]).filter(Boolean)
+        .map((r) => r.replace('refs/heads/', ''));
+      for (const name of names) {
+        let subject = '', at = '', merged = false;
+        try {
+          await run('git', ['fetch', '-q', 'origin', name], { cwd: repo });
+          const { stdout: meta } = await run('git', ['log', '-1', '--format=%s%x00%cI', 'FETCH_HEAD'], { cwd: repo });
+          [subject, at] = meta.split('\x00').map((x) => (x || '').trim());
+          try { await run('git', ['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], { cwd: repo }); merged = true; }
+          catch { merged = false; }
+        } catch (e) { errors.push(`branch ${name}: ${e?.message ?? e}`); }
+        branches.push({ name, subject, at, merged });
+      }
+    } catch (e) {
+      errors.push(`ls-remote: ${e?.message ?? e}`);
+    }
+
+    try {
+      const { stdout } = await run('git', ['log', 'HEAD', `--since=${hours} hours ago`, '--format=%h%x00%s%x00%cI'],
+        { cwd: repo, maxBuffer: 32e6 });
+      commits = stdout.split('\n').filter((l) => l.trim()).map((l) => {
+        const [sha, subject, at] = l.split('\x00');
+        return { sha: (sha || '').trim(), subject: (subject || '').trim(), at: (at || '').trim() };
+      }).filter((c) => c.sha);
+    } catch (e) { errors.push(`git log: ${e?.message ?? e}`); }
+
+    const result = P.priorWork({ branches, commits, query: topic, ok: errors.length === 0, errors });
+
+    if (args.json) { console.log(JSON.stringify({ topic, hours, ...result }, null, 2)); handled = true; done(result.verdict === 'unknown' ? 2 : 0); }
+
+    if (!topic) {
+      console.log('check-first: name the topic you are about to work on, e.g.\n  agentbridge check-first "roster liveness heartbeat"\n');
+    }
+    console.log(`open fronts — branches on the server not merged into HEAD (${result.openFronts.length}):`);
+    for (const b of result.openFronts) console.log(`  ${b.name.padEnd(44)} ${b.at.slice(0, 16)}  ${b.subject.slice(0, 50)}`);
+
+    if (topic) {
+      console.log(`\nprior work matching ${JSON.stringify(topic)}:`);
+      if (!result.matches.length) console.log('  (none)');
+      for (const m of result.matches.slice(0, 10)) {
+        console.log(`  [${m.score}] ${m.kind.padEnd(6)} ${m.name.padEnd(44)} ${String(m.at).slice(0, 16)}  ${m.subject.slice(0, 46)}`);
+      }
+    }
+
+    if (result.verdict === 'unknown') {
+      console.error(`\nLOOKUP INCOMPLETE — this is NOT "nothing found". ${result.errors.length} error(s):`);
+      for (const e of result.errors.slice(0, 5)) console.error(`  ${e}`);
+      handled = true; done(2);
+    }
+    if (result.verdict === 'prior-work-found') {
+      console.log('\nSOMEBODY MAY ALREADY BE ON THIS. Read the branch or the commit before you start.');
+    }
+    handled = true; done(0);
+  }
+
+  if (cmd === 'who') {
+    /*
+     * The roster reported fourteen sessions offline and idle_workers 0 while
+     * three agents were committing. The registry was not wrong -- a missing
+     * heartbeat is offline and must stay so, or a delegation gets addressed to
+     * nobody -- it was answering a different question from the one being asked.
+     * This asks the repository instead, because a commit is a side effect and
+     * cannot be forgotten the way a heartbeat can.
+     */
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const W = await import('../src/workEvidence.mjs');
+
+    const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+
+    /*
+     * A FLAG THAT IS IGNORED SILENTLY IS WORSE THAN ONE THAT IS REFUSED, and
+     * the first version of this defaulted every bad value. `--hours abc`
+     * printed "the last 6h" under a confident header. The dangerous one was
+     * `--registry-live`: mistype it and the disagreement alarm -- the entire
+     * reason to run this -- simply never fires, and the output looks normal.
+     * Absent means take the default; PRESENT AND UNUSABLE means stop.
+     */
+    const num = (name, fallback, ok) => {
+      const raw = args[name];
+      if (raw === undefined || raw === true || raw === '') return fallback;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || !ok(n)) {
+        console.error(`--${name}: ${JSON.stringify(String(raw))} is not usable; refusing rather than quietly using ${fallback}`);
+        process.exit(2);
+      }
+      return n;
+    };
+    const hours = num('hours', 6, (n) => n > 0);
+    const recentMin = num('recent-min', 30, (n) => n > 0);
+
+    let stdout;
+    try {
+      ({ stdout } = await run('git', ['log', '--all', `--since=${hours} hours ago`, `--format=${W.LOG_FORMAT}`],
+        { cwd: repo, maxBuffer: 32 * 1024 * 1024 }));
+    } catch (e) {
+      console.error(`cannot read git history in ${repo}: ${e?.message ?? e}`);
+      process.exit(2);
+    }
+
+    const now = new Date().toISOString();
+    const evidence = W.workEvidence(W.parseLog(stdout), { now, recentMs: recentMin * 60 * 1000 });
+
+    /*
+     * The registry count is read only if it is CHEAP AND CERTAIN. --registry-live
+     * is passed by a caller that already has the number; guessing it here would
+     * put a fabricated figure next to a measured one in the same table.
+     */
+    const liveCount = args['registry-live'] === undefined
+      ? null
+      : num('registry-live', null, (n) => Number.isInteger(n) && n >= 0);
+    const rec = W.reconcile(evidence, liveCount);
+
+    if (args.json) {
+      console.log(JSON.stringify({ now, windowHours: hours, recentMinutes: recentMin, ...evidence, reconcile: rec }, null, 2));
+      handled = true; done(0);
+    }
+
+    const mins = (ms) => `${Math.round(ms / 60000)}m ago`;
+    console.log(`work produced in the last ${hours}h, by commit trailer (NOT a roster; never route on this)\n`);
+    if (!evidence.sessions.length && !evidence.unattributed) {
+      console.log('  no commits in the window — that is quiet, not offline');
+    }
+    for (const sess of evidence.sessions) {
+      console.log(`  ${sess.recent ? 'WORKING' : 'quiet  '}  ${sess.session}  ${String(sess.commits).padStart(3)} commits  last ${mins(sess.lastAgeMs)}  ${sess.lastSubject.slice(0, 48)}`);
+    }
+    if (evidence.unattributed) {
+      console.log(`\n  ${evidence.unattributed} commit(s) carry no session trailer (${evidence.unattributedRecent} recent).`);
+      console.log('  That is somebody unidentified, not nobody.');
+    }
+    if (rec.registryLive !== null) {
+      console.log(`\n  registry live: ${rec.registryLive}   producing now: ${rec.producingNow}`);
+      console.log(`  ${rec.note}`);
+      if (rec.disagrees) {
+        console.log('\n  THE REGISTRY SEES NOBODY AND THE REPOSITORY DISAGREES.');
+        console.log('  The workers are not registering. Fix registration — do not loosen liveness.');
+      }
+    }
+    handled = true; done(0);
+  }
+
   if (cmd === 'lanes') {
     const cfg = await loadConfig();
     const file = args.file || cfg?.lanesFile?.[0] || cfg?.lanesFile || 'lanes.registry.example.yml';
