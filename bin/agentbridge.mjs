@@ -29,6 +29,11 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge heartbeat [--dry-run]      one-shot collect (+publish unless --dry-run)
   agentbridge lanes [--file <f>] [--path <p>] [--json]
                                         show the lane registry, or explain one path
+  agentbridge check-first <topic> [--hours 24] [--repo <dir>] [--json]
+                                        RUN THIS BEFORE STARTING WORK. Has anyone
+                                        already done or started this? Asks the SERVER
+                                        for branches and reads recent commits. A failed
+                                        lookup reports unknown, never "nothing found"
   agentbridge who [--hours 6] [--recent-min 30] [--repo <dir>] [--json]
                                         who has PRODUCED work lately, read from commit
                                         trailers rather than heartbeats. SITUATIONAL
@@ -2026,6 +2031,104 @@ try {
    * Validation errors exit 2 and print every problem at once: an operator
    * fixing a lane file should not discover its faults one run at a time.
    */
+  if (cmd === 'check-first') {
+    /*
+     * Two duplications in one session, both preventable by looking:
+     * code-a fixed CI on master at 19:59Z and I pushed a second fix at 21:04Z;
+     * code-b committed the roster fix at 00:15Z and I committed another at 00:24Z.
+     * Nothing caught either, because collisionGuard compares PATHS and we
+     * touched different files to answer the same question.
+     */
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const P = await import('../src/priorWork.mjs');
+
+    // Positionals only. A bare token that FOLLOWS a --flag is that flag's value,
+    // not part of the topic; without this, `check-first roster --hours 24` would
+    // search for "roster 24" and quietly find nothing.
+    const argv = process.argv.slice(3);
+    const words = [];
+    for (let i = 0; i < argv.length; i += 1) {
+      const a = argv[i];
+      if (a.startsWith('--')) { if (!a.includes('=') && argv[i + 1] && !argv[i + 1].startsWith('--')) i += 1; continue; }
+      words.push(a);
+    }
+    const topic = words.join(' ').trim();
+    const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+    const hours = (() => {
+      const raw = args.hours;
+      if (raw === undefined || raw === true || raw === '') return 24;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) { console.error(`--hours: ${JSON.stringify(String(raw))} is not usable`); process.exit(2); }
+      return n;
+    })();
+
+    const errors = [];
+    let branches = [];
+    let commits = [];
+
+    // THE SERVER, NOT THE REMOTE-TRACKING REFS. This clone's refspec only
+    // updates origin/main, so origin/master is frozen and `git log --all`
+    // inherits the lie -- which is precisely why the 65-minute duplication
+    // happened. ls-remote cannot be stale.
+    try {
+      const { stdout } = await run('git', ['ls-remote', '--heads', 'origin'], { cwd: repo, maxBuffer: 8e6 });
+      const names = stdout.split('\n').map((l) => l.split(/\s+/)[1]).filter(Boolean)
+        .map((r) => r.replace('refs/heads/', ''));
+      for (const name of names) {
+        let subject = '', at = '', merged = false;
+        try {
+          await run('git', ['fetch', '-q', 'origin', name], { cwd: repo });
+          const { stdout: meta } = await run('git', ['log', '-1', '--format=%s%x00%cI', 'FETCH_HEAD'], { cwd: repo });
+          [subject, at] = meta.split('\x00').map((x) => (x || '').trim());
+          try { await run('git', ['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], { cwd: repo }); merged = true; }
+          catch { merged = false; }
+        } catch (e) { errors.push(`branch ${name}: ${e?.message ?? e}`); }
+        branches.push({ name, subject, at, merged });
+      }
+    } catch (e) {
+      errors.push(`ls-remote: ${e?.message ?? e}`);
+    }
+
+    try {
+      const { stdout } = await run('git', ['log', 'HEAD', `--since=${hours} hours ago`, '--format=%h%x00%s%x00%cI'],
+        { cwd: repo, maxBuffer: 32e6 });
+      commits = stdout.split('\n').filter((l) => l.trim()).map((l) => {
+        const [sha, subject, at] = l.split('\x00');
+        return { sha: (sha || '').trim(), subject: (subject || '').trim(), at: (at || '').trim() };
+      }).filter((c) => c.sha);
+    } catch (e) { errors.push(`git log: ${e?.message ?? e}`); }
+
+    const result = P.priorWork({ branches, commits, query: topic, ok: errors.length === 0, errors });
+
+    if (args.json) { console.log(JSON.stringify({ topic, hours, ...result }, null, 2)); handled = true; done(result.verdict === 'unknown' ? 2 : 0); }
+
+    if (!topic) {
+      console.log('check-first: name the topic you are about to work on, e.g.\n  agentbridge check-first "roster liveness heartbeat"\n');
+    }
+    console.log(`open fronts — branches on the server not merged into HEAD (${result.openFronts.length}):`);
+    for (const b of result.openFronts) console.log(`  ${b.name.padEnd(44)} ${b.at.slice(0, 16)}  ${b.subject.slice(0, 50)}`);
+
+    if (topic) {
+      console.log(`\nprior work matching ${JSON.stringify(topic)}:`);
+      if (!result.matches.length) console.log('  (none)');
+      for (const m of result.matches.slice(0, 10)) {
+        console.log(`  [${m.score}] ${m.kind.padEnd(6)} ${m.name.padEnd(44)} ${String(m.at).slice(0, 16)}  ${m.subject.slice(0, 46)}`);
+      }
+    }
+
+    if (result.verdict === 'unknown') {
+      console.error(`\nLOOKUP INCOMPLETE — this is NOT "nothing found". ${result.errors.length} error(s):`);
+      for (const e of result.errors.slice(0, 5)) console.error(`  ${e}`);
+      handled = true; done(2);
+    }
+    if (result.verdict === 'prior-work-found') {
+      console.log('\nSOMEBODY MAY ALREADY BE ON THIS. Read the branch or the commit before you start.');
+    }
+    handled = true; done(0);
+  }
+
   if (cmd === 'who') {
     /*
      * The roster reported fourteen sessions offline and idle_workers 0 while
