@@ -45,7 +45,24 @@ fresh version number, which is what a successful deploy looks like from outside.
 **So the merge is not queued behind a deploy. The merge IS the deploy**, and any
 tree that ships must contain `fifth-hosted-path` or it goes backwards.
 
-**1. Merge THREE branches and deploy the result.** — code-c *(assigned)*
+**1. ~~Merge THREE branches and deploy the result.~~ DONE — verified 2026-09-17.** — was code-c
+**All six branches are ancestors of master `6c8e181`**, checked with
+`git merge-base --is-ancestor` rather than read off a list: `code-b/fifth-hosted-path`
+(`bb899fc`), `work/recover-orphan-branches` (`1a97aa0`), `work/support-modules`
+(`8793112`), `b/attempt-record` (`a816ae4`), `work/reviewer-runtime` (`e992bec`),
+and `code-b/lease-wiring` (`9ba9c96`) — the one this entry specifically warned to
+check by hand rather than assume.
+
+**THIS ENTRY STAYED RED AFTER IT WAS GREEN, AND THAT IS THE EXPENSIVE PART.** It
+reads "nothing below can start until the pipeline is on master", so item 2 has
+been blocked on paper while being unblocked in fact, for hours, with its assignee
+dark since 12:30Z. Nobody rechecked because the document said not to bother. A
+blocker is a claim about the world and goes stale like any other; re-measure it
+before believing it, especially when it is the reason something is not being
+worked on.
+
+*(original brief kept below)*
+**1a. Merge THREE branches and deploy the result.** — was code-c
 `code-b/fifth-hosted-path` (what is live, 14 ahead), then
 `work/recover-orphan-branches` (11 ahead), then `work/support-modules`
 (22 ahead, ends at `50f28a2`). Each contains master entire, so none drops
@@ -57,7 +74,20 @@ Nothing below can start until the pipeline is on master, because the worker
 cannot call what is on a branch. *This is first and it is nobody's favourite
 task, which is exactly why it gets skipped.*
 
-**2. Wire the lease to the pipeline.** — code-c *(assigned)*
+**2. Wire the lease to the pipeline.** — UNBLOCKED 2026-09-17, needs an owner
+*(was code-c, dark since 12:30Z; the autonomous-loop lane is code-a's as of the
+16th, and this is lease and fence semantics, so it is not c8's to take)*
+
+**DIAGNOSED 2026-09-17, so whoever picks it up does not start at the database.**
+`attempts` holds 0 rows, and it is not a silent write failure. `runAttempt` — the
+only path that writes an attempt record — is imported by exactly one file,
+`bin/agentbridge-attempt.mjs`, and **nothing spawns that binary.** Zero references
+from `daemon.mjs`, `worker.mjs`, `workerLoop.mjs`, `dispatch.mjs`, `runtime.mjs`
+or `bin/agentbridge.mjs`; the only mentions anywhere are its own `package.json`
+bin entry, `moduleGraph.mjs`, a comment in `agentbridge-review.mjs` and this
+document. The writer is fine and is covered by `test/attemptPipeline.test.mjs`
+and `test/unattendedLoop.test.mjs`. The row is missing because the spawn was
+never built, which is exactly this item and nothing else.
 claim → `runAttempt` → return. The daemon owns the lease, never the process it
 starts. `bin/agentbridge-attempt.mjs` is a working caller of everything except
 those three verbs.
@@ -230,13 +260,14 @@ verification, no `VerificationProof`. Nothing has been copied from any upstream
 project yet -- verified by search -- and `THIRD_PARTY_CODE.md` now exists empty
 so the first copy lands with its attribution instead of after it.
 
-**SC1. One real attempt row.** — blocks everything below
-The `attempts` table held 0 rows at 2026-09-16 22:33, against a writer merged at
-18:49 in `2e34c48`. The writer is merged and unreached, or reached and failing
-silently, and nobody has established which. Until one real row lands, a repair
-loop has nothing to read, a classifier has nothing to classify and a proof has
-nothing to prove. This is the smallest item on the list and the only one that
-gates the rest.
+**SC1. One real attempt row.** — RESOLVED TO ITEM 2; not a separate task
+I wrote this as "merged and unreached, or reached and failing silently, and
+nobody has established which". Established 2026-09-17: **unreached.** `runAttempt`
+is reachable only from `bin/agentbridge-attempt.mjs` and nothing spawns it, so no
+code path in the running system can produce an attempt row. The writer is not
+broken and needs no work. SC1 is therefore item 2 wearing a different name, and
+listing it twice would have had two people converge on a database that was never
+the problem.
 
 **SC2. `AttemptStep` persistence, then `FailureClass`.** — after SC1
 The trajectory, then the taxonomy. Section 4 of the pack begins with "classify",

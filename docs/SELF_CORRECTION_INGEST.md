@@ -56,9 +56,24 @@ Measured against master, not remembered:
   review verdicts (`accept`, `reject`, `fix_required`, `inconclusive`). Those are
   answers to "how did it end", not "where is it now". No state machine, so
   nothing can be resumed at `REPAIRING` after a restart.
-- **`AttemptStep`** -- zero. No per-step record, so no trajectory, so a repair
-  loop has nothing to read back.
-- **`FailureClass`** -- zero occurrences of any member of the taxonomy. Every
+- **`AttemptStep`** -- **CORRECTION, 2026-09-17: this file was wrong when first
+  committed.** It said zero. `attemptRecord.mjs` exports `attemptStep()` and a
+  frozen `STEP_KINDS` of twelve: CLAIM, PREPARE_WORKSPACE, COMPILE_CONTEXT,
+  START_EXECUTOR, AGENT_RUN, COLLECT_RESULT, VERIFY, PUBLISH_ARTIFACTS,
+  REQUEST_REVIEW, REVIEW, ACCEPT_OR_REJECT, CLEANUP. I searched for the
+  TypeScript-style identifier `AttemptStep` from the pack, case-sensitively, and
+  a lowercase JavaScript function named for the same thing did not match. Searching
+  for a spec's spelling instead of the codebase's is how a repo gets a second
+  implementation of something it already has, which is the specific outcome this
+  document exists to prevent.
+
+  The real gap is narrower and worth stating exactly: the step kinds cover the
+  ORCHESTRATION path, claim through cleanup. The pack's kinds are about the
+  REPAIR path -- INSPECT, LOCALIZE, EDIT, REPAIR. AGENT_RUN is one opaque step
+  where the pack wants a trajectory, so a repair loop still has nothing to read
+  back, for a different reason than "there is no step record".
+- **`FailureClass`** -- zero occurrences of any member of the taxonomy. Re-checked
+  after the `AttemptStep` error above, including lowercase and camelCase spellings. Every
   failure is currently untyped text, which means the repair loop in section 4
   cannot be written at all: it begins with "classify".
 - **Clean-SHA verification** -- **nothing in the repository does a fresh
