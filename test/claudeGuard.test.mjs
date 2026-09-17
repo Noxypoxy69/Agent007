@@ -499,3 +499,25 @@ test('THE BOUNDARY: Stop catches what the rail lets through', async () => {
     'the boundary must not depend on knowing which command did it',
   );
 });
+
+test('shell segmentation respects quoted separators instead of inventing commands', async () => {
+  const { segments } = await import('../src/shellAllowlist.mjs');
+  assert.deepEqual(segments('git status && ls'), ['git status', 'ls']);
+  assert.deepEqual(segments('git commit -m "fix; still one command"'), ['git commit -m "fix; still one command"']);
+  assert.deepEqual(segments("git commit -m 'fix && still one command'"), ["git commit -m 'fix && still one command'"]);
+});
+
+test('quoted arguments are tokenized as data and unbalanced quotes fail closed', async () => {
+  const { judgeShellCommand, tokenize } = await import('../src/shellAllowlist.mjs');
+  assert.deepEqual(tokenize('grep "a;b && c" CLAUDE.md'), {
+    tokens: [
+      { value: 'grep', quoted: false },
+      { value: 'a;b && c', quoted: true },
+      { value: 'CLAUDE.md', quoted: false },
+    ],
+    balanced: true,
+  });
+  assert.equal(judgeShellCommand('grep "a;b" CLAUDE.md').allowed, true);
+  assert.equal(judgeShellCommand('echo "a && b"').allowed, true);
+  assert.equal(judgeShellCommand('grep "unterminated CLAUDE.md').allowed, false);
+});

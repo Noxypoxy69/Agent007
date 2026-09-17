@@ -259,14 +259,51 @@ export function protectedDrift(repoRoot, snapshot) {
  */
 export function baselineBlockingDriftFromGit(repoRoot) {
   let out;
+  let indexFlags;
   try {
-    out = execFileSync('git', ['status', '--porcelain'], {
+    out = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+      cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
+    });
+    /*
+     * `git status` intentionally trusts index hints. A tracked file marked
+     * assume-unchanged (`h`) or skip-worktree (`S`) can differ on disk while
+     * status reports a clean tree. Recovery may never mint a baseline while a
+     * protected file/test is hidden behind either bit.
+     */
+    indexFlags = execFileSync('git', ['ls-files', '-v'], {
       cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
     });
   } catch {
     return null;
   }
   const drift = [];
+  for (const line of indexFlags.split('\n')) {
+    if (line.length < 3) continue;
+    const flag = line[0];
+    /*
+     * ANY LOWERCASE TAG MEANS ASSUME-UNCHANGED, NOT JUST `h`.
+     *
+     * `git ls-files -v` prints the file's tag -- H cached, S skip-worktree,
+     * M unmerged, R removed, C modified, K to-be-killed -- and LOWERCASES it when
+     * assume-unchanged is set. A file carrying BOTH bits therefore prints `s`,
+     * which a check for exactly 'h' and 'S' walks straight past. Measured: with
+     * both bits set, `git status --porcelain` was empty and this function
+     * returned [], so recovery would have minted a baseline over a tampered
+     * protected file -- the bypass this check exists to close, reopened by
+     * setting one additional bit.
+     */
+    const assumeUnchanged = flag >= 'a' && flag <= 'z';
+    const skipWorktree = flag === 'S' || flag === 's';
+    if (!assumeUnchanged && !skipWorktree) continue;
+    const norm = line.slice(2).split(path.sep).join('/');
+    const kind = isProtectedRelPath(norm) ? 'protected'
+      : (/^test\/.+\.test\.mjs$/i.test(norm) ? 'baseline-test' : null);
+    const how = [
+      assumeUnchanged ? 'assume-unchanged' : null,
+      skipWorktree ? 'skip-worktree' : null,
+    ].filter(Boolean).join('+');
+    if (kind) drift.push({ file: norm, now: how, kind });
+  }
   for (const line of out.split('\n')) {
     if (line.trim() === '') continue;
     const status = line.slice(0, 2);

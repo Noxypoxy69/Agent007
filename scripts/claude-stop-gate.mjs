@@ -30,6 +30,20 @@ const out = (reason) => {
 
 if (!input) out('[agentbridge:stop-input-invalid] Stop hook input was not valid JSON.');
 
+/*
+ * Claude Code sets stop_hook_active=true when this turn is already continuing
+ * because a Stop hook blocked once. Blocking again here creates an autonomous
+ * verification loop. Ending the turn is NOT approval: the message explicitly
+ * records that the previous Stop refusal remains unresolved and requires a new
+ * owner/user turn before more work continues.
+ */
+if (input.stop_hook_active === true) {
+  process.stdout.write(`${JSON.stringify({
+    systemMessage: '[agentbridge:stop-loop-break] A Stop hook already blocked this turn. Ending the turn unapproved instead of re-entering the same autonomous verification loop. Resolve the prior guard refusal in a fresh turn.',
+  })}\n`);
+  process.exit(0);
+}
+
 const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
 /*

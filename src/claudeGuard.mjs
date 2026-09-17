@@ -139,7 +139,7 @@ const READ_ONLY_TOOLS = new Set([
   'BashOutput', 'KillShell', 'KillBash',
   // delegation. A subagent is not a bypass: its own tool calls arrive at this
   // same hook, so it is judged call by call rather than trusted wholesale.
-  'Task', 'Agent', 'Workflow', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskOutput', 'TaskStop',
+  'Task', 'Agent', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskOutput', 'TaskStop',
   'SendMessage', 'ListAgents',
 ]);
 
@@ -239,6 +239,16 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    * file belongs in it. Weigh an addition on that, not on convenience.
    */
   if (READ_ONLY_TOOLS.has(toolName)) return { allowed: true };
+
+  /*
+   * Workflow carries executable JavaScript in `script`. Treating it as read-only
+   * bypassed both command and path routing merely because of the tool name. Until
+   * Workflow execution is sandboxed independently, executable workflow payloads
+   * are not a read operation and may not bypass the guard.
+   */
+  if (toolName === 'Workflow') {
+    return deny('workflow-exec-untrusted', 'Workflow carries executable script content and is not a read-only tool');
+  }
 
   /*
    * MCP tools keep the posture they already had: not blocked here, detected at

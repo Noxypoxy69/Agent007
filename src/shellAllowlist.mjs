@@ -189,11 +189,59 @@ const SED_READ = /^sed\s+-n\s+(['"]?)\$?[0-9]+(?:,(?:\$|[0-9]+))?p\1\s+[^\s]+$/;
 
 const GIT_BRANCH_LIST = /^git\s+branch$|^git\s+branch\s+--list(\s+[A-Za-z0-9._/@:=+,^~*-]+)?$/;
 
+function splitSegments(command) {
+  const input = String(command ?? '');
+  const out = [];
+  let quote = null;
+  let buf = '';
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === '"' || ch === "'") {
+      if (quote === null) quote = ch;
+      else if (quote === ch) quote = null;
+      buf += ch;
+      continue;
+    }
+    if (quote === null && (ch === ';' || ch === '|' || ch === '&' || ch === '\n')) {
+      const part = buf.trim();
+      if (part) out.push(part);
+      buf = '';
+      if ((ch === '&' || ch === '|') && input[i + 1] === ch) i += 1;
+      continue;
+    }
+    buf += ch;
+  }
+  const tail = buf.trim();
+  if (tail) out.push(tail);
+  return { parts: out, balanced: quote === null };
+}
+
 export function segments(command) {
-  return String(command ?? '')
-    .split(/(?:\|\||&&|[;|&\n])/)
-    .map((s) => s.trim())
-    .filter((s) => s !== '');
+  return splitSegments(command).parts;
+}
+
+export function tokenize(command) {
+  const input = String(command ?? '');
+  const tokens = [];
+  let quote = null;
+  let quoted = false;
+  let buf = '';
+  const push = () => {
+    if (buf !== '' || quoted) tokens.push({ value: buf, quoted });
+    buf = '';
+    quoted = false;
+  };
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === '"' || ch === "'") {
+      if (quote === null) { quote = ch; quoted = true; continue; }
+      if (quote === ch) { quote = null; continue; }
+    }
+    if (quote === null && /\s/.test(ch)) { push(); continue; }
+    buf += ch;
+  }
+  push();
+  return { tokens, balanced: quote === null };
 }
 
 /*
@@ -233,7 +281,11 @@ export function judgeShellCommand(command) {
    * is torn into "... 2>" and "1" and the strip below never matches it -- which
    * left `npm test 2>&1` refused for containing a redirect it no longer had.
    */
-  const parts = segments(String(command).replace(FD_REDIRECTS, ' '));
+  const split = splitSegments(String(command).replace(FD_REDIRECTS, ' '));
+  if (!split.balanced) {
+    return { allowed: false, reason: 'the command contains an unbalanced quoted string' };
+  }
+  const parts = split.parts;
   if (parts.length === 0) {
     return { allowed: false, reason: 'no command string was supplied' };
   }
@@ -264,7 +316,12 @@ function judgeOneSegment(segment) {
     return { allowed: false, reason: 'a flag that writes or reads a side file (-o, --output, --to-file, -f, --argfile, ...)' };
   }
 
-  const tokens = command.trim().split(/\s+/);
+  const parsed = tokenize(command);
+  if (!parsed.balanced) {
+    return { allowed: false, reason: 'the command contains an unbalanced quoted string' };
+  }
+  const tokenInfo = parsed.tokens;
+  const tokens = tokenInfo.map((t) => t.value);
   const first = tokens[0];
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) {
     return { allowed: false, reason: 'a leading environment assignment can change what the command resolves to' };
@@ -355,11 +412,12 @@ function judgeOneSegment(segment) {
   }
 
   if (PS_READ_ONLY.has(first.toLowerCase())) {
-    for (const t of tokens.slice(1)) {
-      const bare = t.replace(/^['"]|['"]$/g, '');
+    for (const info of tokenInfo.slice(1)) {
+      const bare = info.value;
       if (bare === '') continue;
+      if (info.quoted) continue;
       if (!SAFE_ARG.test(bare)) {
-        return { allowed: false, reason: `argument ${JSON.stringify(t)} is not a plain path or flag` };
+        return { allowed: false, reason: `argument ${JSON.stringify(bare)} is not a plain path or flag` };
       }
     }
     return { allowed: true };
@@ -377,11 +435,16 @@ function judgeOneSegment(segment) {
     }
   }
 
-  for (const t of tokens.slice(subPattern ? 2 : 1)) {
-    const bare = t.replace(/^['"]|['"]$/g, '');
+  for (const info of tokenInfo.slice(subPattern ? 2 : 1)) {
+    const bare = info.value;
     if (bare === '') continue;
+    if (info.quoted) {
+      /* Separators and whitespace inside a balanced quote are data, not shell syntax.
+       * Expansion/redirection/backslash remain refused earlier by FORBIDDEN_CHARS. */
+      continue;
+    }
     if (!SAFE_ARG.test(bare)) {
-      return { allowed: false, reason: `argument ${JSON.stringify(t)} is not a plain path or flag` };
+      return { allowed: false, reason: `argument ${JSON.stringify(bare)} is not a plain path or flag` };
     }
   }
   return { allowed: true };

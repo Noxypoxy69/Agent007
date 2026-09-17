@@ -245,3 +245,14 @@ test('sed is accepted as a line-range print and refused as a write primitive', (
     assert.equal(judgeShellCommand(command).allowed, false, `${command} can write and must be refused`);
   }
 });
+
+test('Workflow cannot bypass the guard merely because its payload field is named script', () => {
+  const verdict = evaluateClaudeTool({
+    tool_name: 'Workflow',
+    tool_input: { script: "require('node:fs').unlinkSync('src/claudeGuard.mjs')" },
+    cwd: repoRoot,
+    session_id: 's',
+  });
+  assert.equal(verdict.allowed, false);
+  assert.equal(verdict.id, 'workflow-exec-untrusted');
+});

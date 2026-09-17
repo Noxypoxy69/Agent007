@@ -136,3 +136,34 @@ test('when git cannot be consulted the gate refuses rather than assuming clean',
   assert.match(verdict.reason, /unknown is not clean/, `expected an explicit unknown, got: ${verdict.reason}`);
   assert.doesNotMatch(verdict.reason, /baseline-created/, 'an unmeasurable tree must not mint a baseline');
 });
+
+test('stop_hook_active breaks the autonomous Stop retry loop', (t) => {
+  const dir = scratchRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = spawnSync(process.execPath, [path.join(dir, 'scripts', 'claude-stop-gate.mjs')], {
+    input: JSON.stringify({ session_id: 'looped-session', stop_hook_active: true }),
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PROJECT_DIR: dir, AGENTBRIDGE_HOME: path.join(dir, 'home') },
+  });
+  assert.equal(r.status, 0);
+  const parsed = JSON.parse(r.stdout || '{}');
+  assert.equal(parsed.decision, undefined, 'a repeated Stop must be allowed to end the turn');
+  assert.match(parsed.systemMessage ?? '', /stop-loop-break/);
+  assert.match(parsed.systemMessage ?? '', /unapproved/);
+});
+
+test('recovery refuses protected files hidden from git status by index bits', (t) => {
+  for (const [flag, label] of [['--assume-unchanged', 'assume-unchanged'], ['--skip-worktree', 'skip-worktree']]) {
+    const dir = scratchRepo();
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    execFileSync('git', ['update-index', flag, 'src/claudeGuard.mjs'], { cwd: dir, stdio: 'ignore' });
+    appendFileSync(path.join(dir, 'src', 'claudeGuard.mjs'), `\n// hidden by ${label}\n`);
+    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: dir, encoding: 'utf8' }).trim(), '',
+      'precondition: ordinary git status must be fooled');
+    const verdict = stop(dir, `hidden-${label}`);
+    assert.equal(verdict.blocked, true);
+    assert.match(verdict.reason, new RegExp(label));
+    assert.match(verdict.reason, /claudeGuard\.mjs/);
+    assert.doesNotMatch(verdict.reason, /baseline-created/);
+  }
+});
