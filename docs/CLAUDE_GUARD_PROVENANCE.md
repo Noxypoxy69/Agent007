@@ -4,8 +4,11 @@ This guard is an immediate containment layer. It does **not** make Claude Code a
 trusted promotion authority and it does not replace AgentBridge's planned
 server-side state machine.
 
-Existing tests are immutable inside the coding session. New test files may be
-created, but after creation they are treated as existing tests. The Stop hook
+Tests present when the session BEGAN are immutable inside it. Tests the session
+creates stay editable -- the shipped rule treated a file as existing the instant
+it was written, so a typo in a test from sixty seconds ago could not be fixed,
+and inverting a test that asserted a vulnerability was correct behaviour would
+have been impossible. The boundary is the session snapshot, not `existsSync`. The Stop hook
 runs the exact discovered `test/*.test.mjs` files without trusting
 `package.json`, requires one complete TAP summary, requires a positive test
 count and exact count reconciliation, and refuses out-of-band changes to its
@@ -55,3 +58,44 @@ hook supplies immediate feedback and blocks common self-dealing paths when it
 runs; it is not the final trust boundary. Promotion must remain disabled until
 an AgentBridge process outside the coding agent's writable worktree owns the
 tests, policy, execution receipt, reviewer identity, and promotion decision.
+
+
+## Repaired 2026-09-17, before installation, against demonstrated bypasses
+
+The shipped guard was tested rather than read, on its own base, through the real
+hook binary. Every one of these was ALLOWED and is now refused:
+
+```
+rm src/claudeGuard.mjs
+cat > .claude/settings.json
+printf "" > scripts/claude-stop-gate.mjs
+printf "" > THIRD_PARTY_CODE.md
+git restore src/claudeGuard.mjs
+mv src/claudeGuard.mjs /tmp/x
+```
+
+**One line caused all of them.** `PROTECTED` entries are anchored `(?:^|\/) ... $`
+because they describe PATHS, and the Bash branch applied them to a whole COMMAND
+string, where `src` is preceded by a space. The regexes were correct for paths
+and matched nothing in commands. Commands are now tokenised, quotes stripped and
+each token resolved against the repository root before `isProtectedPath` decides,
+so `rm "src/claudeGuard.mjs"`, `rm ./src/claudeGuard.mjs` and
+`rm src/../src/claudeGuard.mjs` all resolve to the same refusal.
+
+`scripts/claude-stop-gate.mjs` and `THIRD_PARTY_CODE.md` were absent from the
+structured-tool list; `THIRD_PARTY_CODE.md` was listed as `docs/THIRD_PARTY_CODE.md`,
+a path that does not exist, while the real file sits at the repository root.
+
+**HEAD was the wrong baseline.** The Stop gate ran `git diff --name-only HEAD`,
+which a commit hides: write the stop gate, `git commit -am wip`, and it approved
+everything. It now compares file CONTENT against a snapshot taken before the
+session and stored outside the worktree, and it refuses outright when that
+snapshot is missing. This also detects writes that never reached PreToolUse --
+an MCP repository write, a subagent, a wrapper script. Those are **not
+prevented**, only detected afterwards, and that is the whole claim.
+
+**Test discovery is recursive.** A flat `readdirSync('test')` runs a different
+suite from the `test/**/*.test.mjs` glob the project declares, and would approve
+a run that silently skipped every nested test.
+
+Each defect was restored individually and the matching test watched go red.

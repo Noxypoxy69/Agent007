@@ -23,6 +23,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node bin/agentbridge-claude-guard.mjs --session-start",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   },
   "disableAllHooks": false

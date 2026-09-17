@@ -76,10 +76,8 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const IS_CONSTANT = /^[A-Z][A-Z0-9_]*$/;
 
 /** Exported functions and values, by category, excluding frozen constants. */
-function fnsByCategory(root, { excludeGateMachinery = false } = {}) {
-  const all = classifyExports(root)
-    .filter((d) => !IS_CONSTANT.test(d.name))
-    .filter((d) => !(excludeGateMachinery && GATE_MACHINERY.includes(d.file)));
+function fnsByCategory(root) {
+  const all = classifyExports(root).filter((d) => !IS_CONSTANT.test(d.name));
   const by = {};
   for (const c of EXPORT_CATEGORIES) by[c] = all.filter((d) => d.category === c);
   return by;
@@ -101,8 +99,8 @@ function fnsByCategory(root, { excludeGateMachinery = false } = {}) {
  * supabase/functions/mcp/_shared.js as declared, verified copies; counting them
  * as dead was the misclassification the review caught.
  */
-const BASELINE_UNREFERENCED = 13;
-const BASELINE_TEST_ONLY = 123;
+const BASELINE_UNREFERENCED = 7;
+const BASELINE_TEST_ONLY = 72;
 
 /*
  * GATE MACHINERY IS TEST-ONLY BY NATURE, and excluding it makes the number mean
@@ -120,8 +118,14 @@ const BASELINE_TEST_ONLY = 123;
  * table was bumping 133 to 134 to accommodate this commit's own new exports,
  * and a baseline raised to fit the change it was meant to catch is not a gate.
  */
-const GATE_MACHINERY = ['src/moduleGraph.mjs'];
-
+/*
+ * NO BROAD EXCLUSION. A "gate machinery" carve-out was here and the review was
+ * right to object: exceptions should be explicit names, not a category. With the
+ * two classifier defects fixed it is no longer needed -- moduleGraph contributes
+ * 5 test-only exports, and counting them costs 67 -> 72 rather than the 10 the
+ * old blind spot implied. A baseline five higher is cheaper than an exemption
+ * nobody re-examines.
+ */
 test('PROVISIONAL: the unreferenced ratchet does not increase', () => {
   const by = fnsByCategory(REPO_ROOT);
   assert.ok(
@@ -132,7 +136,7 @@ test('PROVISIONAL: the unreferenced ratchet does not increase', () => {
 });
 
 test('PROVISIONAL: the test-only floor does not increase (NOT contract item 1 yet)', () => {
-  const by = fnsByCategory(REPO_ROOT, { excludeGateMachinery: true });
+  const by = fnsByCategory(REPO_ROOT);
   assert.ok(
     by['test-only'].length <= BASELINE_TEST_ONLY,
     `exports with tests but no production caller rose to ${by['test-only'].length} from ${BASELINE_TEST_ONLY}.\n` +
@@ -145,27 +149,7 @@ test('both baselines are honest: they match what is actually there', () => {
   // A baseline above the real count silently permits a regression. Failing LOW
   // means lower the constant -- that is the ratchet working.
   assert.equal(fnsByCategory(REPO_ROOT).unreferenced.length, BASELINE_UNREFERENCED, 'unreferenced drifted');
-  assert.equal(
-    fnsByCategory(REPO_ROOT, { excludeGateMachinery: true })['test-only'].length,
-    BASELINE_TEST_ONLY,
-    'test-only drifted',
-  );
-});
-
-test('the gate-machinery exclusion is narrow and each entry is really gate machinery', () => {
-  // An exclusion list is how a ratchet quietly stops meaning anything, so it is
-  // asserted rather than trusted: every entry must be consumed ONLY by tests.
-  assert.ok(GATE_MACHINERY.length <= 2, 'keep this list tiny or the number stops meaning anything');
-  const all = classifyExports(REPO_ROOT);
-  for (const file of GATE_MACHINERY) {
-    const own = all.filter((d) => d.file === file);
-    assert.ok(own.length > 0, `${file} must exist and export something`);
-    assert.equal(
-      own.filter((d) => d.category === 'production-referenced').length,
-      0,
-      `${file} is excluded as gate machinery but has production-referenced exports; it is not test-support code`,
-    );
-  }
+  assert.equal(fnsByCategory(REPO_ROOT)['test-only'].length, BASELINE_TEST_ONLY, 'test-only drifted');
 });
 
 test('spliced-only is a category, not debt', () => {

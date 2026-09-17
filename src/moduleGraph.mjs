@@ -592,7 +592,14 @@ export const EXPORT_CATEGORIES = Object.freeze([
 ]);
 
 export function classifyExports(root, { allowed = {} } = {}) {
-  const PROD = ['src', 'bin', 'bridge', 'mcp'];
+  /*
+   * `scripts` IS PRODUCTION. scripts/claude-stop-gate.mjs is invoked by a Claude
+   * Code Stop hook -- something outside the graph runs it, which is the only
+   * sense of "entry point" that matters here. Omitting the directory reported
+   * discoverTests, protectedDrift and snapshotPath as unreferenced while a hook
+   * was calling them.
+   */
+  const PROD = ['src', 'bin', 'bridge', 'mcp', 'scripts'];
   const read = (f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } };
   const mentions = (text, name) =>
     new RegExp(`(^|[^A-Za-z0-9_$])${name}([^A-Za-z0-9_$]|$)`).test(text);
@@ -621,7 +628,16 @@ export function classifyExports(root, { allowed = {} } = {}) {
       if (!name || name === 'default') continue;
       if ((allowed[relPath] ?? []).includes(name)) continue;
 
-      const inProd = prod.some(([other, text]) => other !== f && mentions(text, name));
+      /*
+       * SAME-FILE USE COUNTS. A helper called by its own module's shipped
+       * function is production code, and excluding the defining file reported
+       * isProtectedPath and normalizedCandidates as unreferenced while
+       * evaluateClaudeTool called them on every hook invocation. The definition
+       * itself is skipped so an export is not "used" merely by existing.
+       */
+      const own = stripNonCode(read(f)).replace(new RegExp(`export\\s+(?:function|const|let|class)\\s+${name}\\b`), ' ');
+      const inProd = mentions(own, name)
+        || prod.some(([other, text]) => other !== f && mentions(text, name));
       if (inProd) { out.push({ file: relPath, name, category: 'production-referenced' }); continue; }
 
       const inEdge = mentions(edgeText, name);
