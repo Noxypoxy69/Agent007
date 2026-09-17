@@ -22,6 +22,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluateClaudeTool } from '../src/claudeGuard.mjs';
+import { judgeShellCommand } from '../src/shellAllowlist.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -189,4 +190,58 @@ test('the shipped PreToolUse matcher submits every tool to the guard', () => {
 test('settings.json ends with a newline', () => {
   const raw = readFileSync(path.join(repoRoot, '.claude', 'settings.json'), 'utf8');
   assert.equal(raw.endsWith('\n'), true, 'a file without a trailing newline fuses onto whatever follows it');
+});
+
+/*
+ * THE SHELL RAIL WAS POSIX-ONLY WHILE RUNNING ON A POWERSHELL MACHINE.
+ *
+ * Measured on the operator's Windows machine 2026-09-17: Get-Content,
+ * Get-ChildItem, Select-String, Test-Path and Get-Location were all refused,
+ * and so was `sed -n '1,20p' CLAUDE.md` -- the exact read named in
+ * src/claudeGuard.mjs as the reason a path check was removed. The comment
+ * described a repair that had never been made.
+ *
+ * Both directions are asserted here. A rail that only refuses is an outage and
+ * gets switched off, which loses the Stop gate with it; a rail that only
+ * permits is decoration.
+ */
+test('PowerShell read-only cmdlets are accepted', () => {
+  for (const command of [
+    'Get-Content CLAUDE.md', 'get-content CLAUDE.md', 'Get-ChildItem -Path src',
+    'Select-String -Pattern foo -Path src/x.mjs', 'Test-Path src/claudeGuard.mjs',
+    'Get-Location', 'gci src', 'sls -Pattern foo src/x.mjs',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, true, `${command} is a read and must be allowed`);
+  }
+});
+
+test('PowerShell writers and execution stay refused', () => {
+  for (const command of [
+    'Set-Content CLAUDE.md x', 'Add-Content CLAUDE.md x', 'Clear-Content CLAUDE.md',
+    'Out-File CLAUDE.md', 'Remove-Item src/claudeGuard.mjs', 'Move-Item a b',
+    'Copy-Item a b', 'New-Item x', 'Invoke-Expression x', 'Start-Process cmd',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `${command} writes or executes and must be refused`);
+  }
+});
+
+test('sed is accepted as a line-range print and refused as a write primitive', () => {
+  for (const command of [
+    "sed -n '1,20p' CLAUDE.md", 'sed -n "1,20p" src/collect.mjs',
+    'sed -n 1,20p CLAUDE.md', 'sed -n 5p src/x.mjs',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, true, `${command} is the documented read`);
+  }
+  /*
+   * A BLANKET sed ENTRY WOULD HAVE BEEN A HOLE. The w command and the s///w
+   * flag both create files, carrying no metacharacter and no write flag for the
+   * earlier checks to catch. These are the cases that make the narrow shape
+   * necessary rather than fussy.
+   */
+  for (const command of [
+    "sed -n '1w out.txt' CLAUDE.md", "sed -n 's/a/b/w out.txt' CLAUDE.md",
+    "sed -i 's/a/b/' CLAUDE.md", 'sed --in-place s/a/b/ CLAUDE.md',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `${command} can write and must be refused`);
+  }
 });

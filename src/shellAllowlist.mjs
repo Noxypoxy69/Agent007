@@ -94,6 +94,45 @@ const SHAPES = Object.freeze([
  * `git branch newref` -- which creates a ref -- passed. A positional argument is
  * only safe once --list has made the invocation a query.
  */
+/*
+ * POWERSHELL IS THE PRIMARY SHELL ON THE OPERATOR'S MACHINE AND THIS LIST WAS
+ * POSIX-ONLY. Measured 2026-09-17 on Windows: Get-Content, Get-ChildItem,
+ * Select-String, Test-Path and Get-Location were all refused. Those are reads.
+ * Refusing the only way to read a file on the machine the guard runs on is how
+ * a rail gets switched off, and switching it off loses the Stop gate too.
+ *
+ * Cmdlet names are case-insensitive in PowerShell, so these are matched
+ * lower-cased. Writers stay out by omission: Set-Content, Add-Content,
+ * Out-File, Remove-Item, Move-Item, Copy-Item, New-Item, Invoke-Expression and
+ * Start-Process are not here and therefore refused. Piping a read into a writer
+ * cannot help either -- a pipe is a forbidden metacharacter before this point.
+ *
+ * Alias coverage is deliberately partial. A missing alias is a LOUD one-line
+ * fix; a wrongly included writer is silent. Weigh additions on that.
+ */
+const PS_READ_ONLY = new Set([
+  'get-content', 'get-childitem', 'get-item', 'get-location', 'get-command',
+  'select-string', 'test-path', 'resolve-path', 'split-path', 'join-path',
+  'measure-object', 'compare-object', 'select-object', 'format-list', 'format-table',
+  // the common read-only aliases
+  'gc', 'gci', 'gi', 'gl', 'gcm', 'sls',
+]);
+
+/*
+ * SED IS ALLOWED ONLY IN ONE SHAPE, AND NOT BECAUSE SED IS SAFE.
+ *
+ * `sed -n '1,20p' CLAUDE.md` is named in src/claudeGuard.mjs as the read that
+ * justified removing a path check -- but sed was never added here, so it stayed
+ * refused in every quoting form. The comment described a repair that did not
+ * exist. Measured 2026-09-17.
+ *
+ * A blanket `sed` entry would be a WRITE primitive: the `w` command and the
+ * `s///w file` flag both create files, with no metacharacter and no write flag
+ * for the checks above to see. So only a line-range print is accepted, which is
+ * the documented use and nothing else.
+ */
+const SED_READ = /^sed\s+-n\s+(['"]?)\$?[0-9]+(?:,(?:\$|[0-9]+))?p\1\s+[^\s]+$/;
+
 const GIT_BRANCH_LIST = /^git\s+branch$|^git\s+branch\s+--list(\s+[A-Za-z0-9._/@:=+,^~*-]+)?$/;
 
 export function segments(command) {
@@ -134,6 +173,23 @@ export function judgeShellCommand(command) {
         ? { allowed: true }
         : { allowed: false, reason: 'git branch writes a ref unless it is listing' };
     }
+  }
+
+  if (first.toLowerCase() === 'sed') {
+    return SED_READ.test(command.trim())
+      ? { allowed: true }
+      : { allowed: false, reason: 'sed is accepted only as a line-range print (sed -n <range>p <file>); its w command writes files' };
+  }
+
+  if (PS_READ_ONLY.has(first.toLowerCase())) {
+    for (const t of tokens.slice(1)) {
+      const bare = t.replace(/^['"]|['"]$/g, '');
+      if (bare === '') continue;
+      if (!SAFE_ARG.test(bare)) {
+        return { allowed: false, reason: `argument ${JSON.stringify(t)} is not a plain path or flag` };
+      }
+    }
+    return { allowed: true };
   }
 
   const shape = SHAPES.find(([name]) => name === first);
