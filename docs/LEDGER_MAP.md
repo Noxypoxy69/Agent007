@@ -21,7 +21,7 @@ others, and four of them disagreed with reality in a single night.
 | 3 | `agentbridge.proposals` | dispatcher suggestions awaiting confirm | dispatcher | **1,353 rows** |
 | 4 | `agentbridge.messages` | agent-to-agent prose | coordinators, workers | **175 rows** |
 | 5 | `agentbridge.owner_decisions` | append-only authority ledger | coordinators, on owner's word | **27 rows** |
-| 6 | `agentbridge.sessions` | the roster: who is registered and alive | workers at registration | **0 rows visible; see §3** |
+| 6 | `agentbridge.session_registrations` | the roster: who is registered and alive | workers at registration | **4 rows** (see §3 — I first documented the wrong table) |
 | 7 | Git | branches, commits, `Claude-Session` trailers | every agent | authoritative, and the only unforgettable one |
 | 8 | Markdown in `docs/` | plans, status, assignments, "done" | whoever edits | **12 documents assert state** |
 
@@ -36,11 +36,22 @@ everything if false.
 **`attempts` = 0.** No execution attempt has ever been recorded. This does NOT
 mean nothing has run — see §2, which is the single most important section here.
 
-**`proposals` = 1,353 against `tasks` = 4.** The dispatcher has prepared 1,353
-proposals for four tasks. Zero are open. Nobody has explained this ratio and it
-is not understood. It may be benign (a poll loop re-proposing and superseding),
-it may be a loop that never converges. **This is the first thing worth an
-outside pair of eyes.**
+**`proposals` = 1,357 against `tasks` = 4, AND IT IS STILL CLIMBING.** Measured
+1,353 at one point and 1,357 forty minutes later: 15 in the last fifteen
+minutes, the newest 52 seconds old. Roughly one a minute, around 60 an hour,
+recently all for a single task.
+
+1,350 superseded, 5 ever confirmed, 1 open. **Every one carries
+`would_be_accepted = true`** — the dispatcher repeatedly finds the same work
+acceptable, prepares a proposal, and supersedes it a minute later. This is 99.6%
+of the ledger by volume and it is running as you read this.
+
+The leading hypothesis, stated as a hypothesis: preparation is automated and
+confirmation is not. `confirm_proposal` is a coordinator action, and if no
+coordinator is running a confirm loop the dispatcher will re-propose forever
+without anything being wrong with the dispatcher itself. That would make this an
+unfinished handoff rather than a bug. **It has not been verified, and it is the
+first thing worth an outside pair of eyes.**
 
 **`tasks` = 4**, of which two are demo fixtures (`t-demo-runnable`,
 `t-demo-blocked`), one is labelled `PROOF ONLY`, and one is a real task
@@ -87,25 +98,36 @@ Loop B's guards move into Loop A. That is a lease-semantics decision.
 
 ---
 
-## 3. The roster, which lies in a way worth understanding
+## 3. The roster — and a correction to this document
 
-`list_agents` returns 14 agents with heartbeat timestamps. `agentbridge.sessions`
-returns **0 rows** to the role available here. Both were checked directly today.
+**THIS SECTION WAS WRONG WHEN FIRST PUBLISHED, AND THE ERROR IS INSTRUCTIVE.**
+It reported that `agentbridge.sessions` held 0 rows while `list_agents` returned
+14, and offered row-level security as the likely cause.
 
-The likely explanation is row-level security — the edge function reads with the
-service role and sees everything, an ordinary connection sees nothing — but that
-was **not confirmed**, and it is recorded as unresolved rather than asserted.
+The real answer, established by another agent and then verified here: **the
+roster lives in `agentbridge.session_registrations`, which holds 4 rows.**
+`agentbridge.sessions` is an unused table — a second, empty home for the same
+concept. There is no RLS mystery. I probed for a plausible table name, found one,
+found it empty, and built an explanation for a table nothing writes to.
 
-Either way the consequence is the same and is worth stating plainly: **the same
-table answers differently depending on who asks, with no warning.** Anyone
-debugging the roster through SQL concludes "there are no sessions" and is wrong.
+That is the same mistake this whole document is about, committed while writing
+it: **a name that looks authoritative is not evidence that it is the one in
+use.** Finding a table is not finding the store. The correction is left in place
+rather than quietly edited out, because a reader who inherits the original claim
+would spend an hour on RLS for nothing.
 
-Separately, and this one IS confirmed: the roster reported every agent `offline`
-and `idle_workers: 0` while three agents were committing and pushing. The cause
-was diagnosed and fixed by another agent — heartbeats only ever moved when a
-watcher process ran, and that watcher is a child of the worker's own shell, so it
-dies with the session and nothing supervises it. The fix is **merged and not
-deployed**: production still serves a bundle without it.
+**Five more tables are empty and are second homes for live concepts**:
+`sessions`, `heartbeats`, `lanes`, `machines`, `nonces`, `rate_windows`.
+`heartbeats` is the sharpest — liveness is recorded in `session_registrations`,
+so `heartbeats` is an unused duplicate of the thing the roster most depends on.
+Anyone reasoning about liveness from the table named after it sees nothing.
+
+**What IS confirmed about the roster's behaviour**: it reported every agent
+`offline` and `idle_workers: 0` while three agents were committing and pushing.
+Diagnosed and fixed by another agent — heartbeats only ever moved when a watcher
+process ran, and that watcher is a child of the worker's own shell, so it dies
+with the session and nothing supervises it. **That fix is now deployed (v27) and
+the roster is self-maintaining.**
 
 A complementary read exists that does not depend on registration at all:
 `agentbridge who` reads `Claude-Session` trailers out of git and reports which
@@ -113,8 +135,6 @@ sessions have recently produced work. It is deliberately the wrong shape to
 route on — no output object carries an agent id, lane or capacity, and a test
 asserts that structurally — because two rosters that disagree is a worse failure
 than one roster that is incomplete.
-
----
 
 ## 4. Where duplication comes from, measured
 
