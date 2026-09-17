@@ -162,3 +162,61 @@ test('the reader refuses a proof whose deps were never installed', () => {
   assert.equal(r.ok, false, 'self-consistent is not the same as promotable');
   assert.ok(r.refusals.some((x) => x.code === 'deps-unavailable'));
 });
+
+/* ------------------------------------------------- THE CLI CONTRACT */
+
+test('verify-sha accepts any revision git understands, and says why when it cannot', async () => {
+  /*
+   * REGRESSION, 2026-09-17. A hex-only guard refused `verify-sha HEAD` while
+   * git rev-parse resolves HEAD, branches, tags and master~3 without trouble.
+   * The guard existed to give a clean error instead of a raw git one and ended
+   * up rejecting the most obvious invocation there is. Found by typing it.
+   */
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { fileURLToPath } = await import('node:url');
+  const run = promisify(execFile);
+  const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
+  const REPO = fileURLToPath(new URL('../', import.meta.url));
+
+  const call = async (argv) => {
+    try {
+      const { stdout } = await run(process.execPath, [CLI, 'verify-sha', ...argv], { cwd: REPO, maxBuffer: 8e6 });
+      return { code: 0, stdout, stderr: '' };
+    } catch (e) { return { code: e.code ?? 1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }; }
+  };
+
+  const missing = await call([]);
+  assert.equal(missing.code, 2, 'no revision must refuse, not default to HEAD');
+  assert.match(missing.stderr, /name a commit/);
+
+  const bogus = await call(['zz-no-such-revision']);
+  assert.equal(bogus.code, 2);
+  assert.match(bogus.stderr, /did not resolve to a commit/);
+  assert.match(bogus.stderr, /git said:/, 'the cause must survive, not be swallowed');
+});
+
+test('verify-sha reads the revision as a positional, not as a flag value', async () => {
+  /*
+   * REGRESSION. The first parser used find(a => !a.startsWith('--')), so
+   * `verify-sha --repo /path HEAD` resolved to "/path" -- the exact trap
+   * check-first documents twenty lines away in the same file.
+   */
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { fileURLToPath } = await import('node:url');
+  const run = promisify(execFile);
+  const CLI = fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url));
+  const REPO = fileURLToPath(new URL('../', import.meta.url));
+
+  let stderr = '';
+  try {
+    await run(process.execPath, [CLI, 'verify-sha', '--repo', REPO, 'zz-no-such-revision'],
+      { cwd: REPO, maxBuffer: 8e6, timeout: 60000 });
+  } catch (e) { stderr = e.stderr ?? ''; }
+  assert.match(
+    stderr,
+    /zz-no-such-revision/,
+    'the positional after a flag VALUE must be the revision, not the flag value',
+  );
+});

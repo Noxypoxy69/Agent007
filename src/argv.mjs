@@ -128,3 +128,51 @@ export function sanitizeCommand(cmd) {
     truncated: rest.length > MAX_ARGS,
   };
 }
+
+/*
+ * ------------------------------------------------------------------------
+ * POSITIONALS, WHICH IS PARSING RATHER THAN SANITISING, AND LIVES HERE
+ * BECAUSE THE ALTERNATIVE WAS A THIRD INLINE COPY.
+ *
+ * check-first and verify-sha each carried their own loop, and both had the same
+ * defect. Measured, not reasoned about:
+ *
+ *   check-first --json roster   ->  topic parsed as ""   (then: "no prior work")
+ *   verify-sha  --json <rev>    ->  revision lost entirely
+ *
+ * The loop skipped the token after ANY flag, on the assumption that every flag
+ * takes a value. `--json` does not. So a boolean flag ate the positional, and in
+ * check-first's case the tool then reported nothing found for a topic it had
+ * never been given -- absent presented as zero, in the command whose entire job
+ * is stopping duplicate work.
+ *
+ * WHY AN EXPLICIT VALUELESS SET RATHER THAN A VALUE SET. Both lists can be
+ * wrong; the question is how they fail. Forget a VALUE flag and its argument
+ * becomes a positional, polluting the topic -- silent and wrong. Forget a
+ * VALUELESS flag and it eats a positional, so the command refuses with "name a
+ * commit" -- loud and obviously wrong. Between two incomplete lists, take the
+ * one whose omissions announce themselves.
+ *
+ * `--flag=value` never consumes a following token, in either list.
+ */
+
+/** Flags that take no value anywhere in this CLI. Callers may add their own. */
+export const VALUELESS_FLAGS = Object.freeze([
+  'json', 'help', 'dry-run', 'once', 'watch', 'sql',
+  'show-secret', 'strict-shared', 'registry-live', 'confirm-audited',
+]);
+
+export function positionals(argv, { valueless = VALUELESS_FLAGS } = {}) {
+  const novalue = new Set(valueless.map((f) => f.replace(/^--/, '')));
+  const words = [];
+  const list = Array.isArray(argv) ? argv : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const a = typeof list[i] === 'string' ? list[i] : '';
+    if (!a.startsWith('--')) { words.push(a); continue; }
+    if (a.includes('=')) continue;                   // --flag=value carries its own
+    if (novalue.has(a.slice(2))) continue;           // boolean: the next token is not its value
+    const next = list[i + 1];
+    if (next !== undefined && !next.startsWith('--')) i += 1;
+  }
+  return words;
+}

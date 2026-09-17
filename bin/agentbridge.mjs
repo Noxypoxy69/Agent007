@@ -2089,16 +2089,25 @@ try {
      * documents this exact trap twenty lines from here and I reused the broken
      * shape anyway. A flag's value is never a positional.
      */
-    const vArgv = process.argv.slice(3);
-    const vWords = [];
-    for (let i = 0; i < vArgv.length; i += 1) {
-      const a = vArgv[i];
-      if (a.startsWith('--')) { if (!a.includes('=') && vArgv[i + 1] && !vArgv[i + 1].startsWith('--')) i += 1; continue; }
-      vWords.push(a);
-    }
+    const { positionals } = await import('../src/argv.mjs');
+    const vWords = positionals(process.argv.slice(3));
+    /*
+     * ANY REVISION GIT UNDERSTANDS, NOT JUST A HEX SHA.
+     *
+     * This refused `verify-sha HEAD` on a hex-only regex while git rev-parse
+     * resolves HEAD, branch names, tags and `master~3` perfectly well. The guard
+     * was written to give a clean error instead of a raw git one and ended up
+     * rejecting the most obvious invocation there is -- found by typing it.
+     *
+     * So the shape check only rejects what cannot be a revision at all, and
+     * rev-parse below is the real arbiter. It still resolves in the SOURCE
+     * repository, before the clone, because a name means different things in
+     * different clones and the proof is keyed on the full 40.
+     */
     const want = vWords[0] ?? '';
-    if (!/^[0-9a-f]{7,40}$/.test(want)) {
-      console.error('verify-sha: give a commit sha, e.g. agentbridge verify-sha ef67863');
+    if (want === '' || want.startsWith('-')) {
+      console.error('verify-sha: name a commit, e.g. agentbridge verify-sha HEAD');
+      console.error('            any revision git understands: a sha, a branch, a tag, master~3');
       handled = true; done(2);
     }
     const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
@@ -2109,8 +2118,17 @@ try {
        * RESOLVED IN THE SOURCE REPOSITORY, BEFORE THE CLONE. A short sha is
        * ambiguous across clones, and the proof is keyed on the full 40.
        */
-      const { stdout: full } = await run('git', ['rev-parse', `${want}^{commit}`], { cwd: repo });
-      const sha = full.trim();
+      let sha = null;
+      try {
+        const { stdout: full } = await run('git', ['rev-parse', `${want}^{commit}`], { cwd: repo });
+        sha = full.trim();
+      } catch (e) {
+        // THE CAUSE SURVIVES. "not a commit" and "not a repository" are
+        // different problems and the operator should not have to guess which.
+        console.error(`verify-sha: ${JSON.stringify(want)} did not resolve to a commit in ${repo}`);
+        console.error(`  git said: ${`${e?.stderr || e?.message || e}`.split('\n')[0]}`);
+        handled = true; done(2);
+      }
 
       tmp = await mkdtemp(path.join(tmpdir(), 'agentbridge-verify-'));
       const work = path.join(tmp, 'src');
@@ -2233,17 +2251,18 @@ try {
     const P = await import('../src/priorWork.mjs');
     const C = await import('../src/completion.mjs');
 
-    // Positionals only. A bare token that FOLLOWS a --flag is that flag's value,
-    // not part of the topic; without this, `check-first roster --hours 24` would
-    // search for "roster 24" and quietly find nothing.
-    const argv = process.argv.slice(3);
-    const words = [];
-    for (let i = 0; i < argv.length; i += 1) {
-      const a = argv[i];
-      if (a.startsWith('--')) { if (!a.includes('=') && argv[i + 1] && !argv[i + 1].startsWith('--')) i += 1; continue; }
-      words.push(a);
-    }
-    const topic = words.join(' ').trim();
+    /*
+     * Positionals only, from src/argv.mjs. A bare token following a VALUE flag
+     * is that flag's value -- without this, `check-first roster --hours 24`
+     * searched for "roster 24" and quietly found nothing. The inline version
+     * that used to live here skipped the token after ANY flag, so
+     * `check-first --json roster` parsed the topic as "" and then reported no
+     * prior work for a topic it was never given. Both commands now share one
+     * implementation; see the note in argv.mjs for why the list is of VALUELESS
+     * flags rather than value-taking ones.
+     */
+    const { positionals } = await import('../src/argv.mjs');
+    const topic = positionals(process.argv.slice(3)).join(' ').trim();
     const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
     const hours = (() => {
       const raw = args.hours;
