@@ -36,7 +36,11 @@ function guardedRepo(t) {
   const home = mkdtempSync(path.join(tmpdir(), 'reset-home-'));
   t.after(() => { for (const d of [root, home]) rmSync(d, { recursive: true, force: true }); });
   for (const d of ['src', 'test', 'scripts', 'bin', '.claude']) mkdirSync(path.join(root, d), { recursive: true });
-  for (const f of ['src/guardSession.mjs', 'src/claudeGuard.mjs', 'src/shellAllowlist.mjs',
+  /* safeGit.mjs is copied because guardSession imports it: the gate's own git
+   * calls go through the hardened path. A fixture missing it makes the guard
+   * unloadable, which the positive control below catches rather than letting the
+   * refusal assertions pass for the wrong reason. */
+  for (const f of ['src/guardSession.mjs', 'src/claudeGuard.mjs', 'src/shellAllowlist.mjs', 'src/safeGit.mjs',
     'scripts/claude-stop-gate.mjs', 'bin/agentbridge-claude-guard.mjs']) {
     cpSync(path.join(repoRoot, f), path.join(root, f));
   }

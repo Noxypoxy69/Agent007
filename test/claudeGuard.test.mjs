@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import { evaluateClaudeTool, hookDecision, isProtectedPath } from '../src/claudeGuard.mjs';
 import { buildSnapshot, writeSnapshot, protectedDrift, discoverTests, snapshotPath } from '../src/guardSession.mjs';
@@ -10,27 +10,31 @@ import { buildSnapshot, writeSnapshot, protectedDrift, discoverTests, snapshotPa
 /*
  * A REAL GIT REPOSITORY, BECAUSE THE GUARD ONLY EVER RUNS IN ONE.
  *
- * This used to be a bare temp directory. That was invisible until writeSnapshot
- * started refusing to mint a baseline from a tree git reports as already
- * differing -- the fix for a measured cross-session bypass -- at which point
- * three tests here failed for a reason none of them is about. Not one of them
- * asserts anything concerning a directory outside git; they need a fixture a
- * baseline can legitimately be taken from, and outside git there is no such
- * thing, because "already differs from git" has no answer there.
+ * This was a bare temp directory, which was invisible until writeSnapshot began
+ * asking git whether the tree it is about to adopt as normal is clean. A plain
+ * mkdtemp directory is unmeasurable, and unmeasurable is refused -- so the old
+ * fixture would exercise the refusal path in every test instead of the behaviour
+ * each one is about, and three tests here failed for a reason none of them is
+ * about. Not one asserts anything concerning a directory outside git.
  *
  * Every assertion in those tests is unchanged. Only the setup became honest.
+ *
+ * commit.gpgsign=false because a contributor with commit signing configured
+ * globally would otherwise have the fixture fail for reasons unrelated to it.
  */
-function repoFixture() {
+function repoFixture({ commit = true } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'agentbridge-guard-'));
   mkdirSync(path.join(root, 'test'));
   mkdirSync(path.join(root, '.claude'));
   writeFileSync(path.join(root, 'test', 'real.test.mjs'), 'test("real", () => {});');
-  const git = (...a) => execFileSync('git', a, { cwd: root, stdio: 'ignore' });
-  git('init', '-q', '.');
-  git('config', 'user.name', 'fixture');
-  git('config', 'user.email', 'fixture@local');
-  git('add', '-A');
-  git('commit', '-qm', 'fixture baseline');
+  const git = (...args) => execFileSync('git', [
+    '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args,
+  ], { cwd: root, encoding: 'utf8', windowsHide: true });
+  git('init', '-q', '-b', 'main');
+  if (commit) {
+    git('add', '-A');
+    git('commit', '-q', '-m', 'fixture');
+  }
   return root;
 }
 
@@ -540,4 +544,72 @@ test('quoted arguments are tokenized as data and unbalanced quotes fail closed',
   assert.equal(judgeShellCommand('grep "a;b" CLAUDE.md').allowed, true);
   assert.equal(judgeShellCommand('echo "a && b"').allowed, true);
   assert.equal(judgeShellCommand('grep "unterminated CLAUDE.md').allowed, false);
+});
+
+/*
+ * THE RESET BYPASS, ACROSS SESSIONS. This is the one the exclusive create does
+ * not close.
+ *
+ * writeSnapshot refuses to REPLACE a snapshot, and the test above proves it. But
+ * snapshotPath keys on sha256(repoRoot + sessionId), so a NEW session id is a
+ * NEW file and the exclusive create never fires. Damage a protected control, let
+ * the session end, start another, and SessionStart mints a baseline from the
+ * damaged tree -- after which the Stop gate compares damage against damage and
+ * finds no drift. The control the shell rail and the MCP path both defer to is
+ * then silently disarmed.
+ *
+ * Measured before the fix: session B minted, and protectedDrift returned [].
+ *
+ * The Stop gate's own recovery path already refused this correctly. The check
+ * lived in that ONE caller, and SessionStart -- the path that mints almost every
+ * baseline -- had none. So it moves into writeSnapshot, where every caller
+ * inherits it and the next one cannot forget.
+ */
+test('a NEW session may not mint a baseline over a damaged tree', () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'guard-home-'));
+  process.env.AGENTBRIDGE_HOME = home;
+  const root = repoFixture();
+
+  assert.equal(writeSnapshot(root, 'sess-A').ok, true, 'a clean tree mints normally');
+
+  // A protected control is damaged: local settings can switch the hooks off.
+  writeFileSync(path.join(root, '.claude', 'settings.json'), '{"disableAllHooks":true}');
+
+  const second = writeSnapshot(root, 'sess-B');
+  assert.equal(second.ok, false, 'a new session must not adopt the damaged tree as normal');
+  assert.match(second.reason, /already differ|not clean|drift/i);
+});
+
+test('a WEAKENED BASELINE TEST also blocks minting, not just protected paths', () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'guard-home-'));
+  process.env.AGENTBRIDGE_HOME = home;
+  const root = repoFixture();
+
+  // Only test/claudeGuard.test.mjs is a PROTECTED path; every other test is
+  // merely a baseline test. Weakening one is the same bypass through a different
+  // door, and git-drift covers both.
+  writeFileSync(path.join(root, 'test', 'real.test.mjs'), 'test("real", () => { /* gutted */ });');
+
+  const r = writeSnapshot(root, 'sess-C');
+  assert.equal(r.ok, false, 'a weakened inherited test must not become the baseline');
+});
+
+test('minting is REFUSED where git cannot answer: unknown is not clean', () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'guard-home-'));
+  process.env.AGENTBRIDGE_HOME = home;
+  const root = mkdtempSync(path.join(tmpdir(), 'agentbridge-nogit-'));
+  mkdirSync(path.join(root, 'test'));
+  writeFileSync(path.join(root, 'test', 'real.test.mjs'), 'test("real", () => {});');
+
+  const r = writeSnapshot(root, 'sess-D');
+  assert.equal(r.ok, false, 'an unmeasurable tree is not a clean one');
+  assert.match(r.reason, /could not|unknown|not a git/i);
+});
+
+test('AND IT STILL MINTS on a clean tree — a gate that only refuses is an outage', () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'guard-home-'));
+  process.env.AGENTBRIDGE_HOME = home;
+  const root = repoFixture();
+  const r = writeSnapshot(root, 'sess-E');
+  assert.equal(r.ok, true, `a clean committed tree must still mint: ${r.reason ?? ''}`);
 });

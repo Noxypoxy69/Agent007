@@ -357,10 +357,30 @@ test('M19 an uninterpretable runner result is an error, not a pass', (t) => {
 /* ---- git execution hardening (mutations 20-22) ---- */
 
 test('M20/M21/M22 verifier git calls neutralize candidate-controlled config', (t) => {
-  const src = blankComments(readFileSync(path.join(here, '..', 'src', 'candidateTree.mjs'), 'utf8'));
+  /*
+   * THE FLAGS MOVED, THE REQUIREMENT DID NOT.
+   *
+   * This read candidateTree.mjs, because that is where the list lived. It lived
+   * there AND in verifier.mjs, byte-identical, while seven other git
+   * invocations in this repository had none -- including the two in
+   * guardSession.mjs that the Stop gate depends on. src/safeGit.mjs is the
+   * single artifact now, so the assertion reads the shipped artifact rather
+   * than one of its former copies.
+   *
+   * The routing assertion below is what makes this STRONGER than it was: the
+   * old check could only prove one file mentioned the flags, and said nothing
+   * about whether that file's git calls actually used them or whether anybody
+   * else's did. test/safeGit.test.mjs proves no module invokes git any other
+   * way at all.
+   */
+  const src = blankComments(readFileSync(path.join(here, '..', 'src', 'safeGit.mjs'), 'utf8'));
   assert.match(src, /core\.hooksPath=\/dev\/null/, 'hooksPath must be neutralized');
   assert.match(src, /core\.fsmonitor=false/, 'fsmonitor must be neutralized');
   assert.match(src, /protocol\.ext\.allow=never/, 'ext protocol must be refused');
+
+  const tree = blankComments(readFileSync(path.join(here, '..', 'src', 'candidateTree.mjs'), 'utf8'));
+  assert.match(tree, /from '\.\/safeGit\.mjs'/, 'candidateTree must route its git calls through safeGit');
+  assert.doesNotMatch(tree, /execFileSync\(\s*'git'/, 'candidateTree must not invoke git directly');
 
   /*
    * BEHAVIOURAL, NOT JUST TEXTUAL. A hostile core.fsmonitor in the candidate's

@@ -201,17 +201,20 @@ if (!snapshot) {
    * becomes recoverable on the next one.
    */
   /*
-   * THE REFUSAL ITSELF NOW LIVES IN writeSnapshot, NOT HERE.
+   * THE REFUSAL ITSELF NOW LIVES IN writeSnapshot, NOT HERE, AND THIS USED TO BE
+   * THE ONLY PLACE THAT ENFORCED IT -- which was the hole.
    *
-   * This path used to perform the cleanliness check and then mint. That left
-   * every OTHER caller of writeSnapshot -- notably --session-start, which is the
-   * path every session actually takes -- minting with no check at all, so a new
-   * session could baseline a damaged tree and its Stop gate would report no
-   * drift. Duplicating the check into the second caller would have been the
-   * same mistake with a longer fuse; the control belongs to the act of minting.
+   * This path performed the cleanliness check and then minted. Every OTHER
+   * caller of writeSnapshot had none, notably --session-start, which mints
+   * nearly every baseline: so a new session could baseline a damaged tree and
+   * its Stop gate would then report no drift. Duplicating the check into the
+   * second caller would have been the same mistake with a longer fuse, so the
+   * control belongs to the act of minting and every caller inherits it.
    *
-   * What stays here is the WORDING, because advice is caller-specific and a
-   * refusal a person cannot act on is an outage waiting to happen.
+   * What survives here is the MESSAGE. The per-status advice below is more
+   * useful than the one-line reason writeSnapshot can return, and a refusal a
+   * person cannot act on is an outage waiting to happen. Presentation, not a
+   * second control.
    */
   const minted = writeSnapshot(root, sessionId);
   if (!minted.ok) {

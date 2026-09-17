@@ -66,10 +66,20 @@ if (process.argv.includes('--session-start')) {
   const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const r = writeSnapshot(root, sessionId);
   /*
-   * A REFUSED REPLACEMENT IS REPORTED, NOT SWALLOWED. Re-running this used to
-   * overwrite the baseline with whatever state the repository was in, which was
-   * the entire reset bypass: damage a file, re-run --session-start, and Stop
-   * approves the damage. Initialise once; a second call says so.
+   * A REFUSED MINT IS REPORTED, NOT SWALLOWED.
+   *
+   * Two different refusals arrive here and both matter.
+   *
+   * REPLACEMENT: re-running this used to overwrite the baseline with whatever
+   * state the repository was in -- damage a file, re-run --session-start, and
+   * Stop approves the damage. The exclusive create closed that.
+   *
+   * IT DID NOT CLOSE THE BYPASS ACROSS SESSIONS, and this comment used to claim
+   * otherwise. The snapshot is keyed by repository AND session id, so a new
+   * session is a new file and the exclusive create never fires: damage a
+   * control, start a fresh session, and THIS LINE minted a clean baseline over
+   * it. writeSnapshot now asks git before minting at all, so that refusal
+   * surfaces here too.
    */
   process.stdout.write(`${JSON.stringify({
     systemMessage: r.ok

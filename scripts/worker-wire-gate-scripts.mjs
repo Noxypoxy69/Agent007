@@ -28,6 +28,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { runGit } from '../src/safeGit.mjs';
 import path from 'node:path';
 
 const WANTED = {
@@ -83,7 +84,7 @@ console.log(`worker: wired ${added.join(', ')} into package.json`);
  * base sha is how a worker says "I changed nothing", and that is what an
  * uncommitted edit becomes the moment the directory is gone.
  */
-const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+const git = (...args) => runGit(args, { cwd }).trim();
 
 try {
   git('add', '--', 'package.json');

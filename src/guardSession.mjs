@@ -30,6 +30,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSy
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { runGit } from './safeGit.mjs';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -182,6 +183,21 @@ export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repo
    *
    * So the refusal belongs to the act of minting, not to whoever remembers to
    * ask. Both existing callers inherit it and so does the next one.
+   *
+   * THIS IS NOT ONE GATE'S PROBLEM, which is why it is worth this much comment.
+   * src/shellAllowlist.mjs defers to the Stop gate in terms -- "THE BOUNDARY IS
+   * NOT HERE" -- and src/claudeGuard.mjs defers to it twice more: every mcp__
+   * tool and every tool it cannot classify are not blocked at the door but
+   * "detected at Stop by protected-file drift". Three layers, one destination,
+   * and the destination could be re-based. (Observation owed to the independent
+   * fix on fix/stop-gate-rebaseline, which reached the same conclusion from the
+   * other end.)
+   *
+   * WHAT IT STILL DOES NOT COVER, stated because a fix that overstates its reach
+   * is exactly how the previous one got believed: git compares the working tree
+   * against HEAD, so damage that has been COMMITTED reads as clean and can still
+   * be adopted as a baseline. Closing that needs an authority outside the
+   * writable checkout. Reviewing the commit is what catches it today.
    */
   const gitDrift = baselineBlockingDriftFromGit(repoRoot);
   if (gitDrift === null) {
@@ -311,8 +327,8 @@ export function baselineBlockingDriftFromGit(repoRoot) {
   let out;
   let indexFlags;
   try {
-    out = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
-      cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
+    out = runGit(['status', '--porcelain', '--untracked-files=all'], {
+      cwd: repoRoot, timeout: 20000,
     });
     /*
      * `git status` intentionally trusts index hints. A tracked file marked
@@ -320,9 +336,7 @@ export function baselineBlockingDriftFromGit(repoRoot) {
      * status reports a clean tree. Recovery may never mint a baseline while a
      * protected file/test is hidden behind either bit.
      */
-    indexFlags = execFileSync('git', ['ls-files', '-v'], {
-      cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
-    });
+    indexFlags = runGit(['ls-files', '-v'], { cwd: repoRoot, timeout: 20000 });
   } catch {
     return null;
   }

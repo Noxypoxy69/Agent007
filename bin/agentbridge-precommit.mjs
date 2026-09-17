@@ -40,6 +40,7 @@
  * particular state; in normal use they are read from git.
  */
 import { execFile } from 'node:child_process';
+import { runGitAsync } from '../src/safeGit.mjs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -60,7 +61,7 @@ const has = (name) => argv.includes(`--${name}`);
 
 function git(args, cwd) {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, windowsHide: true, timeout: 60000 }, (err, stdout) => {
+    runGitAsync(args, { cwd, windowsHide: true, timeout: 60000 }, (err, stdout) => {
       resolve({ ok: !err, out: String(stdout ?? '').trim() });
     });
   });

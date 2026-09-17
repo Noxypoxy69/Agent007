@@ -31,7 +31,8 @@ import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createJobStore } from './jobStore.mjs';
-import { buildCandidateTree, materializeTree, resolveBaseline, SAFE_GIT_CONFIG } from './candidateTree.mjs';
+import { runGit } from './safeGit.mjs';
+import { buildCandidateTree, materializeTree, resolveBaseline } from './candidateTree.mjs';
 import { createVerifier, POLICY_VERSION } from './verifier.mjs';
 
 export function stateDir() {
@@ -160,7 +161,7 @@ function snapshotCandidate(stateRoot, repoRoot, candidateWorkspace) {
   const treeSha = buildCandidateTree(candidateWorkspace);
   const materialized = materializeTree(candidateWorkspace, treeSha);
   try {
-    const git = (args, cwd) => execFileSync('git', [...SAFE_GIT_CONFIG, ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
+    const git = (args, cwd) => runGit(args, { cwd }).trim();
     git(['-c', 'init.defaultBranch=main', 'init', '-q', '.'], materialized);
 
     /*
