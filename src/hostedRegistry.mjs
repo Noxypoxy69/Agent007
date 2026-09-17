@@ -777,6 +777,100 @@ const derived = (env, suffix, override) => {
   return { url: reg.url.replace(/\/register$/, suffix), token: reg.token };
 };
 
+/**
+ * EVERY RETURNED TASK THE READER SCOPE CAN SEE, so a reviewer can find its work.
+ *
+ * `fetchOwnTask` answers "what is assigned to ME", which is the wrong question
+ * for a reviewer: review work is by definition somebody else's return. There was
+ * no read path at all for reviewable work, which is why
+ * `bin/agentbridge-review.mjs` had to be handed a task file by hand and why 740
+ * review proposals superseded unread between 01:13 and 03:20 on 2026-09-17.
+ *
+ * It returns rows and judges nothing. WHICH row to review is decided by
+ * `selectReviewable` in `src/reviewConsumer.mjs`, which is pure and which the
+ * suite can watch fail. Putting that choice in here would bury it in a module
+ * that needs a network before it can be tested at all.
+ */
+export async function fetchReviewableWork(env = {}, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cfg = readerConfig(env);
+  if (!cfg) return { state: HOSTED.NOT_CONFIGURED };
+
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== 'function') {
+    return { state: HOSTED.UNREACHABLE, detail: 'no fetch available' };
+  }
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await doFetch(cfg.url, {
+      method: 'POST',
+      signal: ac.signal,
+      headers: {
+        authorization: `Bearer ${cfg.token}`,
+        'content-type': 'application/json',
+        /* Same reason as fetchHostedRegistrations: a CLI exits the moment it has
+         * printed, and on Windows exiting while undici holds a keep-alive socket
+         * trips a libuv assertion -- a correct answer followed by exit 127. */
+        connection: 'close',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'list_tasks', arguments: { state: 'returned' } },
+      }),
+    });
+    if (res.status === 401) {
+      return { state: HOSTED.REJECTED, detail: 'reader token rejected (401)' };
+    }
+    const answered = await interpretHttp(res, { credential: 'reader token' });
+    if (answered) return answered;
+
+    const body = await res.json();
+
+    /*
+     * A JSON-RPC ERROR IS AN ANSWER, NOT A MALFORMED RESPONSE, and the first
+     * draft of this called it malformed -- which is the same collapse this file
+     * warns about two functions up, where a rejected credential read as an
+     * unreachable service. It cost a real diagnosis: the live reader scope
+     * answers -32602 "no such tool: list_tasks", which is precise and
+     * actionable, and "malformed" sent me looking at the parser instead.
+     *
+     * -32602 HERE MEANS THE SCOPE LACKS THE TOOL, deliberately: a reader does
+     * not see list_tasks at all rather than being refused by it. That is not a
+     * fault to retry, it is the wrong credential for the question.
+     */
+    if (body?.error) {
+      const code = body.error.code;
+      const message = String(body.error.message ?? '');
+      if (code === -32602 && /no such tool/i.test(message)) {
+        return {
+          state: HOSTED.REJECTED,
+          detail: `${message}. This token's scope cannot see tasks; list_tasks is a coordinator `
+            + 'tool. A reader sees no tasks at all rather than being refused by one.',
+        };
+      }
+      return { state: HOSTED.REJECTED, detail: `${message} (code ${code})` };
+    }
+
+    const text = body?.result?.content?.[0]?.text;
+    if (typeof text !== 'string') {
+      return { state: HOSTED.MALFORMED, detail: 'no tool result in the response' };
+    }
+    let rows;
+    try { rows = JSON.parse(text); } catch {
+      return { state: HOSTED.MALFORMED, detail: 'tool result was not JSON' };
+    }
+    if (!Array.isArray(rows)) {
+      return { state: HOSTED.MALFORMED, detail: 'tool result was not a list of tasks' };
+    }
+    return { state: HOSTED.OK, rows };
+  } catch (err) {
+    return { state: HOSTED.UNREACHABLE, detail: String(err?.message ?? err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function taskConfig(env = {}) { return derived(env, '/task', 'AGENTBRIDGE_TASK_URL'); }
 export function renewConfig(env = {}) { return derived(env, '/renew', 'AGENTBRIDGE_RENEW_URL'); }
 

@@ -49,6 +49,37 @@ function die(message, code = 2) {
   process.exit(code);
 }
 
+/*
+ * STOPPING AFTER A REMOTE FETCH, WITHOUT process.exit().
+ *
+ * `die` above is safe for every branch that has not opened a socket. The
+ * --discover branch has. On node 24 / Windows, process.exit() after a fetch
+ * trips a libuv assertion and kills the process with a garbage code:
+ *
+ *   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), src\win\async.c:94
+ *
+ * I hit this on the first live --discover run: the refusal printed correctly and
+ * the process then exited -1073740791 instead of 4. For a CLI whose contract is
+ * "exit 0 ONLY when a decision was RECORDED", a garbage exit code after a
+ * correct answer is the worst possible failure -- it is the gate reporting
+ * something that did not happen.
+ *
+ * bin/agentbridge.mjs already measured the fixes that DO NOT work: destroying
+ * undici's dispatcher and deferring through setImmediate both still die. Only
+ * `process.exitCode` plus a NATURAL exit survives. But exitCode alone does not
+ * halt, and a refusal that carries on would go and review something. So the
+ * sentinel throws to halt exactly where exit halted, and the handler converts it
+ * into a code and lets the loop drain. `return` is unavailable: module top level.
+ */
+class Done extends Error {
+  constructor(code) { super(`done:${code}`); this.exitCode = code; }
+}
+process.on('uncaughtException', (err) => {
+  if (err instanceof Done) { process.exitCode = err.exitCode; return; }
+  process.stderr.write(`agentbridge-review: ${err?.stack ?? err}\n`);
+  process.exitCode = 1;
+});
+
 const taskPath = flag('--task');
 const envelopePath = flag('--envelope');
 const root = flag('--root');
@@ -56,14 +87,86 @@ const repo = flag('--repo') ?? process.cwd();
 const session = flag('--session');
 const reviewerPath = flag('--reviewer');
 const noLease = has('--no-lease');
+const discover = has('--discover');
 
-if (!taskPath || !envelopePath || !root) {
-  die('usage: --task <file.json> --envelope <file.json> --root <workspace root> '
+if ((!taskPath && !discover) || !envelopePath || !root) {
+  die('usage: (--task <file.json> | --discover) --envelope <file.json> --root <workspace root> '
     + '[--repo <path>] [--session <id>] [--reviewer <module>] [--no-lease]');
 }
 if (!noLease && !session) die('--session is required: a review is recorded against a registered session');
+if (discover && !session) {
+  die('--discover needs --session: choosing what to review requires knowing who is asking, '
+    + 'because the one thing a reviewer may never take is its own return');
+}
 
-const task = JSON.parse(await readFile(taskPath, 'utf8'));
+/*
+ * DISCOVERY. The step that did not exist, and whose absence is the whole of
+ * this defect: `claim_review` and `submit_review` have been callable since
+ * 2026-09-15 and this CLI has been able to drive them, but somebody had to
+ * already KNOW which task to name. Nobody did, so between 01:13 and 03:20 on
+ * 2026-09-17 the dispatcher prepared 740 review proposals for one returned task
+ * and every one superseded unread.
+ *
+ * THE SELECTION IS NOT MADE HERE. `selectReviewable` is pure and lives in
+ * src/reviewConsumer.mjs so the suite can watch it refuse; this only fetches
+ * rows and reports what the choice was. Nothing about which task is eligible --
+ * self-review, a live lease, a head that names no commit -- is decided in a file
+ * that needs a network before it can be tested.
+ */
+let task;
+if (discover) {
+  const { fetchReviewableWork, HOSTED, closeHttp } = await import('../src/hostedRegistry.mjs');
+  const { selectReviewable } = await import('../src/reviewConsumer.mjs');
+
+  /*
+   * LEAVE WITHOUT process.exit(). See the Done sentinel above for why.
+   *
+   * MY FIRST DIAGNOSIS HERE WAS WRONG AND IS WORTH RECORDING. I assumed the
+   * assertion was undici holding a keep-alive socket, so the fix was to call
+   * closeHttp() before exiting. I did, and it still died with
+   * -1073740791 -- because the trigger is process.exit() itself, not the open
+   * socket. bin/agentbridge.mjs had already measured exactly that and written it
+   * down; I reproduced a solved problem by not reading it first.
+   *
+   * closeHttp() stays because draining the dispatcher is still correct on its
+   * own terms, and because a natural exit waits for the loop to empty. It simply
+   * is not what fixes the exit code. Loopback and local servers do not reproduce
+   * any of this, so the hermetic suite structurally cannot catch it.
+   */
+  const leave = async (code) => { await closeHttp(); throw new Done(code); };
+
+  const found = await fetchReviewableWork(process.env);
+  if (found.state !== HOSTED.OK) {
+    /*
+     * A READ THAT FAILED IS NOT AN EMPTY QUEUE. Reporting "nothing to review"
+     * when the token was rejected or the service was down is the same mistake as
+     * a falling supersede rate reading as success -- it is the absence of an
+     * answer being presented as an answer.
+     */
+    process.stderr.write(`agentbridge-review: --discover could not read reviewable work: `
+      + `${found.state}${found.detail ? ` (${found.detail})` : ''}. That is not an empty queue, `
+      + 'and it must not be reported as one.\n');
+    await leave(4);
+  }
+  const chosen = selectReviewable({ tasks: found.rows, reviewerSession: session });
+  if (!chosen.ok) {
+    /*
+     * Exit 3 is "the far end said no", which is what this is: there is real work
+     * and none of it is mine to take, or there is none at all. The reason names
+     * which, because "nobody else is running" and "nothing has been returned"
+     * call for completely different responses from whoever is watching.
+     */
+    process.stdout.write(`nothing to review: ${chosen.reason} `
+      + `(returned ${chosen.counts.returned}, mine ${chosen.counts.self}, `
+      + `under review ${chosen.counts.underReview}, unreadable ${chosen.counts.unreadable})\n`);
+    await leave(3);
+  }
+  task = chosen.task;
+  process.stdout.write(`discovered ${chosen.taskId}: ${chosen.reason}\n`);
+} else {
+  task = JSON.parse(await readFile(taskPath, 'utf8'));
+}
+
 const envelope = JSON.parse(await readFile(envelopePath, 'utf8'));
 if (!task.task_id) die('the task file needs a task_id');
 if (envelope.taskId !== task.task_id) {
