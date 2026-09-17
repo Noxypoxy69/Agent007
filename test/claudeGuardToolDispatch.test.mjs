@@ -256,3 +256,79 @@ test('Workflow cannot bypass the guard merely because its payload field is named
   assert.equal(verdict.allowed, false);
   assert.equal(verdict.id, 'workflow-exec-untrusted');
 });
+
+/* ============================================================================
+ * THE SWEEP HOLE. The named-path check was sound and covered the wrong half.
+ *
+ * Measured 2026-09-17 at 1489931, by calling judgeShellCommand directly:
+ * `git add src/claudeGuard.mjs` was DENIED -- the spelling CLAUDE.md mandates --
+ * while `git add -A`, `git add .`, `git add -u`, `git commit -am`,
+ * `git restore .`, `git checkout --force`, `git switch --force` and
+ * `git switch --discard-changes` were all ALLOWED. Every one of them reaches the
+ * guard's own source without naming it. The guard refused the documented
+ * workflow and permitted the sweep.
+ * ==========================================================================*/
+
+test('a sweeping stage or commit cannot reach a protected file without naming it', () => {
+  for (const command of [
+    'git add -A', 'git add .', 'git add -u', 'git add --all',
+    'git commit -a -m x', 'git commit -am x', 'git commit --all -m x',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
+  }
+});
+
+test('git restore . disarms the hook for the rest of the session, and is refused', () => {
+  /*
+   * The sharpest row in the table. It reverts the whole working tree including
+   * src/claudeGuard.mjs, and the hook re-imports that module on every call, so
+   * PreToolUse is disarmed the moment the command returns. The pathspec spelling
+   * of the same operation was already refused; this closes the sweep spelling.
+   */
+  assert.equal(judgeShellCommand('git restore .').allowed, false);
+  assert.equal(judgeShellCommand('git checkout .').allowed, false);
+});
+
+test('force is refused in every spelling it has, not just the one -f collides with', () => {
+  /*
+   * `git checkout -f` denied only by coincidence: WRITE_FLAGS carries -f meaning
+   * --file. Narrowing WRITE_FLAGS to the flags it was written for -- a reasonable
+   * tidy-up -- would have silently removed the only refusal here.
+   */
+  for (const command of [
+    'git checkout -f', 'git checkout --force', 'git checkout -f other-branch',
+    'git switch --force', 'git switch --discard-changes', 'git switch -f other',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
+  }
+});
+
+test('THE WORKFLOW IS NOT REFUSED, because an over-block is how a rail gets switched off', () => {
+  /*
+   * This repository has paid for two over-blocks already. Closing the sweep must
+   * not close committing by pathspec, which is the shape CLAUDE.md requires.
+   */
+  for (const command of [
+    'git commit -m x', 'git commit -F -', 'git commit --amend --no-edit',
+    'git add src/collect.mjs', 'git checkout -b newbranch',
+    'git status', 'git fetch origin master',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, true, `newly REFUSED: ${command}`);
+  }
+});
+
+test('MUTATION: the verb classification is derived from GIT_WRITE and cannot silently gap', async () => {
+  /*
+   * Enumerating these by hand produced the same gap twice -- nine verbs and two
+   * named, leaving fetch, push, switch and tag unassigned; the first correction
+   * still missed switch. The module now asserts its own classification against
+   * GIT_WRITE at load. This test proves that assertion is load-bearing by
+   * reading the source rather than by trusting that it is still there.
+   */
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/shellAllowlist.mjs', import.meta.url), 'utf8');
+  assert.match(src, /classification is out of step with GIT_WRITE/,
+    'the load-time derivation check was removed; a new GIT_WRITE verb can now become a hole');
+  assert.match(src, /GIT_WRITE_VERBS\s*=\s*Object\.freeze\(\s*\n?\s*GIT_WRITE\.source/,
+    'the verb list must be DERIVED from GIT_WRITE, not typed beside it');
+});
