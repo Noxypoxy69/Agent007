@@ -49,6 +49,25 @@ export const UNREFERENCED = 'unreferenced';
  * point and an orphan identically, so the difference has to be stated by a
  * person. That is exactly why the opt-out list below is explicit and commented.
  */
+/**
+ * THE DIRECTORIES THAT SHIP. Declared once, because this file had THREE copies of
+ * this list and they had already drifted.
+ *
+ * buildGraph walked src, bin, bridge, mcp and test; classifyExports walked those
+ * plus scripts, with a comment explaining that scripts IS production because a
+ * Claude Code hook runs claude-stop-gate.mjs; deadExports walked neither scripts
+ * nor test. So one file gave two different answers about whether a module
+ * imported by the Stop gate was reachable, and a third about whether its exports
+ * were used. Adding scripts to one of them fixed one answer and left the others
+ * -- which is how a fourth copy gets added later. (Second list found by the
+ * independent review on fix/stop-gate-rebaseline; the first cost a module being
+ * reported as an orphan while a hook was calling it.)
+ *
+ * test/ is deliberately NOT here: it is a root for reachability, never a
+ * definition of what production reaches.
+ */
+export const PRODUCTION_DIRS = Object.freeze(['src', 'bin', 'bridge', 'mcp', 'scripts']);
+
 export const DEFAULT_ENTRY_POINTS = [
   'bin/agentbridge.mjs',
   'bin/agentbridge-precommit.mjs',
@@ -380,7 +399,7 @@ const walkDir = (dir, out = []) => {
  * Returns edges as repo-relative paths, so nothing downstream has to know where
  * the checkout lives — and so no absolute path can end up in a report.
  */
-export function buildGraph(root, { dirs = ['src', 'bin', 'bridge', 'mcp', 'scripts', 'test'] } = {}) {
+export function buildGraph(root, { dirs = [...PRODUCTION_DIRS, 'test'] } = {}) {
   const files = dirs.flatMap((d) => walkDir(path.join(root, d)));
   const graph = new Map();
   const dynamicOnly = new Map();
@@ -615,7 +634,7 @@ export function classifyExports(root, { allowed = {} } = {}) {
    * discoverTests, protectedDrift and snapshotPath as unreferenced while a hook
    * was calling them.
    */
-  const PROD = ['src', 'bin', 'bridge', 'mcp', 'scripts'];
+  const PROD = PRODUCTION_DIRS;
   const read = (f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } };
   const mentions = (text, name) =>
     new RegExp(`(^|[^A-Za-z0-9_$])${name}([^A-Za-z0-9_$]|$)`).test(text);
@@ -674,7 +693,7 @@ export function classifyExports(root, { allowed = {} } = {}) {
   return out.sort((a, b) => a.file.localeCompare(b.file) || a.name.localeCompare(b.name));
 }
 
-export function deadExports(root, { dirs = ['src', 'bin', 'bridge', 'mcp'], allowed = {} } = {}) {
+export function deadExports(root, { dirs = PRODUCTION_DIRS, allowed = {} } = {}) {
   // walkDir and readFileSync, the same helpers buildGraph uses. The first draft
   // of this invoked a nodeFs()/collectFiles() pair that does not exist in this
   // module -- invented while writing, caught by running it.

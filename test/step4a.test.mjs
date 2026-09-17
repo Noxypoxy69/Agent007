@@ -104,7 +104,13 @@ test('M3 identity neither reads nor writes the candidate index', (t) => {
   assert.equal(idOf(h.a, h.c).candidateTreeSha, unstaged, 'and the index must not change the answer');
 });
 
-test('M4 identity includes executable-bit changes', (t) => {
+/*
+ * SKIPPED OFF POSIX, NOT FAILED. Windows has no executable bit, so chmod is a
+ * no-op there and the tree SHA correctly does not change -- the assertion is
+ * measuring the filesystem, not the code. It failed on the operator's primary
+ * machine, which is how a suite stops being run at all.
+ */
+test('M4 identity includes executable-bit changes', { skip: process.platform === 'win32' && 'no executable bit on Windows' }, (t) => {
   const h = harness(t);
   const before = idOf(h.a, h.c).candidateTreeSha;
   chmodSync(path.join(h.c, 'src', 'feature.mjs'), 0o755);
