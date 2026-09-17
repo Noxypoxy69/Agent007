@@ -25,17 +25,16 @@ import { isProtectedRelPath, isBaselineTestPath } from './policy.mjs';
 import { createApprovalStore, ApprovalStoreError } from './approvalStore.mjs';
 import { runValidation } from './validationRunner.mjs';
 import { execFileSync } from 'node:child_process';
+import { runGit } from './safeGit.mjs';
 
-const SAFE_GIT = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never'];
+/* The hardening list moved to src/safeGit.mjs; it was duplicated here. */
 
 /**
  * Fetch the approved tree's objects into the authoritative repository and record
  * it as a commit under refs/agentbridge/promoted/. Never touches a branch.
  */
 function writeApprovedTree({ repoRoot, candidateWorkspace, treeSha, parentCommit, candidateId }) {
-  const git = (args, opts = {}) => execFileSync('git', [...SAFE_GIT, ...args], {
-    cwd: repoRoot, encoding: 'utf8', timeout: 60000, windowsHide: true, maxBuffer: 256 * 1024 * 1024, ...opts,
-  });
+  const git = (args, opts = {}) => runGit(args, { cwd: repoRoot, ...opts });
   /*
    * ANCHOR THE TREE BEFORE FETCHING IT. write-tree leaves a LOOSE object in the
    * candidate's store, reachable from no branch -- so fetching refs/heads/*
@@ -48,9 +47,7 @@ function writeApprovedTree({ repoRoot, candidateWorkspace, treeSha, parentCommit
    * candidate.
    */
   const anchorRef = `refs/agentbridge/anchor/${treeSha}`;
-  const candGit = (args, opts = {}) => execFileSync('git', [...SAFE_GIT, ...args], {
-    cwd: candidateWorkspace, encoding: 'utf8', timeout: 60000, windowsHide: true, maxBuffer: 256 * 1024 * 1024, ...opts,
-  });
+  const candGit = (args, opts = {}) => runGit(args, { cwd: candidateWorkspace, ...opts });
   const anchorCommit = candGit(['commit-tree', treeSha, '-m', `anchor ${treeSha}`], {
     env: {
       ...process.env,

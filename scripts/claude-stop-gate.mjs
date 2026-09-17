@@ -79,10 +79,15 @@ if (!snapshot) {
   }
 
   /*
-   * NEVER MINT A BASELINE FROM A MODIFIED TREE. That is exactly the reset bypass
-   * writeSnapshot's exclusive create exists to stop -- damage a protected file,
-   * acquire a baseline that says the damage was always there. If the protected
-   * files already differ, this session does not get to declare that normal.
+   * NEVER MINT A BASELINE FROM A MODIFIED TREE -- damage a protected file,
+   * acquire a baseline that says the damage was always there.
+   *
+   * THIS IS NO LONGER THE ONLY PLACE THAT ENFORCES IT, and it used to be, which
+   * was the hole. writeSnapshot now runs the same check itself, so every caller
+   * is covered including --session-start, which mints nearly every baseline and
+   * had none. What survives here is the MESSAGE: the per-status advice below is
+   * more useful than the one-line reason writeSnapshot can return. Presentation,
+   * not a second control.
    */
   if (gitDrift.length) {
     /*

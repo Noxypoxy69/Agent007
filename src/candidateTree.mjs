@@ -29,6 +29,7 @@
  * .git, and the verifier must not inherit it.
  */
 import { execFileSync } from 'node:child_process';
+import { runGit } from './safeGit.mjs';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -37,12 +38,8 @@ import path from 'node:path';
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const NUL = String.fromCharCode(0);
 
-/** Every git invocation in this module refuses the repository's own executable config. */
-const SAFE_GIT_CONFIG = [
-  '-c', 'core.hooksPath=/dev/null',
-  '-c', 'core.fsmonitor=false',
-  '-c', 'protocol.ext.allow=never',
-];
+/* The hardening is src/safeGit.mjs now. It lived here AND in verifier.mjs,
+ * byte-identical, while seven other invocations had none. */
 
 export class IdentityError extends Error {
   constructor(stage, detail) {
@@ -54,14 +51,7 @@ export class IdentityError extends Error {
 
 function git(args, { cwd, env = {}, stage }) {
   try {
-    return execFileSync('git', [...SAFE_GIT_CONFIG, ...args], {
-      cwd,
-      encoding: 'utf8',
-      timeout: 60000,
-      windowsHide: true,
-      maxBuffer: 256 * 1024 * 1024,
-      env: { ...process.env, ...env },
-    });
+    return runGit(args, { cwd, env: { ...process.env, ...env } });
   } catch (e) {
     /*
      * THROWS. It does not return a sentinel. The prototype's "__DIFF_FAILED__"

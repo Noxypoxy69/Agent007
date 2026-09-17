@@ -28,6 +28,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { runGit } from '../src/safeGit.mjs';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
@@ -38,7 +39,7 @@ import { artifactLoads as checkArtifactLoads } from '../src/artifactLoads.mjs';
 const ARTIFACT_DIR = 'supabase/functions/mcp';
 
 function git(...args) {
-  return execFileSync('git', args, { encoding: 'utf8' }).trim();
+  return runGit(args).trim();
 }
 
 function arg(name, fallback = null) {
@@ -120,7 +121,7 @@ try {
    * So only the trailing newline comes off, and the columns are matched rather
    * than counted.
    */
-  const porcelain = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
+  const porcelain = runGit(['status', '--porcelain']);
   dirtyPaths = porcelain
     .split('\n')
     .filter((l) => l.length > 3)
@@ -132,7 +133,7 @@ try {
     })
     .filter(Boolean);
   try {
-    execFileSync('git', ['merge-base', '--is-ancestor', headSha, releaseRef], { stdio: 'pipe' });
+    runGit(['merge-base', '--is-ancestor', headSha, releaseRef], { stdio: 'pipe' });
     headIsAncestorOfRelease = true;
   } catch {
     /* Exit 1 means "not an ancestor". Any other failure leaves it null, which

@@ -30,6 +30,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSy
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { runGit } from './safeGit.mjs';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -160,6 +161,60 @@ export function buildSnapshot(repoRoot) {
  */
 export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repoRoot)) {
   const file = snapshotPath(repoRoot, sessionId);
+
+  /*
+   * NEVER MINT A BASELINE FROM A TREE THAT IS NOT DEMONSTRABLY CLEAN.
+   *
+   * THE EXCLUSIVE CREATE BELOW DOES NOT CLOSE THE RESET BYPASS, AND THE COMMENT
+   * THAT SAID IT DID WAS WRONG. It refuses to REPLACE a snapshot, which stops
+   * re-running --session-start inside one session. But snapshotPath keys on
+   * sha256(repoRoot + sessionId), so a NEW session id is a NEW file and EEXIST
+   * never fires. Damage a protected control, end the session, start another, and
+   * SessionStart adopted the damaged tree as normal -- after which the Stop gate
+   * compared damage against damage and found no drift.
+   *
+   * That is not one gate's problem. src/shellAllowlist.mjs defers to the Stop
+   * gate in terms ("THE BOUNDARY IS NOT HERE"), and src/claudeGuard.mjs defers
+   * to it twice more -- every mcp__ tool and every tool it cannot classify are
+   * "not blocked here, detected at Stop by protected-file drift". Three layers,
+   * one destination, and the destination could be re-based.
+   *
+   * THE CHECK ALREADY EXISTED AND WAS IN THE WRONG PLACE. The Stop gate's own
+   * recovery path called baselineBlockingDriftFromGit before minting and refused
+   * correctly. It lived in that one caller; --session-start, which mints nearly
+   * every baseline, had nothing. So it moves HERE, where every caller inherits
+   * it and the next one cannot forget. The Stop gate keeps its own call: it
+   * turns the same answer into per-file advice, which is a better message than
+   * this function can give. That is presentation, not a second control.
+   *
+   * ABSENT IS NOT CLEAN. null means git could not be consulted, which is unknown
+   * -- and a baseline is exactly the thing that must not be minted on a guess.
+   *
+   * WHAT THIS STILL DOES NOT COVER, because a fix that overstates its reach is
+   * how the last one got believed: git compares the working tree against HEAD,
+   * so damage that has been COMMITTED reads as clean and can still be adopted.
+   * Closing that needs an authority outside the writable checkout -- the same
+   * thing src/verificationProof.mjs says authority always needs. Reviewing the
+   * commit is what catches it today.
+   */
+  const blocking = baselineBlockingDriftFromGit(repoRoot);
+  if (blocking === null) {
+    return {
+      ok: false,
+      file,
+      reason: 'the protected files could not be measured against git, so this tree is not known to be '
+        + 'clean and no baseline may be minted from it (unknown is not clean)',
+    };
+  }
+  if (blocking.length) {
+    return {
+      ok: false,
+      file,
+      reason: 'files the baseline would cover already differ from git, so a baseline taken now would '
+        + `adopt that state as normal: ${blocking.map((d) => `${d.file} [${d.kind}] ${d.now}`).join(', ')}`,
+    };
+  }
+
   mkdirSync(path.dirname(file), { recursive: true });
   try {
     /*
@@ -261,8 +316,8 @@ export function baselineBlockingDriftFromGit(repoRoot) {
   let out;
   let indexFlags;
   try {
-    out = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
-      cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
+    out = runGit(['status', '--porcelain', '--untracked-files=all'], {
+      cwd: repoRoot, timeout: 20000,
     });
     /*
      * `git status` intentionally trusts index hints. A tracked file marked
@@ -270,9 +325,7 @@ export function baselineBlockingDriftFromGit(repoRoot) {
      * status reports a clean tree. Recovery may never mint a baseline while a
      * protected file/test is hidden behind either bit.
      */
-    indexFlags = execFileSync('git', ['ls-files', '-v'], {
-      cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
-    });
+    indexFlags = runGit(['ls-files', '-v'], { cwd: repoRoot, timeout: 20000 });
   } catch {
     return null;
   }
