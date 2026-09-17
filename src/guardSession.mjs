@@ -160,6 +160,51 @@ export function buildSnapshot(repoRoot) {
  */
 export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repoRoot)) {
   const file = snapshotPath(repoRoot, sessionId);
+
+  /*
+   * NEVER MINT A BASELINE FROM A TREE THAT ALREADY DIFFERS. THIS CHECK LIVES
+   * HERE, IN THE MINTING FUNCTION, AND NOT IN A CALLER.
+   *
+   * It used to live only in the Stop gate's recovery path, and the exclusive
+   * create below carried a comment claiming it closed the reset bypass:
+   * "Initialise once; a second call says so." That is true and it is not
+   * enough. The snapshot path is keyed on sha256(repoRoot, sessionId), so a
+   * NEW session is a new key, EEXIST never fires, and the whole bypass is
+   * available again to anyone who starts another session.
+   *
+   * Measured end to end, 2026-09-17, six steps in a throwaway repository:
+   * session A baselines a clean tree; .claude/settings.json is edited to
+   * disable hooks; A's Stop gate blocks correctly; A cannot re-baseline
+   * (EEXIST does its job); session B baselines the SAME damaged tree without
+   * complaint; B's Stop gate returns {} -- approval. The damage had become the
+   * baseline. The defence existed, was correct, and sat in the path almost
+   * nobody takes, while the path every session takes had none.
+   *
+   * So the refusal belongs to the act of minting, not to whoever remembers to
+   * ask. Both existing callers inherit it and so does the next one.
+   */
+  const gitDrift = baselineBlockingDriftFromGit(repoRoot);
+  if (gitDrift === null) {
+    /* Unknown is not clean. A tree git cannot describe is one this function
+     * cannot certify, and certifying it is the whole failure mode. */
+    return {
+      ok: false,
+      file,
+      cause: 'unmeasurable',
+      drift: null,
+      reason: 'git could not be consulted to check the protected files, so a baseline taken now would record an unverified state as normal',
+    };
+  }
+  if (gitDrift.length) {
+    return {
+      ok: false,
+      file,
+      cause: 'dirty',
+      drift: gitDrift,
+      reason: 'files the baseline would cover already differ from git, so a baseline taken now would adopt that state as normal',
+    };
+  }
+
   mkdirSync(path.dirname(file), { recursive: true });
   try {
     /*
@@ -168,16 +213,21 @@ export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repo
      * write, and the loser's baseline wins. 'wx' fails if the path exists, so
      * the filesystem decides. 0600 because a baseline another user can edit is
      * not a baseline.
+     *
+     * THIS CLOSES THE SAME-SESSION REPLACEMENT AND NOTHING WIDER. The key
+     * includes the session id, so it says nothing at all about a different
+     * session looking at the same damaged tree. The check above is what covers
+     * that, and this comment used to imply it was covered here.
      */
     writeFileSync(file, `${JSON.stringify({ ...snapshot, sessionId: sessionId ?? null }, null, 2)}\n`,
       { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   } catch (e) {
     if (e?.code === 'EEXIST') {
-      return { ok: false, file, reason: 'a snapshot already exists for this session and may not be replaced' };
+      return { ok: false, file, cause: 'exists', drift: null, reason: 'a snapshot already exists for this session and may not be replaced' };
     }
-    return { ok: false, file, reason: `snapshot could not be written: ${e?.message ?? e}` };
+    return { ok: false, file, cause: 'unwritable', drift: null, reason: `snapshot could not be written: ${e?.message ?? e}` };
   }
-  return { ok: true, file };
+  return { ok: true, file, cause: null, drift: null };
 }
 
 /** null when absent or unusable. The caller must treat null as REFUSE, never as clean. */
