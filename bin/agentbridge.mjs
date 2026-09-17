@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { initConfig, loadConfig, loadRegistry, registerAgent, unregisterAgent, localMachineLabel, CONFIG_FILE, VERSION } from '../src/config.mjs';
+import { recordSample, describe } from '../src/resourceStore.mjs';
 import { protectSecret, unprotectSecret, isWindows } from '../src/secretstore.mjs';
 import { collect } from '../src/collect.mjs';
 import { runDaemon } from '../src/daemon.mjs';
@@ -296,6 +297,24 @@ try {
           : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
       beatFailed = !landed && !notConfigured;
     }
+    /*
+     * WHAT THE MACHINE HAD AT THIS BEAT, recorded locally and never fatally.
+     *
+     * The roster went dark on 2026-09-16 and three agents independently blamed
+     * memory. Nothing in this repository had ever recorded a number, so the
+     * claim could be neither confirmed nor dropped. It is recorded AFTER the
+     * publish attempt so `beatFailed` travels with the reading: free memory
+     * alone is a curiosity, free memory at the moment a beat did not land is
+     * the correlation nobody had.
+     *
+     * A FAILURE HERE IS SILENT ON PURPOSE. recordSample never throws and never
+     * changes the exit code; a diagnostic that can fail the beat it observes is
+     * worse than no diagnostic.
+     */
+    const sample = await recordSample({ beatFailed, command: cmd });
+    const line = describe(sample);
+    if (line) console.error(line);
+
     if (args.json || cmd === 'heartbeat') {
       console.log(JSON.stringify(payload, null, 2));
       process.exit(beatFailed ? 1 : 0);
