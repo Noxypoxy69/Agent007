@@ -2092,17 +2092,42 @@ try {
     // happened. ls-remote cannot be stale.
     try {
       const { stdout } = await run('git', ['ls-remote', '--heads', 'origin'], { cwd: repo, maxBuffer: 8e6 });
-      const names = stdout.split('\n').map((l) => l.split(/\s+/)[1]).filter(Boolean)
-        .map((r) => r.replace('refs/heads/', ''));
-      for (const name of names) {
+      const heads = stdout.split('\n').map((l) => l.split(/\s+/)).filter((p) => p.length >= 2 && p[1])
+        .map(([sha, ref]) => [ref.replace('refs/heads/', ''), sha]);
+      /*
+       * NOTHING HERE WRITES TO THE REPOSITORY, AND THAT IS THE WHOLE POINT.
+       *
+       * The first version ran `git fetch origin <name>` per branch and then read
+       * FETCH_HEAD. FETCH_HEAD IS SHARED STATE. Two check-first processes in one
+       * repository clobber each other's, so the same query returns different
+       * answers in the same second -- measured: three concurrent pairs, three
+       * divergences, one pair where one process printed SOMEBODY MAY ALREADY BE
+       * ON THIS and its twin printed nothing, and exit codes of 0 and 2 for
+       * identical input.
+       *
+       * For this command that is not a rough edge, it is the tool being wrong
+       * about the only question it answers -- and two agents working at once is
+       * the condition it EXISTS for, not an edge case.
+       *
+       * So the sha comes from ls-remote, which only reads, and the metadata is
+       * read from the local object when we already have it. A branch whose
+       * object is absent locally is reported by NAME with unknown metadata,
+       * which is honest and still enough to stop a duplication. It also cannot
+       * be an ancestor of HEAD -- every ancestor of HEAD is present locally --
+       * so `merged: false` is correct by construction rather than by guess.
+       */
+      for (const [name, sha] of heads) {
         let subject = '', at = '', merged = false;
-        try {
-          await run('git', ['fetch', '-q', 'origin', name], { cwd: repo });
-          const { stdout: meta } = await run('git', ['log', '-1', '--format=%s%x00%cI', 'FETCH_HEAD'], { cwd: repo });
-          [subject, at] = meta.split('\x00').map((x) => (x || '').trim());
-          try { await run('git', ['merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], { cwd: repo }); merged = true; }
+        let have = false;
+        try { await run('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: repo }); have = true; } catch { have = false; }
+        if (have) {
+          try {
+            const { stdout: meta } = await run('git', ['log', '-1', '--format=%s%x00%cI', sha], { cwd: repo });
+            [subject, at] = meta.split('\x00').map((x) => (x || '').trim());
+          } catch (e) { errors.push(`branch ${name}: ${e?.message ?? e}`); }
+          try { await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: repo }); merged = true; }
           catch { merged = false; }
-        } catch (e) { errors.push(`branch ${name}: ${e?.message ?? e}`); }
+        }
         branches.push({ name, subject, at, merged });
       }
     } catch (e) {

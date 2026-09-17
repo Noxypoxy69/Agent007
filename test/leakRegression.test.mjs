@@ -248,8 +248,33 @@ function namesMachine(text, identity) {
   const user = identity.username;
   if (user && user.length >= 3) {
     const u = user.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    //  /jane  \jane  ~jane  @jane   or   jane@
-    if (new RegExp(`[/\\\\~@]${u}(?![a-z0-9_-])|(?<![a-z0-9_-])${u}@`).test(hay)) return user;
+    /*
+     * A USERNAME IDENTIFIES SOMEBODY WHERE IT OWNS A HOME OR AN ACCOUNT, NOT
+     * AFTER ANY SEPARATOR AT ALL.
+     *
+     * Matching after any slash or backslash reddened a clean checkout for an
+     * operator called node, work or deploy, because the repo's own vocabulary
+     * contains those path segments: the nodejs executable path in argv.mjs, the
+     * /work/ab containment examples in workspaceManager, and two docs headings.
+     * Six files across three names, none of them anybody's home directory.
+     *
+     * That is the same failure this matcher was narrowed for once already, when
+     * it read the CI account name out of ordinary prose: a gate that fires on a
+     * correct repo is the one people learn to skip, and then the real red goes
+     * unread too.
+     *
+     * So the separator has to be a HOME prefix, /home/u or Users\u, or a tilde,
+     * or an account form on either side of an @. The tilde excludes a doubled
+     * one: markdown strikethrough is not a home directory and was matching as
+     * one.
+     */
+    const owns = new RegExp(
+      `(?:home|users)[/\\\\]${u}(?![a-z0-9_-])`
+      + `|(?<!~)~${u}(?![a-z0-9_-])`
+      + `|(?<![a-z0-9_-])${u}@`
+      + `|@${u}(?![a-z0-9_-])`,
+    );
+    if (owns.test(hay)) return user;
   }
 
   return null;
@@ -273,6 +298,23 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
     'host DESKTOP-ABC123 reported',
   ]) {
     assert.notEqual(namesMachine(leak, me), null, `should have been flagged: ${leak}`);
+  }
+
+  /*
+   * A SEPARATOR IS NOT OWNERSHIP. Each of these is a real line from the six
+   * files that reddened a clean checkout for an operator named node, work or
+   * deploy: the repo's own vocabulary, not anybody's home directory.
+   */
+  for (const [name, clean] of [
+    ['node', 'spawn "C:\\Program Files\\nodejs\\node.exe" with args'],
+    ['work', 'isInside("/work/ab", "/work/ab-evil") is false'],
+    ['deploy', '0. ~~Deploy the edge function.~~ done'],
+  ]) {
+    assert.equal(
+      namesMachine(clean, { username: name, hostname: '', homedir: '' }),
+      null,
+      `a path segment was read as ownership by "${name}": ${clean}`,
+    );
   }
 
   // The username alone, in prose. This is the case that was failing CI.

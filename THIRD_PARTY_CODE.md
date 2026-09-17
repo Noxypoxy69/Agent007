@@ -39,6 +39,27 @@ out of attribution; it is a value of the `copied vs adapted` field below.
 
 *(none)*
 
+## EXCLUDED — DO NOT CLONE, READ OR ANALYSE
+
+**MCP Agent Mail (Rust)** — commit `e97e29fa`, reported by an outside reviewer
+2026-09-17. Its licence carries a rider prohibiting use and analysis by
+OpenAI and Anthropic models. The reviewer deleted its clone on discovering this,
+which was the right call.
+
+**This binds the agents working in this repository, not only the humans.** Every
+coordinator and worker here is an Anthropic model. Cloning it to "just look at
+the inbox design" is the prohibited act, not a step toward one. Do not fetch it,
+do not read it through a tool, do not paste excerpts into a session.
+
+We may independently implement inboxes, acknowledgements, receipts and
+dead-letter handling — those are ordinary designs, not its property. The
+constraint is on reading THAT codebase, not on the problem it solves. Anything
+built here for message delivery must be written from the requirements, and this
+ledger is where that provenance gets recorded if it ever stops being obvious.
+
+Recorded here rather than in a chat message because the next agent to go looking
+for messaging prior art will search this file, not somebody's transcript.
+
 ## Two things that are not licence questions but belong next to them
 
 **OpenHands ships MIT core alongside source-available commercial components.**
