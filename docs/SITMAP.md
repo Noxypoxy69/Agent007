@@ -50,7 +50,7 @@ the live database.
 | Thing | State |
 | --- | --- |
 | agentbridge `master` | `a816ae4` — **+59 today**, contains production |
-| deployed edge function | **still v20** — Danny authorised a deploy at 08:18Z; code-c has not run it |
+| deployed edge function | **not written down here on purpose** — this cell said v20 while production served v26. Read `deploy/last-deployment.json`, or ask the far end with `bin/agentbridge-deploy-check.mjs`. It also named an assignee dark for hours and an authorisation superseded twice; none of those are facts a markdown table can hold. |
 | v20 corresponds to | `code-b/fifth-hosted-path` `bb899fc`, byte-identical in both files |
 | master vs production | **45 ahead, 0 behind** — a deploy is now correct |
 | `work/support-modules` | `d9dce69` — +9 tonight, 1430 pass 0 fail, unmerged |

@@ -221,8 +221,73 @@ if (liveDirArg) {
   }
 }
 
+/*
+ * ONE REFUSAL LIST, AND THE EXIT CODE IS COMPUTED FROM IT.
+ *
+ * All three of the following were true of this file until 2026-09-17, and they
+ * were true together, which is why none of them showed:
+ *
+ * 1. The tree refusal set `process.exitCode = 1` and the last line then called
+ *    `process.exit(verdict.ok ? 0 : 1)`. An explicit argument to process.exit
+ *    DISCARDS process.exitCode, so "REFUSED: nothing-would-change" printed and
+ *    the process returned 0. Measured: with --live and --record supplied so the
+ *    drift check was satisfied, an identical tree printed REFUSED and exited 0.
+ *
+ * 2. A --live-dir that could not be read logged one line to stderr and left
+ *    treeCompared false -- the SAME state as never passing the flag at all. So
+ *    "I asked for the comparison and it failed" was indistinguishable from "I
+ *    did not ask", and both printed DEPLOYABLE. That is the skip-is-not-a-pass
+ *    rule this gate states in its own header, broken by the newest check in it.
+ *
+ * 3. The if/else-if chain meant that when the tree refusal fired, verdict's own
+ *    refusals were never printed. The gate refused for one reason while hiding
+ *    the others.
+ *
+ * And they hid each other. test/deployCheckTree.test.mjs asserts the exit code
+ * is non-zero for an identical tree, and it PASSES -- because it runs without
+ * --live/--record, so verdict.ok is false on live-drift-unchecked and that is
+ * what returns 1. The assertion was reading an exit code produced by a
+ * different refusal than the one it names, and defect 3 hid the evidence by
+ * suppressing that refusal from the output. A proxy agreed with the truth until
+ * the drift check was satisfied, which is exactly when this gate is asked to
+ * speak.
+ */
+const refusals = verdict.ok ? [] : [...verdict.refusals];
+
+if (liveDirArg && !treeCompared) {
+  refusals.push({
+    reason: 'live-dir-unreadable',
+    detail: 'a tree comparison was REQUESTED with --live-dir and could not be performed (see '
+      + 'stderr above). Refusing rather than proceeding: a check that was asked for and failed '
+      + 'is not the same as one nobody asked for, and treating it as one is how a skip becomes '
+      + 'a pass.',
+  });
+}
+
+if (treeCompared && treeAdded === 0 && treeRemoved === 0) {
+  refusals.push({
+    reason: 'nothing-would-change',
+    detail: 'the tree about to ship is identical to what is already serving. A deploy now bumps '
+      + 'the version, changes no bytes, and reports success, which is exactly what v23 did. '
+      + 'Either this is the wrong checkout, or there is nothing to deploy.',
+  });
+}
+
 if (process.argv.includes('--json')) {
-  console.log(JSON.stringify({ ...verdict, digest, driftChecked, loadErrors }, null, 2));
+  // ok and refusals come from the COMBINED list, not from verdict alone. A JSON
+  // consumer reading verdict.ok would have been told `true` for a run the gate
+  // refused on the tree, and would have deployed on it.
+  console.log(JSON.stringify({
+    ...verdict,
+    ok: refusals.length === 0,
+    refusals,
+    digest,
+    driftChecked,
+    treeCompared,
+    treeAdded: treeCompared ? treeAdded : null,
+    treeRemoved: treeCompared ? treeRemoved : null,
+    loadErrors,
+  }, null, 2));
 } else {
   console.log(`deploy check — ${ARTIFACT_DIR}`);
   console.log(`  head       ${headSha.slice(0, 12)} against ${releaseRef}`);
@@ -247,19 +312,15 @@ if (process.argv.includes('--json')) {
     console.log('             and it is the one that was missing when v22 to v23 shipped nothing.');
   }
   console.log('');
-  if (treeCompared && treeAdded === 0 && treeRemoved === 0) {
-    console.log('REFUSED:');
-    console.log('  - nothing-would-change: the tree about to ship is identical to what is');
-    console.log('    already serving. A deploy now bumps the version, changes no bytes, and');
-    console.log('    reports success, which is exactly what v23 did. Either this is the wrong');
-    console.log('    checkout, or there is nothing to deploy.');
-    process.exitCode = 1;
-  } else if (verdict.ok) {
+  if (refusals.length === 0) {
     console.log('DEPLOYABLE.');
   } else {
+    // EVERY reason, not the first one to match. A caller can usually fix one
+    // and needs to know all of them -- and a refusal that hides its siblings
+    // is how the tree check masked live-drift-unchecked.
     console.log('REFUSED:');
-    for (const r of verdict.refusals) console.log(`  - ${r.reason}: ${r.detail}`);
+    for (const r of refusals) console.log(`  - ${r.reason}: ${r.detail}`);
   }
 }
 
-process.exit(verdict.ok ? 0 : 1);
+process.exit(refusals.length === 0 ? 0 : 1);
