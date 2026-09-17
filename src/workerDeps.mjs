@@ -212,7 +212,20 @@ export function hostedDeps(env, { session_id }) {
  * failure. A heartbeat that fails silently is worse than none: none is at least
  * consistent with what the roster says.
  */
-export function heartbeatDeps(env, { session_id, agent_id }) {
+/*
+ * machine_id IS REQUIRED BY /register AND THIS FUNCTION DID NOT SEND IT.
+ *
+ * MEASURED: the first worker ever run logged "heartbeat FAILED x40:
+ * machine_id is required -- THIS WORKER IS GOING DARK" and kept going. It
+ * claimed a task, ran it and returned it while invisible to the roster, which
+ * reported idle_workers 0 during a tick where a worker was holding a lease.
+ *
+ * The failure was LOUD and still cost the run: the block above is right that a
+ * silent heartbeat is worse, and this is the case it was written for. What it
+ * could not do was supply the missing field. The caller has it -- loadConfig()
+ * has carried machineId since init -- and simply never passed it down.
+ */
+export function heartbeatDeps(env, { session_id, agent_id, machine_id = null }) {
   let consecutiveFailures = 0;
 
   return {
@@ -224,6 +237,7 @@ export function heartbeatDeps(env, { session_id, agent_id }) {
       const res = await publishRegistration(env, {
         session_id,
         agent_id,
+        machine_id,
         capacity,
         task_id,
         head_sha,

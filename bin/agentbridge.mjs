@@ -831,10 +831,28 @@ try {
     const agentId = typeof args.agent === 'string' ? args.agent.trim() : null;
     const once = args.once === true || args.once === 'true';
 
+    /*
+     * RESOLVED HERE, NOT INLINE. loadConfig is async, so `loadConfig().machineId`
+     * reads a property off a Promise and yields undefined -- the same missing
+     * field that sent the first worker dark, reintroduced with extra steps. I
+     * wrote it that way first.
+     */
+    const workerMachineId = (await loadConfig())?.machineId ?? null;
+    if (!workerMachineId) {
+      console.error('error: no machineId in the config; run `agentbridge init` first.');
+      console.error('       Without it every heartbeat is refused and this worker goes dark.');
+      process.exit(2);
+    }
+
     const deps = {
       now: () => new Date().toISOString(),
       ...D.hostedDeps(process.env, { session_id: sessionId }),
-      ...D.heartbeatDeps(process.env, { session_id: sessionId, agent_id: agentId }),
+      ...D.heartbeatDeps(process.env, {
+        session_id: sessionId,
+        agent_id: agentId,
+        // Without this every heartbeat is refused as invalid and the worker goes dark.
+        machine_id: workerMachineId,
+      }),
       prepareWorktree: (a) => D.prepareWorktree(a),
       cleanupWorktree: (d) => D.cleanupWorktree(d),
       headSha: (d) => D.headSha(d),
