@@ -186,8 +186,21 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
    * deciding late rather than the supervisor deciding now. Past the window it
    * must be re-prepared, which costs nothing and forces the guard to run
    * against the present.
+   *
+   * AGE IS MEASURED FROM THE LAST REAFFIRMATION, NOT THE FIRST PREPARATION, and
+   * the two are different dates for a reason. reconcileProposals keeps a row
+   * alive while the dispatcher keeps deriving it unchanged, so `prepared_at`
+   * becomes "how long has this been waiting", which is the number that makes a
+   * stuck queue visible -- 676 review proposals were written about one task
+   * precisely because nothing ever surfaced that it had been waiting four hours.
+   * Bumping prepared_at on every heartbeat would make every entry look sixty
+   * seconds old forever: the churn would stop and the symptom it was shouting
+   * would go quiet with it, which is a worse outcome than the churn.
+   *
+   * So freshness reads reaffirmed_at and falls back to prepared_at for any row
+   * written before that column existed.
    */
-  const prepared = Date.parse(proposal.prepared_at);
+  const prepared = Date.parse(proposal.reaffirmed_at ?? proposal.prepared_at);
   const t = Date.parse(now);
   if (Number.isNaN(prepared) || Number.isNaN(t)) {
     errors.push('the proposal cannot be dated, so its age cannot be checked');
@@ -231,6 +244,137 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
   if (!verdict.ok) errors.push(...verdict.errors);
 
   return { ok: errors.length === 0, errors };
+}
+
+/*
+ * ═══ THE CHURN ═══════════════════════════════════════════════════════════
+ *
+ * THE DISPATCHER WROTE 676 REVIEW PROPOSALS ABOUT ONE TASK. Measured on the
+ * live database at 05:41Z on 2026-09-17: 185 of a 200-row page were review
+ * proposals on t-wire-gate-scripts, one a minute without a break from 23:38Z
+ * to 03:20Z, every one identical to the last.
+ *
+ * IT IS NOT RUNNING RIGHT NOW, AND THAT IS NOT A FIX. Zero were prepared after
+ * 03:20:37Z, which is the second code-b accepted that task. The dispatcher did
+ * not stop; it ran out of returned work to re-propose. Nothing here changed,
+ * so the next worker that returns anything restarts it at sixty rows an hour,
+ * and it cannot stop on its own because no consumer claims a review proposal.
+ * The missing consumer is a different slice. This is the writer.
+ *
+ * WHAT THE WRITER DOES, and its comment is RIGHT about the part it defends:
+ * every tick supersedes the entire open set and inserts fresh rows. Replacing
+ * the set is correct -- an old proposal open beside a newer one lets somebody
+ * confirm a suggestion the dispatcher has already withdrawn, which is stale
+ * authority wearing a different hat. But that argument covers replacing a row
+ * whose CONTENT changed. Replacing a row with a byte-identical row defends
+ * nothing; it records that the dispatcher had nothing new to say, once a
+ * minute, forever.
+ *
+ * SO THE DISTINCTION IS SEMANTIC, NOT TEMPORAL. A proposal that says exactly
+ * what the open one says is the same proposal, still current, and what it
+ * wants is a heartbeat. A proposal that differs in any field a reader would
+ * act on -- the verdict, the commit to read, who returned it -- is news, and
+ * news gets a row.
+ *
+ * WHY IT IS HERE RATHER THAN IN THE EDGE FUNCTION. This is a decision, and
+ * supabase/functions/mcp/index.ts cannot be imported by the suite, so anything
+ * decided there is untested by construction. CLAUDE.md rule 10. The caller
+ * keeps the effects: it reads the open rows, calls this, and performs the three
+ * lists.
+ */
+
+/**
+ * The fields that make two proposals the SAME proposal.
+ *
+ * Everything a reader would act on, and nothing else. `prepared_at` is
+ * deliberately absent -- it is the clock, not the content, and including it
+ * would make every proposal differ from every other one, which is the bug.
+ */
+const PROPOSAL_IDENTITY = [
+  'kind', 'task_id', 'agent_id', 'session_id', 'lane_id',
+  'returned_by', 'head_sha', 'notes', 'would_be_accepted', 'reasons',
+];
+
+/**
+ * Do these two proposals say the same thing?
+ *
+ * NULL AND ABSENT ARE THE SAME THING HERE, and that is load-bearing rather than
+ * lenient. A row read back from the database carries `agent_id: null` on a
+ * review proposal; the freshly-derived one simply has no such key. Comparing
+ * those raw makes every review proposal differ from its own stored copy, so
+ * nothing would ever match and the churn would survive the fix looking exactly
+ * like it had been fixed.
+ */
+export function proposalsMatch(a, b) {
+  if (!a || !b) return false;
+  for (const key of PROPOSAL_IDENTITY) {
+    const l = a[key] ?? null;
+    const r = b[key] ?? null;
+    if (Array.isArray(l) || Array.isArray(r)) {
+      const la = arr(l);
+      const ra = arr(r);
+      if (la.length !== ra.length) return false;
+      if (la.some((v, i) => String(v) !== String(ra[i]))) return false;
+      continue;
+    }
+    if (l !== r) return false;
+  }
+  return true;
+}
+
+/**
+ * What the writer should do this tick: keep, close, or record.
+ *
+ * @param open  the proposals currently in state `open`, as stored (with ids)
+ * @param fresh what proposeWork just derived
+ * @returns {{reaffirm: string[], reaffirmed_at: string, supersede: string[], insert: object[]}}
+ *
+ * REAFFIRM CARRIES A TIMESTAMP, AND LEAVING IT OUT WOULD HAVE BEEN AN OUTAGE.
+ * canConfirm refuses any proposal older than PROPOSAL_STALE_AFTER_MS. Keep a
+ * row alive for an hour without touching its clock and it becomes unconfirmable
+ * while still being the dispatcher's current opinion -- a queue entry nobody may
+ * act on and nothing replaces, because the writer is now content to leave it
+ * there. That trades sixty harmless rows an hour for a queue that is quietly
+ * dead, which is the worse of the two. So an unchanged proposal is not merely
+ * spared; its clock is reset, and a test asserts the reset rather than trusting
+ * the caller to remember.
+ */
+export function reconcileProposals({ open = [], fresh = [], now } = {}) {
+  if (!nonEmpty(now)) throw new TypeError('reconcileProposals requires a `now` timestamp');
+
+  const openRows = arr(open).filter(Boolean);
+  const claimed = new Set();
+  const reaffirm = [];
+  const insert = [];
+
+  for (const candidate of arr(fresh).filter(Boolean)) {
+    /*
+     * One open row may satisfy one fresh proposal, never two. Without the
+     * claimed set, two identical fresh proposals would both reaffirm the same
+     * row and the second would silently vanish instead of being written.
+     */
+    const hit = openRows.find((o) => !claimed.has(o.proposal_id) && proposalsMatch(o, candidate));
+    if (hit) {
+      claimed.add(hit.proposal_id);
+      reaffirm.push(hit.proposal_id);
+      continue;
+    }
+    insert.push(candidate);
+  }
+
+  /*
+   * ANYTHING THE DISPATCHER NO LONGER PROPOSES MUST CLOSE. This is the half the
+   * original writer got right and the half a naive "only insert when changed"
+   * fix would drop: when the task was accepted at 03:20:37Z the correct answer
+   * was not "stop writing", it was "close the open row". A proposal left open
+   * after the dispatcher stopped meaning it is the stale authority the table
+   * exists to prevent.
+   */
+  const supersede = openRows
+    .filter((o) => !claimed.has(o.proposal_id))
+    .map((o) => o.proposal_id);
+
+  return { reaffirm, reaffirmed_at: now, supersede, insert };
 }
 
 /** How long a worker may be silent before its absence is a finding, not a gap. */

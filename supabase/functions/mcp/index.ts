@@ -6,7 +6,7 @@ import {
   // are simply no longer how this file writes those two transitions.
   toolDefs, INSTRUCTIONS, canAssign, validateMessage, negotiateProtocol,
   messagesQuery, canReturn, canAccept, acceptRecord, canCancel, cancelRecord,
-  eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
+  eventsFor, nextCursor, proposeWork, canConfirm, reconcileProposals, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
@@ -1787,21 +1787,81 @@ Deno.serve(async (request) => {
     });
 
     /*
-     * THE OPEN SET IS REPLACED, NOT APPENDED TO.
+     * THE OPEN SET IS REPLACED, NOT APPENDED TO -- AND THE ORIGINAL VERSION OF
+     * THIS COMMENT WAS RIGHT ABOUT THE PART IT DEFENDED AND SILENT ABOUT THE
+     * PART THAT COST 676 ROWS.
      *
      * An old proposal left open beside a fresh one lets a coordinator confirm a
      * suggestion the dispatcher has already replaced -- the stale-authority
-     * problem in a different hat. Superseding first also means `open` always
-     * means "what the dispatcher thinks now".
+     * problem in a different hat. That argument is correct and is preserved in
+     * full below: anything the dispatcher no longer proposes still closes.
+     *
+     * What it does not argue for is replacing a row with an IDENTICAL row. This
+     * tick ran every minute and superseded-then-reinserted unconditionally, so
+     * one returned task that nobody reviewed produced sixty indistinguishable
+     * rows an hour. Measured 2026-09-17T05:41Z: 185 review proposals on
+     * t-wire-gate-scripts in a single 200-row page, one a minute without a break
+     * from 23:38Z to 03:20Z. Zero after 03:20:37Z -- not because this was fixed,
+     * but because code-b accepted the task and the dispatcher ran out of things
+     * to re-propose. The next return would have restarted it.
+     *
+     * So the open set is now RECONCILED rather than rebuilt. The decision of
+     * what counts as changed is pure and lives in src/dispatch.mjs, because this
+     * file cannot be imported by the suite and anything decided here is untested
+     * by construction (CLAUDE.md rule 10). This half keeps only the effects.
      *
      * Confirmed rows are never touched: they are the record of what was
      * actually done.
      */
-    await patch('proposals?state=eq.open', { state: 'superseded', superseded_at: now });
+    const openNow = await get('proposals?select=*&state=eq.open&limit=200');
+    const plan = reconcileProposals({ open: openNow, fresh: proposals, now });
+
+    /*
+     * BOTH WRITES KEEP state=eq.open, AND I DROPPED IT ON THE FIRST ATTEMPT.
+     *
+     * Narrowing from `state=eq.open` to a list of ids is necessary: the unscoped
+     * patch would close the very rows just reaffirmed, the churn re-entering
+     * through the cleanup step. But narrowing is not REPLACING, and an id list
+     * on its own has lost the precondition.
+     *
+     * The window is real. The open set is read, reconciled, then written, and a
+     * coordinator may confirm one of those proposals in between. Without the
+     * state filter that confirmed row is then superseded -- confirmed, then
+     * superseded, a transition no guard admits and a record that disagrees with
+     * what happened. test/theWritesAreWired.test.mjs caught it on the first run
+     * after the wiring, which is exactly why that test reads the file instead of
+     * trusting whoever edited it.
+     *
+     * An empty result here is the lost race rather than a success: PostgREST
+     * answers a PATCH whose predicate matched nothing with 200 and an empty
+     * array. Neither of these writes is load-bearing enough to refuse on -- the
+     * next tick re-derives the same plan a minute later and converges -- but the
+     * predicate is what keeps the record honest in the meantime.
+     */
+    if (plan.supersede.length) {
+      const ids = plan.supersede.map((id) => encodeURIComponent(id)).join(',');
+      await patch(
+        `proposals?proposal_id=in.(${ids})&state=eq.open`,
+        { state: 'superseded', superseded_at: now },
+      );
+    }
+
+    if (plan.reaffirm.length) {
+      /*
+       * prepared_at IS NOT TOUCHED. It is how long this has been waiting for a
+       * human, and that number is the one whose absence let the pile grow
+       * unnoticed. Only the freshness clock moves.
+       */
+      const ids = plan.reaffirm.map((id) => encodeURIComponent(id)).join(',');
+      await patch(
+        `proposals?proposal_id=in.(${ids})&state=eq.open`,
+        { reaffirmed_at: plan.reaffirmed_at },
+      );
+    }
 
     let written = [];
-    if (proposals.length) {
-      written = await write('proposals', proposals.map((p) => ({
+    if (plan.insert.length) {
+      written = await write('proposals', plan.insert.map((p) => ({
         kind: p.kind,
         task_id: p.task_id,
         agent_id: p.agent_id ?? null,

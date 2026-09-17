@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  proposeWork, canConfirm, supervisoryReport,
+  proposeWork, canConfirm, supervisoryReport, reconcileProposals, proposalsMatch,
   PROPOSAL_STALE_AFTER_MS, PROPOSAL_KINDS,
 } from '../src/dispatch.mjs';
 
@@ -264,4 +264,164 @@ test('a quiet hour reads as quiet', () => {
     proposals: 0, awaiting_review: 0, idle_workers: 0, blocked: 0,
     workers_went_stale: 0, tasks: {},
   });
+});
+
+/* ── the churn ─────────────────────────────────────────────────────────────
+ *
+ * MEASURED BEFORE WRITING A LINE, because the contract's numbers were three
+ * hours old and said the flood was live.
+ *
+ *   superseded review proposals on t-wire-gate-scripts    185 of a 200-row page
+ *   one per minute, unbroken                              23:38Z -> 03:20Z
+ *   prepared after the task was accepted at 03:20:37Z     0
+ *   open proposals right now                              0
+ *
+ * So the flood has STOPPED, and not because anything was fixed: code-b accepted
+ * the one returned task at 03:20:37Z and the dispatcher ran out of things to
+ * re-propose. The writer is untouched. The next worker that returns work starts
+ * it again at sixty rows an hour, and it never stops on its own because nothing
+ * consumes a review proposal.
+ *
+ * WHAT THE WRITER ACTUALLY DOES, supabase/functions/mcp/index.ts around 1800:
+ * every tick supersedes the whole open set and inserts a fresh row, whether or
+ * not anything changed. Its comment defends replacing the set -- correctly, an
+ * old proposal open beside a new one is stale authority -- but replacing a row
+ * with a byte-identical row is not that. It is an audit trail of the dispatcher
+ * having nothing to say.
+ *
+ * The decision of WHAT CHANGED is pure, so it lives here rather than in the
+ * edge function, which the suite cannot import. See CLAUDE.md rule 10.
+ */
+
+const openRow = (over = {}) => ({
+  proposal_id: 'p-1', kind: 'review', task_id: 't1',
+  agent_id: null, session_id: null, lane_id: null,
+  returned_by: 'danny-win-d1', head_sha: 'abc123', notes: 'did the thing',
+  would_be_accepted: true, reasons: [], prepared_at: ago(60_000), ...over,
+});
+const freshRow = (over = {}) => ({
+  kind: 'review', task_id: 't1',
+  returned_by: 'danny-win-d1', head_sha: 'abc123', notes: 'did the thing',
+  would_be_accepted: true, reasons: [], prepared_at: NOW, ...over,
+});
+
+test('AN UNCHANGED PROPOSAL IS REAFFIRMED, NOT SUPERSEDED AND REWRITTEN', () => {
+  const plan = reconcileProposals({ open: [openRow()], fresh: [freshRow()], now: NOW });
+  assert.deepEqual(plan.supersede, [], 'an unchanged proposal was superseded, which is the churn');
+  assert.deepEqual(plan.insert, [], 'an unchanged proposal was written again as a new row');
+  assert.deepEqual(plan.reaffirm, ['p-1'], 'the surviving row was not reaffirmed, so it will go stale and die');
+});
+
+test('A CHANGED VERDICT IS HISTORY AND IS RECORDED AS A NEW ROW', () => {
+  /*
+   * The point of the whole table. would_be_accepted flipping means the world
+   * moved, and that IS worth a row -- collapsing it would trade a noisy log for
+   * a lying one.
+   */
+  const plan = reconcileProposals({
+    open: [openRow()],
+    fresh: [freshRow({ would_be_accepted: false, reasons: ['the base moved'] })],
+    now: NOW,
+  });
+  assert.deepEqual(plan.supersede, ['p-1']);
+  assert.equal(plan.insert.length, 1);
+  assert.deepEqual(plan.reaffirm, []);
+});
+
+test('A HEAD_SHA THAT MOVED IS A DIFFERENT PROPOSAL, NOT THE SAME ONE', () => {
+  /*
+   * The worker pushed again. Same task, same verdict, different commit to read.
+   * Reaffirming here would leave a reviewer looking at the wrong sha, which is
+   * worse than the churn this is fixing.
+   */
+  const plan = reconcileProposals({
+    open: [openRow()],
+    fresh: [freshRow({ head_sha: 'def456' })],
+    now: NOW,
+  });
+  assert.deepEqual(plan.supersede, ['p-1']);
+  assert.equal(plan.insert.length, 1);
+});
+
+test('AN OPEN PROPOSAL THE DISPATCHER NO LONGER MAKES IS SUPERSEDED', () => {
+  /*
+   * The task was accepted -- exactly what happened at 03:20:37Z. Nothing fresh
+   * matches, so the row must close. Leaving it open is the stale-authority bug
+   * the existing writer comment is about, and this fix must not reintroduce it.
+   */
+  const plan = reconcileProposals({ open: [openRow()], fresh: [], now: NOW });
+  assert.deepEqual(plan.supersede, ['p-1']);
+  assert.deepEqual(plan.insert, []);
+  assert.deepEqual(plan.reaffirm, []);
+});
+
+test('REAFFIRMING RESETS THE STALENESS CLOCK, OR THE FIX CREATES AN OUTAGE', () => {
+  /*
+   * canConfirm refuses a proposal older than PROPOSAL_STALE_AFTER_MS. Keep a row
+   * for an hour without touching its clock and it becomes unconfirmable while
+   * still being the dispatcher's current opinion -- a proposal nobody may act on
+   * and nothing replaces. That turns sixty harmless rows an hour into a dead
+   * queue, which is a worse bug than the one being fixed.
+   */
+  const stale = openRow({ prepared_at: ago(PROPOSAL_STALE_AFTER_MS + 60_000) });
+  const before = canConfirm(
+    { ...stale, kind: 'review' },
+    { task: task({ state: 'returned' }), tasks: [], now: NOW, isLive: alive },
+  );
+  assert.equal(before.ok, false, 'precondition: that row was supposed to be too old to confirm');
+
+  const plan = reconcileProposals({ open: [stale], fresh: [freshRow()], now: NOW });
+  assert.deepEqual(plan.reaffirm, ['p-1'], 'a stale-but-still-current proposal was not reaffirmed');
+  assert.equal(plan.reaffirmed_at, NOW, 'reaffirm carries no new timestamp, so the clock never resets');
+});
+
+test('FRESHNESS READS reaffirmed_at; prepared_at STAYS THE WAITING-SINCE CLOCK', () => {
+  /*
+   * THE OBVIOUS FIX IS THE WRONG ONE AND IT IS WORTH SAYING WHY.
+   *
+   * Reaffirming by bumping prepared_at keeps the row confirmable and needs no
+   * new column -- and it makes every review proposal read sixty seconds old
+   * forever. The 676 rows about one task were a symptom SHOUTING that nothing
+   * consumes a review proposal; silencing the churn by rewriting the clock
+   * would have removed the shout and left the stuck queue, which is trading a
+   * noisy bug for a quiet one.
+   *
+   * So the two dates mean different things: prepared_at is how long this has
+   * been waiting for a human, reaffirmed_at is whether the dispatcher still
+   * means it.
+   */
+  const heldOpenForHours = {
+    ...openRow(),
+    prepared_at: ago(4 * 60 * 60 * 1000),   // waiting since 4 hours ago
+    reaffirmed_at: ago(30_000),             // and still current 30s ago
+  };
+  const verdict = canConfirm(heldOpenForHours, {
+    task: task({ state: 'returned' }), tasks: [], now: NOW, isLive: alive,
+  });
+  assert.ok(
+    !verdict.errors.some((e) => /stale/.test(e)),
+    `a reaffirmed proposal was called stale: ${verdict.errors.join('; ')}`,
+  );
+  assert.equal(
+    heldOpenForHours.prepared_at, ago(4 * 60 * 60 * 1000),
+    'prepared_at was mutated, so nothing can report how long this waited',
+  );
+});
+
+test('A ROW PREDATING reaffirmed_at STILL AGES, RATHER THAN BECOMING IMMORTAL', () => {
+  /*
+   * The fallback is the dangerous half of `??`. Rows written before the column
+   * existed carry reaffirmed_at undefined, and a fallback that resolved those
+   * to "now" would make every historical proposal permanently confirmable --
+   * a staleness check that stops refusing is not a check.
+   */
+  const old = { ...openRow(), prepared_at: ago(PROPOSAL_STALE_AFTER_MS + 60_000) };
+  delete old.reaffirmed_at;
+  const verdict = canConfirm(old, {
+    task: task({ state: 'returned' }), tasks: [], now: NOW, isLive: alive,
+  });
+  assert.ok(
+    verdict.errors.some((e) => /stale/.test(e)),
+    'a pre-column row an hour old was not called stale, so the fallback swallowed the check',
+  );
 });
