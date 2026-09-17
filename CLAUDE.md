@@ -134,6 +134,38 @@ reachable (make it pass, then restore) and prove it stands down if its premise
 is removed. Otherwise it is an IOU that outlives its reason and teaches people
 to ignore red.
 
+**17. A CONTROL THAT IS NEVER CONSULTED IS NOT A CONTROL.** Every rule above is
+about a check that RAN and concluded wrongly. On 2026-09-17 the guard concluded
+nothing, because nothing asked it: `.claude/settings.json` submitted
+"Bash|Edit|MultiEdit|Write|NotebookEdit" and Windows sessions run shell through a
+PowerShell tool. A real session deleted `src/claudeGuard.mjs` and git reported
+`D src/claudeGuard.mjs` with no refusal from anywhere. The guard's own unit tests
+were green throughout, because they call the module directly and the module was
+never the broken part. **Before trusting any guard, establish that the path
+reaches it at all** — the wiring is a separate claim from the logic, and only the
+logic has tests.
+
+**18. WHEN SOMETHING REFUSES YOU, ESTABLISH *WHICH* THING REFUSED.** Three
+successive runs scored that same guard as working because probes came back
+BLOCKED. The refusals were from the Claude Code auto-mode classifier — a
+different mechanism in a different layer — and are indistinguishable from a hook
+refusal unless you read the text. A fourth run where the classifier happened to
+stay silent is the only reason the deletion was ever observed. **A refusal from
+the wrong layer is a hollow gate wearing a pass**, and it is worse than a green
+test because it feels like evidence. Name the mechanism: ours prefix their
+refusals with `[agentbridge:`.
+
+**19. A LIST OF NAMES FAILS IN BOTH DIRECTIONS.** The fix for 17 was to stop
+dispatching on tool names. The first attempt default-DENIED every name it did not
+recognise, which refused 25 of a real 54-tool roster — `Artifact`, `CronList`,
+`ListSkills` and twenty-two others that cannot touch a file. Allowing by known
+name leaks; denying by unknown name is an outage; and an outage gets the hook
+switched off, which loses every layer at once. **Route on the SHAPE of the input**
+— does it carry a command, does it carry a path — because that is a property of
+the operation rather than of the vocabulary. And measure against the REAL roster:
+both failures came from guessing which tool names exist on a machine that was not
+the one under test.
+
 ---
 
 # The rest of the traps
