@@ -62,6 +62,9 @@ const ENVELOPE_KEYS = Object.freeze([
   'durationMs',
   'artifacts',
   'notes',
+  // System evidence, written by the runner when an adapter throws; an adapter
+  // offering one is refused upstream as USURPED.
+  'failure',
 ]);
 
 const TEST_KEYS = Object.freeze(['passed', 'failed', 'skipped', 'total']);
@@ -179,6 +182,33 @@ export function createResultEnvelope(input) {
   const notes = input.notes ?? '';
   if (typeof notes !== 'string') fail('notes must be a string');
 
+  /*
+   * WHY IT FAILED, when something other than the work is the one saying so.
+   *
+   * `notes` is the work's own account and evidenceOf drops it, which is the
+   * rule that keeps a glowing summary from deciding anything. `failure` is not
+   * that: executorAdapter writes it when an adapter THROWS, the work cannot
+   * supply one (it is refused as USURPED), and it is the only thing that
+   * distinguishes a permanent crash from a transient one. A `spawn ENOENT` is
+   * deterministic and retrying it is three attempts spent on nothing.
+   *
+   * ABSENT IS NULL. A crash with no recorded reason is a crash whose reason is
+   * unknown, and an empty string would read as "no reason" -- the same
+   * inversion that makes a failed lookup look like a clean answer.
+   */
+  let failure = input.failure ?? null;
+  if (failure !== null) {
+    if (typeof failure !== 'object') fail('failure must be an object or null');
+    if (typeof failure.kind !== 'string' || failure.kind === '') {
+      fail('failure.kind must be a non-empty string');
+    }
+    failure = Object.freeze({
+      kind: failure.kind,
+      adapter: typeof failure.adapter === 'string' ? failure.adapter : null,
+      message: typeof failure.message === 'string' ? failure.message : '',
+    });
+  }
+
   return Object.freeze({
     version: ENVELOPE_VERSION,
     taskId,
@@ -192,6 +222,7 @@ export function createResultEnvelope(input) {
     pathContract: normalisePathContract(input.pathContract),
     durationMs,
     artifacts: Object.freeze([...artifacts]),
+    failure,
     notes,
   });
 }
@@ -218,6 +249,13 @@ export function evidenceOf(envelope) {
     filesChanged: Object.freeze([...(envelope.filesChanged ?? [])]),
     pathContract: envelope.pathContract ?? null,
     durationMs: envelope.durationMs ?? null,
+    /*
+     * ADDED DELIBERATELY, which is what the note above asks for. This is not
+     * prose: the runner recorded it, the work never touched it, and an adapter
+     * offering one is refused upstream. It is here so a retry decision can tell
+     * a permanent crash from a transient one instead of guessing.
+     */
+    failure: envelope.failure ?? null,
   });
 }
 
@@ -231,6 +269,11 @@ export function verdictFor(envelope) {
   const reasons = [];
 
   if (evidence.outcome !== 'exited') reasons.push(`outcome:${evidence.outcome}`);
+
+  // The reason travels as a code beside the outcome. `outcome:crashed` says it
+  // broke; this says what broke, which is what decides whether retrying is
+  // worth an attempt.
+  if (evidence.failure !== null) reasons.push(`failure:${evidence.failure.kind}`);
 
   if (evidence.exitCode === null) reasons.push('exit-code:absent');
   else if (evidence.exitCode !== 0) reasons.push(`exit-code:${evidence.exitCode}`);

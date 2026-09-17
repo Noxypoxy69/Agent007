@@ -59,6 +59,12 @@ const USURPED = Object.freeze({
   commit: 'the commit is read from git, not reported by the work',
   verdict: 'no adapter decides whether its own run was acceptable',
   success: 'no adapter decides whether its own run was acceptable',
+  /*
+   * `failure` is written by THIS module when an adapter throws, and a decision
+   * reads it. That is exactly why an adapter may not supply one: an adapter
+   * that can label its own crash `transient` can buy itself retries forever.
+   */
+  failure: 'the crash reason is recorded by the runner, not reported by the work',
 });
 
 function fail(message) {
@@ -162,6 +168,7 @@ export async function execute(adapter, spec, io = {}) {
   try {
     raw = await adapter.run(spec, io);
   } catch (error) {
+    const message = error?.message ?? String(error);
     return Object.freeze({
       outcome: 'crashed',
       exitCode: null,
@@ -170,7 +177,24 @@ export async function execute(adapter, spec, io = {}) {
       stderr: undefined,
       artifacts: Object.freeze([]),
       durationMs: now() - startedAt,
-      notes: `adapter ${adapter.id} threw: ${error?.message ?? String(error)}`,
+      /*
+       * SYSTEM EVIDENCE, NOT AGENT PROSE, and the distinction is the whole
+       * point of this field.
+       *
+       * The reason used to go into `notes` alone. But notes is what the WORK
+       * said -- resultEnvelope calls it "carried for a human, read by no
+       * decision", and evidenceOf omits it on purpose. So the single fact that
+       * separates a permanent crash from a transient one was filed in the one
+       * field guaranteed to be ignored. `spawn ENOENT`, the shape executorLocal
+       * produces when its empty-PATH launch cannot resolve a bare executable,
+       * is deterministic: retrying it spends attempts on something that cannot
+       * succeed, and the retry decision had no way to know.
+       *
+       * This did not come from the work, so it travels where a decision can
+       * read it. `notes` keeps the same text for a human reading the envelope.
+       */
+      failure: Object.freeze({ kind: 'adapter-threw', adapter: adapter.id, message }),
+      notes: `adapter ${adapter.id} threw: ${message}`,
     });
   }
   const normalised = normaliseResult(raw);

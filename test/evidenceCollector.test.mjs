@@ -118,3 +118,40 @@ test("the agent's notes survive into the envelope but not into evidence", async 
   });
   assert.equal(envelope.notes, 'all good!');
 });
+
+/*
+ * THE LINK THAT MAKES THE FIELD REAL.
+ *
+ * executorAdapter records WHY an adapter threw, and resultEnvelope projects it
+ * to decisions. Neither matters if the collector between them drops it: the
+ * field would exist, be tested at both ends, and never arrive in production.
+ * That is the orphan shape this repository has met five times.
+ */
+test('the crash reason survives collection and reaches the envelope', async () => {
+  const envelope = await collectEvidence({
+    taskId: 't-1',
+    execution: {
+      outcome: 'crashed',
+      durationMs: 7,
+      failure: { kind: 'adapter-threw', adapter: 'local', message: 'spawn ENOENT' },
+      notes: 'adapter local threw: spawn ENOENT',
+    },
+    contract: { allowed: ['src/**'], forbidden: [] },
+    io,
+  });
+
+  assert.equal(envelope.outcome, 'crashed');
+  assert.equal(envelope.failure?.kind, 'adapter-threw');
+  assert.equal(envelope.failure?.adapter, 'local');
+  assert.match(envelope.failure?.message ?? '', /ENOENT/);
+});
+
+test('a run that recorded no failure carries null, not a blank reason', async () => {
+  const envelope = await collectEvidence({
+    taskId: 't-1',
+    execution: { outcome: 'timeout', durationMs: 7 },
+    contract: { allowed: ['src/**'], forbidden: [] },
+    io,
+  });
+  assert.equal(envelope.failure, null);
+});

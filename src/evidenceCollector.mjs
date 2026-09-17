@@ -130,6 +130,16 @@ export async function collectEvidence({ taskId, attempt = 0, execution, contract
     pathContract,
     durationMs: execution.durationMs ?? null,
     artifacts: execution.artifacts ?? [],
+    /*
+     * WHY IT BROKE, and it is NOT in the same class as notes below.
+     *
+     * The runner wrote this when the adapter threw; the work never touched it,
+     * and an adapter that offers one is refused in executorAdapter. So it
+     * crosses into evidence, where the retry decision can tell a permanent
+     * crash from a transient one. Null when nothing recorded a reason --
+     * unknown, not "no reason".
+     */
+    failure: execution.failure ?? null,
     // Whatever the agent said. Carried for a human, read by no decision.
     notes: execution.notes ?? '',
   });

@@ -94,3 +94,54 @@ test('defineExecutor refuses an unknown capability', () => {
     /unknown capability/,
   );
 });
+
+/*
+ * WHY A CRASH CRASHED, in a field a decision is allowed to read.
+ *
+ * `execute` catches a throw from an adapter and records it, which is right: the
+ * loop above must be able to note "this blew up" and move on rather than
+ * unwinding and losing the attempt. But the reason went into `notes`, and notes
+ * is AGENT PROSE -- resultEnvelope's own comment calls it "carried for a human,
+ * read by no decision", and evidenceOf deliberately omits it.
+ *
+ * So the one thing that distinguishes a PERMANENT crash from a transient one
+ * was filed in the single field guaranteed to be ignored. `spawn ENOENT` -- the
+ * shape produced by executorLocal's empty-PATH launch, which is why Loop B has
+ * never run -- is deterministic: retrying it three times is three attempts
+ * spent on something that cannot succeed. The retry decision could not tell.
+ *
+ * The exception text is SYSTEM evidence, not a claim by the work, so it travels
+ * in its own field. And precisely because a decision reads it, an adapter must
+ * not be able to supply it: that would be the work grading its own failure,
+ * which is what USURPED exists to stop.
+ */
+test('a crashed adapter reports WHY, in a field decisions can read', async () => {
+  const boom = defineExecutor({
+    id: 'boom',
+    capabilities: ['shell'],
+    run() { throw new Error('spawn ENOENT'); },
+  });
+
+  const r = await execute(boom, { taskId: 't1', cwd: '/w', argv: ['x'], timeoutMs: 1000 });
+
+  assert.equal(r.outcome, 'crashed');
+  assert.equal(r.failure?.kind, 'adapter-threw');
+  assert.match(r.failure?.message ?? '', /spawn ENOENT/);
+  assert.equal(r.failure?.adapter, 'boom');
+});
+
+test('an adapter may NOT forge its own failure reason', async () => {
+  const liar = defineExecutor({
+    id: 'liar',
+    capabilities: ['shell'],
+    run() {
+      return { outcome: 'crashed', failure: { kind: 'transient', message: 'try me again' } };
+    },
+  });
+
+  await assert.rejects(
+    () => execute(liar, { taskId: 't1', cwd: '/w', argv: ['x'], timeoutMs: 1000 }),
+    /may not report failure/,
+    'an adapter that grades its own crash is the work judging itself',
+  );
+});

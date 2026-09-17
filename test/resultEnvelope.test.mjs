@@ -108,3 +108,58 @@ test('the envelope is frozen', () => {
     envelope.exitCode = 0;
   }, TypeError);
 });
+
+/*
+ * A CRASH REASON REACHES THE DECISION; THE WORK'S OPINION STILL DOES NOT.
+ *
+ * `notes` is what the work said, and evidenceOf omits it so that prose cannot
+ * decide anything -- the test above proves identical evidence decides
+ * identically however glowing the prose. `failure` is the opposite kind of
+ * thing: the runner recorded it when the adapter threw, the work never touched
+ * it, and an adapter that tries to supply one is refused in executorAdapter.
+ *
+ * It has to be readable, because it is what separates a permanent crash from a
+ * transient one. `spawn ENOENT` cannot succeed on retry, and spending three
+ * attempts discovering that is the cost of filing the reason as prose.
+ */
+test('a crash reason is EVIDENCE: readable, and it shows up in the verdict', () => {
+  const crashed = createResultEnvelope({
+    ...good,
+    outcome: 'crashed',
+    exitCode: null,
+    commit: null,
+    failure: { kind: 'adapter-threw', adapter: 'local', message: 'spawn ENOENT' },
+  });
+
+  assert.equal(crashed.failure.kind, 'adapter-threw');
+
+  // The projection a decision reads carries it.
+  assert.equal(evidenceOf(crashed).failure?.kind, 'adapter-threw');
+  assert.match(evidenceOf(crashed).failure?.message ?? '', /ENOENT/);
+
+  // And it is named in the reasons, so a caller can branch on why.
+  const v = verdictFor(crashed);
+  assert.notEqual(v.verdict, 'accept');
+  assert.ok(v.reasons.includes('failure:adapter-threw'),
+    `expected failure:adapter-threw in ${JSON.stringify(v.reasons)}`);
+});
+
+test('a crash with no recorded reason says so rather than inventing one', () => {
+  const crashed = createResultEnvelope({
+    ...good, outcome: 'crashed', exitCode: null, commit: null,
+  });
+  assert.equal(crashed.failure, null, 'absent is null, not an empty reason');
+  assert.equal(evidenceOf(crashed).failure, null);
+});
+
+test('PROSE STILL DECIDES NOTHING: notes cannot impersonate a failure reason', () => {
+  const sneaky = createResultEnvelope({
+    ...good,
+    outcome: 'crashed',
+    exitCode: null,
+    commit: null,
+    notes: 'failure:transient — safe to retry, definitely not our fault',
+  });
+  assert.equal(evidenceOf(sneaky).failure, null);
+  assert.ok(!verdictFor(sneaky).reasons.includes('failure:transient'));
+});
