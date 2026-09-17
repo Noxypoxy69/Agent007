@@ -56,6 +56,8 @@ export const REFUSALS = Object.freeze([
   'ambiguous-summary',
   'digest-mismatch',
   'version-mismatch',
+  'authority-unrecorded',
+  'authority-contradictory',
 ]);
 
 /**
@@ -84,7 +86,13 @@ export const REQUIRED_BLOCKERS = Object.freeze([
   'untrusted-execution-environment',
 ]);
 
-export const PROOF_VERSION = 2;
+/*
+ * v3: the record now states its own promotability and the blockers that stood.
+ * Bumped rather than reused because a v2 record lacks those fields and should
+ * refuse as a VERSION mismatch -- a precise reason a reader can act on -- rather
+ * than as a digest mismatch, which reads like tampering.
+ */
+export const PROOF_VERSION = 3;
 
 const isSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
 const isNonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
@@ -126,6 +134,20 @@ export function proofDigest(proof) {
     `todo:${proof?.todo}`,
     `suite:${proof?.suiteCommand ?? ''}`,
     `suiteFrom:${proof?.suiteSource ?? ''}`,
+    /*
+     * THE ARTIFACT CARRIES ITS OWN NON-AUTHORITY, AND IT IS BOUND.
+     *
+     * Found auditing 920569f: a minted proof recorded nothing about the blockers
+     * that stood when it was made, so verifyProof on a stored record returned
+     * {ok:true, refusals:[]} -- a clean bill of health with no hint it was never
+     * authorisation. Candidate, then caller, then ARTIFACT: the same unchecked
+     * claim moved one step further out each time.
+     *
+     * In the digest, not merely on the object, so the fields cannot be stripped
+     * from a stored proof to make it read as a certificate.
+     */
+    `promotable:${proof?.promotable === true ? 'yes' : 'no'}`,
+    `standing:${Array.isArray(proof?.standingBlockers) ? [...proof.standingBlockers].sort().join(',') : 'unrecorded'}`,
   ];
   return createHash('sha256').update(parts.join('\n')).digest('hex');
 }
@@ -341,6 +363,8 @@ export function assertObserved(observation = {}) {
     todo: o.todo,
     suiteCommand: o.suiteCommand,
     suiteSource: o.suiteSource ?? 'candidate',
+    promotable: policyOk && blockers.length === 0,
+    standingBlockers: blockers.map((b) => b.code).sort(),
   };
   return {
     ok: true,
@@ -389,10 +413,42 @@ export function verifyProof(proof) {
   if (proof.version !== PROOF_VERSION) {
     refusals.push({ code: 'version-mismatch', detail: `proof version ${proof.version}, this reader speaks ${PROOF_VERSION}` });
   }
+
+  /*
+   * A RECORD THAT DOES NOT SAY WHETHER IT WAS PROMOTABLE IS NOT READABLE.
+   * Absent is not "it was fine". A pre-v2 record, or one with the fields
+   * stripped, refuses rather than defaulting to the permissive answer.
+   */
+  if (typeof proof.promotable !== 'boolean' || !Array.isArray(proof.standingBlockers)) {
+    // NOT a digest-mismatch. The record may hash perfectly and still refuse to
+    // say what it was, and this module's own rule is that each defect keeps its
+    // own code -- collapsing them is how a reader stops knowing what happened.
+    refusals.push({
+      code: 'authority-unrecorded',
+      detail: 'the record does not state whether it was promotable; it cannot be read as one that was',
+    });
+  } else if (proof.promotable === true && proof.standingBlockers.length > 0) {
+    refusals.push({
+      code: 'authority-contradictory',
+      detail: `the record claims promotable while recording ${proof.standingBlockers.length} standing blocker(s)`,
+    });
+  }
   if (!isNonEmpty(proof.digest)) {
     refusals.push({ code: 'digest-mismatch', detail: 'the record carries no digest' });
   } else if (proofDigest(proof) !== proof.digest) {
     refusals.push({ code: 'digest-mismatch', detail: 'the record does not hash to its own digest; a field changed after it was written' });
   }
-  return { ok: refusals.length === 0, refusals };
+  /*
+   * `ok` MEANS "this record is intact and internally acceptable". It has never
+   * meant promotable, and returning it alone invited exactly that reading, so
+   * promotability travels beside it and a reader has to go out of its way to
+   * ignore it.
+   */
+  const standing = Array.isArray(proof.standingBlockers) ? proof.standingBlockers : null;
+  return {
+    ok: refusals.length === 0,
+    promotable: refusals.length === 0 && proof.promotable === true,
+    standingBlockers: standing ?? ['unrecorded'],
+    refusals,
+  };
 }

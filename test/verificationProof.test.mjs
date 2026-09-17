@@ -304,3 +304,74 @@ test('the CLI never derives a trust input from the candidate repository', async 
   assert.ok(!/signature/.test(call), 'no signature may be supplied until a verifier identity exists');
 });
 
+
+/* --------------------------- THE ARTIFACT CARRIES ITS OWN NON-AUTHORITY */
+
+test('a minted record STATES that it was not promotable, and the blockers that stood', () => {
+  /*
+   * FOUND AUDITING 920569f, and it is the same defect a third time: the record
+   * carried nothing about the blockers standing when it was made, so verifyProof
+   * on a stored proof returned {ok:true, refusals:[]} -- a clean bill of health
+   * for something that was never authorisation. Candidate, then caller, then
+   * artifact; the unchecked claim moved outward each time instead of going away.
+   */
+  const p = assertObserved(CLEAN).proof;
+  assert.equal(p.promotable, false);
+  assert.deepEqual([...p.standingBlockers].sort(), [...REQUIRED_BLOCKERS].sort());
+
+  const back = verifyProof(p);
+  assert.equal(back.ok, true, 'the record is intact');
+  assert.equal(back.promotable, false, 'and intact is not the same as promotable');
+  assert.deepEqual([...back.standingBlockers].sort(), [...REQUIRED_BLOCKERS].sort());
+});
+
+test('a record with the non-authority fields stripped is refused, not assumed fine', () => {
+  /*
+   * THE DIGEST IS NOT THE THING UNDER TEST HERE. A first version deleted the
+   * fields and asserted the refusal -- which passed through the DIGEST check,
+   * because the fields are bound into it, and never reached the guard it was
+   * written for. A mutation disabling that guard stayed green.
+   *
+   * So the forger recomputes the digest. Now the record is internally consistent
+   * and the only thing that can refuse it is the explicit "this record does not
+   * say whether it was promotable" guard.
+   */
+  const p = assertObserved(CLEAN).proof;
+  const stripped = { ...p };
+  delete stripped.promotable;
+  delete stripped.standingBlockers;
+  stripped.digest = proofDigest(stripped);
+
+  const r = verifyProof(stripped);
+  assert.equal(r.ok, false, 'absent is not "it was fine"');
+  assert.equal(r.promotable, false);
+  assert.ok(
+    r.refusals.some((x) => x.code === 'authority-unrecorded'),
+    'the refusal must come from the explicit guard, not incidentally from the digest',
+  );
+
+  // And the plain strip, without re-digesting, is refused too -- by both paths.
+  const naive = { ...p };
+  delete naive.promotable;
+  delete naive.standingBlockers;
+  assert.equal(verifyProof(naive).ok, false);
+});
+
+test('a record claiming promotable while recording blockers is self-contradictory', () => {
+  const p = assertObserved(CLEAN).proof;
+  const lying = { ...p, promotable: true };
+  lying.digest = proofDigest(lying);          // a forger who recomputes the hash
+  const r = verifyProof(lying);
+  assert.equal(r.ok, false, 'internally consistent is still not coherent');
+  assert.equal(r.promotable, false);
+  assert.ok(
+    r.refusals.some((x) => x.code === 'authority-contradictory'),
+    'a self-contradictory record is its own defect, not a digest problem',
+  );
+});
+
+test('promotability and the standing blockers are BOUND into the digest', () => {
+  const p = assertObserved(CLEAN).proof;
+  assert.notEqual(proofDigest({ ...p, promotable: true }), p.digest);
+  assert.notEqual(proofDigest({ ...p, standingBlockers: [] }), p.digest);
+});

@@ -72,7 +72,12 @@ test('no production module reads a verdict field outside the CLI command block',
    * kept, since a field name inside a string is exactly how a JSON consumer
    * would read one.
    */
-  const VERDICT_FIELDS = ['promotable', 'promotionBlockers', 'blockerPolicyComplete', 'assertObserved'];
+  const VERDICT_FIELDS = [
+    'promotable', 'promotionBlockers', 'blockerPolicyComplete', 'assertObserved',
+    // added after an audit found the ARTIFACT carried no non-authority marker:
+    // a consumer could read these off a stored proof without importing anything.
+    'standingBlockers', 'verifyProof', 'proofDigest',
+  ];
   const files = await sourceFiles();
   const offenders = [];
   for (const f of files) {
