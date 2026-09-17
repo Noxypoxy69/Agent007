@@ -1,27 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  assertObserved, verifyProof, proofDigest, PROOF_VERSION,
-  BLOCKER_POLICY_VERSION, REQUIRED_BLOCKERS,
+  assertObserved, inspectObservationRecord, RECORD_VERSION, STANDING_BLOCKERS, canonicalList,
 } from '../src/verificationProof.mjs';
 
 /**
- * THE REGRESSION FIXTURES ARE A REAL ATTACK, NOT AN IMAGINED ONE.
+ * THE SAME DEFECT FOUR TIMES, AND THE FOURTH SETTLED THE DESIGN.
  *
- * An independent review demonstrated a complete false green in v1. Reproduced
- * against a real clone before repairing: a commit whose package.json replaced
- * the test script with
+ *   1 the CANDIDATE controlled verification -- a commit set its own test script
+ *   2 the CALLER controlled it -- three literals cleared every blocker
+ *   3 the ARTIFACT carried no non-authority context
+ *   4 the ARTIFACT manufactured authority:
+ *       { ...valid, promotable: true, standingBlockers: [], digest: recompute }
+ *       returned { ok: true, promotable: true }
  *
- *     printf "# tests 1662\n# pass 1647\n# fail 0\n# skipped 15\n"; exit 1
- *
- * was reported VERIFIED with a proof minted, having run zero tests. Four
- * independent failures had to line up and all four were present: the candidate
- * controlled the command, the exit status was discarded, reconciliation only
- * rejected `>`, and the digest was unkeyed.
- *
- * The exit-0 variant is ALSO here and it is NOT refused, because it cannot be:
- * a candidate that defines its own suite can print anything. That is what
- * `promotable: false` and the candidate-controlled-suite blocker exist to say.
+ * Each repair moved the unchecked claim instead of removing it. So the promotion
+ * vocabulary is deleted: no promotable field, no `ok` a caller reads as
+ * permission, no adapter registry, no exported digest helper, no exit-0 path.
+ * `authorization` is the literal 'none' and is not computed from anything.
  */
 
 const CLEAN = Object.freeze({
@@ -40,57 +36,152 @@ const CLEAN = Object.freeze({
   suiteCommand: 'npm test  (node --test "test/**/*.test.mjs")',
 });
 
+/* ------------------------------------------- THE VOCABULARY IS GONE */
+
+test('THE FORGED RECORD: there is no promotable field to forge', () => {
+  /*
+   * The exact record the fourth review supplied. Under v3 it returned
+   * {ok:true, promotable:true, standingBlockers:[], refusals:[]}. It is refused
+   * now -- but the load-bearing change is that a well-formed record has no
+   * promotable field at all, so the forgery has nothing to aim at.
+   */
+  const real = assertObserved(CLEAN).record;
+  const forged = { ...real, promotable: true, standingBlockers: [] };
+  const r = inspectObservationRecord(forged);
+  assert.equal(r.integrity, 'invalid');
+  assert.equal(r.authorization, 'none');
+  assert.ok(r.refusals.some((x) => x.code === 'promotion-claim-present'));
+  assert.ok(!('ok' in r), 'no field a caller can read as permission');
+  assert.ok(!('promotable' in r));
+});
+
+test('a clean observation exposes no promotion vocabulary anywhere', () => {
+  const v = assertObserved(CLEAN);
+  assert.deepEqual(v.refusals, []);
+  assert.equal(v.authorization, 'none');
+  for (const field of ['ok', 'promotable', 'promotionBlockers', 'blockerPolicyComplete']) {
+    assert.ok(!(field in v), `${field} must not exist on the verdict`);
+    assert.ok(!(field in v.record), `${field} must not exist on the record`);
+  }
+});
+
+test('authorization is the literal none for every input, including hostile ones', () => {
+  for (const extra of [
+    {}, { signature: 'x' }, { suiteSource: 'trusted-policy' }, { isolated: true },
+    { authorization: 'granted' }, { promotable: true }, { blockersAtObservation: [] },
+    { signature: 'x', suiteSource: 'trusted-policy', isolated: true, authorization: 'granted' },
+  ]) {
+    const v = assertObserved({ ...CLEAN, ...extra });
+    assert.equal(v.authorization, 'none', `authorization moved for ${JSON.stringify(extra)}`);
+    assert.equal(v.blockers.length, STANDING_BLOCKERS.length);
+  }
+});
+
+test('the reader answers authorization none even for a refused or absent record', () => {
+  assert.equal(inspectObservationRecord(null).authorization, 'none');
+  assert.equal(inspectObservationRecord({}).authorization, 'none');
+  assert.equal(inspectObservationRecord(assertObserved(CLEAN).record).authorization, 'none');
+});
+
+test('the digest helper is not exported', async () => {
+  // A digest helper beside an observation is the tool a forger reaches for.
+  const mod = await import('../src/verificationProof.mjs');
+  for (const name of ['proofDigest', 'recordDigest', 'verifyProof']) {
+    assert.ok(!(name in mod), `${name} must not be exported`);
+  }
+});
+
+test('array fields are canonically encoded, so two lists cannot collide', () => {
+  /*
+   * THE PROPERTY, TESTED DIRECTLY. A first version asserted that two forged
+   * records were both refused -- which they were, by the DIGEST path, whatever
+   * the encoding. A mutation reverting to join(',') stayed green, so the test
+   * proved nothing about canonicalisation. The encoder is exported for this;
+   * the digest is not, because an encoder is not authority-adjacent.
+   */
+  assert.notEqual(
+    canonicalList(['a,b', 'c']),
+    canonicalList(['a', 'b,c']),
+    "join(',') maps these to the same string; a canonical encoding must not",
+  );
+  assert.equal(canonicalList(['b', 'a']), canonicalList(['a', 'b']), 'order must not matter');
+  assert.equal(canonicalList('nope'), 'unrecorded', 'a non-array is not silently coerced');
+  assert.equal(canonicalList(undefined), 'unrecorded');
+});
+
+test('a record is intact only when nothing changed, and integrity is a STATE', () => {
+  const real = assertObserved(CLEAN).record;
+  const good = inspectObservationRecord(real);
+  assert.equal(good.integrity, 'valid');
+  assert.deepEqual(good.refusals, []);
+  assert.equal(inspectObservationRecord({ ...real, pass: 9999 }).integrity, 'invalid');
+  const noDigest = { ...real }; delete noDigest.digest;
+  assert.equal(inspectObservationRecord(noDigest).integrity, 'invalid');
+});
+
+test('a record that does not say which blockers stood is refused', () => {
+  const real = assertObserved(CLEAN).record;
+  const stripped = { ...real }; delete stripped.blockersAtObservation;
+  assert.equal(inspectObservationRecord(stripped).integrity, 'invalid');
+});
+
+test('a legacy version is refused as a version mismatch', () => {
+  const real = assertObserved(CLEAN).record;
+  assert.ok(inspectObservationRecord({ ...real, version: 3 }).refusals.some((x) => x.code === 'version-mismatch'));
+  assert.equal(RECORD_VERSION, 4);
+});
+
 /* ------------------------------------------------ THE DEMONSTRATED ATTACK */
 
 test('REGRESSION: green summary with a nonzero exit is refused', () => {
   const r = assertObserved({ ...CLEAN, suiteExitCode: 1 });
-  assert.equal(r.ok, false);
-  assert.equal(r.proof, null, 'a refused run must not hand back an artifact');
+  assert.ok(r.refusals.length > 0);
+  assert.equal(r.record, null, 'a refused run must not hand back an artifact');
   assert.ok(r.refusals.some((x) => x.code === 'suite-nonzero-exit'));
 });
 
 test('REGRESSION: tests 1600 / pass 1 does not reconcile', () => {
   // v1 rejected only pass+fail+skip > tests, so 1 of 1600 passed as green.
   const r = assertObserved({ ...CLEAN, tests: 1600, pass: 1, fail: 0, skip: 0 });
-  assert.equal(r.ok, false);
+  assert.ok(r.refusals.length > 0);
   assert.ok(r.refusals.some((x) => x.code === 'counts-do-not-reconcile'));
 });
 
 test('a suite killed by a signal, or timed out, is refused even with green counts', () => {
   const sig = assertObserved({ ...CLEAN, suiteExitCode: null, terminationSignal: 'SIGKILL' });
-  assert.equal(sig.ok, false);
+  assert.ok(sig.refusals.length > 0);
   assert.ok(sig.refusals.some((x) => x.code === 'suite-signalled'));
 
   const late = assertObserved({ ...CLEAN, suiteExitCode: null, timedOut: true });
-  assert.equal(late.ok, false);
+  assert.ok(late.refusals.length > 0);
   assert.ok(late.refusals.some((x) => x.code === 'suite-timed-out'));
 });
 
 test('an unrecorded exit status is refused, not assumed to be zero', () => {
   const r = assertObserved({ ...CLEAN, suiteExitCode: undefined });
-  assert.equal(r.ok, false, 'absent is not zero, least of all for an exit code');
+  assert.ok(r.refusals.length > 0, 'absent is not zero, least of all for an exit code');
   assert.ok(r.refusals.some((x) => x.code === 'suite-nonzero-exit'));
 });
 
 test('cancelled tests mean the suite did not complete', () => {
   const r = assertObserved({ ...CLEAN, cancelled: 3, pass: 1644 });
-  assert.equal(r.ok, false);
+  assert.ok(r.refusals.length > 0);
   assert.ok(r.refusals.some((x) => x.code === 'tests-cancelled'));
 });
 
 test('two summaries in one output cannot be adjudicated', () => {
   const r = assertObserved({ ...CLEAN, ambiguousSummary: true, tests: null, pass: null, fail: null });
-  assert.equal(r.ok, false);
+  assert.ok(r.refusals.length > 0);
   assert.ok(r.refusals.some((x) => x.code === 'ambiguous-summary'));
 });
 
 test('source mutated during the run means what ran is not the commit', () => {
   const dirty = assertObserved({ ...CLEAN, treeCleanAfter: false });
-  assert.equal(dirty.ok, false);
+  assert.ok(dirty.refusals.length > 0);
   assert.ok(dirty.refusals.some((x) => x.code === 'source-mutated'));
 
   const moved = assertObserved({ ...CLEAN, headAfter: 'b'.repeat(40) });
-  assert.equal(moved.ok, false);
+  assert.ok(moved.refusals.length > 0);
   assert.ok(moved.refusals.some((x) => x.code === 'source-mutated'));
 });
 
@@ -112,266 +203,19 @@ test('every reason at once, never only the first', () => {
 
 /* ------------------------------------------- WHAT IT REFUSES TO CLAIM */
 
-test('a fully clean run is OBSERVED and still NOT promotable', () => {
-  const r = assertObserved(CLEAN);
-  assert.equal(r.ok, true, JSON.stringify(r.refusals));
-  assert.equal(r.promotable, false, 'a clean observation is not a certificate');
-  const codes = r.promotionBlockers.map((b) => b.code);
-  assert.deepEqual(
-    codes.sort(),
-    [...REQUIRED_BLOCKERS].sort(),
-    'every blocker must be named on a passing run, not only on a failing one',
-  );
-});
 
-test('blockers are not refusals and must not be collapsed', () => {
-  const r = assertObserved(CLEAN);
-  assert.deepEqual(r.refusals, [], 'nothing went wrong with this run');
-  assert.ok(r.promotionBlockers.length > 0, 'and it still may not authorise promotion');
-});
-
-test('NO caller input can clear a blocker — the exploit, as a refusal', () => {
+test('the observation-supplied policy version is IGNORED, not negotiated', () => {
   /*
-   * THIS TEST WAS THE EXPLOIT. It read "a signed, policy-sourced, isolated run
-   * WOULD be promotable", passed, and was written by me as "the positive
-   * direction, so the blockers cannot quietly become unclearable". It was the
-   * vulnerability with a green tick beside it: the three trust fields were
-   * caller-supplied, nothing verified any of them, and assertObserved is
-   * exported. Three literals produced promotable: true.
-   *
-   * A blocker is now cleared only by a verifier adapter registered inside the
-   * module, and there are none. So this asserts the opposite of what it used to.
+   * The previous code read `blockerPolicyVersion === undefined ? true : ...` and
+   * the commit calling it "fail-closed" was wrong: an absent version was
+   * accepted, and observation data got a say in which policy judged it. Harmless
+   * only while blockers were unconditional -- dangerous the moment one could
+   * clear. The field is now not read at all.
    */
-  const attack = assertObserved({
-    ...CLEAN, signature: 'sig:abc', suiteSource: 'trusted-policy', isolated: true,
-  });
-  assert.equal(attack.promotable, false, 'a claimed signature is not a signature');
-  assert.equal(attack.promotionBlockers.length, REQUIRED_BLOCKERS.length);
-
-  // Everything at once, including fields that name the outputs themselves.
-  const wild = assertObserved({
-    ...CLEAN, signature: 'x', suiteSource: 'trusted-policy', isolated: true,
-    promotable: true, promotionBlockers: [], blockerPolicyComplete: true, verified: true,
-  });
-  assert.equal(wild.promotable, false);
-  assert.deepEqual(
-    wild.promotionBlockers.map((b) => b.code).sort(),
-    [...REQUIRED_BLOCKERS].sort(),
-    'every blocker still stands whatever the caller claims',
-  );
-});
-
-test('promotable is false for EVERY input this module can be given', () => {
-  // Property, not examples: no combination of the former trust fields promotes.
-  for (const signature of [undefined, '', 'x', 'sig:valid-looking']) {
-    for (const suiteSource of [undefined, 'candidate', 'trusted-policy']) {
-      for (const isolated of [undefined, false, true]) {
-        const r = assertObserved({ ...CLEAN, signature, suiteSource, isolated });
-        assert.equal(
-          r.promotable, false,
-          `promotable with signature=${signature} suiteSource=${suiteSource} isolated=${isolated}`,
-        );
-      }
-    }
+  for (const v of [undefined, 0, 1, 99, 'latest', null]) {
+    const r = assertObserved({ ...CLEAN, blockerPolicyVersion: v });
+    assert.equal(r.authorization, 'none', `version ${JSON.stringify(v)} changed the answer`);
+    assert.equal(r.blockers.length, STANDING_BLOCKERS.length);
+    assert.deepEqual(r.refusals, [], 'and it is not a refusal either; it is simply ignored');
   }
-});
-
-test('the policy version fails CLOSED and is the module\'s, not the observation\'s', () => {
-  /*
-   * It read `undefined || === CURRENT`, so an observation carrying no version
-   * was accepted and observation data selected which policy judged it. Data
-   * under review does not choose its own reviewer.
-   */
-  assert.equal(assertObserved({ ...CLEAN, blockerPolicyVersion: 99 }).blockerPolicyComplete, false);
-  assert.equal(assertObserved({ ...CLEAN, blockerPolicyVersion: 0 }).blockerPolicyComplete, false);
-  const r = assertObserved({ ...CLEAN });
-  assert.equal(r.blockerPolicyVersion, BLOCKER_POLICY_VERSION, 'the module reports ITS version');
-});
-
-/* ------------------------------------------------- THE READER'S HALF */
-
-test('REGRESSION: the record version is bound into the digest', () => {
-  // v1 hashed the module CONSTANT, so proof.version could be rewritten freely.
-  const proof = assertObserved(CLEAN).proof;
-  const altered = { ...proof, version: 999 };
-  assert.notEqual(proofDigest(altered), proof.digest, 'version must change the digest');
-  assert.equal(verifyProof({ ...altered, digest: proof.digest }).ok, false);
-});
-
-test('verifyProof re-runs the whole validator, not just the hash', () => {
-  // A self-consistent record of a BAD run must still be refused on content.
-  const forged = {
-    version: PROOF_VERSION, repoId: 'r', sha: 'a'.repeat(40),
-    checkoutHead: 'a'.repeat(40), headAfter: 'a'.repeat(40),
-    sourceClean: true, treeCleanAfter: true, depsInstalled: true,
-    lifecycleScriptsRan: false,
-    suiteExitCode: 0, terminationSignal: null, timedOut: false,
-    tests: 1600, pass: 1, fail: 0, skip: 0, cancelled: 0, todo: 0,
-    suiteCommand: 'npm test', suiteSource: 'candidate',
-  };
-  forged.digest = proofDigest(forged);
-  const r = verifyProof(forged);
-  assert.equal(r.ok, false, 'internally consistent is not the same as acceptable');
-  assert.ok(r.refusals.some((x) => x.code === 'counts-do-not-reconcile'));
-});
-
-test('a minted record verifies, and an edited one does not', () => {
-  const proof = assertObserved(CLEAN).proof;
-  assert.equal(verifyProof(proof).ok, true, JSON.stringify(verifyProof(proof).refusals));
-  assert.equal(verifyProof({ ...proof, pass: 9999 }).ok, false);
-  assert.equal(verifyProof(null).ok, false);
-  const noDigest = { ...proof }; delete noDigest.digest;
-  assert.equal(verifyProof(noDigest).ok, false);
-});
-
-test('two honest observations of one commit agree on the digest', () => {
-  // repoId is canonical, not a local path, so this holds across machines.
-  assert.equal(assertObserved(CLEAN).proof.digest, assertObserved({ ...CLEAN }).proof.digest);
-});
-
-test('the digest is NOT a signature, and the module says so where it counts', () => {
-  // Anyone can construct a record and compute its digest. This asserts the
-  // property rather than pretending otherwise: forgery is detected by the
-  // `unsigned` BLOCKER, never by the hash.
-  const forged = { ...assertObserved(CLEAN).proof };
-  forged.digest = proofDigest(forged);
-  assert.equal(verifyProof(forged).ok, true, 'an unkeyed digest cannot detect authorship');
-  assert.equal(assertObserved(CLEAN).promotable, false, 'which is why nothing unsigned is promotable');
-});
-
-/* ------------------------------------- MANDATORY BLOCKERS, FAILING CLOSED */
-
-test('every required blocker is reported on a clean run, by its policy name', () => {
-  const r = assertObserved(CLEAN);
-  assert.equal(r.ok, true);
-  assert.equal(r.blockerPolicyVersion, BLOCKER_POLICY_VERSION);
-  assert.deepEqual(
-    r.promotionBlockers.map((b) => b.code).sort(),
-    [...REQUIRED_BLOCKERS].sort(),
-    'a blocker missing from the output is indistinguishable from one that was cleared',
-  );
-});
-
-test('a blocker cleared by the CANDIDATE would still not promote — trust inputs come from the caller', () => {
-  /*
-   * The three trust inputs are signature, suiteSource and isolated. None is read
-   * from the repository under test; a candidate that could set them has not been
-   * checked by anything. This asserts the module honours only those three and
-   * ignores anything else offered alongside them.
-   */
-  const pretend = assertObserved({
-    ...CLEAN,
-    trusted: true, verified: true, promotable: true, skipBlockers: true,
-    promotionBlockers: [], signed: true,
-  });
-  assert.equal(pretend.promotable, false, 'no field but the three trust inputs may clear a blocker');
-  assert.equal(pretend.promotionBlockers.length, REQUIRED_BLOCKERS.length);
-});
-
-test('a refused observation still reports its blockers', () => {
-  // Otherwise a reader of a failing run learns nothing about why even a passing
-  // one would not have been enough.
-  const r = assertObserved({ ...CLEAN, suiteExitCode: 1 });
-  assert.equal(r.ok, false);
-  assert.equal(r.promotable, false);
-  assert.equal(r.promotionBlockers.length, REQUIRED_BLOCKERS.length);
-});
-
-/* ------------------------------------------- THE CALLER'S SIDE, STRUCTURAL */
-
-test('the CLI never derives a trust input from the candidate repository', async () => {
-  /*
-   * This is a property of the CALLER, not the module, so it is checked against
-   * the shipped source. Comments are stripped first: a structural gate in this
-   * repository once failed against correct code by matching its own explanation.
-   */
-  const { readFile } = await import('node:fs/promises');
-  const { fileURLToPath } = await import('node:url');
-  const { stripComments } = await import('../src/moduleGraph.mjs');
-  const cli = stripComments(await readFile(fileURLToPath(new URL('../bin/agentbridge.mjs', import.meta.url)), 'utf8'));
-
-  const block = cli.slice(cli.indexOf("cmd === 'observe-sha'"));
-  const call = block.slice(block.indexOf('assertObserved'), block.indexOf('assertObserved') + 1200);
-
-  // A NEGATIVE NEEDS THE POSITIVE FIRST. Asserting "no signature appears" against
-  // an empty slice passes and proves nothing -- which is exactly what happened
-  // when this used the string-stripping variant.
-  assert.ok(block.length > 0, 'the observe-sha block must be found at all');
-  assert.ok(call.length > 100, `the assertObserved call must be found; got ${call.length} chars`);
-
-  assert.match(call, /suiteSource:\s*'candidate'/, 'suite provenance must be hardcoded, never read from the clone');
-  assert.match(call, /isolated:\s*false/, 'isolation must be hardcoded false while it is false');
-  assert.ok(!/signature/.test(call), 'no signature may be supplied until a verifier identity exists');
-});
-
-
-/* --------------------------- THE ARTIFACT CARRIES ITS OWN NON-AUTHORITY */
-
-test('a minted record STATES that it was not promotable, and the blockers that stood', () => {
-  /*
-   * FOUND AUDITING 920569f, and it is the same defect a third time: the record
-   * carried nothing about the blockers standing when it was made, so verifyProof
-   * on a stored proof returned {ok:true, refusals:[]} -- a clean bill of health
-   * for something that was never authorisation. Candidate, then caller, then
-   * artifact; the unchecked claim moved outward each time instead of going away.
-   */
-  const p = assertObserved(CLEAN).proof;
-  assert.equal(p.promotable, false);
-  assert.deepEqual([...p.standingBlockers].sort(), [...REQUIRED_BLOCKERS].sort());
-
-  const back = verifyProof(p);
-  assert.equal(back.ok, true, 'the record is intact');
-  assert.equal(back.promotable, false, 'and intact is not the same as promotable');
-  assert.deepEqual([...back.standingBlockers].sort(), [...REQUIRED_BLOCKERS].sort());
-});
-
-test('a record with the non-authority fields stripped is refused, not assumed fine', () => {
-  /*
-   * THE DIGEST IS NOT THE THING UNDER TEST HERE. A first version deleted the
-   * fields and asserted the refusal -- which passed through the DIGEST check,
-   * because the fields are bound into it, and never reached the guard it was
-   * written for. A mutation disabling that guard stayed green.
-   *
-   * So the forger recomputes the digest. Now the record is internally consistent
-   * and the only thing that can refuse it is the explicit "this record does not
-   * say whether it was promotable" guard.
-   */
-  const p = assertObserved(CLEAN).proof;
-  const stripped = { ...p };
-  delete stripped.promotable;
-  delete stripped.standingBlockers;
-  stripped.digest = proofDigest(stripped);
-
-  const r = verifyProof(stripped);
-  assert.equal(r.ok, false, 'absent is not "it was fine"');
-  assert.equal(r.promotable, false);
-  assert.ok(
-    r.refusals.some((x) => x.code === 'authority-unrecorded'),
-    'the refusal must come from the explicit guard, not incidentally from the digest',
-  );
-
-  // And the plain strip, without re-digesting, is refused too -- by both paths.
-  const naive = { ...p };
-  delete naive.promotable;
-  delete naive.standingBlockers;
-  assert.equal(verifyProof(naive).ok, false);
-});
-
-test('a record claiming promotable while recording blockers is self-contradictory', () => {
-  const p = assertObserved(CLEAN).proof;
-  const lying = { ...p, promotable: true };
-  lying.digest = proofDigest(lying);          // a forger who recomputes the hash
-  const r = verifyProof(lying);
-  assert.equal(r.ok, false, 'internally consistent is still not coherent');
-  assert.equal(r.promotable, false);
-  assert.ok(
-    r.refusals.some((x) => x.code === 'authority-contradictory'),
-    'a self-contradictory record is its own defect, not a digest problem',
-  );
-});
-
-test('promotability and the standing blockers are BOUND into the digest', () => {
-  const p = assertObserved(CLEAN).proof;
-  assert.notEqual(proofDigest({ ...p, promotable: true }), p.digest);
-  assert.notEqual(proofDigest({ ...p, standingBlockers: [] }), p.digest);
 });

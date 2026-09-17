@@ -37,10 +37,12 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge observe-sha <rev> [--repo <dir>] [--json]
                                         (was verify-sha, renamed: it observes, it
                                         does not verify)
-             EXIT CODES: 0 promotable — unreachable today, by design.
-                         3 observed cleanly but NOT promotable.
-                         1 the observation itself was refused.
+             EXIT CODES: 3 a clean observation — evidence, NOT authorisation.
+                         1 the observation was refused.
                          2 could not run.
+                         There is no exit 0. This command cannot authorise
+                         anything, so it must not return the status automation
+                         reads as success.
                                         clone the sha into a fresh directory, npm ci there,
                                         run the command that commit DECLARES, and mint a
                                         VerificationProof. There is no --suite flag on
@@ -2091,7 +2093,7 @@ try {
   if (cmd === 'verify-sha') {
     console.error('verify-sha was renamed to observe-sha, and its exit codes changed.');
     console.error('  It observes a commit. It does not verify one, and it never authorised promotion.');
-    console.error('  0 is now reserved for a promotable observation, which nothing can currently produce.');
+    console.error('  It has no exit-0 path at all: an observation is evidence, never authorisation.');
     console.error('  Use: agentbridge observe-sha <rev>');
     handled = true; done(2);
   }
@@ -2236,30 +2238,43 @@ try {
         tests, pass, fail, skip, cancelled, todo,
         suiteCommand: `npm test  (${declared})`,
         suiteSource: 'candidate',
-        isolated: false,
       });
 
       /*
-       * EXIT 0 MEANS PROMOTABLE, NOT "the command worked".
+       * THERE IS NO PATH TO EXIT 0, AND NO CONDITIONAL THAT COULD PRODUCE ONE.
        *
-       * A successful observation exiting 0 is precisely how automation comes to
-       * treat observation as verification: a CI step, a merge script or a future
-       * agent reads the status and proceeds. So 0 is reserved for promotable,
-       * which nothing in this repository can currently produce, and a clean but
-       * unpromotable observation exits 3 -- distinguishable from a refused
-       * observation (1) and from a command that could not run (2).
+       * The previous mapping was `!ok ? 1 : (promotable ? 0 : 3)`. It never
+       * returned 0, because nothing could be promotable -- but it kept a branch
+       * that WOULD return 0 the moment something was, which is a dormant
+       * false-green waiting for its condition. A command that can never
+       * authorise anything should not be able to say the thing automation reads
+       * as success.
+       *
+       *   1  the observation was refused
+       *   2  the command could not run
+       *   3  a clean observation, which is evidence and not authorisation
        */
-      const exitCode = !verdict.ok ? 1 : (verdict.promotable ? 0 : 3);
+      const exitCode = verdict.refusals.length > 0 ? 1 : 3;
 
       if (args.json) {
+        /*
+         * blockersCanonical is the exact encoding the record's digest was
+         * computed over. A consumer that stores or re-serialises the blocker
+         * list must round-trip these bytes, not its own idea of how to join an
+         * array -- which is the collision this encoding exists to prevent.
+         */
         console.log(JSON.stringify({
-          ...verdict, blockerPolicyVersion: V.BLOCKER_POLICY_VERSION, sourcePath: repo, depsError,
+          ...verdict,
+          recordVersion: V.RECORD_VERSION,
+          blockersCanonical: V.canonicalList(verdict.record?.blockersAtObservation),
+          sourcePath: repo,
+          depsError,
         }, null, 2));
         handled = true; done(exitCode);
       }
 
-      if (verdict.ok) {
-        const p = verdict.proof;
+      if (verdict.refusals.length === 0) {
+        const p = verdict.record;
         console.log(`OBSERVED ${p.sha}`);
         // "suite exit 0", never bare "exit 0": this command's OWN exit is 3 here,
         // and a reader skimming must not take the suite's status for the process's.
@@ -2275,9 +2290,9 @@ try {
        * PRINTED ON EVERY RUN, PASS OR FAIL. A clean observation is still not a
        * certificate, and the reader must not have to know that already.
        */
-      console.error(`\nNOT A PROMOTION GATE — policy v${V.BLOCKER_POLICY_VERSION}, ${verdict.promotionBlockers.length} mandatory blocker(s) standing:`);
-      for (const b of verdict.promotionBlockers) console.error(`  ${b.code}: ${b.detail}`);
-      console.error(`  exiting ${exitCode}: a clean observation is not authorisation to merge, integrate, accept or complete.`);
+      console.error(`\nauthorization: ${verdict.authorization} — ${verdict.blockers.length} standing blocker(s), none clearable:`);
+      for (const b of verdict.blockers) console.error(`  ${b.code}: ${b.detail}`);
+      console.error(`  exiting ${exitCode}: this command has no exit-0 path. An observation is evidence, never authorisation.`);
 
       handled = true; done(exitCode);
     } finally {

@@ -102,7 +102,7 @@ function fnsByCategory(root, { excludeGateMachinery = false } = {}) {
  * as dead was the misclassification the review caught.
  */
 const BASELINE_UNREFERENCED = 13;
-const BASELINE_TEST_ONLY = 124;
+const BASELINE_TEST_ONLY = 123;
 
 /*
  * GATE MACHINERY IS TEST-ONLY BY NATURE, and excluding it makes the number mean

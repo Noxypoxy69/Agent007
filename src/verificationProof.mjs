@@ -1,39 +1,41 @@
 /**
- * VERIFICATION OBSERVATIONS — AND WHY THIS IS NOT A PROMOTION GATE.
+ * OBSERVATION RECORDS. THERE IS NO PROMOTION VOCABULARY HERE, ON PURPOSE.
  *
- * Built to enforce TEST_PASS_IN_DIRTY_WORKTREE != PROMOTABLE. An independent
- * review of the first version found it could mint a false green, and the
- * demonstration was decisive: a commit whose package.json replaced the test
- * script with `printf "# tests 1662\n# pass 1647\n# fail 0\n"; exit 1` was
- * VERIFIED. Zero tests ran. The process exited 1. A proof was minted.
+ * Four reviews found the same defect in four places, and each repair moved it
+ * rather than removing it:
  *
- * THE FOUR LINKS IN THAT CHAIN, ALL PRESENT AT ONCE:
- *   the candidate controlled the command that defines "the suite";
- *   the exit code was parsed out of existence -- stdout was kept, status dropped;
- *   reconciliation only rejected pass+fail+skip > tests, so 1 of 1662 passed;
- *   the digest was an unkeyed hash anybody can recompute over anything.
+ *   1. the CANDIDATE controlled verification -- a commit set its own test script
+ *   2. the CALLER controlled it -- three literals cleared every blocker
+ *   3. the ARTIFACT carried no non-authority context -- a stored record read as
+ *      a clean bill of health
+ *   4. the ARTIFACT manufactured authority -- {promotable:true, standingBlockers:[]}
+ *      with a recomputed digest returned {ok:true, promotable:true}
  *
- * WHAT CHANGED, AND WHAT DELIBERATELY HAS NOT.
+ * The fourth is the one that settles the design. Every guard I added protected a
+ * `promotable` field that had no business existing. A record that can say it was
+ * promotable is a record somebody can forge into saying it, and an unkeyed
+ * digest proves internal consistency, never authorship.
  *
- * The mechanical false greens are closed below: exit status, signal and timeout
- * are load-bearing, counts must reconcile EXACTLY, cancelled must be zero, the
- * version is bound into the digest, and verifyProof re-runs the whole semantic
- * validator instead of trusting a hash.
+ * SO THE FIELD IS GONE. An observation records EVIDENCE: what ran, on which
+ * commit, with what result, and which blockers stood at the time. It has no
+ * promotion field, no success-looking `ok`, and the reader always answers
+ * `authorization: 'none'` -- not because today's configuration happens to
+ * withhold it, but because this module cannot grant it at all.
  *
- * The other three defects cannot be closed by arithmetic and are NOT pretended
- * away. A proof is unsigned, so it proves nothing about WHO ran the verification
- * or that it ran at all. The suite command still comes from the candidate. The
- * run executes candidate-controlled code on the host. Those need a credential,
- * a trusted policy store and container isolation respectively -- none of which
- * exist here yet.
+ * WHAT IS DELIBERATELY ABSENT AND MUST STAY ABSENT:
+ *   a promotable field on the record;
+ *   an `ok` that a caller can read as permission;
+ *   any verifier-adapter registry -- the abstraction invited the forgery;
+ *   an exported digest helper, which is authority-adjacent;
+ *   any code path that yields exit 0.
  *
- * SO THIS MODULE NO LONGER CLAIMS TO PROMOTE ANYTHING. assertObserved() returns
- * an observation plus an explicit, non-empty list of promotionBlockers. Callers
- * that want a promotion decision must read `promotable`, which is false in every
- * configuration this repository can currently produce. An honest tool that
- * refuses to certify is worth more than one whose certificate is forgeable.
+ * When real authority exists it belongs OUTSIDE this module and outside the
+ * coding agent's writable checkout: a signed attestation from an approved
+ * verifier identity, a suite policy loaded by id and digest from an authority
+ * the candidate cannot reach, and an isolation attestation. None of those is a
+ * boolean, a string, or a field on a record.
  *
- * PURE. No clone, no spawn, no clock. The CLI observes; this decides.
+ * PURE. No clone, no spawn, no clock.
  */
 
 import { createHash } from 'node:crypto';
@@ -54,130 +56,103 @@ export const REFUSALS = Object.freeze([
   'tests-cancelled',
   'zero-tests',
   'ambiguous-summary',
-  'digest-mismatch',
+  'integrity-broken',
   'version-mismatch',
-  'authority-unrecorded',
-  'authority-contradictory',
+  'promotion-claim-present',
 ]);
 
 /**
- * MANDATORY, VERSIONED PROMOTION BLOCKERS. They fail CLOSED.
+ * Blockers that stand on every observation, unconditionally.
  *
- * Every one of these must be explicitly evaluated on every observation. A
- * blocker that is absent, unknown, or not evaluated does not mean "cleared" --
- * it means the observation cannot authorise anything, which is the opposite
- * default from the one that produced the false green.
- *
- * NONE OF THEM ARE CLEARABLE BY THE CANDIDATE. Each is decided from a trust
- * input supplied by the CALLER -- a signature, the provenance of the suite
- * command, the isolation of the execution environment. Nothing here is read out
- * of the repository under test, because a candidate that can clear its own
- * blockers has not been checked by anything.
- *
- * The version exists so a stored observation cannot be re-interpreted under a
- * later, weaker policy. An observation carrying a different policy version is
- * not promotable, full stop.
+ * There is no mechanism to clear one. The registry that used to hold "verifier
+ * adapters" is deleted: it existed only to be empty, and the abstraction is what
+ * made a cleared blocker representable in the first place.
  */
-export const BLOCKER_POLICY_VERSION = 1;
-
-export const REQUIRED_BLOCKERS = Object.freeze([
+export const STANDING_BLOCKERS = Object.freeze([
   'unsigned-observation',
   'candidate-controlled-suite',
   'untrusted-execution-environment',
 ]);
 
-/*
- * v3: the record now states its own promotability and the blockers that stood.
- * Bumped rather than reused because a v2 record lacks those fields and should
- * refuse as a VERSION mismatch -- a precise reason a reader can act on -- rather
- * than as a digest mismatch, which reads like tampering.
- */
-export const PROOF_VERSION = 3;
+const BLOCKER_DETAIL = Object.freeze({
+  'unsigned-observation':
+    'nothing signs an observation: an unkeyed digest cannot establish who observed, or that anyone did',
+  'candidate-controlled-suite':
+    'no trusted suite policy exists: the command came from the commit under test',
+  'untrusted-execution-environment':
+    'no isolation attestation exists: install and suite ran on the host with ambient credentials',
+});
+
+/** v4: the promotion vocabulary is removed from the record format entirely. */
+export const RECORD_VERSION = 4;
 
 const isSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
 const isNonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 const isCount = (v) => Number.isInteger(v) && v >= 0;
 
-/**
- * The content address of an observation.
+/*
+ * NOT EXPORTED. A digest helper beside an observation is authority-adjacent: it
+ * is the tool a forger reaches for, and exporting it published the means to make
+ * a tampered record self-consistent. Integrity is asked of the reader, which is
+ * the only question a hash can answer.
  *
- * `v:` now reads the RECORD's version, not the module constant. Hashing the
- * constant meant an attacker could rewrite proof.version to anything and the
- * digest still matched -- the field was recorded but not bound. Every field the
- * verdict depends on is bound; only diagnostics (timings, local paths) are not,
- * so two honest verifications of one commit still agree.
- *
- * THIS IS AN UNKEYED HASH AND THEREFORE NOT A SIGNATURE. It detects editing. It
- * cannot establish that verification happened or who ran it, because anyone can
- * construct an object and compute its digest. Signing needs a verifier identity
- * and a credential, which is the identity slice, not this one.
+ * ARRAYS ARE JSON-ENCODED, NOT JOINED. `['a,b','c']` and `['a','b,c']` join to
+ * the same string, so a comma-joined list is not a canonical encoding of a list.
  */
-export function proofDigest(proof) {
+/**
+ * Canonical encoding of a list, exported so the property can be TESTED.
+ *
+ * `['a,b','c']` and `['a','b,c']` join to the same comma string, so a joined
+ * list is not a canonical encoding of a list. This is exported and the digest is
+ * not: an encoder is not authority-adjacent, and leaving it unexported made the
+ * canonicalisation test decorative -- both forged records were refused by the
+ * digest path whatever the encoding, so a mutation reverting to join(',') stayed
+ * green.
+ */
+export function canonicalList(value) {
+  return Array.isArray(value) ? JSON.stringify([...value].map(String).sort()) : 'unrecorded';
+}
+
+function recordDigest(record) {
+  const arr = canonicalList;
   const parts = [
-    `v:${proof?.version ?? ''}`,
-    `repo:${proof?.repoId ?? ''}`,
-    `sha:${proof?.sha ?? ''}`,
-    `headAt:${proof?.checkoutHead ?? ''}`,
-    `headAfter:${proof?.headAfter ?? ''}`,
-    `clean:${proof?.sourceClean === true ? 'yes' : 'no'}`,
-    `cleanAfter:${proof?.treeCleanAfter === true ? 'yes' : 'no'}`,
-    `deps:${proof?.depsInstalled === true ? 'yes' : 'no'}`,
-    `scripts:${proof?.lifecycleScriptsRan === true ? 'yes' : 'no'}`,
-    `exit:${proof?.suiteExitCode}`,
-    `signal:${proof?.terminationSignal ?? 'none'}`,
-    `timeout:${proof?.timedOut === true ? 'yes' : 'no'}`,
-    `tests:${proof?.tests}`,
-    `pass:${proof?.pass}`,
-    `fail:${proof?.fail}`,
-    `skip:${proof?.skip}`,
-    `cancelled:${proof?.cancelled}`,
-    `todo:${proof?.todo}`,
-    `suite:${proof?.suiteCommand ?? ''}`,
-    `suiteFrom:${proof?.suiteSource ?? ''}`,
-    /*
-     * THE ARTIFACT CARRIES ITS OWN NON-AUTHORITY, AND IT IS BOUND.
-     *
-     * Found auditing 920569f: a minted proof recorded nothing about the blockers
-     * that stood when it was made, so verifyProof on a stored record returned
-     * {ok:true, refusals:[]} -- a clean bill of health with no hint it was never
-     * authorisation. Candidate, then caller, then ARTIFACT: the same unchecked
-     * claim moved one step further out each time.
-     *
-     * In the digest, not merely on the object, so the fields cannot be stripped
-     * from a stored proof to make it read as a certificate.
-     */
-    `promotable:${proof?.promotable === true ? 'yes' : 'no'}`,
-    `standing:${Array.isArray(proof?.standingBlockers) ? [...proof.standingBlockers].sort().join(',') : 'unrecorded'}`,
+    `v:${record?.version ?? ''}`,
+    `repo:${record?.repoId ?? ''}`,
+    `sha:${record?.sha ?? ''}`,
+    `headAt:${record?.checkoutHead ?? ''}`,
+    `headAfter:${record?.headAfter ?? ''}`,
+    `clean:${record?.sourceClean === true ? 'yes' : 'no'}`,
+    `cleanAfter:${record?.treeCleanAfter === true ? 'yes' : 'no'}`,
+    `deps:${record?.depsInstalled === true ? 'yes' : 'no'}`,
+    `scripts:${record?.lifecycleScriptsRan === true ? 'yes' : 'no'}`,
+    `exit:${record?.suiteExitCode}`,
+    `signal:${record?.terminationSignal ?? 'none'}`,
+    `timeout:${record?.timedOut === true ? 'yes' : 'no'}`,
+    `tests:${record?.tests}`,
+    `pass:${record?.pass}`,
+    `fail:${record?.fail}`,
+    `skip:${record?.skip}`,
+    `cancelled:${record?.cancelled}`,
+    `todo:${record?.todo}`,
+    `suite:${record?.suiteCommand ?? ''}`,
+    `suiteFrom:${record?.suiteSource ?? ''}`,
+    `blockers:${arr(record?.blockersAtObservation)}`,
   ];
   return createHash('sha256').update(parts.join('\n')).digest('hex');
 }
 
-/**
- * Everything wrong with this run, all at once.
- *
- * Split out so verifyProof() can re-run the IDENTICAL semantics over a record
- * that arrived from elsewhere. The first version checked three fields on the way
- * in and a different three on the way out, so a proof could fail minting and
- * pass reading. One validator, both directions.
- */
+/** Everything wrong with this run, all at once. One validator, both directions. */
 function validate(o) {
   const refusals = [];
   const add = (code, detail) => refusals.push({ code, detail });
 
   if (!isSha(o.sha)) add('not-a-sha', `${o.sha ?? 'absent'} is not a full 40-character sha`);
-
   if (o.sourceClean !== true) {
-    add('dirty-source', 'the checkout carried uncommitted changes before the run; that proves nothing about the commit');
+    add('dirty-source', 'the checkout carried uncommitted changes before the run');
   }
-  /*
-   * MEASURED AFTER THE RUN TOO. Cleanliness was checked only before npm ci and
-   * the suite, so lifecycle scripts or tests could rewrite tracked source and
-   * the verifier would still report it had tested the commit.
-   */
   if (o.treeCleanAfter !== true) {
     add('source-mutated', 'tracked files changed during install or the suite; what ran is not the commit');
   }
-
   if (!isSha(o.checkoutHead)) {
     add('sha-mismatch', 'the checkout did not report a usable HEAD');
   } else if (isSha(o.sha) && o.checkoutHead !== o.sha) {
@@ -186,21 +161,12 @@ function validate(o) {
   if (isSha(o.checkoutHead) && o.headAfter !== undefined && o.headAfter !== o.checkoutHead) {
     add('source-mutated', `HEAD moved during the run: ${o.checkoutHead} -> ${o.headAfter}`);
   }
-
   if (o.depsInstalled !== true) {
     add('deps-unavailable', 'dependencies were not installed; the run does not cover resolution');
   }
-
   if (!isNonEmpty(o.suiteCommand)) {
     add('suite-not-run', 'no suite command recorded; an observation must name what ran');
   }
-
-  /*
-   * THE EXIT STATUS IS LOAD-BEARING. The first version caught the failure,
-   * kept stdout and dropped the status, so a suite that printed a green summary
-   * and then died -- posttest failure, timeout after printing, a signal, npm
-   * failing after the runner finished -- was indistinguishable from success.
-   */
   if (o.suiteExitCode !== 0) {
     add('suite-nonzero-exit', `the suite exited ${o.suiteExitCode === null || o.suiteExitCode === undefined ? 'with an unrecorded status' : o.suiteExitCode}`);
   }
@@ -208,13 +174,8 @@ function validate(o) {
     add('suite-signalled', `the suite was killed by ${o.terminationSignal}`);
   }
   if (o.timedOut === true) add('suite-timed-out', 'the suite did not finish inside its limit');
-
-  /*
-   * EXACTLY ONE SUMMARY. Parsing the first matching line anywhere in stdout let
-   * a candidate print a convincing summary before the real runner spoke.
-   */
   if (o.ambiguousSummary === true) {
-    add('ambiguous-summary', 'more than one suite summary appeared in the output; which one is real cannot be decided');
+    add('ambiguous-summary', 'more than one suite summary appeared in the output');
   }
 
   const counts = ['tests', 'pass', 'fail', 'skip', 'cancelled', 'todo'];
@@ -225,11 +186,6 @@ function validate(o) {
     if (o.tests === 0) add('zero-tests', 'the suite ran 0 tests; that is not a pass');
     if (o.fail > 0) add('suite-failed', `${o.fail} failing test(s)`);
     if (o.cancelled > 0) add('tests-cancelled', `${o.cancelled} test(s) cancelled; the suite did not complete`);
-    /*
-     * EXACT EQUALITY, BOTH DIRECTIONS. Rejecting only `>` accepted
-     * tests 1600 / pass 1 / fail 0 -- a direct false green, and one a fake TAP
-     * printer produces by accident.
-     */
     const accounted = o.pass + o.fail + o.skip + o.cancelled + o.todo;
     if (accounted !== o.tests) {
       add('counts-do-not-reconcile',
@@ -240,110 +196,24 @@ function validate(o) {
 }
 
 /**
- * Which mandatory blockers stand. TODAY THAT IS ALL OF THEM, UNCONDITIONALLY.
+ * What this run observed. It never says what may be done about it.
  *
- * THE SECOND REVIEW FOUND THE FALSE GREEN HERE, and it was mine, not the
- * candidate's. The previous version cleared each blocker from a caller-supplied
- * value -- a non-empty `signature` string, `suiteSource: 'trusted-policy'`,
- * `isolated: true`. Nothing verified a signature, loaded a policy or checked an
- * attestation. They were assertions, and assertObserved is exported, so:
- *
- *     assertObserved({ ...valid, signature: 'x',
- *                      suiteSource: 'trusted-policy', isolated: true })
- *     -> promotable: true
- *
- * I had shipped the claim "nothing in this repository can clear any of them".
- * Three literals cleared all three. Worse, the exploit was in the suite as a
- * PASSING test called "a signed, policy-sourced, isolated run WOULD be
- * promotable", written by me as the positive direction.
- *
- * The move from candidate-controlled to caller-controlled verification is not a
- * smaller defect. It is the same missing authority boundary one step up.
- *
- * SO NO INPUT CLEARS A BLOCKER. The trust fields are not read. A blocker is
- * cleared only by a VERIFIER ADAPTER -- a function registered in this module
- * that performs a real check -- and there are none, so `promotable` is false in
- * every call, for every argument, including arguments that claim otherwise.
- *
- * WHEN AN ADAPTER ARRIVES it must be one of:
- *   a cryptographically verified signature from an approved verifier identity;
- *   a suite policy loaded by id AND digest from an authority outside the
- *     candidate;
- *   a signed or container-produced isolation attestation.
- * Never a boolean. Never a string. Never anything the caller simply says.
- */
-const VERIFIER_ADAPTERS = Object.freeze({
-  // Deliberately empty. An entry here must perform a real verification and
-  // return a boolean it has EARNED, not one it was handed.
-});
-
-const BLOCKER_DETAIL = Object.freeze({
-  'unsigned-observation':
-    'no verifier adapter exists: an unkeyed digest cannot establish who verified, or that anyone did',
-  'candidate-controlled-suite':
-    'no trusted suite policy exists: the command came from the commit under test',
-  'untrusted-execution-environment':
-    'no isolation attestation exists: install and suite ran on the host with ambient credentials',
-});
-
-function evaluateBlockers(o) {
-  const blockers = [];
-  let evaluated = 0;
-  for (const code of REQUIRED_BLOCKERS) {
-    evaluated += 1;
-    const adapter = VERIFIER_ADAPTERS[code];
-    // NO ADAPTER MEANS THE BLOCKER STANDS. Absent is not cleared, and the
-    // caller is not consulted -- `o` is deliberately unused for trust.
-    const cleared = typeof adapter === 'function' ? adapter(o) === true : false;
-    if (!cleared) blockers.push({ code, detail: BLOCKER_DETAIL[code] ?? 'no detail recorded' });
-  }
-
-  /*
-   * THE POLICY VERSION IS THIS MODULE'S, NOT THE OBSERVATION'S.
-   *
-   * It previously read `o.blockerPolicyVersion === undefined || ... === CURRENT`,
-   * which fails OPEN: an observation carrying no version was accepted, and
-   * observation data got to select which policy judged it. Data under review
-   * does not choose its own reviewer. A caller-supplied version that differs is
-   * now a hard mismatch; absent is fine only because it is IGNORED.
-   */
-  const versionOk = o.blockerPolicyVersion === undefined
-    ? true
-    : o.blockerPolicyVersion === BLOCKER_POLICY_VERSION;
-  if (!versionOk) {
-    blockers.push({
-      code: 'unsigned-observation',
-      detail: `observation claims blocker policy v${o.blockerPolicyVersion}; this module judges only by v${BLOCKER_POLICY_VERSION}`,
-    });
-  }
-
-  return { blockers, policyOk: evaluated === REQUIRED_BLOCKERS.length && versionOk };
-}
-
-/**
- * What this run OBSERVED. Never what may be promoted.
- *
- * `promotable` is false whenever any blocker stands, and at least one always
- * does in this repository today. That is the honest state, not a placeholder:
- * the observation is real evidence and it is not a certificate.
+ * The blocker policy version is this module's and is NOT read from the input.
+ * A previous version accepted an absent version and called that fail-closed; it
+ * was not, it was fail-open with a comment. Observation data does not select
+ * which policy judges it, and it does not get a say at all.
  */
 export function assertObserved(observation = {}) {
   const o = { skip: 0, cancelled: 0, todo: 0, ...observation };
   const refusals = validate(o);
-
-  /*
-   * BLOCKERS ARE NOT REFUSALS. A refusal means this run failed. A blocker means
-   * even a clean run cannot authorise promotion, for reasons outside the run.
-   * Collapsing them would let "nothing went wrong" read as "ship it".
-   */
-  const { blockers, policyOk } = evaluateBlockers(o);
+  const blockers = STANDING_BLOCKERS.map((code) => ({ code, detail: BLOCKER_DETAIL[code] }));
 
   if (refusals.length > 0) {
-    return { ok: false, promotable: false, blockerPolicyComplete: policyOk, blockerPolicyVersion: BLOCKER_POLICY_VERSION, refusals, promotionBlockers: blockers, proof: null };
+    return { refusals, authorization: 'none', blockers, record: null };
   }
 
-  const proof = {
-    version: PROOF_VERSION,
+  const record = {
+    version: RECORD_VERSION,
     repoId: o.repoId ?? '',
     sha: o.sha,
     checkoutHead: o.checkoutHead,
@@ -363,92 +233,80 @@ export function assertObserved(observation = {}) {
     todo: o.todo,
     suiteCommand: o.suiteCommand,
     suiteSource: o.suiteSource ?? 'candidate',
-    promotable: policyOk && blockers.length === 0,
-    standingBlockers: blockers.map((b) => b.code).sort(),
+    // FACTS about the run, not a verdict. There is no promotable field, so
+    // there is nothing to forge into one.
+    blockersAtObservation: STANDING_BLOCKERS.map((c) => c).sort(),
   };
   return {
-    ok: true,
-    /*
-     * FAILS CLOSED: clean run, COMPLETE policy, and nothing standing.
-     *
-     * The `policyOk` term is defence-in-depth and is NOT independently reachable
-     * from outside this module -- measured, not assumed. Every externally
-     * producible way to make the policy incomplete (a version mismatch) also
-     * raises a blocker, so the second term already refuses. The only case where
-     * policyOk alone decides is an evaluator being deleted from the map, which a
-     * caller cannot do. A mutation removing this term therefore stays green, and
-     * that is recorded here rather than papered over with a test that would only
-     * appear to cover it: the guarantee is that a future blocker added to
-     * REQUIRED_BLOCKERS without an evaluator cannot silently read as cleared.
-     */
-    promotable: policyOk && blockers.length === 0,
-    blockerPolicyComplete: policyOk,
-    blockerPolicyVersion: BLOCKER_POLICY_VERSION,
     refusals: [],
-    promotionBlockers: blockers,
-    proof: { ...proof, digest: proofDigest(proof) },
+    authorization: 'none',
+    blockers,
+    record: { ...record, digest: recordDigest(record) },
   };
 }
 
 /**
- * Does a record that arrived from elsewhere still describe what it claims?
+ * Is a record that arrived from elsewhere intact? That is the ONLY question.
  *
- * RE-RUNS THE WHOLE VALIDATOR, then checks the digest. The first version checked
- * a handful of fields and trusted the hash for the rest, so a record could carry
- * a wrong version, a mismatched head or counts that did not reconcile and still
- * read as valid. A digest proves a record is unedited; it says nothing about
- * whether the record was ever acceptable.
+ * Named for what it does. `verifyProof` returning `ok` was two invitations in
+ * one: "verify" and "proof" both suggest authority, and downstream code reads a
+ * bare `ok:true` as permission. Integrity is a state, authorization is always
+ * none, and neither is a boolean a caller can shortcut.
  */
-export function verifyProof(proof) {
-  if (!proof || typeof proof !== 'object') {
-    return { ok: false, refusals: [{ code: 'digest-mismatch', detail: 'not a proof object' }] };
+export function inspectObservationRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return {
+      integrity: 'invalid',
+      authorization: 'none',
+      refusals: [{ code: 'integrity-broken', detail: 'not an observation record' }],
+    };
   }
-  const refusals = validate({
-    ...proof,
-    skip: proof.skip,
-    // A minted proof records these as the passing values; validate() re-checks
-    // them rather than assuming the minting path was the one that produced it.
-  });
 
-  if (proof.version !== PROOF_VERSION) {
-    refusals.push({ code: 'version-mismatch', detail: `proof version ${proof.version}, this reader speaks ${PROOF_VERSION}` });
+  const refusals = validate(record);
+
+  if (record.version !== RECORD_VERSION) {
+    refusals.push({
+      code: 'version-mismatch',
+      detail: `record version ${record.version}, this reader speaks ${RECORD_VERSION}`,
+    });
   }
 
   /*
-   * A RECORD THAT DOES NOT SAY WHETHER IT WAS PROMOTABLE IS NOT READABLE.
-   * Absent is not "it was fine". A pre-v2 record, or one with the fields
-   * stripped, refuses rather than defaulting to the permissive answer.
+   * A LEGACY RECORD CARRYING A PROMOTION CLAIM IS REFUSED OUTRIGHT. v3 records
+   * could say promotable:true with an empty blocker list and a recomputed
+   * digest, and be read as authorised. Any record that still speaks that
+   * vocabulary is rejected rather than reinterpreted.
    */
-  if (typeof proof.promotable !== 'boolean' || !Array.isArray(proof.standingBlockers)) {
-    // NOT a digest-mismatch. The record may hash perfectly and still refuse to
-    // say what it was, and this module's own rule is that each defect keeps its
-    // own code -- collapsing them is how a reader stops knowing what happened.
+  if ('promotable' in record) {
     refusals.push({
-      code: 'authority-unrecorded',
-      detail: 'the record does not state whether it was promotable; it cannot be read as one that was',
-    });
-  } else if (proof.promotable === true && proof.standingBlockers.length > 0) {
-    refusals.push({
-      code: 'authority-contradictory',
-      detail: `the record claims promotable while recording ${proof.standingBlockers.length} standing blocker(s)`,
+      code: 'promotion-claim-present',
+      detail: 'the record carries a promotion claim; that format could forge authority and is not readable',
     });
   }
-  if (!isNonEmpty(proof.digest)) {
-    refusals.push({ code: 'digest-mismatch', detail: 'the record carries no digest' });
-  } else if (proofDigest(proof) !== proof.digest) {
-    refusals.push({ code: 'digest-mismatch', detail: 'the record does not hash to its own digest; a field changed after it was written' });
+
+  if (!Array.isArray(record.blockersAtObservation)) {
+    refusals.push({
+      code: 'integrity-broken',
+      detail: 'the record does not say which blockers stood when it was made',
+    });
   }
-  /*
-   * `ok` MEANS "this record is intact and internally acceptable". It has never
-   * meant promotable, and returning it alone invited exactly that reading, so
-   * promotability travels beside it and a reader has to go out of its way to
-   * ignore it.
-   */
-  const standing = Array.isArray(proof.standingBlockers) ? proof.standingBlockers : null;
+
+  if (!isNonEmpty(record.digest)) {
+    refusals.push({ code: 'integrity-broken', detail: 'the record carries no digest' });
+  } else if (recordDigest(record) !== record.digest) {
+    refusals.push({
+      code: 'integrity-broken',
+      detail: 'the record does not hash to its own digest; a field changed after it was written',
+    });
+  }
+
   return {
-    ok: refusals.length === 0,
-    promotable: refusals.length === 0 && proof.promotable === true,
-    standingBlockers: standing ?? ['unrecorded'],
+    integrity: refusals.length === 0 ? 'valid' : 'invalid',
+    // NOT COMPUTED. There is no input, no field and no configuration that makes
+    // this anything else. Authority does not live in this module.
+    authorization: 'none',
+    blockersAtObservation: Array.isArray(record.blockersAtObservation)
+      ? record.blockersAtObservation : ['unrecorded'],
     refusals,
   };
 }

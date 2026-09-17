@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripComments, parseImports } from '../src/moduleGraph.mjs';
-import { assertObserved, REQUIRED_BLOCKERS } from '../src/verificationProof.mjs';
+import { assertObserved, STANDING_BLOCKERS } from '../src/verificationProof.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -72,11 +72,17 @@ test('no production module reads a verdict field outside the CLI command block',
    * kept, since a field name inside a string is exactly how a JSON consumer
    * would read one.
    */
+  /*
+   * DISTINCTIVE NAMES ONLY. `authorization` was in this list for one run and
+   * fired on six modules -- it is an HTTP header name and appears legitimately
+   * all over the tree. A gate that reddens on `Authorization:` is a gate someone
+   * deletes, so the field is dropped rather than exempted module by module.
+   */
   const VERDICT_FIELDS = [
-    'promotable', 'promotionBlockers', 'blockerPolicyComplete', 'assertObserved',
-    // added after an audit found the ARTIFACT carried no non-authority marker:
-    // a consumer could read these off a stored proof without importing anything.
-    'standingBlockers', 'verifyProof', 'proofDigest',
+    'assertObserved', 'inspectObservationRecord', 'blockersAtObservation',
+    // `promotable` no longer exists anywhere; naming it means a consumer
+    // reintroducing the vocabulary is caught rather than quietly accommodated.
+    'promotable', 'promotionBlockers',
   ];
   const files = await sourceFiles();
   const offenders = [];
@@ -108,7 +114,7 @@ test('no workflow invokes the observation command', () => {
   }
 });
 
-test('exit 0 is unreachable: promotable cannot be true for any observation', () => {
+test('a clean observation still answers authorization: none', () => {
   /*
    * The CLI maps promotable -> exit 0. This asserts the ONLY thing that could
    * produce it. Not a sample: a blocker with no verifier adapter can never be
@@ -121,23 +127,56 @@ test('exit 0 is unreachable: promotable cannot be true for any observation', () 
     tests: 10, pass: 10, fail: 0, skip: 0, cancelled: 0, todo: 0, suiteCommand: 'npm test',
   };
   const r = assertObserved(clean);
-  assert.equal(r.ok, true, 'control: this is an otherwise clean observation');
-  assert.equal(r.promotable, false);
-  assert.equal(r.promotionBlockers.length, REQUIRED_BLOCKERS.length);
+  assert.deepEqual(r.refusals, [], 'control: this is an otherwise clean observation');
+  assert.equal(r.authorization, 'none');
+  assert.ok(!('promotable' in r), 'the promotion vocabulary must not come back');
+  assert.equal(r.blockers.length, STANDING_BLOCKERS.length);
 });
 
-test('the observation module registers NO verifier adapters yet', () => {
+test('the CLI has no code path that can exit 0', async () => {
   /*
-   * The load-bearing fact behind the test above. An adapter appearing here must
-   * perform a real cryptographic, policy or attestation check -- if one is added
-   * without that, this gate is the last thing standing between a claim and a
-   * promotion, so it fails loudly rather than adapting.
+   * The previous mapping was `!ok ? 1 : (promotable ? 0 : 3)`. It never returned
+   * 0 -- and kept a branch that WOULD the moment something became promotable. A
+   * dormant false-green is still a false-green, so the conditional is gone and
+   * this asserts it stays gone.
    */
-  const src = stripComments(readFileSync(path.join(REPO, OBSERVATION_MODULE), 'utf8'));
-  const block = src.slice(src.indexOf('VERIFIER_ADAPTERS'), src.indexOf('VERIFIER_ADAPTERS') + 400);
-  assert.ok(block.length > 50, 'the adapter registry must be found');
-  assert.ok(
-    !/:\s*\(/.test(block) && !/:\s*function/.test(block),
-    'a verifier adapter was registered; this gate must be updated deliberately, with the real check reviewed',
-  );
+  const { readFile } = await import('node:fs/promises');
+  const cli = stripComments(await readFile(path.join(REPO, 'bin', 'agentbridge.mjs'), 'utf8'));
+  const block = cli.slice(cli.indexOf("cmd === 'observe-sha'"));
+  const end = block.indexOf("cmd === 'check-first'");
+  const body = end > 0 ? block.slice(0, end) : block;
+  assert.ok(body.length > 500, 'the observe-sha block must be found');
+
+  const assignments = [...body.matchAll(/exitCode\s*=\s*([^;]+);/g)].map((m) => m[1].trim());
+  assert.equal(assignments.length, 1, `expected one exitCode assignment, got ${assignments.length}`);
+
+  /*
+   * THE RESULTS, NOT EVERY DIGIT. A first version rejected any `0` in the
+   * expression and reddened on `refusals.length > 0 ? 1 : 3` -- where the zero
+   * is a comparison, not an outcome. What matters is the values the expression
+   * can YIELD.
+   */
+  const expr = assignments[0];
+  const results = [...expr.matchAll(/[?:]\s*(\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(results.length >= 2, `could not read the outcomes from: ${expr}`);
+  assert.ok(!results.includes(0), `an exit-0 outcome exists in: ${expr}`);
+
+  // And the whole block must never call done(0) directly either.
+  assert.ok(!/done\(\s*0\s*\)/.test(body), 'the block calls done(0) somewhere');
+});
+
+test('no production module has an unresolved dynamic import', async () => {
+  /*
+   * The authority audit reads static imports. `import(someVariable)` cannot be
+   * resolved, so a consumer could reach the observation module through one and
+   * the audit would see nothing. Measured at zero today, so this is absolute
+   * rather than a baseline: the first one to appear must be looked at.
+   */
+  const files = await sourceFiles();
+  const unresolved = [];
+  for (const f of files) {
+    const { dynamic } = parseImports(readFileSync(f, 'utf8'));
+    if (dynamic.length) unresolved.push(`${rel(f)} -> import(${dynamic.join(', ')})`);
+  }
+  assert.deepEqual(unresolved, [], 'an unresolved dynamic import can hide a consumer from this audit');
 });
