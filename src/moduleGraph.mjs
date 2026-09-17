@@ -59,6 +59,9 @@ export const DEFAULT_ENTRY_POINTS = [
    * invokes it, so src/reviewRunner.mjs and src/reviewDecision.mjs are shipped
    * rather than test-only. */
   'bin/agentbridge-review.mjs',
+  /* Claude invokes this from a PreToolUse hook. It is a shipped process entry,
+   * not merely a test import. */
+  'bin/agentbridge-claude-guard.mjs',
   /* A human runs this before hand-deploying the edge function. It is an entry
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */

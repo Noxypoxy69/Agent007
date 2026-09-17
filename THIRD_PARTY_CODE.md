@@ -70,3 +70,18 @@ file, in the specific commit, rather than the licence of the repository.
 its state machine as a pattern. Patterns are not copyrightable; an
 implementation is. Do not copy from it until somebody has read its LICENSE file
 and written the answer here.
+# Claude coding-guard donors (2026-09-17)
+
+- `karanb192/claude-code-hooks`, MIT, pinned review revision
+  `a7122bc702057f71b250fdd40ccbd6cebb8019e8`. AgentBridge's emergency guard is
+  informed by its protect-tests, config-guard, and git-safety patterns.
+- `alexfazio/plankton`, MIT, pinned review revision
+  `085d6727f0fd4b5d2c8b64b090d89b5c798f7b39`. AgentBridge uses its pattern of
+  protecting quality configuration, with a fail-closed implementation.
+- `jpicklyk/task-orchestrator`, MIT, pinned review revision
+  `074130f913df7b8cdef51027ae8ca882c98ba518`. Architecture reference for
+  server-enforced task transitions and actor attribution; no Kotlin copied.
+- `databricks-solutions/consort`, DB License, inspected at
+  `3c3af22c2d9ce7fb2d803e827a118cccb798e028`. Architecture reference only;
+  source is restricted to use with Databricks Services and was not reused.
+- `0xHoneyJar/loa`, AGPL-3.0. Architecture reference only; no code copied.
