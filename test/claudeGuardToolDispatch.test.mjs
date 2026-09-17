@@ -91,12 +91,41 @@ test('a write to a protected path is refused under an unfamiliar tool name', () 
   }
 });
 
-test('a tool the guard cannot classify is refused, not approved', () => {
-  const verdict = evaluateClaudeTool({
-    tool_name: 'Mystery', tool_input: { something: 'else' }, cwd: repoRoot, session_id: 's',
+test('an unclassifiable tool that names a protected path is still refused', () => {
+  /*
+   * THE BACKSTOP, NOT THE BOUNDARY. A tool with no command and no recognised
+   * path field is allowed through -- default-denying those refused 24 of a real
+   * 54-tool roster, which is an outage, not a guard. But a protected path
+   * appearing under SOME field name nobody anticipated is still caught.
+   */
+  const hidden = evaluateClaudeTool({
+    tool_name: 'SomeFileMover',
+    tool_input: { source: 'a.txt', destination: 'src/claudeGuard.mjs' },
+    cwd: repoRoot,
+    session_id: 's',
   });
-  assert.equal(verdict.allowed, false, 'an unclassifiable tool must not fall through to allowed');
-  assert.equal(verdict.id, 'unclassified-tool');
+  assert.equal(hidden.allowed, false, 'a protected path under an unanticipated field must still be caught');
+  assert.equal(hidden.id, 'protected-control');
+
+  const nested = evaluateClaudeTool({
+    tool_name: 'SomeBatchTool',
+    tool_input: { ops: [{ to: 'docs/ORDER.md' }] },
+    cwd: repoRoot,
+    session_id: 's',
+  });
+  assert.equal(nested.allowed, false, 'the backstop must see into nested structures');
+});
+
+test('an unclassifiable tool that touches nothing in the repo is allowed', () => {
+  /*
+   * POSITIVE HALF (rule 5 and rule 15). Without this the gate above would pass
+   * just as well if the guard refused EVERYTHING, which is the exact failure
+   * this pair replaced.
+   */
+  for (const name of ['CronList', 'ListSkills', 'PushNotification', 'SearchPlugins', 'SomethingBrandNew']) {
+    const verdict = evaluateClaudeTool({ tool_name: name, tool_input: { q: 'hello' }, cwd: repoRoot, session_id: 's' });
+    assert.equal(verdict.allowed, true, `${name} cannot touch the repo and must not be blocked (id was ${verdict.id})`);
+  }
 });
 
 /*

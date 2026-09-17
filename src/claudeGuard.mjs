@@ -139,7 +139,7 @@ const READ_ONLY_TOOLS = new Set([
   'BashOutput', 'KillShell', 'KillBash',
   // delegation. A subagent is not a bypass: its own tool calls arrive at this
   // same hook, so it is judged call by call rather than trusted wholesale.
-  'Task', 'Agent', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskOutput', 'TaskStop',
+  'Task', 'Agent', 'Workflow', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskOutput', 'TaskStop',
   'SendMessage', 'ListAgents',
 ]);
 
@@ -153,6 +153,15 @@ const STRUCTURED_EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEd
  */
 const SHELL_TOOL_NAMES = new Set(['Bash', 'PowerShell', 'Shell', 'Cmd', 'Terminal', 'pwsh', 'powershell']);
 
+/*
+ * `script` NEARLY CAME OUT OF THIS LIST AND SHOULD NOT HAVE. The Workflow tool
+ * carries a JavaScript workflow script under that name, so this list routed it
+ * to the shell rail and refused it -- measured against a real 54-tool roster,
+ * 2026-09-17. The fix is Workflow's entry in READ_ONLY_TOOLS above, which is
+ * consulted FIRST, not the removal of `script`: dropping it would have let a
+ * shell tool that happens to use that field name through unjudged, trading a
+ * loud false positive for a silent false negative.
+ */
 const COMMAND_FIELDS = ['command', 'script', 'cmd'];
 const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
 
@@ -254,15 +263,51 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
   }
 
   /*
-   * DEFAULT DENY. The line that used to be here said `return { allowed: true }`
-   * and is the whole reason this file could be deleted from a shell the guard
-   * was never shown. An unclassifiable tool is not a safe tool; it is one this
-   * guard has no opinion about, and "no opinion" must not read as "approved".
+   * DEFAULT DENY WAS HERE AND COST TOO MUCH. Refusing every tool this guard
+   * could not classify refused 24 of a real 54-tool roster -- Artifact, CronList,
+   * ListSkills, SendUserFile, PushNotification and eighteen others, none of which
+   * can touch a repository file. That is not a guard, it is an outage, and an
+   * outage gets the hook switched off, which loses every layer at once.
+   *
+   * Denying by unknown NAME was the same enumeration mistake as allowing by
+   * known name, failing in the other direction. A tool with no command and no
+   * path field cannot address a repository file through anything this guard can
+   * see, so the honest verdict is the one the MCP tools already get: not blocked
+   * here, detected at Stop by protected-file drift.
+   *
+   * THE BACKSTOP BELOW IS NOT A BOUNDARY. It is a cheap last look for a
+   * protected path appearing in some field name nobody anticipated -- a
+   * hypothetical mover with `source` and `destination`. Detection loses in
+   * general, which is why it sits UNDER the shape routing rather than in place
+   * of it, and why it is documented as a backstop and not as the control.
    */
-  return deny('unclassified-tool',
-    `${toolName} carries neither a command this guard can judge nor a path it can check, and is not in READ_ONLY_TOOLS. `
-    + 'If it cannot write to the repository, add it to that set in src/claudeGuard.mjs -- a one-line change, '
-    + 'and a far cheaper failure than the silent hole this default-deny replaced');
+  const mention = protectedMentionIn(input, cwd);
+  if (mention) {
+    return deny('protected-control',
+      `${toolName} names ${mention}, which is part of the guard or completion contract`);
+  }
+  return { allowed: true };
+}
+
+/*
+ * Every string anywhere in the tool input, including nested objects and arrays.
+ * Depth- and count-bounded because this runs on every tool call and a hook that
+ * hangs is a hook somebody disables.
+ */
+function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }) {
+  if (depth > 4 || seen.n > 200) return null;
+  const values = Array.isArray(input) ? input : (input && typeof input === 'object' ? Object.values(input) : []);
+  for (const value of values) {
+    seen.n += 1;
+    if (typeof value === 'string') {
+      if (value.length === 0 || value.length > 4096) continue;
+      if (isProtectedPath(value, cwd)) return value;
+    } else if (value && typeof value === 'object') {
+      const hit = protectedMentionIn(value, cwd, depth + 1, seen);
+      if (hit) return hit;
+    }
+  }
+  return null;
 }
 
 export function hookDecision(result) {
