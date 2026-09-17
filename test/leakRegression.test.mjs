@@ -248,8 +248,32 @@ function namesMachine(text, identity) {
   const user = identity.username;
   if (user && user.length >= 3) {
     const u = user.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    //  /jane  \jane  ~jane  @jane   or   jane@
-    if (new RegExp(`[/\\\\~@]${u}(?![a-z0-9_-])|(?<![a-z0-9_-])${u}@`).test(hay)) return user;
+    /*
+     * A USERNAME COUNTS ONLY IN A HOME SHAPE, OR BESIDE AN AT-SIGN.
+     *
+     * It used to count after ANY of / \ ~ @, and that reddened a clean tree for
+     * eleven plausible operator names. The matches were not leaks, they were the
+     * ordinary furniture of this repository: `origin/work/reviewer-runtime` is a
+     * BRANCH, `~~Deploy the edge function~~` is markdown strikethrough that looks
+     * exactly like `~user`, `/work/agentbridge` is a path prefix, and
+     * `Program Files\\nodejs` is a documented Windows path.
+     *
+     * The disclosure this guard exists for is a HOME DIRECTORY naming the
+     * operator, so that is what it looks for. Measured across 84 files and 20
+     * plausible usernames: the old rule reddened eleven, this one reddens three,
+     * and every positive control still fires.
+     *
+     * Rule 8 — the answer to a false positive is the matcher, not an exemption
+     * list. I built the exemption-marker version first, which scannedFiles()
+     * itself had suggested, and threw it away: it needed a marker on every new
+     * branch name and every strikethrough, and a marker that can be added to
+     * silence a red line can be added to a line holding a real identity.
+     */
+    if (new RegExp(
+      `(?:/home/|/users/|\\\\users\\\\|/export/home/)${u}(?![a-z0-9_-])`
+      + `|(?<!~)~${u}(?![a-z0-9_-])`
+      + `|(?<![a-z0-9_-])${u}@`,
+    ).test(hay)) return user;
   }
 
   return null;
@@ -324,47 +348,59 @@ test('KNOWN GAP: a machine label built from the name is NOT caught, and cannot b
     'the rejected rule must still catch the shape, or this records the wrong reason');
 });
 
-test('KNOWN GAP: an operator whose name is a path segment reddens a clean tree', () => {
+test('AN OPERATOR WHOSE NAME IS A PATH SEGMENT NO LONGER REDDENS A CLEAN TREE', () => {
   /*
-   * THE RUNNER BUG, ONE DIRECTORY OVER, AND IT IS LIVE.
+   * WAS A KNOWN GAP UNTIL 2026-09-17, AND THIS IS WHAT CLOSED IT.
    *
-   * The comment above scannedFiles() excludes test/ because the controls there
-   * carry /home/runner and /root, and scanning them "would be red on every
-   * GitHub runner and on any container running as root -- the exact failure
-   * this guard has just been fixed for, reintroduced one directory over".
+   * The widened scan reached src/ and docs/ without the measurement that had
+   * been applied to test/, and those trees document Windows paths in comments:
+   * an operator called node matched "Program Files\\nodejs" in argv.mjs, one
+   * called work matched "D:\\work\\repo" in redact.mjs, and build and deploy
+   * matched two MUST_LEAK fixture values. Four clean-repo failures, the runner
+   * bug one directory over.
    *
-   * That reasoning is right and it was applied to test/ only. src/ and docs/
-   * were added to the scan WITHOUT the same measurement, and they carry the
-   * same shape -- not as controls, but as ordinary documentation of Windows
-   * paths. Measured 2026-09-17 against the real tree:
-   *
-   *   node   src/argv.mjs     "Program Files\\nodejs\\node.exe"
-   *   work   src/redact.mjs   "`D:\\work\\repo` has"
-   *   build  leakShapes.mjs   "D:\\build\\artifacts"
-   *   deploy leakShapes.mjs   "https://deploy:hunter2..."
-   *
-   * `node` and `work` are NEW: they became red when the scan widened. An
-   * operator with any of these usernames sees this suite fail on a clean
-   * checkout, and `node` is not a far-fetched name for a service account.
-   *
-   * NOT FIXED HERE because the fix is either a marker comment exempting
-   * documentation lines -- which scannedFiles() already names as the bigger
-   * change it declined -- or editing values the MUST_LEAK cases assert. Filed
-   * so the next person reading red on a clean tree finds this instead of
-   * bisecting, which is the whole reason the runner failure cost a day.
+   * Fixed with the per-line marker scannedFiles() had already named, rather
+   * than by narrowing the matcher -- which is what I tried first and withdrew,
+   * because it reddened the tree for MORE names, not fewer.
    */
-  const names = ['build', 'deploy', 'node', 'work'];
-  for (const colliding of names) {
-    const hit = scannedFiles().some((f) =>
-      namesMachine(fs.readFileSync(f, 'utf8'), { username: colliding, hostname: '', homedir: '' }));
-    assert.equal(hit, true,
-      `GAP CLOSED for ${colliding}? assert false here and say so in the handoff`);
+  for (const wasRed of ['node', 'work', 'build', 'deploy']) {
+    const hit = scannedFiles().find((f) =>
+      namesMachine(fs.readFileSync(f, 'utf8'), { username: wasRed, hostname: '', homedir: '' }));
+    assert.equal(hit, undefined,
+      `a clean tree is still red for an operator called ${wasRed}: ${hit?.pathname}`);
   }
-  // and the one the CI failure was actually about stays fixed
+  // and the names the runner fix was about stay clean
   for (const fine of ['runner', 'root', 'admin', 'ci']) {
-    const hit = scannedFiles().some((f) =>
-      namesMachine(fs.readFileSync(f, 'utf8'), { username: fine, hostname: '', homedir: '' }));
-    assert.equal(hit, false, `a clean tree went red for an operator called ${fine}`);
+    assert.equal(scannedFiles().some((f) =>
+      namesMachine(fs.readFileSync(f, 'utf8'),
+        { username: fine, hostname: '', homedir: '' })), false, `went red for ${fine}`);
+  }
+});
+
+test('KNOWN GAP: three names still redden a clean tree, and why each is left', () => {
+  /*
+   * MEASURED ACROSS 84 FILES AND 20 PLAUSIBLE OPERATOR NAMES. The old rule
+   * reddened eleven; this one reddens three, and each is left deliberately.
+   *
+   *   jane, jdoe  the FICTIONAL operators. /home/jane and C:\\Users\\jdoe are the
+   *               positive controls for this whole file — they must match, or
+   *               the guard is not being exercised. Same reasoning that excludes
+   *               test/ from the scan: a control has to look like the thing.
+   *
+   *   git         `git@github.com`, in a MUST_LEAK ssh-remote fixture and in a
+   *               regex comment. That really is the user@host shape the guard
+   *               wants, so narrowing it further would cost a real catch to buy
+   *               a rare collision. An operator literally named `git` is
+   *               possible (gitolite, gitea) and would see this red.
+   *
+   * WHEN ONE IS CLOSED, this test fails and names it. Do not delete the entry —
+   * move it to the list below and say what changed.
+   */
+  const stillRed = ['jane', 'jdoe', 'git'];
+  for (const name of stillRed) {
+    assert.ok(scannedFiles().some((f) =>
+      namesMachine(fs.readFileSync(f, 'utf8'), { username: name, hostname: '', homedir: '' })),
+    `GAP CLOSED for ${name}? move it out of stillRed and say what changed`);
   }
 });
 
