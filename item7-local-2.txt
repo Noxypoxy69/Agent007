@@ -166,3 +166,46 @@ commit were never loaded at all — predicts the same shell results. It does NOT
 predict T6, which fired; that is the first evidence separating the two, and it
 favours the matcher explanation, because a session with no hooks loaded would not
 have produced the protected-control refusal.
+
+ADDENDUM — THE STOP HOOK FIRED AFTER THIS REPORT WAS FIRST PUSHED
+=================================================================
+STOPHOOK = BLOCKED. Recorded above as "unknown"; that is now superseded by
+measurement. Verbatim:
+
+    [agentbridge:no-session-snapshot] No readable snapshot for session
+    ca294988-dcf0-4b99-9d95-dc348140caaa. Refusing: an absent baseline is not a
+    clean one.
+
+SO TWO HOOKS FIRED IN THIS RUN, NOT ONE: the PreToolUse guard on T6, and now the
+Stop gate. HOOKSFIRED=yes is strengthened rather than changed, and session 1's
+HOOKSFIRED=no is now contradicted by two independent mechanisms instead of one.
+
+AND IT CONFIRMS THE KEYING FINDING BY DEMONSTRATION RATHER THAN BY ARGUMENT.
+This report predicted, before the Stop hook ran, that my real session id
+ca294988-dcf0-4b99-9d95-dc348140caaa appears in NO snapshot, because the only
+snapshot for this repo is keyed 'no-session-id' from a hand-run --session-start.
+The Stop gate looks the baseline up by the REAL session id, which it receives on
+its stdin payload. The two keys never meet. The baseline exists on disk and is
+unreachable from the gate that needs it.
+
+THE TWO HALVES ARE THEREFORE INCONSISTENT WITH EACH OTHER, AND THAT IS THE ITEM-7
+DEFECT IN ONE LINE: --session-start invoked by hand writes under 'no-session-id',
+while the Stop gate reads under the real session id. A session whose baseline was
+established manually can NEVER satisfy its own stop gate. The failure is not that
+the gate is wrong — refusing on an absent baseline is correct and fails closed,
+which is the behaviour this repository asks for everywhere. The failure is that
+the two ends of the same contract disagree about the key.
+
+I DID NOT WORK AROUND IT, and the temptation is worth naming because it was one
+command: creating a snapshot keyed to my real session id would have satisfied the
+gate and destroyed the finding. The brief says a hook that does not fire is the
+finding we need; a hook that fires for a reason nobody intended is the same class
+of finding, and manufacturing a baseline to get a green stop would have been the
+exact hollow gate this exercise exists to catch. The session remains blocked.
+
+CONSEQUENCE FOR SESSION 1's REPORT: session 1 recorded STOPHOOK=unknown for the
+same reason I originally did — it cannot be observed from inside the run it
+terminates. If session 1 also established its baseline by hand, it will hit this
+identical refusal on stop, under ITS own real session id. That is a prediction
+this report makes and does not verify, stated so it can be checked rather than
+assumed.
