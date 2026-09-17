@@ -1,77 +1,73 @@
 /**
- * A CONSERVATIVE ALLOWLIST, BECAUSE BASH IS A PROGRAMMING LANGUAGE.
+ * EXACT COMMAND SHAPES. The previous version called itself an allowlist and was
+ * a first-token allowlist with a subcommand denylist bolted on. Measured against
+ * it, nine of ten known writers were allowed:
  *
- * The previous guard detected mutation by extracting path tokens and matching
- * them against protected paths. That closed the spellings it knew and nothing
- * else. Measured against the shipped guard, ALL of these were allowed:
+ *     git fetch origin            writes refs/FETCH_HEAD, supports --upload-pack
+ *     git branch newref           writes a ref
+ *     git remote set-url ...      writes configuration
+ *     npm ci                      writes node_modules, runs lifecycle scripts
+ *     npm run build               executes arbitrary repository commands
+ *     npx cowsay                  downloads and executes arbitrary programs
+ *     node scripts/anything.mjs   executes arbitrary repository code
+ *     find . -fprintf out %p      writes a file with no -delete and no -exec
+ *     sed -n 'w target' file      writes a file without -i
  *
- *     node -e "require('fs').unlinkSync('src/claudeGuard.mjs')"
- *     python3 -c "open('scripts/claude-stop-gate.mjs','w').write('')"
- *     eval "$COMMAND"
- *     find src -name claudeGuard.mjs -delete
- *     perl -e "unlink q(src/claudeGuard.mjs)"
+ * Approving a BINARY and then subtracting its dangerous sub-commands is a
+ * denylist wearing the other word: the list of writers is open-ended and every
+ * omission is a hole. So nothing is approved by binary. A command must match one
+ * of the exact shapes below, anchored end to end, or it is refused.
  *
- * No list of filename spellings reaches those. An interpreter can construct any
- * path at runtime, `eval` hides the command until it runs, and `find -delete`
- * never names the file. Denylisting a language is a losing position by
- * construction, so the question is inverted: what is KNOWN to be read-only?
+ * WHAT THIS COSTS, SAID PLAINLY. No `node`, no `npm`, no `npx`, no `env`, no
+ * `awk`, no `find`, no `sed`. The agent cannot run the test suite from Bash.
+ * That is deliberate: running tests IS executing repository code, and the Stop
+ * gate already runs the suite itself, in a process the turn does not control.
+ * An agent that wants a suite run gets it at Stop, not on demand.
  *
- * FAILS CLOSED. An unrecognised command is refused. That is deliberately
- * expensive -- a legitimate command will be refused and have to be rephrased or
- * run by the owner -- and the alternative is a guard that reports "protected"
- * while `node -e` empties the file it protects.
- *
- * REPOSITORY WRITES GO THROUGH THE STRUCTURED TOOLS, where the path is a field
- * rather than a string to be parsed. That is the seam this exists to enforce.
- *
- * COMMIT AND PUSH ARE NOT HERE. They are a separate operation that belongs
- * after the Stop gate has passed, not something a coding turn does mid-flight.
+ * SHELL METACHARACTERS ARE REFUSED OUTRIGHT, including inside quotes. `grep -E
+ * 'a|b'` is refused. Deciding whether a metacharacter is quoted means writing a
+ * shell parser, and a guard whose correctness depends on out-parsing bash has
+ * already lost. A refused command can be rephrased; a mis-parsed one cannot be
+ * recalled.
  */
 
-/** First tokens that are read-only in every form this repository uses. */
-export const ALLOWED_COMMANDS = Object.freeze([
-  'ls', 'cat', 'head', 'tail', 'wc', 'file', 'stat', 'basename', 'dirname',
-  'echo', 'printf', 'pwd', 'which', 'date', 'true', 'false', 'test',
-  'grep', 'rg', 'sort', 'uniq', 'cut', 'tr', 'comm', 'diff', 'column', 'jq',
-  // Read-only in these forms; the mutating variants (sed -i, find -delete,
-  // find -exec) are hard-refused above whatever the first token is.
-  'sed', 'awk', 'find', 'env',
-  'node', 'npm', 'npx', 'git',
+/** Tokens that make a command unjudgeable wherever they appear. */
+const FORBIDDEN_CHARS = /[$`;|&<>(){}\n\\]/;
+
+/**
+ * Arguments a read-only command may carry. No absolute-path writes, no output
+ * redirection flags, nothing that names an executable.
+ */
+const SAFE_ARG = /^[A-Za-z0-9._/@:=+,^~[\]?*%-]+$/;
+
+/** Flags that turn an otherwise-read-only git invocation into something else. */
+const GIT_POISON = /(^|\s)(-c|--exec-path|--upload-pack|--receive-pack|--output|-o|--config-env|--git-dir|--work-tree|--namespace)(=|\s|$)/;
+
+/**
+ * Exact shapes. Each entry is [first-token, allowed-second-token or null].
+ * A null second token means the command takes no sub-command.
+ */
+const SHAPES = Object.freeze([
+  // git, read-only porcelain and plumbing only. `branch` only in --list form.
+  ['git', /^(status|diff|log|show|rev-parse|rev-list|ls-remote|ls-files|ls-tree|merge-base|cat-file|for-each-ref|blame|describe|shortlog|symbolic-ref|var)$/],
+  // Plain file and text reading.
+  ['ls', null], ['cat', null], ['head', null], ['tail', null], ['wc', null],
+  ['file', null], ['stat', null], ['pwd', null], ['basename', null], ['dirname', null],
+  ['date', null], ['which', null], ['echo', null], ['printf', null],
+  ['true', null], ['false', null], ['test', null],
+  ['grep', null], ['rg', null], ['sort', null], ['uniq', null], ['cut', null],
+  ['tr', null], ['comm', null], ['diff', null], ['column', null], ['jq', null],
 ]);
 
-/** Sub-commands that keep an otherwise-dangerous binary read-only. */
-export const ALLOWED_SUBCOMMANDS = Object.freeze({
-  git: [
-    'status', 'diff', 'log', 'show', 'rev-parse', 'rev-list', 'ls-remote',
-    'ls-files', 'ls-tree', 'merge-base', 'cat-file', 'for-each-ref', 'branch',
-    'remote', 'blame', 'describe', 'shortlog', 'grep', 'fetch',
-  ],
-  npm: ['test', 'run', 'ls', 'view', 'ci'],
-  npx: null,   // judged by its arguments below
-  node: null,
-  npm_: null,
-});
+/**
+ * `git branch` is a WRITER unless it is explicitly listing.
+ *
+ * A first version allowed optional trailing arguments without --list, so
+ * `git branch newref` -- which creates a ref -- passed. A positional argument is
+ * only safe once --list has made the invocation a query.
+ */
+const GIT_BRANCH_LIST = /^git\s+branch$|^git\s+branch\s+--list(\s+[A-Za-z0-9._/@:=+,^~*-]+)?$/;
 
-/** Shapes that make any command unjudgeable, whatever its first token. */
-const HARD_REFUSALS = Object.freeze([
-  [/(^|[^<>])>{1,2}[^>]/, 'output redirection'],
-  [/\$\(/, 'command substitution'],
-  [/`/, 'backtick substitution'],
-  [/\beval\b/, 'eval'],
-  [/\bxargs\b/, 'xargs'],
-  [/\bsource\b|^\s*\./, 'sourcing a script'],
-  [/\b(?:node|python3?|perl|ruby|php|deno|bun)\s+-\s*(?:e|c)\b/, 'an inline interpreter program'],
-  [/\b(?:node|python3?|perl|ruby|php|deno|bun)\s+--eval\b/, 'an inline interpreter program'],
-  [/\bfind\b[^|;&]*-(?:delete|exec|execdir|ok)\b/, 'find with a mutating action'],
-  [/\bgit\b[^|;&]*\b(?:commit|push|reset|checkout|restore|clean|rm|mv|rebase|merge|cherry-pick|stash|worktree|update-ref|update-index|hash-object)\b/,
-    'a git operation that can write'],
-  [/\bnpm\b[^|;&]*\b(?:install|uninstall|pkg|publish|link|exec)\b/, 'an npm operation that can write'],
-  [/\bsudo\b|\bchmod\b|\bchown\b|\bln\b/, 'a privilege or link operation'],
-  [/\b(?:rm|mv|cp|dd|shred|truncate|tee|install|rsync|unlink|mkdir|touch|sed\s+[^|;&]*-i|perl\s+[^|;&]*-i)\b/,
-    'a filesystem mutation'],
-]);
-
-/** Split on shell separators so each segment is judged on its own first token. */
 export function segments(command) {
   return String(command ?? '')
     .split(/(?:\|\||&&|[;|&\n])/)
@@ -79,42 +75,52 @@ export function segments(command) {
     .filter((s) => s !== '');
 }
 
-/**
- * May this command run?
- *
- * Returns { allowed } or { allowed: false, reason }. The reason names what was
- * not recognised, because a refusal nobody can act on gets overridden.
- */
+/** Returns { allowed } or { allowed: false, reason }. */
 export function judgeShellCommand(command) {
   if (typeof command !== 'string' || command.trim() === '') {
     return { allowed: false, reason: 'no command string was supplied' };
   }
+  if (FORBIDDEN_CHARS.test(command)) {
+    return {
+      allowed: false,
+      reason: 'the command contains a shell metacharacter (substitution, redirection, chaining or escaping)',
+    };
+  }
 
-  for (const [pattern, what] of HARD_REFUSALS) {
-    if (pattern.test(command)) {
-      return { allowed: false, reason: `${what} is refused: it can write without naming a path` };
+  const tokens = command.trim().split(/\s+/);
+  const first = tokens[0];
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) {
+    return { allowed: false, reason: 'a leading environment assignment can change what the command resolves to' };
+  }
+
+  if (first === 'git') {
+    if (GIT_POISON.test(command)) {
+      return { allowed: false, reason: 'a git flag that can execute or redirect (-c, --upload-pack, --output, --git-dir, ...)' };
+    }
+    if (tokens[1] === 'branch') {
+      return GIT_BRANCH_LIST.test(command.trim())
+        ? { allowed: true }
+        : { allowed: false, reason: 'git branch writes a ref unless it is listing' };
     }
   }
 
-  for (const seg of segments(command)) {
-    const tokens = seg.match(/(?:[^\s'"]+|'[^']*'|"[^"]*")+/g) ?? [];
-    let first = (tokens[0] ?? '').replace(/^['"]|['"]$/g, '');
-    // VAR=x cmd ... — skip leading assignments rather than treating them as the command
-    let i = 0;
-    while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first) && i + 1 < tokens.length) {
-      i += 1;
-      first = tokens[i].replace(/^['"]|['"]$/g, '');
+  const shape = SHAPES.find(([name]) => name === first);
+  if (!shape) {
+    return { allowed: false, reason: `"${first}" has no approved read-only shape` };
+  }
+  const [, subPattern] = shape;
+  if (subPattern) {
+    const sub = tokens[1] ?? '';
+    if (!subPattern.test(sub)) {
+      return { allowed: false, reason: `"${first} ${sub || '(none)'}" is not an approved read-only shape` };
     }
-    const base = first.split('/').pop();
-    if (!ALLOWED_COMMANDS.includes(base)) {
-      return { allowed: false, reason: `"${base}" is not on the read-only allowlist` };
-    }
-    const subs = ALLOWED_SUBCOMMANDS[base];
-    if (Array.isArray(subs)) {
-      const sub = (tokens[i + 1] ?? '').replace(/^['"]|['"]$/g, '');
-      if (!subs.includes(sub)) {
-        return { allowed: false, reason: `"${base} ${sub || '(none)'}" is not a read-only sub-command` };
-      }
+  }
+
+  for (const t of tokens.slice(subPattern ? 2 : 1)) {
+    const bare = t.replace(/^['"]|['"]$/g, '');
+    if (bare === '') continue;
+    if (!SAFE_ARG.test(bare)) {
+      return { allowed: false, reason: `argument ${JSON.stringify(t)} is not a plain path or flag` };
     }
   }
   return { allowed: true };

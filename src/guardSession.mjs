@@ -67,10 +67,39 @@ export function isProtectedRelPath(rel) {
   return PROTECTED_PATHS.some((entry) => (entry.endsWith('/') ? norm.startsWith(entry) : norm === entry));
 }
 
-/** Concrete files to hash. A prefix entry contributes whatever exists beneath it. */
-export const PROTECTED_FILES = Object.freeze(
-  PROTECTED_PATHS.filter((p) => !p.endsWith('/')),
-);
+/**
+ * Concrete files to hash, WITH PREFIX ENTRIES EXPANDED.
+ *
+ * This was `PROTECTED_PATHS.filter((p) => !p.endsWith('/'))`, which silently
+ * dropped every prefix -- so `.claude/` was protected at PreToolUse and ABSENT
+ * from the Stop snapshot, recreating the exact two-layer gap the single
+ * definition was introduced to close. A regression I wrote while claiming to fix
+ * the thing it reintroduced.
+ *
+ * Expansion is a function of the tree, not a constant, because a file ADDED
+ * under a protected prefix during a session must count as drift too. Deletions
+ * fall out of the same comparison: a path in the snapshot with no hash now.
+ */
+export function protectedFilesIn(repoRoot) {
+  const out = new Set();
+  for (const entry of PROTECTED_PATHS) {
+    if (!entry.endsWith('/')) { out.add(entry); continue; }
+    const base = path.join(repoRoot, entry);
+    const visit = (dir) => {
+      let entries = [];
+      try { entries = readdirSync(dir); } catch { return; }
+      for (const e of entries.sort()) {
+        const abs = path.join(dir, e);
+        let st;
+        try { st = statSync(abs); } catch { continue; }
+        if (st.isDirectory()) visit(abs);
+        else out.add(path.relative(repoRoot, abs).split(path.sep).join('/'));
+      }
+    };
+    visit(base);
+  }
+  return [...out].sort();
+}
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
@@ -114,7 +143,7 @@ function hashFile(abs) {
 
 export function buildSnapshot(repoRoot) {
   const files = {};
-  for (const rel of PROTECTED_FILES) files[rel] = hashFile(path.join(repoRoot, rel));
+  for (const rel of protectedFilesIn(repoRoot)) files[rel] = hashFile(path.join(repoRoot, rel));
   const tests = {};
   for (const rel of discoverTests(repoRoot)) tests[rel] = hashFile(path.join(repoRoot, rel));
   return { version: SNAPSHOT_VERSION, repoRoot: path.resolve(repoRoot), at: new Date().toISOString(), files, tests };
@@ -130,11 +159,23 @@ export function buildSnapshot(repoRoot) {
  */
 export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repoRoot)) {
   const file = snapshotPath(repoRoot, sessionId);
-  if (existsSync(file)) {
-    return { ok: false, file, reason: 'a snapshot already exists for this session and may not be replaced' };
-  }
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify({ ...snapshot, sessionId: sessionId ?? null }, null, 2)}\n`, 'utf8');
+  try {
+    /*
+     * ATOMIC EXCLUSIVE CREATE. existsSync-then-write is a check-then-act race:
+     * two SessionStart hooks in the same instant both see no file and both
+     * write, and the loser's baseline wins. 'wx' fails if the path exists, so
+     * the filesystem decides. 0600 because a baseline another user can edit is
+     * not a baseline.
+     */
+    writeFileSync(file, `${JSON.stringify({ ...snapshot, sessionId: sessionId ?? null }, null, 2)}\n`,
+      { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch (e) {
+    if (e?.code === 'EEXIST') {
+      return { ok: false, file, reason: 'a snapshot already exists for this session and may not be replaced' };
+    }
+    return { ok: false, file, reason: `snapshot could not be written: ${e?.message ?? e}` };
+  }
   return { ok: true, file };
 }
 
@@ -146,6 +187,15 @@ export function readSnapshot(repoRoot, sessionId) {
     const parsed = JSON.parse(readFileSync(file, 'utf8'));
     if (!parsed || parsed.version !== SNAPSHOT_VERSION || typeof parsed.files !== 'object') return null;
     if (typeof parsed.tests !== 'object' || parsed.tests === null) return null;
+    /*
+     * THE SNAPSHOT MUST BE THIS REPOSITORY'S AND THIS SESSION'S. The filename is
+     * a hash of both, but a file is just a file: validating the contents means a
+     * snapshot moved, copied or hand-edited to a different key is refused rather
+     * than adopted as somebody else's baseline.
+     */
+    if (path.resolve(parsed.repoRoot ?? '') !== path.resolve(repoRoot)) return null;
+    const want = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : null;
+    if ((parsed.sessionId ?? null) !== want) return null;
     return parsed;
   } catch { return null; }
 }
@@ -158,11 +208,17 @@ export function readSnapshot(repoRoot, sessionId) {
  */
 export function protectedDrift(repoRoot, snapshot) {
   const drift = [];
-  for (const rel of PROTECTED_FILES) {
-    const before = snapshot.files[rel] ?? null;
+  // The union of "was protected then" and "is protected now", so an ADDED file
+  // under a protected prefix is drift and so is a DELETED one.
+  const names = new Set([...Object.keys(snapshot.files ?? {}), ...protectedFilesIn(repoRoot)]);
+  for (const rel of [...names].sort()) {
+    const before = snapshot.files?.[rel] ?? null;
     const now = hashFile(path.join(repoRoot, rel));
     if (before !== now) {
-      drift.push({ file: rel, was: before ? 'present' : 'absent', now: now ? 'changed' : 'deleted' });
+      drift.push({
+        file: rel,
+        now: now === null ? 'deleted' : (before === null ? 'added' : 'changed'),
+      });
     }
   }
   return drift;

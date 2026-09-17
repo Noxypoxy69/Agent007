@@ -62,7 +62,9 @@ test('blocks self-modification through Claude and npm configuration commands', (
 
 test('does not confuse harmless reads with mutations', () => {
   const root = repoFixture();
-  for (const command of ['git diff -- test/real.test.mjs', 'sed -n "1,20p" CLAUDE.md', 'node --test test/real.test.mjs']) {
+  // sed and node --test were here and are now refused by policy, not by
+  // accident: both can write, and running tests is executing repository code.
+  for (const command of ['git diff -- test/real.test.mjs', 'git status --porcelain', 'cat CLAUDE.md']) {
     assert.equal(evaluateClaudeTool({ tool_name: 'Bash', tool_input: { command }, cwd: root }).allowed, true, command);
   }
 });
@@ -157,16 +159,18 @@ test('a test created during the session stays editable; a baseline test does not
    */
   const { writeFileSync } = await import('node:fs');
   const root = repoFixture();
-  writeSnapshot(root, buildSnapshot(root));          // real.test.mjs is baseline
+  writeSnapshot(root, 'sess-1');                      // real.test.mjs is baseline
   writeFileSync(path.join(root, 'test', 'fresh.test.mjs'), 'x');
 
   const fresh = evaluateClaudeTool({
-    tool_name: 'Edit', tool_input: { file_path: 'test/fresh.test.mjs', old_string: 'x', new_string: 'y' }, cwd: root,
+    tool_name: 'Edit', tool_input: { file_path: 'test/fresh.test.mjs', old_string: 'x', new_string: 'y' },
+    cwd: root, session_id: 'sess-1',
   });
   assert.equal(fresh.allowed, true, 'a test this session created must remain editable');
 
   const baseline = evaluateClaudeTool({
-    tool_name: 'Edit', tool_input: { file_path: 'test/real.test.mjs', old_string: 'x', new_string: 'y' }, cwd: root,
+    tool_name: 'Edit', tool_input: { file_path: 'test/real.test.mjs', old_string: 'x', new_string: 'y' },
+    cwd: root, session_id: 'sess-1',
   });
   assert.equal(baseline.id, 'baseline-test-immutable');
 });
@@ -199,12 +203,16 @@ test('an interpreter cannot be used to write, whatever it names', async () => {
 });
 
 test('read-only work is still allowed, or the guard gets turned off', async () => {
+  /*
+   * npm test, node --test and sed are NO LONGER here. Running the suite is
+   * executing repository code, and the Stop gate runs it in a process the turn
+   * does not control. An agent gets a suite run at Stop, not on demand.
+   */
   const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
   for (const command of [
     'git status --porcelain', 'git diff --stat HEAD', 'git log --oneline -5',
-    'npm test', 'node --test test/a.test.mjs', 'rg pattern src/',
-    'sed -n "1,20p" CLAUDE.md', 'ls -la', 'cat package.json',
-    'AGENTBRIDGE_HOME=/tmp node --test test/a.test.mjs',
+    'rg pattern src/', 'ls -la', 'cat package.json', 'head -20 CLAUDE.md',
+    'git branch --list', 'git ls-remote --heads origin',
   ]) {
     assert.equal(judgeShellCommand(command).allowed, true, `refused: ${command}`);
   }
@@ -254,4 +262,96 @@ test('baseline test drift is detected, not merely recorded', async () => {
   writeFileSync(path.join(root, 'test', 'real.test.mjs'), 'test("weakened", () => {});');
   const drift = baselineTestDrift(root, snapshot);
   assert.ok(drift.some((d) => d.file === 'test/real.test.mjs'), 'a weakened baseline test must be visible');
+});
+
+/* ========== THE THREE REGRESSIONS IN 59a3b3c, EACH REPRODUCED FIRST ========== */
+
+test('REGRESSION: a protected PREFIX is in the Stop snapshot, not filtered out', async () => {
+  /*
+   * PROTECTED_FILES was PROTECTED_PATHS.filter(p => !p.endsWith('/')), which
+   * dropped every prefix -- so `.claude/` was protected at PreToolUse and ABSENT
+   * from the snapshot, recreating the two-layer gap the single definition
+   * existed to close. Measured: snapshot hashed no .claude file at all.
+   */
+  const { protectedFilesIn } = await import('../src/guardSession.mjs');
+  const root = repoFixture();
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(path.join(root, '.claude', 'settings.json'), '{}');
+  const files = protectedFilesIn(root);
+  assert.ok(files.includes('.claude/settings.json'), 'a file under a protected prefix must be hashed');
+
+  const snapshot = buildSnapshot(root);
+  assert.ok('.claude/settings.json' in snapshot.files);
+});
+
+test('REGRESSION: a file ADDED or DELETED under a protected prefix is drift', async () => {
+  const { writeFileSync, rmSync } = await import('node:fs');
+  const root = repoFixture();
+  writeFileSync(path.join(root, '.claude', 'settings.json'), '{}');
+  const snapshot = buildSnapshot(root);
+
+  writeFileSync(path.join(root, '.claude', 'sneaky-hook.mjs'), 'x');
+  const added = protectedDrift(root, snapshot);
+  assert.ok(added.some((d) => d.file === '.claude/sneaky-hook.mjs' && d.now === 'added'),
+    'a new file under a protected prefix must be visible');
+
+  rmSync(path.join(root, '.claude', 'settings.json'));
+  const gone = protectedDrift(root, snapshot);
+  assert.ok(gone.some((d) => d.file === '.claude/settings.json' && d.now === 'deleted'));
+});
+
+test('REGRESSION: the session id reaches the baseline-test check', async () => {
+  /*
+   * readSnapshot became session-scoped; this call site was not updated, so it
+   * looked under the key 'no-session-id', found nothing, and every inherited
+   * test was editable through Edit/Write.
+   */
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir: td } = await import('node:os');
+  process.env.AGENTBRIDGE_HOME = mkdtempSync(path.join(td(), 'guard-home-'));
+  const root = repoFixture();
+  writeSnapshot(root, 'sess-X');
+
+  const withId = evaluateClaudeTool({
+    tool_name: 'Edit',
+    tool_input: { file_path: 'test/real.test.mjs', old_string: 'a', new_string: 'b' },
+    cwd: root, session_id: 'sess-X',
+  });
+  assert.equal(withId.id, 'baseline-test-immutable', 'with the id, the baseline test is protected');
+
+  const withoutId = evaluateClaudeTool({
+    tool_name: 'Edit',
+    tool_input: { file_path: 'test/real.test.mjs', old_string: 'a', new_string: 'b' },
+    cwd: root,
+  });
+  assert.equal(withoutId.allowed, false,
+    'and without one it must still refuse -- an unknown session is not a permitted one');
+});
+
+test('REGRESSION: a snapshot from another repo or session is not adopted', async () => {
+  const { mkdtempSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { tmpdir: td } = await import('node:os');
+  process.env.AGENTBRIDGE_HOME = mkdtempSync(path.join(td(), 'guard-home-'));
+  const root = repoFixture();
+  const { readSnapshot, snapshotPath } = await import('../src/guardSession.mjs');
+  writeSnapshot(root, 'sess-A');
+  assert.ok(readSnapshot(root, 'sess-A'), 'control: its own snapshot reads');
+
+  // Same bytes, filed under a different session key.
+  const stolen = JSON.parse(readFileSync(snapshotPath(root, 'sess-A'), 'utf8'));
+  writeFileSync(snapshotPath(root, 'sess-B'), JSON.stringify(stolen), { mode: 0o600 });
+  assert.equal(readSnapshot(root, 'sess-B'), null, 'a snapshot carrying another sessionId must be refused');
+});
+
+test('REGRESSION: known writers are refused by exact shape', async () => {
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  for (const command of [
+    'git fetch origin', 'git branch newref', 'git branch -D main',
+    'git remote set-url origin http://evil', 'npm ci', 'npm run build', 'npx cowsay',
+    'node scripts/anything.mjs', 'env rm -rf src',
+    'find . -name x -fprintf out.txt %p', 'sed -n "w target.txt" CLAUDE.md',
+    'git -c core.pager=rm log', 'git log --output=x', 'npm test',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
+  }
 });

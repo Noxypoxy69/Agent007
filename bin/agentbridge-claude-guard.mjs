@@ -40,7 +40,7 @@ try {
 }
 
 const result = payload
-  ? evaluateClaudeTool({ ...payload, cwd: payload.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd() })
+  ? evaluateClaudeTool({ ...payload, cwd: payload.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), session_id: payload.session_id ?? null })
   : { allowed: false, id: 'invalid-json', reason: 'Claude hook input was not valid JSON' };
 
 process.stdout.write(`${JSON.stringify(hookDecision(result))}\n`);

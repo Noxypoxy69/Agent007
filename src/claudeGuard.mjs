@@ -65,9 +65,26 @@ export function isProtectedPath(filePath, cwd = process.cwd()) {
  * the Stop gate refuses separately -- one control failing closed, not two
  * guessing.
  */
-export function isSessionBaselineTest(filePath, cwd = process.cwd()) {
-  const snapshot = readSnapshot(cwd);
-  if (!snapshot) return false;
+export function isSessionBaselineTest(filePath, cwd = process.cwd(), sessionId = null) {
+  /*
+   * THE SESSION ID MUST ARRIVE HERE. readSnapshot became session-scoped and this
+   * call site was not updated, so it looked for a snapshot under the key
+   * 'no-session-id', found none, returned false, and every inherited test was
+   * editable through Edit/Write. Stop would have caught it afterwards; the
+   * PreToolUse protection this function exists for was simply not running.
+   */
+  const snapshot = readSnapshot(cwd, sessionId);
+  /*
+   * NO RESOLVABLE SNAPSHOT MEANS FAIL CLOSED. Returning false here said "this is
+   * not a baseline test", so with a missing or unmatched session id EVERY
+   * inherited test was editable. An unknown session cannot prove a file is new,
+   * and "cannot prove" is not "permitted": any existing test file is treated as
+   * baseline until a snapshot says otherwise.
+   */
+  if (!snapshot) {
+    return normalizedCandidates(filePath, cwd)
+      .some((c) => /(?:^|\/)test\/.+\.test\.mjs$/i.test(c) && existsSync(c));
+  }
   for (const candidate of normalizedCandidates(filePath, cwd)) {
     const rel = path.relative(snapshot.repoRoot, candidate).split(path.sep).join('/');
     if (isBaselineTest(rel, snapshot)) return true;
@@ -79,7 +96,7 @@ function deny(id, reason) {
   return { allowed: false, id, reason };
 }
 
-export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}, cwd = process.cwd() } = {}) {
+export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}, cwd = process.cwd(), session_id: sessionId = null } = {}) {
   if (typeof toolName !== 'string' || !input || typeof input !== 'object') {
     return deny('malformed-hook-input', 'Hook input is missing a tool name or tool input object');
   }
@@ -92,7 +109,7 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
     if (isProtectedPath(filePath, cwd)) {
       return deny('protected-control', `${filePath} is part of the guard or completion contract`);
     }
-    if (isSessionBaselineTest(filePath, cwd)) {
+    if (isSessionBaselineTest(filePath, cwd, sessionId)) {
       return deny('baseline-test-immutable', `${filePath} was present when the session began; baseline tests are not editable from inside it`);
     }
     const content = String(input.content ?? input.new_string ?? '');
