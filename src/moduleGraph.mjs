@@ -59,6 +59,13 @@ export const DEFAULT_ENTRY_POINTS = [
    * invokes it, so src/reviewRunner.mjs and src/reviewDecision.mjs are shipped
    * rather than test-only. */
   'bin/agentbridge-review.mjs',
+  /* The Step 4A verification path. Two separate executables ON PURPOSE: the
+   * worker's command can verify and cannot promote, and that separation is the
+   * only authority claim available while both run as the same OS user. Declared
+   * here because an entry point and an orphan look identical from the graph --
+   * the difference has to be stated by a person, and this is that statement. */
+  'bin/agentbridge-verify.mjs',
+  'bin/agentbridge-integrate.mjs',
   /* Claude invokes this from a PreToolUse hook. It is a shipped process entry,
    * not merely a test import. */
   'bin/agentbridge-claude-guard.mjs',

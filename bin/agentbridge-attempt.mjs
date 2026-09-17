@@ -27,6 +27,7 @@ import { mkdir, readFile as readBytes, rename, rm, stat, writeFile } from 'node:
 import { run } from '../src/exec.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
 import { createWorkspaceManager } from '../src/workspaceManager.mjs';
+import { openVerificationJob } from '../src/verificationControl.mjs';
 import { runAttempt } from '../src/attemptPipeline.mjs';
 import { ENVELOPE_VERSION } from '../src/resultEnvelope.mjs';
 import { createLedger } from '../src/tokenTelemetry.mjs';
@@ -150,12 +151,50 @@ const io = {
  * make this file a second implementation of the naming rule.
  */
 let workspacePath = null;
+let verificationJobId = null;
+let verificationError = null;
 const tracked = {
   ...workspaces,
   async create(spec) {
     const ws = await workspaces.create(spec);
     workspacePath = ws.path;
     return ws;
+  },
+
+  /*
+   * THE CONTROLLER OPENS THE VERIFICATION JOB HERE, AND THE PLACEMENT IS THE
+   * WHOLE POINT.
+   *
+   * It was originally opened after runAttempt returned, which read correctly
+   * and was dead: the pipeline destroys an accepted workspace BEFORE it
+   * returns, so every job named a directory that no longer existed and
+   * verification would have refused all of them with "no such workspace". No
+   * test that built its own workspace could see that; running this binary
+   * end-to-end did, immediately.
+   *
+   * runAttempt disposes of an accepted attempt with destroy() and of every
+   * other one with quarantine(), so this is both the last moment the candidate
+   * exists and the first moment acceptance is known. That coupling is load
+   * bearing, so it is stated here rather than left to be rediscovered.
+   *
+   * A failure to open a job does NOT rewrite the attempt's verdict, and does
+   * not block disposal. An attempt that ran is reported as it ran; a
+   * verification that could not be opened is reported as absent rather than as
+   * refused, because those are different facts.
+   */
+  async destroy(ws) {
+    try {
+      verificationJobId = openVerificationJob({
+        repoRoot: repo,
+        baselineRef: 'HEAD',
+        candidateWorkspace: ws?.path ?? workspacePath,
+        sessionId: task?.sessionId ?? null,
+        workerId: task?.workerId ?? null,
+      });
+    } catch (e) {
+      verificationError = String(e?.message ?? e);
+    }
+    return workspaces.destroy(ws);
   },
 };
 
@@ -221,5 +260,7 @@ process.stdout.write(
     2,
   )}\n`,
 );
+
+process.stdout.write(`${JSON.stringify({ verification: { jobId: verificationJobId, error: verificationError } }, null, 2)}\n`);
 
 process.exit(result.accepted ? 0 : 1);

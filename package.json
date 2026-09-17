@@ -6,7 +6,9 @@
   "bin": {
     "agentbridge": "./bin/agentbridge.mjs",
     "agentbridge-attempt": "./bin/agentbridge-attempt.mjs",
-    "agentbridge-review": "./bin/agentbridge-review.mjs"
+    "agentbridge-review": "./bin/agentbridge-review.mjs",
+    "agentbridge-verify": "./bin/agentbridge-verify.mjs",
+    "agentbridge-integrate": "./bin/agentbridge-integrate.mjs"
   },
   "engines": {
     "node": ">=20"
