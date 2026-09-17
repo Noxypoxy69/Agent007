@@ -183,3 +183,39 @@ test('CRLF IN THE DEPLOYED BUNDLE IS NOT A DIFFERENCE', async (t) => {
   const { out } = runGate(['--ref', 'origin/master', '--live-dir', dir]);
   assert.match(out, /tree\s+\+0 -0/, 'line endings alone were reported as a difference');
 });
+
+test('A STALE CONTROL-PLANE READING IS REFUSED, BECAUSE IT AGREES WITH ITSELF', async (t) => {
+  /*
+   * Twice in one night the drift check passed against a reading that no longer
+   * described production. code-c fed it a live.json written 63 minutes earlier
+   * and it printed "live drift none" at the exact moment there WAS an
+   * unrecorded hand-deploy -- the thing it exists to catch. code-d gated on a
+   * reading taken before an upload, somebody landed a version in the six
+   * minutes between, and the result re-shipped identical bytes as a new
+   * version.
+   *
+   * The gate holds no credential and cannot re-read the control plane. What it
+   * can check is the age of the reading it was handed, which is the property
+   * both failures had.
+   */
+  const dir = await mkdtemp(path.join(tmpdir(), 'gate-age-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const reading = path.join(dir, 'live.json');
+  await writeFile(reading, JSON.stringify({ version: 1, artifactHash: 'x'.repeat(64) }));
+
+  const fresh = runGate(['--ref', 'origin/master', '--live', reading, '--record', 'deploy/last-deployment.json']);
+  assert.doesNotMatch(fresh.out, /stale-live-reading/, 'a reading written seconds ago was called stale');
+
+  const { utimes } = await import('node:fs/promises');
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  await utimes(reading, old, old);
+
+  const stale = runGate(['--ref', 'origin/master', '--live', reading, '--record', 'deploy/last-deployment.json']);
+  assert.match(stale.out, /stale-live-reading/, 'a ten-minute-old reading was accepted');
+  assert.notEqual(stale.code, 0, 'the gate exited 0 on a stale reading');
+  assert.match(
+    stale.out,
+    /does not close it/i,
+    'the refusal must say freshness bounds the window rather than closing it, or it overclaims',
+  );
+});

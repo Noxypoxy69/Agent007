@@ -149,6 +149,28 @@ try {
 let liveDrift = null;
 let driftChecked = false;
 const livePath = arg('--live');
+
+/*
+ * A CONTROL-PLANE READING GOES STALE, AND A STALE ONE IS A HOLLOW GATE.
+ *
+ * code-c, 18:18Z: passed a live.json written 63 minutes earlier, so the drift
+ * check compared live against a cached file, agreed with itself, and printed
+ * "live drift none" at the exact moment there WAS an unrecorded hand-deploy --
+ * the thing it exists to catch. The gate did not fail; it was hand-fed.
+ *
+ * This cannot re-read the control plane: no credential, deliberately. What it
+ * CAN check is how old the reading it was handed is, which is the property that
+ * failure actually had. bin/agentbridge-deploy.mjs does the real re-read
+ * immediately before upload; this only bounds the window, and the refusal says
+ * so rather than implying it is closed.
+ */
+const MAX_LIVE_AGE_MS = 120_000;
+let liveAgeMs = null;
+if (livePath) {
+  try {
+    liveAgeMs = Date.now() - statSync(livePath).mtimeMs;
+  } catch { /* unreadable is handled where the file is parsed, not here */ }
+}
 const recordPath = arg('--record');
 /*
  * THE HONEST FIRST DEPLOY SAYS SO, RATHER THAN LOOKING LIKE A SKIPPED CHECK.
@@ -261,6 +283,18 @@ if (liveDirArg && !treeCompared) {
       + 'stderr above). Refusing rather than proceeding: a check that was asked for and failed '
       + 'is not the same as one nobody asked for, and treating it as one is how a skip becomes '
       + 'a pass.',
+  });
+}
+
+if (liveAgeMs !== null && liveAgeMs > MAX_LIVE_AGE_MS) {
+  refusals.push({
+    reason: 'stale-live-reading',
+    detail: `the --live reading is ${Math.round(liveAgeMs / 1000)}s old, past the `
+      + `${Math.round(MAX_LIVE_AGE_MS / 1000)}s window. Generate it in the same breath as this `
+      + 'check: a cached control-plane reading makes the drift check agree with itself, which is '
+      + 'how it printed "drift none" during an unrecorded hand-deploy. This bounds the window and '
+      + 'does NOT close it -- somebody can still deploy between this check and your upload, which '
+      + 'is how v28 re-shipped v27 byte for byte. bin/agentbridge-deploy.mjs closes it.',
   });
 }
 
