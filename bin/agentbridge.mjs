@@ -30,6 +30,16 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge lanes [--file <f>] [--path <p>] [--json]
                                         show the lane registry, or explain one path
   agentbridge check-first <topic> [--hours 24] [--repo <dir>] [--json]
+             [--paths a,b]              also reports FILE collisions with unmerged branches
+  agentbridge verify-sha <sha> [--repo <dir>] [--json]
+                                        clone the sha into a fresh directory, npm ci there,
+                                        run the command that commit DECLARES, and mint a
+                                        VerificationProof. There is no --suite flag on
+                                        purpose: a caller-supplied command is a claim, and a
+                                        proof must name what actually ran. Refuses a dirty
+                                        checkout, a head that landed elsewhere, an install
+                                        that did not happen, a run of zero tests, and any
+                                        failure. TEST_PASS_IN_DIRTY_WORKTREE != PROMOTABLE.
                                         RUN THIS BEFORE STARTING WORK. Has anyone
                                         already done or started this? Asks the SERVER
                                         for branches and reads recent commits. A failed
@@ -2049,6 +2059,156 @@ try {
    * Validation errors exit 2 and print every problem at once: an operator
    * fixing a lane file should not discover its faults one run at a time.
    */
+  /*
+   * verify-sha — THE COMMIT PASSES, NOT YOUR DESK.
+   *
+   * docs/SELF_CORRECTION_INGEST.md measured the hole: "nothing in the repository
+   * does a fresh checkout of the exact SHA and re-runs the suite", so the pack's
+   * invariant TEST_PASS_IN_DIRTY_WORKTREE != PROMOTABLE was unenforced. Being
+   * written down stopped nothing -- the author of this command ran a green suite
+   * in a tree with uncommitted changes and pushed on the strength of it, twice,
+   * in the session that wrote the module underneath.
+   *
+   * EVERY JUDGEMENT IS IN src/verificationProof.mjs. This clones, checks out,
+   * runs and parses; it decides nothing. The refusal branches therefore stay
+   * reachable in a millisecond instead of requiring a broken repository.
+   */
+  if (cmd === 'verify-sha') {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = (await import('node:path')).default;
+    const run = promisify(execFile);
+    const V = await import('../src/verificationProof.mjs');
+
+    /*
+     * POSITIONALS ONLY, THE SAME WAY check-first DOES IT. The first version used
+     * find(a => !a.startsWith('--')), which returns the VALUE of a preceding
+     * flag: `verify-sha --repo /path ef67863` resolved to "/path". check-first
+     * documents this exact trap twenty lines from here and I reused the broken
+     * shape anyway. A flag's value is never a positional.
+     */
+    const vArgv = process.argv.slice(3);
+    const vWords = [];
+    for (let i = 0; i < vArgv.length; i += 1) {
+      const a = vArgv[i];
+      if (a.startsWith('--')) { if (!a.includes('=') && vArgv[i + 1] && !vArgv[i + 1].startsWith('--')) i += 1; continue; }
+      vWords.push(a);
+    }
+    const want = vWords[0] ?? '';
+    if (!/^[0-9a-f]{7,40}$/.test(want)) {
+      console.error('verify-sha: give a commit sha, e.g. agentbridge verify-sha ef67863');
+      handled = true; done(2);
+    }
+    const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+
+    let tmp = null;
+    try {
+      /*
+       * RESOLVED IN THE SOURCE REPOSITORY, BEFORE THE CLONE. A short sha is
+       * ambiguous across clones, and the proof is keyed on the full 40.
+       */
+      const { stdout: full } = await run('git', ['rev-parse', `${want}^{commit}`], { cwd: repo });
+      const sha = full.trim();
+
+      tmp = await mkdtemp(path.join(tmpdir(), 'agentbridge-verify-'));
+      const work = path.join(tmp, 'src');
+      await run('git', ['clone', '--no-local', '--quiet', repo, work], { maxBuffer: 3.2e7 });
+      await run('git', ['-C', work, 'checkout', '--quiet', '--detach', sha], { maxBuffer: 8e6 });
+
+      const { stdout: head } = await run('git', ['-C', work, 'rev-parse', 'HEAD']);
+      /*
+       * THE CLONE'S OWN CLEANLINESS, MEASURED IN THE CLONE. Asking the source
+       * tree whether it is clean would be asking the wrong repository -- the
+       * whole point is that the source may be dirty and the verification must
+       * not be.
+       */
+      const { stdout: dirt } = await run('git', ['-C', work, 'status', '--porcelain'], { maxBuffer: 8e6 });
+      const sourceClean = dirt.trim() === '';
+
+      /*
+       * DEPENDENCIES FIRST, AND A FAILED INSTALL IS A REFUSAL. Measured: a fresh
+       * clone of a sound commit reports two failures, both "Cannot find package
+       * @modelcontextprotocol/sdk". Running the suite without installing would
+       * fail a good commit for a reason that says nothing about it.
+       */
+      let depsInstalled = false;
+      let depsError = null;
+      try {
+        await run('npm', ['ci', '--silent'], { cwd: work, maxBuffer: 6.4e7, timeout: 9e5 });
+        depsInstalled = true;
+      } catch (e) {
+        // THE CAUSE SURVIVES. A bare catch here left the operator with
+        // "dependencies were not installed" and no reason -- offline, a bad
+        // lockfile and a registry outage are three different problems and one
+        // of them is the commit's fault.
+        depsInstalled = false;
+        depsError = `${e?.stderr || e?.message || e}`.split('\n').slice(0, 3).join(' ').slice(0, 300);
+      }
+
+      /*
+       * THE REPO'S OWN DECLARED COMMAND, READ FROM THE CLONE'S package.json.
+       * The first version invented `node --test test/`, which on this Node
+       * resolves `test/` as a module path and dies instantly -- while the proof
+       * recorded "npm test", a command that never ran, inside its own digest.
+       * A verifier must run what the repository says it runs.
+       */
+      const { readFile } = await import('node:fs/promises');
+      let declared = null;
+      try {
+        const pkg = JSON.parse(await readFile(path.join(work, 'package.json'), 'utf8'));
+        declared = typeof pkg?.scripts?.test === 'string' ? pkg.scripts.test : null;
+      } catch { declared = null; }
+      if (!declared) {
+        console.error('verify-sha: the checked-out commit declares no npm test script; nothing to verify against');
+        handled = true; done(1);
+      }
+
+      let out = '';
+      const ran = `npm test  (${declared})`;
+      try {
+        const r = await run('npm', ['test', '--silent'], { cwd: work, maxBuffer: 6.4e7, timeout: 1.8e6 });
+        out = r.stdout;
+      } catch (e) {
+        // A failing suite exits nonzero and its output is still the evidence.
+        out = `${e?.stdout ?? ''}`;
+      }
+      const num = (label) => {
+        const m = out.match(new RegExp(`^# ${label} (\\d+)$`, 'm'));
+        return m && m[1] !== undefined ? Number(m[1]) : null;
+      };
+
+      const verdict = V.assertProvable({
+        sha,
+        repo,
+        sourceClean,
+        checkoutHead: head.trim(),
+        depsInstalled,
+        tests: num('tests'),
+        pass: num('pass'),
+        fail: num('fail'),
+        skip: num('skipped') ?? 0,
+        suiteCommand: ran,
+      });
+
+      if (args.json) { console.log(JSON.stringify({ ...verdict, depsError }, null, 2)); handled = true; done(verdict.ok ? 0 : 1); }
+
+      if (verdict.ok) {
+        console.log(`VERIFIED ${verdict.proof.sha}`);
+        console.log(`  ${verdict.proof.pass}/${verdict.proof.tests} pass, ${verdict.proof.fail} fail, ${verdict.proof.skip} skipped, from a clean clone`);
+        console.log(`  proof ${verdict.proof.digest}`);
+        handled = true; done(0);
+      }
+      console.error(`NOT PROMOTABLE ${sha} — ${verdict.refusals.length} refusal(s):`);
+      for (const r of verdict.refusals) console.error(`  ${r.code}: ${r.detail}`);
+      if (depsError) console.error(`  install said: ${depsError}`);
+      handled = true; done(1);
+    } finally {
+      if (tmp) await rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   if (cmd === 'check-first') {
     /*
      * Two duplications in one session, both preventable by looking:
