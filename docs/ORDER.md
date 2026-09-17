@@ -17,6 +17,65 @@ correctly behind the loop, not in front of it.
 
 ---
 
+## OWNER RULING — repair order, 2026-09-17
+
+EVIDENCE: commit 8157148 the concurrency fix; the measurements below were taken against this tree
+EVIDENCE: unverifiable the row counts are point-in-time readings of a live database and are recorded as the basis of a decision, not as current state. Re-measure with the queries in docs/LEDGER_MAP.md before acting on them.
+
+**The ruling:**
+
+```
+1  identity / per-session credentials
+2  stop review-proposal churn
+3  fenced attempt persistence, runAttempt integrated AFTER one real Loop B proof
+4  durable inbox receipts / acknowledgements
+5  completion fingerprint
+```
+
+**This supersedes an earlier owner decision of comms-first**, made the same
+night. Both positions are recorded because a superseded decision that vanishes
+teaches the next reader nothing, and this ledger is append-only for that reason.
+
+| measurement | value |
+|---|---|
+| outbox rows undelivered | 0 |
+| messages moved | 178, across 12 recipients |
+| review proposals, no consumer | ~48/hour, ongoing |
+| production attempt records | 0 |
+| registration credential | shared; one session can name another |
+
+**Position A, comms first.** A multi-lane repair cannot be coordinated while a
+message can be accepted under a free-text alias with no proof the intended agent
+received it. Rebuilding the ledger under unaccountable coordination risks a
+third round of duplicated work.
+
+**Position B, the measured order.** Delivery is not the binding constraint.
+Neither duplication that triggered this work was a comms failure — one fix sat
+on master for 65 minutes, the other on a pushed branch for nine, both
+discoverable by anyone who looked. Messages to offline agents were refused
+delivery by the Bridge rather than silently dropped. Review churn and unrecorded
+execution are bleeding now.
+
+**WHAT THE RULING DOES NOT SAY.** It does not declare messaging finished. Zero
+undelivered proves DELIVERY works and proves nothing about ACKNOWLEDGEMENT.
+Comms delivery is presently adequate; comms accountability remains unfinished
+and is slice 4, not abandoned. Identity moves first on its own merit: a shared
+credential is an authorization hole whatever the ordering.
+
+**Standing constraints carried by the ruling:**
+
+- **Messages are prose and never execution authority.** Already true; preserve
+  it through the rebuild rather than re-deriving it.
+- **No unattended production workers.** Nothing launches until its phase has a
+  measured end-to-end proof.
+- Stopping the churn is containment. **Review work stays dormant** until a real
+  reviewer consumer exists; silence is not the review seam closing.
+- Freezing dispatch must not freeze **lease and outbox reconciliation**.
+
+*Recorded by c8, who argued Position B.* A ruling that agrees with the
+recorder's own argument is the one most worth making auditable, which is why the
+numbers are here and not just the conclusion. The full plan is `docs/ROADMAP.md`.
+
 ## Blocking the loop
 
 **0. ~~Deploy the edge function.~~ ALREADY LIVE — closed 2026-09-16 08:18.**

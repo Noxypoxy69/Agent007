@@ -10,36 +10,66 @@ run the commands; for evidence of what is broken, see `docs/LEDGER_MAP.md`.
 
 ---
 
-## 0. The decision, and the objection it overruled
+## 0. The ruling, superseding an earlier decision, with both positions kept
 
-**Danny decided: communications first.** Identity and a durable inbox are built
-before the work ledger is repaired.
+**OWNER RULING — 2026-09-17.** Order:
 
-The objection is recorded here rather than dropped, because an implementer
-deserves the argument and not just the conclusion:
+```
+1  identity / per-session credentials
+2  stop review-proposal churn
+3  fenced attempt persistence, and runAttempt integrated AFTER one real Loop B proof
+4  durable inbox receipts / acknowledgements
+5  completion fingerprint
+```
 
-> *c8's objection, measured:* delivery is not the binding constraint. The outbox
-> had zero undelivered messages; 178 messages had moved across 12 recipients.
-> Neither of the two duplications that triggered this work was a comms failure —
-> one fix sat on `master` for 65 minutes and the other on a pushed branch for
-> nine, both discoverable by anyone who looked. When messages were sent to
-> offline agents the Bridge *refused to claim delivery*, which is the system
-> telling the truth. Meanwhile review proposals accumulate with no consumer and
-> production work executes with no attempt record — both bleeding now.
+**This supersedes an earlier owner decision of comms-first, made hours before,
+and that decision is recorded here rather than erased.** An implementer reading
+a plan that has changed direction deserves to know it changed and why.
 
-> *The counter, which is why the decision stands:* agents cannot coordinate a
-> multi-lane repair if a message can be accepted under a free-text alias with no
-> proof the intended agent received it. Rebuilding the ledger while coordination
-> is unaccountable risks a third round of duplicated work. And the identity half
-> is a genuine authorization hole regardless of sequencing: the registration
-> token is shared, so one worker can name another's session, refresh its
-> heartbeat and read its assigned work.
+### The measurements that moved it
 
-Both are true. The decision is Danny's, it is made, and the order below follows
-it. **The one thing not deferred is the pair of live bleeds** — see §6, which
-runs in parallel because it is containment, not construction.
+| | |
+|---|---|
+| outbox rows undelivered | **0** |
+| messages moved | 178, across 12 recipients |
+| review proposals with no consumer | **~48/hour, ongoing** |
+| production attempt records | **0** |
+| registration credential | **shared — one session can name another** |
 
----
+### Position A — comms first (the earlier decision)
+
+Agents cannot coordinate a multi-lane repair if a message can be accepted under
+a free-text alias with no proof the intended agent received it. Rebuilding the
+ledger while coordination is unaccountable risks a third round of duplicated
+work.
+
+### Position B — measured order (the ruling)
+
+Delivery is not the binding constraint. Neither of the two duplications that
+triggered this work was a comms failure: one fix sat on `master` for 65 minutes
+and the other on a pushed branch for nine, both discoverable by anyone who
+looked. When messages were sent to offline agents the Bridge *refused to claim
+delivery* — the system telling the truth. Meanwhile review proposals accumulate
+with no consumer and production work executes with no attempt record.
+
+### What the ruling explicitly does NOT say
+
+**It does not declare messaging finished.** Zero undelivered proves delivery
+works; it proves nothing about acknowledgement. **Comms delivery is presently
+adequate; comms accountability remains unfinished** and is slice 4, not
+abandoned. The identity half moves to first on its own merit — a shared
+credential is an authorization hole regardless of sequencing.
+
+### Standing constraints, carried by the ruling
+
+* **Messages are prose and never execution authority.** Preserve this property
+  through the rebuild; it is already true.
+* **No unattended production workers.** Nothing launches until its phase has a
+  measured end-to-end proof.
+
+*Recorded by c8, who argued Position B. That is precisely why both positions and
+the numbers are written here: a ruling that matches the recorder's own argument
+is the one most worth making auditable.*
 
 ## 1. What this architecture is for
 
@@ -173,7 +203,62 @@ path until the new one has proven end-to-end delivery.
 
 ---
 
-## 5. Slice 2 — Durable inbox, listener, receipts
+## 5. Slice 2 — Stop the review-proposal churn
+
+Bleeding now, depends on nothing else, and second by the ruling.
+
+**6a. Stop the churn.** The dispatcher supersedes every open
+proposal and recreates it each minute. Add a semantic fingerprint over
+(kind, task_id, task generation, agent/returned commit, reasons). If unchanged,
+update `last_evaluated_at` — do not supersede or insert. Never regenerate while
+a valid review lease is held. Existing valid proposals are retained, not
+recreated.
+
+**6b. Freeze unattended dispatch** until 6a lands. **Keep lease and outbox
+reconciliation running** — freezing dispatch must not freeze recovery.
+
+**6c. Review work stays dormant** until slice 4's reviewer consumer exists.
+Silencing the proposals is containment, not the review seam closing.
+
+---
+
+## 6. Slice 3 — Execution seam
+
+**Third by the ruling in §0, and gated on one real Loop B proof.**
+
+```
+current   agentbridge work → worker.mjs → workerDeps.startRun → verify → return
+required  claim → start_attempt → guarded pipeline → isolated workspace
+          → concurrent lease renewal → terminate on fence loss → evidence
+          → publish reachable result → return
+```
+
+* one fenced attempt transport: `start_attempt`, `append_attempt_step`,
+  `finish_attempt`. `finish_attempt` validates the task lease and fence **in the
+  same transaction as the task return.** No direct REST writes from workers.
+* **no `attempt_id`, no executor launch.** State the failure mode explicitly: a
+  worker that proceeds when the row cannot be written has no gate; one that
+  halts on an unreachable database is a new outage. Fail closed, loudly, and put
+  the chosen behaviour in the contract.
+* `runAttempt` goes INSIDE `agentbridge work`. Do not create a third loop. The
+  outer worker keeps heartbeat, lease renewal and event polling around it.
+* structural gate: **only `runAttempt` may import or invoke an execution
+  engine.** It must fail if the worker loop, CLI or daemon launches a model
+  directly.
+
+**Sequencing caveat, which is the one place this roadmap disagrees with the
+outside review:** Loop A is the only path that has ever executed work against
+the real bridge; Loop B has run in tests and never in production. Removing the
+`startRun` bypass before Loop B completes one real task end to end trades "runs
+unguarded" for "does not run at all", on the strength of a path with no
+production evidence. **Prove one real attempt through Loop B, then cut over,
+then delete the bypass.** The destination is not in question; the order is.
+
+---
+
+## 7. Slice 4 — Durable inbox, listener, receipts
+
+**Fourth by the ruling. Delivery works today; ACCOUNTABILITY is what this adds.**
 
 ### Tables
 
@@ -254,57 +339,7 @@ notifications abandoned by a crashed drainer.
 
 ---
 
-## 6. Runs in parallel — containment, not construction
-
-These are bleeding now and do not depend on comms.
-
-**6a. Stop the review-proposal churn.** The dispatcher supersedes every open
-proposal and recreates it each minute. Add a semantic fingerprint over
-(kind, task_id, task generation, agent/returned commit, reasons). If unchanged,
-update `last_evaluated_at` — do not supersede or insert. Never regenerate while
-a valid review lease is held. Existing valid proposals are retained, not
-recreated.
-
-**6b. Freeze unattended dispatch** until 6a lands. Keep the reconciler and
-outbox drain scheduled.
-
----
-
-## 7. Slice 3 — Execution seam
-
-**Ordered after comms by the decision in §0.**
-
-```
-current   agentbridge work → worker.mjs → workerDeps.startRun → verify → return
-required  claim → start_attempt → guarded pipeline → isolated workspace
-          → concurrent lease renewal → terminate on fence loss → evidence
-          → publish reachable result → return
-```
-
-* one fenced attempt transport: `start_attempt`, `append_attempt_step`,
-  `finish_attempt`. `finish_attempt` validates the task lease and fence **in the
-  same transaction as the task return.** No direct REST writes from workers.
-* **no `attempt_id`, no executor launch.** State the failure mode explicitly: a
-  worker that proceeds when the row cannot be written has no gate; one that
-  halts on an unreachable database is a new outage. Fail closed, loudly, and put
-  the chosen behaviour in the contract.
-* `runAttempt` goes INSIDE `agentbridge work`. Do not create a third loop. The
-  outer worker keeps heartbeat, lease renewal and event polling around it.
-* structural gate: **only `runAttempt` may import or invoke an execution
-  engine.** It must fail if the worker loop, CLI or daemon launches a model
-  directly.
-
-**Sequencing caveat, which is the one place this roadmap disagrees with the
-outside review:** Loop A is the only path that has ever executed work against
-the real bridge; Loop B has run in tests and never in production. Removing the
-`startRun` bypass before Loop B completes one real task end to end trades "runs
-unguarded" for "does not run at all", on the strength of a path with no
-production evidence. **Prove one real attempt through Loop B, then cut over,
-then delete the bypass.** The destination is not in question; the order is.
-
----
-
-## 8. Slice 4 — Review seam
+## 8. Slice 4b — Review seam
 
 The database already has `claim_review`, `renew_review_lease`, `submit_review`,
 self-review refusal, review fencing, reviewed-commit comparison and fix-task
@@ -411,14 +446,20 @@ rebuilt from this repository alone.
 ## 11. Order, in one block
 
 ```
-1  identity + per-session credentials          ← Danny's decision, first
-2  durable inbox + listener + receipts
-   (6a stop review churn, 6b freeze dispatch — IN PARALLEL, containment)
-3  execution seam: attempt transport, runAttempt inside the worker
-4  review seam: the reviewer consumer
-5  completion seam: fingerprint, integration record, preflight
+1  identity + per-session credentials
+2  stop review-proposal churn  (keep lease + outbox reconciliation running)
+3  fenced attempt persistence: start/step/finish
+   → complete ONE real Loop B task as the integration proof
+   → then replace agentbridge work's raw execution path with runAttempt
+   → attempt AND step rows required before this is called complete
+4  durable inbox: receipts, acknowledgements, TTL, atomic claim, recovery
+5  completion fingerprint: no equivalent active work created or assigned twice
 6  consolidation and the baseline migration
 ```
 
-Slices 1 and 2 ship behind a compatibility layer. **Nothing working is removed
-until its replacement has proven end-to-end delivery.**
+Review work stays **dormant** after step 2 until an actual reviewer consumer
+exists — stopping the churn must not be mistaken for the review seam being done.
+
+Slices ship behind a compatibility layer. **Nothing working is removed until its
+replacement has proven end-to-end delivery**, and no phase is complete without a
+measured end-to-end proof.
