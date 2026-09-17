@@ -8,9 +8,24 @@ import { writeSnapshot } from '../src/guardSession.mjs';
  * refuses outright when it is missing rather than assuming nothing changed.
  */
 if (process.argv.includes('--session-start')) {
+  let startRaw = '';
+  for await (const chunk of process.stdin) startRaw += chunk;
+  let sessionId = null;
+  try { sessionId = JSON.parse(startRaw || '{}')?.session_id ?? null; } catch { sessionId = null; }
+
   const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const file = writeSnapshot(root);
-  process.stdout.write(`${JSON.stringify({ systemMessage: `agentbridge guard: session snapshot written to ${file}` })}\n`);
+  const r = writeSnapshot(root, sessionId);
+  /*
+   * A REFUSED REPLACEMENT IS REPORTED, NOT SWALLOWED. Re-running this used to
+   * overwrite the baseline with whatever state the repository was in, which was
+   * the entire reset bypass: damage a file, re-run --session-start, and Stop
+   * approves the damage. Initialise once; a second call says so.
+   */
+  process.stdout.write(`${JSON.stringify({
+    systemMessage: r.ok
+      ? `agentbridge guard: session snapshot initialised at ${r.file}`
+      : `agentbridge guard: snapshot NOT replaced -- ${r.reason}`,
+  })}\n`);
   process.exit(0);
 }
 
@@ -25,7 +40,7 @@ try {
 }
 
 const result = payload
-  ? evaluateClaudeTool(payload)
+  ? evaluateClaudeTool({ ...payload, cwd: payload.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd() })
   : { allowed: false, id: 'invalid-json', reason: 'Claude hook input was not valid JSON' };
 
 process.stdout.write(`${JSON.stringify(hookDecision(result))}\n`);

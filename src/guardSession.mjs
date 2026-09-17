@@ -32,27 +32,60 @@ import { homedir } from 'node:os';
 
 export const SNAPSHOT_VERSION = 1;
 
-/** Files whose content must not change during a coding session. */
-export const PROTECTED_FILES = Object.freeze([
-  '.claude/settings.json',
+/**
+ * THE ONE PROTECTED-PATH DEFINITION. Both layers import this.
+ *
+ * There were two lists and they disagreed: PreToolUse protected docs/ROADMAP.md,
+ * docs/ORDER.md and all of .claude/**, and the Stop snapshot did not -- so a
+ * write that bypassed PreToolUse could change them and Stop would not notice.
+ * Two lists of the same thing drift the moment one is edited; there is now one.
+ *
+ * An entry ending in `/` is a PREFIX and covers everything beneath it.
+ */
+export const PROTECTED_PATHS = Object.freeze([
+  '.claude/',
   'CLAUDE.md',
   'package.json',
   'package-lock.json',
   'src/claudeGuard.mjs',
   'src/guardSession.mjs',
+  'src/shellAllowlist.mjs',
   'src/moduleGraph.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
   'docs/CLAUDE_GUARD_PROVENANCE.md',
+  'docs/ROADMAP.md',
+  'docs/ORDER.md',
   'THIRD_PARTY_CODE.md',
 ]);
+
+/** Is a repo-relative path protected? Exact match, or under a `/` prefix entry. */
+export function isProtectedRelPath(rel) {
+  if (typeof rel !== 'string' || rel === '') return false;
+  const norm = rel.split(path.sep).join('/').replace(/^\.\//, '');
+  return PROTECTED_PATHS.some((entry) => (entry.endsWith('/') ? norm.startsWith(entry) : norm === entry));
+}
+
+/** Concrete files to hash. A prefix entry contributes whatever exists beneath it. */
+export const PROTECTED_FILES = Object.freeze(
+  PROTECTED_PATHS.filter((p) => !p.endsWith('/')),
+);
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 
 /** Outside the worktree on purpose. See the header for what that does and does not buy. */
-export function snapshotPath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
-  const key = sha(path.resolve(repoRoot)).slice(0, 16);
+/**
+ * Keyed by repository AND Claude session id.
+ *
+ * It used to be the repository path alone, so every concurrent session in one
+ * repo shared -- and overwrote -- the same baseline. Two agents in one worktree
+ * is the condition this project actually runs in, so that is not a corner case.
+ * A missing session id is its own key and is reported, never silently merged.
+ */
+export function snapshotPath(repoRoot, sessionId, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
+  const id = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : 'no-session-id';
+  const key = sha(`${path.resolve(repoRoot)}\u0000${id}`).slice(0, 16);
   return path.join(home, 'guard-sessions', `${key}.json`);
 }
 
@@ -87,16 +120,27 @@ export function buildSnapshot(repoRoot) {
   return { version: SNAPSHOT_VERSION, repoRoot: path.resolve(repoRoot), at: new Date().toISOString(), files, tests };
 }
 
-export function writeSnapshot(repoRoot, snapshot = buildSnapshot(repoRoot)) {
-  const file = snapshotPath(repoRoot);
+/**
+ * INITIALISE ONCE. A second call for the same session REFUSES.
+ *
+ * `--session-start` used to overwrite unconditionally, so the reset was the
+ * whole bypass: damage a protected file, re-run --session-start, and Stop
+ * approves the damaged state as the new baseline. Demonstrated. A baseline that
+ * the thing it measures can rewrite is not a baseline.
+ */
+export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repoRoot)) {
+  const file = snapshotPath(repoRoot, sessionId);
+  if (existsSync(file)) {
+    return { ok: false, file, reason: 'a snapshot already exists for this session and may not be replaced' };
+  }
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
-  return file;
+  writeFileSync(file, `${JSON.stringify({ ...snapshot, sessionId: sessionId ?? null }, null, 2)}\n`, 'utf8');
+  return { ok: true, file };
 }
 
 /** null when absent or unusable. The caller must treat null as REFUSE, never as clean. */
-export function readSnapshot(repoRoot) {
-  const file = snapshotPath(repoRoot);
+export function readSnapshot(repoRoot, sessionId) {
+  const file = snapshotPath(repoRoot, sessionId);
   if (!existsSync(file)) return null;
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'));
@@ -120,6 +164,23 @@ export function protectedDrift(repoRoot, snapshot) {
     if (before !== now) {
       drift.push({ file: rel, was: before ? 'present' : 'absent', now: now ? 'changed' : 'deleted' });
     }
+  }
+  return drift;
+}
+
+/**
+ * Baseline tests whose CONTENT changed, or that vanished.
+ *
+ * snapshot.tests was collected and never compared. A bypass could weaken an
+ * inherited test and Stop would run the weakened version and pass it -- the
+ * suite grading itself against rules the session had just relaxed. Measured: a
+ * weakened baseline test produced zero drift.
+ */
+export function baselineTestDrift(repoRoot, snapshot) {
+  const drift = [];
+  for (const [rel, before] of Object.entries(snapshot.tests ?? {})) {
+    const now = hashFile(path.join(repoRoot, rel));
+    if (before !== now) drift.push({ file: rel, now: now ? 'changed' : 'deleted' });
   }
   return drift;
 }

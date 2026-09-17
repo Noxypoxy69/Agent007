@@ -99,3 +99,66 @@ suite from the `test/**/*.test.mjs` glob the project declares, and would approve
 a run that silently skipped every nested test.
 
 Each defect was restored individually and the matching test watched go red.
+
+## Second repair, 2026-09-17 — four decisive bypasses, all reproduced first
+
+An independent review rejected the first repair. Every finding was verified
+against the running code before anything changed, and every one held.
+
+**The baseline reset.** `--session-start` overwrote the snapshot unconditionally,
+so: damage a protected file, re-run it, and Stop approves the damaged state as
+the new baseline. A baseline the measured thing can rewrite is not a baseline.
+Snapshots now initialise ONCE and a second call refuses and says so.
+
+**One snapshot for every concurrent session.** The key was the repository path
+alone. Two agents in one worktree is this project's normal operating condition.
+Keyed by repository AND Claude `session_id` now, taken from the hook payload.
+
+**Baseline test hashes were collected and never compared.** A bypass could weaken
+an inherited test; the Stop gate would then RUN the weakened test and pass it —
+the suite grading itself against rules the session had just relaxed. Measured: a
+weakened baseline test produced zero drift. Compared now.
+
+**Two protected-path lists that disagreed.** PreToolUse covered
+`docs/ROADMAP.md`, `docs/ORDER.md` and all of `.claude/**`; the Stop snapshot did
+not. There is one definition now, in `guardSession.mjs`, and both layers import
+it.
+
+**And the one that ended the approach:** tokenising filenames cannot work,
+because Bash is a programming language. All of these were allowed by the first
+repair:
+
+```
+node -e "require('fs').unlinkSync('src/claudeGuard.mjs')"
+python3 -c "open('scripts/claude-stop-gate.mjs','w').write('')"
+eval "$COMMAND"
+find src -name claudeGuard.mjs -delete
+perl -e "unlink q(src/claudeGuard.mjs)"
+```
+
+An interpreter constructs paths at runtime, `eval` hides the command until it
+runs, and `find -delete` never names the file. `src/shellAllowlist.mjs` inverts
+the question: what is KNOWN read-only? Everything else is refused, including
+`git commit` and `git push`, which belong after the Stop gate rather than inside
+a coding turn.
+
+### Two residual holes, named because they are real
+
+`npm test` and `node --test` execute JavaScript from the repository, and a test
+the session created is editable by design — so a new test file can call
+`fs.unlinkSync`. `npm run` executes `package.json` scripts, protected from edits
+but whatever they were at session start. **Neither is prevented.** Both are
+detected at Stop by protected-file and baseline-test drift. Proven: a
+session-created test emptied `src/claudeGuard.mjs` and Stop blocked.
+
+That is the same posture as an MCP repository write — caught afterwards, not
+blocked — and it is the honest boundary of a guard that lives inside the
+checkout it guards.
+
+### What is still NOT proven
+
+The guard has never run as an actual Claude Code hook. Hooks DO fire in this
+environment — a `PreToolUse` hook in a sibling project blocked a deliberately
+triggered command — but that was a different project's hook. Two simultaneous
+sessions have not been exercised. Until both are, "the logic refuses correctly
+when invoked" is the claim, and "it gets invoked" is not.

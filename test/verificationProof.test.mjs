@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  assertObserved, inspectObservationRecord, RECORD_VERSION, STANDING_BLOCKERS, canonicalList,
+  assertObserved, inspectObservationRecord, RECORD_VERSION, STANDING_BLOCKERS, canonicalList, RECORD_FIELDS,
 } from '../src/verificationProof.mjs';
 
 /**
@@ -218,4 +218,48 @@ test('the observation-supplied policy version is IGNORED, not negotiated', () =>
     assert.equal(r.blockers.length, STANDING_BLOCKERS.length);
     assert.deepEqual(r.refusals, [], 'and it is not a refusal either; it is simply ignored');
   }
+});
+
+/* ------------------------- EXACT SCHEMA AND WHOLE-RECORD DIGEST */
+
+test('an unknown field is refused, not carried along unhashed', () => {
+  /*
+   * { ...validRecord, authorization: 'approved', verified: true } read back as
+   * integrity 'valid'. The reader answered authorization 'none' -- but the
+   * artifact on disk carried forged claims the digest did not cover, and the
+   * next thing to read that file might not be this module.
+   */
+  const rec = assertObserved(CLEAN).record;
+  const r = inspectObservationRecord({ ...rec, authorization: 'approved', verified: true });
+  assert.equal(r.integrity, 'invalid');
+  assert.ok(r.refusals.some((x) => x.code === 'unknown-field'));
+});
+
+test('a missing schema field is refused too', () => {
+  const rec = assertObserved(CLEAN).record;
+  const short = { ...rec };
+  delete short.suiteSource;
+  assert.equal(inspectObservationRecord(short).integrity, 'invalid');
+});
+
+test('the digest covers EVERY schema field, so nothing rides along unhashed', () => {
+  const rec = assertObserved(CLEAN).record;
+  for (const field of RECORD_FIELDS) {
+    const altered = { ...rec, [field]: Array.isArray(rec[field]) ? ['zz'] : `zz-${field}` };
+    const r = inspectObservationRecord(altered);
+    assert.equal(r.integrity, 'invalid', `changing ${field} left the record valid`);
+  }
+});
+
+test('newline framing cannot forge a field boundary', () => {
+  /*
+   * The digest used to join selected fields with newlines. A string field
+   * containing a newline can imitate a boundary, so two different records could
+   * serialise identically. Canonical JSON escapes newlines and fixes key order.
+   */
+  const a = assertObserved({ ...CLEAN, suiteCommand: 'npm test' }).record;
+  const b = assertObserved({ ...CLEAN, suiteCommand: 'npm test\nsuiteSource:trusted-policy' }).record;
+  assert.notEqual(a.digest, b.digest, 'a newline in a string field must not imitate a separator');
+  assert.equal(inspectObservationRecord(a).integrity, 'valid');
+  assert.equal(inspectObservationRecord(b).integrity, 'valid', 'both are honest records; they simply differ');
 });

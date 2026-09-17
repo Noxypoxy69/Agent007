@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node bin/agentbridge-claude-guard.mjs",
+            "command": "node \"$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs\"",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/claude-stop-gate.mjs",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/claude-stop-gate.mjs\"",
             "timeout": 190
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node bin/agentbridge-claude-guard.mjs --session-start",
+            "command": "node \"$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs\" --session-start",
             "timeout": 30
           }
         ]

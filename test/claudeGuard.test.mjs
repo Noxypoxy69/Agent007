@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { evaluateClaudeTool, hookDecision, isProtectedPath, shellPathTokens } from '../src/claudeGuard.mjs';
+import { evaluateClaudeTool, hookDecision, isProtectedPath } from '../src/claudeGuard.mjs';
 import { buildSnapshot, writeSnapshot, protectedDrift, discoverTests, snapshotPath } from '../src/guardSession.mjs';
 
 function repoFixture() {
@@ -29,27 +29,34 @@ test('protects guard configuration through relative, absolute, and symlinked pat
 });
 
 test('blocks deleting tests and destructive or protected pushes', () => {
+  /*
+   * The DONOR asserted a specific refusal id per command. Those ids described a
+   * denylist that could not hold -- node -e, python3 -c, eval, find -delete and
+   * perl -e all walked through it. The allowlist refuses the same commands and
+   * more, under one id, so the assertion is on the REFUSAL rather than on which
+   * rule happened to catch it.
+   */
   const root = repoFixture();
-  for (const [command, id] of [
-    ['rm test/real.test.mjs', 'test-removed'],
-    ['git reset --hard HEAD~1', 'destructive-git'],
-    ['git push origin master', 'protected-push'],
-    ['git push --force origin feature', 'protected-push'],
-    ['printf "fake" > test/real.test.mjs', 'test-removed'],
-    ['git restore test/real.test.mjs', 'test-removed'],
+  for (const command of [
+    'rm test/real.test.mjs',
+    'git reset --hard HEAD~1',
+    'git push origin master',
+    'git push --force origin feature',
+    'printf "fake" > test/real.test.mjs',
+    'git restore test/real.test.mjs',
   ]) {
-    assert.equal(evaluateClaudeTool({ tool_name: 'Bash', tool_input: { command }, cwd: root }).id, id, command);
+    assert.equal(evaluateClaudeTool({ tool_name: 'Bash', tool_input: { command }, cwd: root }).allowed, false, command);
   }
 });
 
 test('blocks self-modification through Claude and npm configuration commands', () => {
   const root = repoFixture();
-  for (const [command, id] of [
-    ['claude plugin disable guard-pack', 'claude-config-mutation'],
-    ['claude config set permissions.default allow', 'claude-config-mutation'],
-    ['npm pkg set scripts.test="printf fake"', 'package-control-mutation'],
+  for (const command of [
+    'claude plugin disable guard-pack',
+    'claude config set permissions.default allow',
+    'npm pkg set scripts.test="printf fake"',
   ]) {
-    assert.equal(evaluateClaudeTool({ tool_name: 'Bash', tool_input: { command }, cwd: root }).id, id, command);
+    assert.equal(evaluateClaudeTool({ tool_name: 'Bash', tool_input: { command }, cwd: root }).allowed, false, command);
   }
 });
 
@@ -93,14 +100,6 @@ test('a shell command cannot reach a protected control, in any spelling', () => 
     const r = evaluateClaudeTool({ tool_name: 'Bash', tool_input: { command }, cwd: root });
     assert.equal(r.allowed, false, `ALLOWED: ${command}`);
   }
-});
-
-test('path tokens are extracted, not pattern-matched against the command', () => {
-  assert.deepEqual(shellPathTokens('rm src/claudeGuard.mjs'), ['src/claudeGuard.mjs']);
-  assert.deepEqual(shellPathTokens('cat > .claude/settings.json'), ['.claude/settings.json']);
-  assert.deepEqual(shellPathTokens('rm "src/a.mjs"'), ['src/a.mjs'], 'quotes come off');
-  assert.deepEqual(shellPathTokens('rm -rf src/a.mjs'), ['src/a.mjs'], 'flags are not paths');
-  assert.deepEqual(shellPathTokens('echo hello'), [], 'a bare word is not a path');
 });
 
 test('the two structured-tool protections that were missing', () => {
@@ -170,4 +169,89 @@ test('a test created during the session stays editable; a baseline test does not
     tool_name: 'Edit', tool_input: { file_path: 'test/real.test.mjs', old_string: 'x', new_string: 'y' }, cwd: root,
   });
   assert.equal(baseline.id, 'baseline-test-immutable');
+});
+
+/* ================= THE THREE REPAIRS THAT HAD NO GATE =================
+ * Each of these was proven by hand in a scratch clone and then had no test, so
+ * a mutation restoring the defect stayed green. Demonstrated is not gated.
+ * ====================================================================== */
+
+test('an interpreter cannot be used to write, whatever it names', async () => {
+  /*
+   * Measured against the shipped guard: all five ALLOWED. An interpreter builds
+   * paths at runtime, so no list of filename spellings reaches them.
+   */
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  for (const command of [
+    'node -e "require(\'fs\').unlinkSync(\'src/claudeGuard.mjs\')"',
+    'python3 -c "open(\'scripts/claude-stop-gate.mjs\',\'w\').write(\'\')"',
+    'perl -e "unlink q(src/claudeGuard.mjs)"',
+    'node --eval "x"',
+    'eval "$COMMAND"',
+    'find src -name claudeGuard.mjs -delete',
+    'find . -name x -exec rm {} ;',
+    'cat f | xargs rm',
+    'echo x > src/claudeGuard.mjs',
+    'echo $(rm -rf src)',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, false, `ALLOWED: ${command}`);
+  }
+});
+
+test('read-only work is still allowed, or the guard gets turned off', async () => {
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  for (const command of [
+    'git status --porcelain', 'git diff --stat HEAD', 'git log --oneline -5',
+    'npm test', 'node --test test/a.test.mjs', 'rg pattern src/',
+    'sed -n "1,20p" CLAUDE.md', 'ls -la', 'cat package.json',
+    'AGENTBRIDGE_HOME=/tmp node --test test/a.test.mjs',
+  ]) {
+    assert.equal(judgeShellCommand(command).allowed, true, `refused: ${command}`);
+  }
+});
+
+test('a session snapshot is initialised ONCE and cannot be replaced', async () => {
+  /*
+   * THE RESET BYPASS. --session-start overwrote unconditionally, so: damage a
+   * protected file, re-run --session-start, and Stop approves the damage as the
+   * new baseline. A baseline the measured thing can rewrite is not a baseline.
+   */
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir: td } = await import('node:os');
+  const home = mkdtempSync(path.join(td(), 'guard-home-'));
+  process.env.AGENTBRIDGE_HOME = home;
+  const root = repoFixture();
+
+  const first = writeSnapshot(root, 'sess-A');
+  assert.equal(first.ok, true);
+  const second = writeSnapshot(root, 'sess-A');
+  assert.equal(second.ok, false, 'a second call must refuse');
+  assert.match(second.reason, /may not be replaced/);
+});
+
+test('concurrent sessions do not share one baseline', () => {
+  /*
+   * The key was the repository path alone, so every Claude session in a repo
+   * overwrote the same file. Two agents in one worktree is this project's normal
+   * operating condition, not a corner case.
+   */
+  const root = repoFixture();
+  assert.notEqual(snapshotPath(root, 'sess-A'), snapshotPath(root, 'sess-B'));
+  assert.equal(snapshotPath(root, 'sess-A'), snapshotPath(root, 'sess-A'), 'and it is stable per session');
+  assert.notEqual(snapshotPath(root, 'sess-A'), snapshotPath(root, undefined), 'a missing id is its own key, not a merge');
+});
+
+test('baseline test drift is detected, not merely recorded', async () => {
+  /*
+   * snapshot.tests was collected and never compared, so a weakened inherited
+   * test would be RUN by the Stop gate and pass -- the suite grading itself
+   * against rules the session had just relaxed.
+   */
+  const { writeFileSync } = await import('node:fs');
+  const { baselineTestDrift } = await import('../src/guardSession.mjs');
+  const root = repoFixture();
+  const snapshot = buildSnapshot(root);
+  writeFileSync(path.join(root, 'test', 'real.test.mjs'), 'test("weakened", () => {});');
+  const drift = baselineTestDrift(root, snapshot);
+  assert.ok(drift.some((d) => d.file === 'test/real.test.mjs'), 'a weakened baseline test must be visible');
 });

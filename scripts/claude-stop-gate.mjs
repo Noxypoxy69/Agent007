@@ -13,7 +13,7 @@
  * not "nothing changed".
  */
 import { spawnSync } from 'node:child_process';
-import { readSnapshot, protectedDrift, discoverTests } from '../src/guardSession.mjs';
+import { readSnapshot, protectedDrift, baselineTestDrift, discoverTests } from '../src/guardSession.mjs';
 
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
@@ -29,14 +29,31 @@ if (!input) out('[agentbridge:stop-input-invalid] Stop hook input was not valid 
 
 const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
-const snapshot = readSnapshot(root);
+/*
+ * The session id comes from the Stop payload, so this reads the baseline THIS
+ * session created. Keyed by repository alone, two concurrent sessions shared and
+ * overwrote one file.
+ */
+const sessionId = input.session_id ?? null;
+const snapshot = readSnapshot(root, sessionId);
 if (!snapshot) {
-  out('[agentbridge:no-session-snapshot] No readable session snapshot. Refusing: an absent baseline is not a clean one. Run the SessionStart hook, or `node bin/agentbridge-claude-guard.mjs --session-start`.');
+  out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}. Refusing: an absent baseline is not a clean one.`);
 }
 
 const drift = protectedDrift(root, snapshot);
 if (drift.length) {
   out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
+}
+
+/*
+ * BASELINE TESTS ARE COMPARED, NOT MERELY RECORDED. snapshot.tests was collected
+ * and never checked, so a weakened inherited test would be RUN by the block
+ * below and pass -- the suite grading itself against rules the session had just
+ * relaxed. Measured: a weakened baseline test produced zero drift.
+ */
+const testDrift = baselineTestDrift(root, snapshot);
+if (testDrift.length) {
+  out(`[agentbridge:baseline-test-changed] Tests present at session start differ from the snapshot:\n${testDrift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
 }
 
 /* RECURSIVE, matching `npm test`'s test/** glob. A flat readdir runs a different

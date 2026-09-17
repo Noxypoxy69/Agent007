@@ -1,58 +1,29 @@
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import { readSnapshot, isBaselineTest } from './guardSession.mjs';
+import { readSnapshot, isBaselineTest, isProtectedRelPath } from './guardSession.mjs';
+import { judgeShellCommand } from './shellAllowlist.mjs';
 
 const MUTATING_SHELL = /(?:^|[;&|\n]\s*|\s)(?:rm|unlink|shred|trash|mv|cp|rsync|install|tee|truncate|dd|sed\s+[^;&|\n]*?-i\b|perl\s+[^;&|\n]*?-\w*i\b|git\s+(?:rm|checkout|restore|clean|reset|commit|merge|rebase|push)|npm\s+(?:install|uninstall|pkg\s+(?:set|delete)))\b/i;
 const SHELL_REDIRECT = /(?:^|[^<])>{1,2}\|?\s*[^;&|\n]+/;
 const SKIP_MARKER = /(?:\b(?:it|test|describe|context)\.skip\s*\(|\bx(?:it|test|describe|context)\s*\(|@pytest\.mark\.(?:skip|xfail)|@unittest\.skip|\bpytest\.skip\s*\(|@Disabled\b|@Ignore\b|\bt\.Skip(?:Now)?\s*\(|#\[ignore\]|\[Ignore\])/;
 
-const PROTECTED = [
-  /(?:^|\/)\.claude(?:\/|$)/i,
-  /(?:^|\/)CLAUDE(?:\.local)?\.md$/i,
-  /(?:^|\/)package(?:-lock)?\.json$/i,
-  /(?:^|\/)src\/claudeGuard\.mjs$/i,
-  /(?:^|\/)src\/moduleGraph\.mjs$/i,
-  /(?:^|\/)bin\/agentbridge-claude-guard\.mjs$/i,
-  /(?:^|\/)scripts\/claude-stop-gate\.mjs$/i,
-  /(?:^|\/)THIRD_PARTY_CODE\.md$/i,
-  /(?:^|\/)src\/guardSession\.mjs$/i,
-  /(?:^|\/)test\/claudeGuard\.test\.mjs$/i,
-  /(?:^|\/)docs\/(?:ROADMAP|ORDER|THIRD_PARTY_CODE)\.md$/i,
-  /(?:^|\/)docs\/CLAUDE_GUARD_PROVENANCE\.md$/i,
-];
-
-
-/**
- * Path-like tokens from a shell command, quotes and redirects handled.
+/*
+ * THE PATH LIST LIVES IN guardSession.mjs AND NOWHERE ELSE.
  *
- * Deliberately generous: a token that might be a path is returned, and
- * isProtectedPath decides. Over-returning costs a refused command that can be
- * rephrased; under-returning is the bypass this exists to close.
- *
- * QUOTED AND RELATIVE FORMS NORMALISE TO THE SAME PLACE, because `rm
- * "src/claudeGuard.mjs"`, `rm ./src/claudeGuard.mjs` and
- * `rm src/../src/claudeGuard.mjs` are one operation wearing three spellings.
- * path.resolve collapses all of them; the quotes come off here.
+ * There were two of them and they disagreed: this layer protected
+ * docs/ROADMAP.md, docs/ORDER.md and all of .claude/**, the Stop snapshot did
+ * not, so a write that bypassed PreToolUse changed them undetected. Two lists of
+ * one thing drift the moment somebody edits one.
  */
-export function shellPathTokens(command) {
-  if (typeof command !== 'string') return [];
-  const out = [];
-  // Split on whitespace outside quotes, keeping redirect operators separable.
-  const spaced = command.replace(/([<>]{1,2})/g, ' $1 ');
-  const parts = spaced.match(/(?:[^\s'"]+|'[^']*'|"[^"]*")+/g) ?? [];
-  for (let raw of parts) {
-    raw = raw.trim();
-    if (raw === '') continue;
-    if (/^[<>|&;]+$/.test(raw)) continue;                 // operators
-    const unquoted = raw.replace(/^['"]|['"]$/g, '');
-    if (unquoted === '' || unquoted.startsWith('-')) continue;   // flags
-    // A token is path-like if it has a separator or a file extension.
-    if (!/[\\/]/.test(unquoted) && !/\.[A-Za-z0-9]{1,8}$/.test(unquoted)) continue;
-    out.push(unquoted);
-  }
-  return [...new Set(out)];
-}
 
+
+/*
+ * shellPathTokens lived here and is deleted. It extracted path-like tokens so
+ * they could be matched against protected paths -- a denylist of spellings,
+ * which node -e, python3 -c, eval, find -delete and perl -e all walked through.
+ * The allowlist in src/shellAllowlist.mjs replaced it, and keeping a dead
+ * tokeniser around would invite somebody to reach for the losing approach again.
+ */
 export function normalizedCandidates(filePath, cwd = process.cwd()) {
   if (typeof filePath !== 'string' || filePath.length === 0) return [];
   const absolute = path.resolve(cwd, filePath);
@@ -69,8 +40,13 @@ export function normalizedCandidates(filePath, cwd = process.cwd()) {
   return [...new Set(out)];
 }
 
-export function isProtectedPath(filePath, cwd) {
-  return normalizedCandidates(filePath, cwd).some((candidate) => PROTECTED.some((rule) => rule.test(candidate)));
+export function isProtectedPath(filePath, cwd = process.cwd()) {
+  const root = path.resolve(cwd);
+  return normalizedCandidates(filePath, cwd).some((candidate) => {
+    const rel = path.relative(root, candidate).split(path.sep).join('/');
+    if (rel.startsWith('..')) return false;      // outside the repo is not ours to judge
+    return isProtectedRelPath(rel);
+  });
 }
 
 /**
@@ -128,46 +104,35 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
   if (toolName === 'Bash') {
     const command = input.command;
     if (typeof command !== 'string') return deny('missing-command', 'Bash did not provide a command string');
-    if (/\bclaude\s+(?:config\s+(?:set|add|remove|rm)|mcp\s+(?:add|remove|rm)|plugin\s+(?:install|uninstall|enable|disable|update|marketplace))\b/i.test(command)) {
-      return deny('claude-config-mutation', 'Claude may not rewrite its own tools, plugins, hooks, or permissions');
-    }
-    if (/\bnpm\s+(?:install|uninstall|pkg\s+(?:set|delete))\b/i.test(command)) {
-      return deny('package-control-mutation', 'Claude may not mutate the package manifest or dependency lock during containment');
-    }
-    const testMention = /(?:^|[\s'"=])(?:\.\/)?test\/[^\s'";&|]+\.test\.mjs\b/i.test(command);
-    if (testMention && (MUTATING_SHELL.test(command) || SHELL_REDIRECT.test(command))) {
-      return deny('test-removed', 'Shell mutation of an existing test is forbidden');
-    }
-    if (!MUTATING_SHELL.test(command) && !SHELL_REDIRECT.test(command)) return { allowed: true };
-    if (/\bgit\s+push\b[^\n]*(?:\bmain\b|\bmaster\b|--force|-f\b)/i.test(command)) {
-      return deny('protected-push', 'Direct or forced pushes to a protected branch are forbidden');
-    }
-    if (/\bgit\s+(?:reset\s+--hard|clean\s+-[^\n]*f)/i.test(command)) {
-      return deny('destructive-git', 'Destructive git cleanup/reset is forbidden');
-    }
+
     /*
-     * PATH TOKENS, NOT THE WHOLE COMMAND.
-     *
-     * This line used to be:
-     *   PROTECTED.some((rule) => rule.test(command.replaceAll('\\','/')))
-     * and it matched nothing. Every PROTECTED rule is anchored with (?:^|\/)
-     * and $ because it describes a PATH; applied to a command string, `rm
-     * src/claudeGuard.mjs` has `src` preceded by a space, so the anchor fails.
-     * Demonstrated through the real hook binary: rm src/claudeGuard.mjs,
-     * cat > .claude/settings.json and printf "" > scripts/claude-stop-gate.mjs
-     * were all ALLOWED. The regexes were correct for paths and useless here.
-     *
-     * So the command is tokenised, each token is normalised against the repo,
-     * and isProtectedPath decides -- the same function the structured tools use.
+     * ALLOWLIST, NOT DETECTION. Mutation used to be detected by extracting path
+     * tokens, which closed the spellings it knew and nothing else: node -e,
+     * python3 -c, eval, find -delete and perl -e were all allowed, measured
+     * against the shipped guard. An interpreter builds paths at runtime and a
+     * denylist of a programming language cannot win. So the question is now what
+     * is KNOWN read-only, and everything else is refused.
      */
-    for (const token of shellPathTokens(command)) {
-      if (isProtectedPath(token, cwd)) {
-        return deny('protected-control-shell', `Shell command targets protected control ${token}`);
-      }
-      if (isSessionBaselineTest(token, cwd)) {
-        return deny('test-removed', `Shell mutation of baseline test ${token} is forbidden`);
-      }
+    const verdict = judgeShellCommand(command);
+    if (!verdict.allowed) {
+      return deny('shell-not-allowlisted',
+        `${verdict.reason}. Repository writes go through the structured edit tools, where the path is a field rather than a string to be parsed`);
     }
+
+    /*
+     * NO SECOND PATH CHECK. One was here and it refused `sed -n '1,20p' CLAUDE.md`
+     * -- a READ of a protected file. The allowlist already guarantees the command
+     * cannot write, so naming a protected path is not a reason to refuse, and a
+     * guard that blocks reading the rules is one people turn off.
+     *
+     * TWO RESIDUAL HOLES, NAMED RATHER THAN IMPLIED. `npm test` and `node --test`
+     * execute JavaScript from the repository, and a test file the session created
+     * is editable by design -- so a new test can call fs.unlinkSync. `npm run`
+     * executes package.json scripts, which are protected from edits but were
+     * whatever they were at session start. Neither is PREVENTED here. Both are
+     * detected at Stop, by protected-file drift and baseline-test drift, which is
+     * the same posture as an MCP write: caught afterwards, not blocked.
+     */
     return { allowed: true };
   }
 

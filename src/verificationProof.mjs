@@ -59,6 +59,7 @@ export const REFUSALS = Object.freeze([
   'integrity-broken',
   'version-mismatch',
   'promotion-claim-present',
+  'unknown-field',
 ]);
 
 /**
@@ -90,55 +91,53 @@ const isSha = (v) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
 const isNonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 const isCount = (v) => Number.isInteger(v) && v >= 0;
 
-/*
- * NOT EXPORTED. A digest helper beside an observation is authority-adjacent: it
- * is the tool a forger reaches for, and exporting it published the means to make
- * a tampered record self-consistent. Integrity is asked of the reader, which is
- * the only question a hash can answer.
+/**
+ * THE EXACT SHAPE OF A RECORD. Anything else is not one.
  *
- * ARRAYS ARE JSON-ENCODED, NOT JOINED. `['a,b','c']` and `['a','b,c']` join to
- * the same string, so a comma-joined list is not a canonical encoding of a list.
+ * A record used to be judged field by field, so unknown keys rode along
+ * unhashed and unexamined:
+ *
+ *     { ...validRecord, authorization: 'approved', verified: true }
+ *
+ * read back as integrity 'valid'. The READER answered authorization 'none', but
+ * the artifact on disk carried forged claims that the digest did not cover, and
+ * the next thing to read that file might not be this module. An unknown key is
+ * now a refusal, and the digest covers the whole accepted record.
  */
+export const RECORD_FIELDS = Object.freeze([
+  'version', 'repoId', 'sha', 'checkoutHead', 'headAfter',
+  'sourceClean', 'treeCleanAfter', 'depsInstalled', 'lifecycleScriptsRan',
+  'suiteExitCode', 'terminationSignal', 'timedOut',
+  'tests', 'pass', 'fail', 'skip', 'cancelled', 'todo',
+  'suiteCommand', 'suiteSource', 'blockersAtObservation',
+]);
+
 /**
  * Canonical encoding of a list, exported so the property can be TESTED.
  *
  * `['a,b','c']` and `['a','b,c']` join to the same comma string, so a joined
- * list is not a canonical encoding of a list. This is exported and the digest is
- * not: an encoder is not authority-adjacent, and leaving it unexported made the
- * canonicalisation test decorative -- both forged records were refused by the
- * digest path whatever the encoding, so a mutation reverting to join(',') stayed
- * green.
+ * list is not a canonical encoding of a list.
  */
 export function canonicalList(value) {
   return Array.isArray(value) ? JSON.stringify([...value].map(String).sort()) : 'unrecorded';
 }
 
+/*
+ * NOT EXPORTED, and now over the WHOLE record as canonical JSON.
+ *
+ * The previous digest joined selected fields with newlines, which is ambiguous
+ * framing: a string field containing a newline can imitate a field boundary, so
+ * two different records could serialise identically. JSON escapes newlines and
+ * the key order is fixed, so the encoding is injective -- and covering every
+ * accepted field means nothing rides along unhashed.
+ */
 function recordDigest(record) {
-  const arr = canonicalList;
-  const parts = [
-    `v:${record?.version ?? ''}`,
-    `repo:${record?.repoId ?? ''}`,
-    `sha:${record?.sha ?? ''}`,
-    `headAt:${record?.checkoutHead ?? ''}`,
-    `headAfter:${record?.headAfter ?? ''}`,
-    `clean:${record?.sourceClean === true ? 'yes' : 'no'}`,
-    `cleanAfter:${record?.treeCleanAfter === true ? 'yes' : 'no'}`,
-    `deps:${record?.depsInstalled === true ? 'yes' : 'no'}`,
-    `scripts:${record?.lifecycleScriptsRan === true ? 'yes' : 'no'}`,
-    `exit:${record?.suiteExitCode}`,
-    `signal:${record?.terminationSignal ?? 'none'}`,
-    `timeout:${record?.timedOut === true ? 'yes' : 'no'}`,
-    `tests:${record?.tests}`,
-    `pass:${record?.pass}`,
-    `fail:${record?.fail}`,
-    `skip:${record?.skip}`,
-    `cancelled:${record?.cancelled}`,
-    `todo:${record?.todo}`,
-    `suite:${record?.suiteCommand ?? ''}`,
-    `suiteFrom:${record?.suiteSource ?? ''}`,
-    `blockers:${arr(record?.blockersAtObservation)}`,
-  ];
-  return createHash('sha256').update(parts.join('\n')).digest('hex');
+  const canonical = {};
+  for (const key of [...RECORD_FIELDS].sort()) {
+    const v = record?.[key];
+    canonical[key] = Array.isArray(v) ? [...v].map(String).sort() : (v === undefined ? null : v);
+  }
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
 /** Everything wrong with this run, all at once. One validator, both directions. */
@@ -282,6 +281,22 @@ export function inspectObservationRecord(record) {
       code: 'promotion-claim-present',
       detail: 'the record carries a promotion claim; that format could forge authority and is not readable',
     });
+  }
+
+  /*
+   * EXACT SCHEMA. An unknown key is refused rather than ignored: ignoring it
+   * leaves forged claims sitting in the artifact, unhashed, for the next reader.
+   */
+  const unknown = Object.keys(record).filter((k) => k !== 'digest' && !RECORD_FIELDS.includes(k));
+  if (unknown.length) {
+    refusals.push({
+      code: 'unknown-field',
+      detail: `record carries field(s) outside the schema: ${unknown.sort().join(', ')}`,
+    });
+  }
+  const absent = RECORD_FIELDS.filter((k) => !(k in record));
+  if (absent.length) {
+    refusals.push({ code: 'unknown-field', detail: `record is missing required field(s): ${absent.join(', ')}` });
   }
 
   if (!Array.isArray(record.blockersAtObservation)) {
