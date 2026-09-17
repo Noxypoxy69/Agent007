@@ -1,6 +1,7 @@
-import { readdirSync, statSync, copyFileSync, unlinkSync } from 'node:fs';
+import { readdirSync, statSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { stripTypeScriptTypes } from 'node:module';
 import path from 'node:path';
 
 /**
@@ -211,14 +212,39 @@ export function artifactLoads(root, artifact, { parse } = {}) {
     const rel = path.relative(root, file).split(path.sep).join('/');
     if (findings.some((f) => f.file === rel)) continue; // already failed the real check
     const strict = strictParse(file);
-    if (!strict) {
+    if (strict.covered && !strict.ok) {
+      /*
+       * BLOCKING, and this is the correction that matters.
+       *
+       * The previous version reported every .ts file as `weak-parse-coverage`
+       * and refused nothing, on the reasoning that a strict-parse failure might
+       * just be TypeScript syntax. After stripping, it cannot be: the types are
+       * gone, so a failure is a real one.
+       *
+       * MEASURED, and it is why this was rewritten. `node --check` on a
+       * TWO-LINE .ts file catches `const A = 1; const A = 2;` -- which is what
+       * the original fixtures tested, and they passed. On the REAL index.ts,
+       * with the same duplicate appended, it exits 0. Node takes the permissive
+       * type-stripping path for a file that actually contains TypeScript, and
+       * the check this module exists for was blind to the outage it was named
+       * after. The fixtures proved the check worked on files that were not
+       * TypeScript, while the file it guards is.
+       */
+      findings.push({
+        file: rel,
+        kind: DUPLICATE.test(strict.detail) ? 'duplicate-declaration' : 'parse-failure',
+        detail: `${strict.detail} (found by stripping types and parsing strictly; `
+          + 'node --check accepts this file as-is because TypeScript takes a permissive path)',
+      });
+      continue;
+    }
+    if (!strict.covered) {
       findings.push({
         file: rel,
         kind: 'weak-parse-coverage',
-        detail: 'parsed only by the permissive TypeScript path. node --check accepts some '
-          + 'malformed .ts that it rejects as .mjs, so this file has NOT had a strict parse. '
-          + 'Duplicate declarations are still caught; a general syntax error may not be. '
-          + 'Not blocking, because real TypeScript syntax fails a strict parse legitimately.',
+        detail: 'this file could not be given a strict parse -- type stripping is unavailable '
+          + 'on this runtime. Duplicate declarations in real TypeScript are NOT caught without '
+          + 'it, so coverage here is weaker than the header claims.',
       });
     }
   }
@@ -245,12 +271,46 @@ export function artifactLoads(root, artifact, { parse } = {}) {
  * extension is what selects node's permissive TypeScript path.
  */
 function strictParse(file) {
+  /*
+   * A .ts FILE IS TYPE-STRIPPED FIRST, AND THAT IS THE WHOLE FIX.
+   *
+   * Copying index.ts to a .mjs name and parsing it was never a strict parse of
+   * THIS file: real type annotations are a syntax error to the .mjs parser, so
+   * the attempt always failed, always for the wrong reason, and always got
+   * reported as `weak-parse-coverage` -- an advisory nobody can act on.
+   *
+   * Stripping the types produces JavaScript that the strict parser accepts, so
+   * a failure after stripping is a REAL defect in the file rather than an
+   * artefact of the extension.
+   */
+  let source;
+  try {
+    source = readFileSync(file, 'utf8');
+  } catch {
+    return { covered: false, ok: true, detail: '' };
+  }
+
+  let js = source;
+  if (/\.ts$/.test(file)) {
+    try {
+      js = stripTypeScriptTypes(source, { mode: 'strip' });
+    } catch (err) {
+      /*
+       * IT IS NOT VALID TYPESCRIPT. That is a real finding, not missing
+       * coverage: nothing can load a file the type stripper cannot read.
+       */
+      return { covered: true, ok: false, detail: firstUseful(String(err?.message ?? err)) };
+    }
+  }
+
   const tmp = path.join(tmpdir(), `ab-strict-${process.pid}-${Math.random().toString(36).slice(2)}.mjs`);
   try {
-    copyFileSync(file, tmp);
-    return spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8' }).status === 0;
+    writeFileSync(tmp, js);
+    const r = spawnSync(process.execPath, ['--check', tmp], { encoding: 'utf8' });
+    if ((r.status ?? 1) === 0) return { covered: true, ok: true, detail: '' };
+    return { covered: true, ok: false, detail: firstUseful(String(r.stderr ?? '')) };
   } catch {
-    return true; // cannot tell: do not invent a finding
+    return { covered: false, ok: true, detail: '' };
   } finally {
     try { unlinkSync(tmp); } catch { /* best effort */ }
   }

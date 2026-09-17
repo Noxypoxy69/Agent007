@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { artifactLoads } from '../src/artifactLoads.mjs';
 
@@ -97,28 +98,100 @@ test('a plain syntax error is a parse-failure, not a duplicate', async (t) => {
   assert.equal(r.findings[0].kind, 'parse-failure');
 });
 
-test('MEASURED LIMIT: node --check is weaker on .ts, and the gap is reported', async (t) => {
+/*
+ * THE FIXTURES PROVED THE CHECK WORKED ON FILES THAT WERE NOT TYPESCRIPT.
+ *
+ * Everything above this line passed while the module was blind to the outage it
+ * is named after, and these three tests are why that was invisible.
+ *
+ * MEASURED, on node v24.18.1:
+ *
+ *   'const A = 1; const A = 2;'            as .ts  -> exit 1   CAUGHT
+ *   the same duplicate appended to the REAL index.ts -> exit 0   MISSED
+ *
+ * Both are .ts. The difference is that the real file CONTAINS TypeScript, so
+ * node takes its permissive type-stripping path; a two-line fixture with no
+ * type syntax gets the strict parser and fails as expected. Every fixture here
+ * was of the second kind, so `node --check` looked like it caught duplicates in
+ * TypeScript. It does not.
+ *
+ * The fix strips the types first and parses the JavaScript that comes out,
+ * which is a strict parse of THIS file rather than of a file that happens to
+ * share its extension. These tests use fixtures with real type annotations so
+ * they exercise the path the artifact actually takes.
+ */
+
+test('THE FIXTURE DEFECT: the REAL entrypoint, with the REAL outage shape', async (t) => {
   /*
-   * I assumed the parser was uniform and it is not. Measured:
+   * The fixture is the artifact itself, because that is where the gap lives and
+   * no synthetic file reproduced it. A duplicate in a small typed fixture IS
+   * caught by node --check; the same duplicate appended to this file is not.
+   */
+  const { readFileSync } = await import('node:fs');
+  const real = readFileSync(
+    fileURLToPath(new URL('../supabase/functions/mcp/index.ts', import.meta.url)),
+    'utf8',
+  );
+  const root = await artifact(t, { 'index.ts': `${real}\nconst UUID = /x/;\nconst UUID = /y/;\n` });
+
+  const r = artifactLoads(root, 'supabase/functions/mcp');
+  assert.equal(r.ok, false, 'a duplicate const in the real entrypoint was not caught');
+  const dup = r.findings.find((f) => f.kind === 'duplicate-declaration');
+  assert.ok(dup, `no duplicate-declaration finding: ${JSON.stringify(r.findings.map((f) => f.kind))}`);
+});
+
+test('CONTROL: node --check ALONE misses it, which is what makes stripping load-bearing', async (t) => {
+  /*
+   * MEASURED, node v24.18.1. This is the assertion that justifies the whole
+   * stripping pass, so it is checked rather than described -- and if node ever
+   * fixes its permissive path this goes red and tells whoever is here that the
+   * extra work can be dropped.
    *
-   *   'export function f( {'  as .ts   -> exit 0   ACCEPTED
-   *   the same bytes         as .mjs  -> exit 1
-   *
-   * node type-strips TypeScript on a more permissive path, so the entrypoint --
-   * index.ts, the file that actually went down -- gets the weaker parse. I found
-   * this by testing the claim rather than trusting it, and the honest response is
-   * to surface the gap per file rather than quietly cover less than the header
-   * says.
-   *
-   * ADVISORY, not blocking: real TypeScript syntax fails a strict parse
-   * legitimately, so a failure there is not evidence of a broken file.
+   * Worse than the duplicate: an outright SYNTAX ERROR appended to this file
+   * also exits 0. `node --check` on this artifact was not weak, it was vacuous,
+   * and the gate printed "parses yes" on the strength of it for as long as the
+   * check has existed.
+   */
+  const { readFileSync, writeFileSync, rmSync } = await import('node:fs');
+  const { spawnSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+
+  const real = readFileSync(
+    fileURLToPath(new URL('../supabase/functions/mcp/index.ts', import.meta.url)),
+    'utf8',
+  );
+  const dup = path.join(tmpdir(), `ab-control-dup-${process.pid}.ts`);
+  const broken = path.join(tmpdir(), `ab-control-syn-${process.pid}.ts`);
+  t.after(() => { rmSync(dup, { force: true }); rmSync(broken, { force: true }); });
+
+  writeFileSync(dup, `${real}\nconst UUID = /x/;\nconst UUID = /y/;\n`);
+  writeFileSync(broken, `${real}\nexport function stillBroken( {\n`);
+
+  assert.equal(
+    spawnSync(process.execPath, ['--check', dup], { encoding: 'utf8' }).status, 0,
+    'node --check now catches a duplicate here by itself; the stripping pass can be simplified',
+  );
+  assert.equal(
+    spawnSync(process.execPath, ['--check', broken], { encoding: 'utf8' }).status, 0,
+    'node --check now catches a syntax error here by itself; update this header',
+  );
+});
+
+test('a malformed .ts is REFUSED now, not merely noted', async (t) => {
+  /*
+   * This is the assertion that flipped. It used to require ok:true and a
+   * `weak-parse-coverage` note, on the reasoning that a strict-parse failure
+   * might only be TypeScript syntax the .mjs parser cannot read. After
+   * stripping, it cannot be: the types are gone, so a failure is a real one and
+   * an advisory would be an outage nobody was warned about.
    */
   const root = await artifact(t, { 'index.ts': 'export function f( {\n' });
   const r = artifactLoads(root, 'supabase/functions/mcp');
-  assert.equal(r.ok, true, 'a strict-parse failure on .ts must not block: it may be real TS');
-  assert.equal(r.findings.length, 1);
-  assert.equal(r.findings[0].kind, 'weak-parse-coverage');
-  assert.match(r.findings[0].file, /index\.ts$/);
+  assert.equal(r.ok, false, 'a file that cannot parse was allowed to deploy');
+  assert.ok(
+    r.findings.some((f) => f.kind === 'parse-failure' || f.kind === 'duplicate-declaration'),
+    `expected a blocking finding, got ${JSON.stringify(r.findings)}`,
+  );
 });
 
 test('a .ts that IS strictly parseable gets no weak-coverage note', async (t) => {
