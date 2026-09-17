@@ -33,6 +33,7 @@ import path from 'node:path';
 
 import { artifactDigest, assertPromotable, verifyLive } from '../src/deployGate.mjs';
 import { linesMissingFrom } from '../scripts/check-edge-deploy.mjs';
+import { artifactLoads as checkArtifactLoads } from '../src/artifactLoads.mjs';
 
 const ARTIFACT_DIR = 'supabase/functions/mcp';
 
@@ -66,28 +67,39 @@ try {
 }
 
 /*
- * DOES IT LOAD? `node --check` on each JavaScript file in the artifact.
+ * DOES IT LOAD? Delegated to src/artifactLoads.mjs.
  *
  * This catches the duplicate top-level declaration that took the Bridge down
- * for eleven minutes -- a shape that every one of 1079 passing tests was blind
- * to, because index.ts is an entrypoint nothing in the suite can import.
+ * for eleven minutes -- a shape every one of 1079 passing tests was blind to,
+ * because index.ts is an entrypoint nothing in the suite can import.
  *
- * It does NOT catch everything a Deno isolate refuses at module scope. In the
- * other repository, `crypto.randomUUID()` at global scope threw only when the
- * isolate started, after typecheck, lint and build were all green. So a pass
- * here means "it parses", not "it starts", and that is the honest claim.
+ * THE LOOP THAT USED TO BE HERE SKIPPED .ts. It matched /\.(js|mjs)$/, so the
+ * entrypoint -- the actual file that went down -- was the one file it never
+ * parsed. It also spawned a process per file and could not tell a parse failure
+ * from a duplicate declaration.
+ *
+ * The module additionally handles what that loop could not: an empty artifact
+ * REFUSES rather than reporting a clean check of nothing; a stale shadow copy
+ * beside a real file is reported without refusing; and every non-.mjs file gets
+ * a strict second parse, because node --check is weaker on .ts and .js than on
+ * .mjs and the entrypoint was getting the weakest parse of the three.
+ *
+ * A pass still means "it parses", never "it starts". Nothing here runs a Deno
+ * isolate, and `crypto.randomUUID()` at module scope threw only when the isolate
+ * started, after typecheck, lint and build were all green.
  */
-let artifactLoads = true;
-const loadErrors = [];
-for (const f of files) {
-  if (!/\.(js|mjs)$/.test(f.path)) continue;
-  try {
-    execFileSync(process.execPath, ['--check', f.path], { stdio: 'pipe' });
-  } catch (err) {
-    artifactLoads = false;
-    loadErrors.push(`${f.path}: ${String(err.stderr ?? err.message).split('\n')[0]}`);
-  }
-}
+const loadCheck = checkArtifactLoads(process.cwd(), ARTIFACT_DIR);
+const artifactLoads = loadCheck.ok;
+
+/*
+ * Advisory findings are carried, not dropped. shadow-copy and
+ * weak-parse-coverage do not refuse -- a noisy gate gets switched off and is
+ * then absent for the case that matters -- but they are the reason a human
+ * reads this output at all, so they travel with the blocking ones.
+ */
+const loadErrors = loadCheck.findings.map(
+  (f) => `${f.kind} ${f.file}: ${f.detail}`,
+);
 
 const releaseRef = arg('--ref', 'origin/master');
 let headSha;
@@ -137,6 +149,28 @@ try {
 let liveDrift = null;
 let driftChecked = false;
 const livePath = arg('--live');
+
+/*
+ * A CONTROL-PLANE READING GOES STALE, AND A STALE ONE IS A HOLLOW GATE.
+ *
+ * code-c, 18:18Z: passed a live.json written 63 minutes earlier, so the drift
+ * check compared live against a cached file, agreed with itself, and printed
+ * "live drift none" at the exact moment there WAS an unrecorded hand-deploy --
+ * the thing it exists to catch. The gate did not fail; it was hand-fed.
+ *
+ * This cannot re-read the control plane: no credential, deliberately. What it
+ * CAN check is how old the reading it was handed is, which is the property that
+ * failure actually had. bin/agentbridge-deploy.mjs does the real re-read
+ * immediately before upload; this only bounds the window, and the refusal says
+ * so rather than implying it is closed.
+ */
+const MAX_LIVE_AGE_MS = 120_000;
+let liveAgeMs = null;
+if (livePath) {
+  try {
+    liveAgeMs = Date.now() - statSync(livePath).mtimeMs;
+  } catch { /* unreadable is handled where the file is parsed, not here */ }
+}
 const recordPath = arg('--record');
 /*
  * THE HONEST FIRST DEPLOY SAYS SO, RATHER THAN LOOKING LIKE A SKIPPED CHECK.
@@ -234,8 +268,85 @@ if (liveDirArg) {
   }
 }
 
+/*
+ * ONE REFUSAL LIST, AND THE EXIT CODE IS COMPUTED FROM IT.
+ *
+ * All three of the following were true of this file until 2026-09-17, and they
+ * were true together, which is why none of them showed:
+ *
+ * 1. The tree refusal set `process.exitCode = 1` and the last line then called
+ *    `process.exit(verdict.ok ? 0 : 1)`. An explicit argument to process.exit
+ *    DISCARDS process.exitCode, so "REFUSED: nothing-would-change" printed and
+ *    the process returned 0. Measured: with --live and --record supplied so the
+ *    drift check was satisfied, an identical tree printed REFUSED and exited 0.
+ *
+ * 2. A --live-dir that could not be read logged one line to stderr and left
+ *    treeCompared false -- the SAME state as never passing the flag at all. So
+ *    "I asked for the comparison and it failed" was indistinguishable from "I
+ *    did not ask", and both printed DEPLOYABLE. That is the skip-is-not-a-pass
+ *    rule this gate states in its own header, broken by the newest check in it.
+ *
+ * 3. The if/else-if chain meant that when the tree refusal fired, verdict's own
+ *    refusals were never printed. The gate refused for one reason while hiding
+ *    the others.
+ *
+ * And they hid each other. test/deployCheckTree.test.mjs asserts the exit code
+ * is non-zero for an identical tree, and it PASSES -- because it runs without
+ * --live/--record, so verdict.ok is false on live-drift-unchecked and that is
+ * what returns 1. The assertion was reading an exit code produced by a
+ * different refusal than the one it names, and defect 3 hid the evidence by
+ * suppressing that refusal from the output. A proxy agreed with the truth until
+ * the drift check was satisfied, which is exactly when this gate is asked to
+ * speak.
+ */
+const refusals = verdict.ok ? [] : [...verdict.refusals];
+
+if (liveDirArg && !treeCompared) {
+  refusals.push({
+    reason: 'live-dir-unreadable',
+    detail: 'a tree comparison was REQUESTED with --live-dir and could not be performed (see '
+      + 'stderr above). Refusing rather than proceeding: a check that was asked for and failed '
+      + 'is not the same as one nobody asked for, and treating it as one is how a skip becomes '
+      + 'a pass.',
+  });
+}
+
+if (liveAgeMs !== null && liveAgeMs > MAX_LIVE_AGE_MS) {
+  refusals.push({
+    reason: 'stale-live-reading',
+    detail: `the --live reading is ${Math.round(liveAgeMs / 1000)}s old, past the `
+      + `${Math.round(MAX_LIVE_AGE_MS / 1000)}s window. Generate it in the same breath as this `
+      + 'check: a cached control-plane reading makes the drift check agree with itself, which is '
+      + 'how it printed "drift none" during an unrecorded hand-deploy. This bounds the window and '
+      + 'does NOT close it -- somebody can still deploy between this check and your upload, which '
+      + 'is how v28 re-shipped v27 byte for byte. bin/agentbridge-deploy.mjs closes it.',
+  });
+}
+
+if (treeCompared && treeAdded === 0 && treeRemoved === 0) {
+  refusals.push({
+    reason: 'nothing-would-change',
+    detail: 'the tree about to ship is identical to what is already serving. A deploy now bumps '
+      + 'the version, changes no bytes, and reports success, which is exactly what v23 did. '
+      + 'Either this is the wrong checkout, or there is nothing to deploy.',
+  });
+}
+
 if (process.argv.includes('--json')) {
-  console.log(JSON.stringify({ ...verdict, digest, driftChecked, loadErrors }, null, 2));
+  // ok and refusals come from the COMBINED list, not from verdict alone. A JSON
+  // consumer reading verdict.ok would have been told `true` for a run the gate
+  // refused on the tree, and would have deployed on it.
+  console.log(JSON.stringify({
+    ...verdict,
+    ok: refusals.length === 0,
+    refusals,
+    digest,
+    driftChecked,
+    treeCompared,
+    treeAdded: treeCompared ? treeAdded : null,
+    treeRemoved: treeCompared ? treeRemoved : null,
+    loadErrors,
+  }, null, 2));
 } else {
   console.log(`deploy check — ${ARTIFACT_DIR}`);
   console.log(`  head       ${headSha.slice(0, 12)} against ${releaseRef}`);
@@ -260,19 +371,15 @@ if (process.argv.includes('--json')) {
     console.log('             and it is the one that was missing when v22 to v23 shipped nothing.');
   }
   console.log('');
-  if (treeCompared && treeAdded === 0 && treeRemoved === 0) {
-    console.log('REFUSED:');
-    console.log('  - nothing-would-change: the tree about to ship is identical to what is');
-    console.log('    already serving. A deploy now bumps the version, changes no bytes, and');
-    console.log('    reports success, which is exactly what v23 did. Either this is the wrong');
-    console.log('    checkout, or there is nothing to deploy.');
-    process.exitCode = 1;
-  } else if (verdict.ok) {
+  if (refusals.length === 0) {
     console.log('DEPLOYABLE.');
   } else {
+    // EVERY reason, not the first one to match. A caller can usually fix one
+    // and needs to know all of them -- and a refusal that hides its siblings
+    // is how the tree check masked live-drift-unchecked.
     console.log('REFUSED:');
-    for (const r of verdict.refusals) console.log(`  - ${r.reason}: ${r.detail}`);
+    for (const r of refusals) console.log(`  - ${r.reason}: ${r.detail}`);
   }
 }
 
-process.exit(verdict.ok ? 0 : 1);
+process.exit(refusals.length === 0 ? 0 : 1);

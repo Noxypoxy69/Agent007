@@ -232,3 +232,44 @@ test('a successful beat RESETS the counter', async () => {
   assert.equal(ok.ok, true);
   assert.notEqual(ok.goingDark, true);
 });
+
+test('THE HEARTBEAT CARRIES machine_id, WITHOUT WHICH THE WORKER GOES DARK', async () => {
+  /*
+   * MEASURED, NOT IMAGINED. The first worker ever run on this project logged
+   * "heartbeat FAILED x40: machine_id is required -- THIS WORKER IS GOING DARK"
+   * and carried on: it claimed a task, ran it and returned it while invisible
+   * to the roster, which reported idle_workers 0 during a tick in which a
+   * worker was holding a live lease.
+   *
+   * /register requires machine_id and heartbeatDeps never sent it. The loud
+   * failure was correct and did not help, because nothing could supply the
+   * field from where the error was printed.
+   *
+   * This asserts the PAYLOAD rather than the outcome. A test that only checked
+   * ok:true would pass against a fake that accepts anything, which is how a
+   * field can go missing for the entire life of a component.
+   */
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push(JSON.parse(init.body));
+    return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => '{}' };
+  };
+
+  const { heartbeat } = heartbeatDeps(ENV, {
+    session_id: 's-me',
+    agent_id: 'code-b',
+    machine_id: 'machine-abc',
+  });
+  await heartbeat({ capacity: 'busy', task_id: 't-1' }, { fetchImpl });
+
+  assert.equal(seen.length, 1, 'the heartbeat did not post at all');
+  assert.equal(
+    seen[0].machine_id,
+    'machine-abc',
+    'machine_id is absent from the heartbeat payload; /register refuses it and the worker goes dark',
+  );
+  // the fields it already sent must survive the addition
+  assert.equal(seen[0].session_id, 's-me');
+  assert.equal(seen[0].agent_id, 'code-b');
+  assert.equal(seen[0].capacity, 'busy');
+});

@@ -1,0 +1,79 @@
+# Lane ownership for the agentbridge repo.
+#
+# WHY THIS FILE EXISTS. get_collision_summary reported, every time it was asked:
+#   no-lane-map: "no lanes map supplied; cross-lane file ownership was not
+#   evaluated -- publish lanes.yml path globs to enable cross-lane-write
+#   detection"
+# So the one check that can see two agents writing the same file was switched
+# off, and on the night of 2026-09-16 it cost: two agents writing
+# deploy/last-deployment.json (five attribution corrections), two writing
+# bin/agentbridge-deploy-check.mjs (a rebase conflict mid-deploy), and two
+# writing the deployment record for the same version.
+#
+# check-first cannot cover this. It reads branches and commits -- work already
+# DONE -- and the collisions were work in progress on one shared worktree.
+#
+# First match wins, so order matters. Paths not listed are unclaimed and the
+# bridge reports them as shared.
+#
+# These are AREAS, not people. Agents move between lanes; files do not.
+
+# Production DDL. Lease and review semantics live here, and a second
+# implementation of either is the defect the owner ruling of 2026-09-16 exists
+# to prevent.
+migrations:
+  - "supabase/migrations/**"
+
+# The deployed artifact. Two files and nothing else ships, so anything here is
+# production the moment somebody runs a deploy.
+edge:
+  - "supabase/functions/mcp/**"
+
+# Everything that decides whether a deploy may happen, and the record of what
+# did. The record took five attribution corrections in one day because two
+# agents wrote it from different sides of the same deploy.
+deploy:
+  - "bin/agentbridge-deploy.mjs"
+  - "bin/agentbridge-deploy-check.mjs"
+  - "scripts/check-edge-deploy.mjs"
+  - "deploy/**"
+  - "docs/HANDOFF-DEPLOY.md"
+
+# The worker runtime: claim, run, verify, return, and the durable attempt row.
+worker:
+  - "src/worker*.mjs"
+  - "src/attempt*.mjs"
+  - "src/workspaceManager.mjs"
+  - "src/executor*.mjs"
+  - "bin/agentbridge-attempt.mjs"
+  - "scripts/worker-*.mjs"
+
+# Who may talk to whom, and under what name. Identity resolution and message
+# validation both live here; they drifted apart once already.
+coordination:
+  - "src/coordination.mjs"
+  - "src/ownerDecisions.mjs"
+  - "src/permissionRequest.mjs"
+  - "src/liveRegistry.mjs"
+  - "src/hostedRegistry.mjs"
+  - "src/registrationStore.mjs"
+
+# The guards on the guards. A change here needs another agent's verification
+# before it lands, per CLAUDE.md.
+guards:
+  - "src/payloadGuard.mjs"
+  - "src/redact.mjs"
+  - "src/moduleGraph.mjs"
+  - "test/leakRegression.test.mjs"
+  - "test/fixtures/leakShapes.mjs"
+
+# The review runtime: what a reviewer reads, and how a verdict is reached.
+review:
+  - "src/review*.mjs"
+  - "bin/agentbridge-review.mjs"
+
+# Shared narrative. Everyone writes here, which is precisely why it is named:
+# an unclaimed path is reported as shared rather than silently contended.
+docs:
+  - "docs/**"
+  - "CLAUDE.md"

@@ -138,6 +138,21 @@ to ignore red.
 
 # The rest of the traps
 
+**TWO SOURCE FILES ARE INVISIBLE TO `grep` AND `git grep`.**
+`src/deployGate.mjs` and `src/auditRange.mjs` contain literal NUL bytes — real
+`\x00` characters, not the escape — used deliberately as length framing in a
+digest (`${path}\x00${len}\x00${body}\x00`). That is correct and must stay;
+without the framing, two different file lists can hash the same. The cost is
+that grep classifies both files as binary and **silently skips them**, reporting
+`binary file matches` at best and nothing at all with `-l`.
+
+So any repo-wide audit built on `git grep` has a two-file blind spot and will
+report a clean sweep it did not perform. This was found while scrubbing the
+operator's real home directory out of the tree — a scrub driven entirely by
+`git grep`. Both files were checked afterwards by reading the bytes in Python
+and were clean, so nothing was missed that time. Next time, read the files;
+`git grep -a` also works. A check that skips a file must not print a pass.
+
 **`_shared.js` IS A HAND-MAINTAINED SPLICE** of `src/` and `bridge/`, because a
 Supabase edge function cannot import from outside its own directory. The tests
 exercise the **originals**. Every edit to a spliced module must be applied to
@@ -226,6 +241,56 @@ so `agentbridge:write-nothing` does not grant write.
 **A connector defaults to READ.** Write requires ticking the box AND the
 coordinator token. Do not type the coordinator token into that form unless the
 client genuinely needs to assign, accept, cancel, or record owner decisions.
+
+## Before you start: check that nobody already did it
+
+Run this. It takes two seconds and it is the whole checklist:
+
+```bash
+node bin/agentbridge.mjs check-first "what you are about to work on"
+```
+
+It prints the branches on the SERVER that are not merged yet, and ranks every
+recent branch and commit against your topic. If it says SOMEBODY MAY ALREADY BE
+ON THIS, read that branch before writing a line.
+
+**Why this exists, measured, in one session on 2026-09-16:**
+
+- code-a fixed the CI failure and pushed it to master at **19:59Z**. I diagnosed
+  the same failure and pushed a second fix at **21:04Z**. Sixty-five minutes, and
+  it was on master the whole time.
+- code-b committed the roster liveness fix at **00:15Z**. I committed a different
+  answer to the same question at **00:24Z**. Nine minutes.
+
+**Nothing caught either, and it is worth knowing why, because the machinery all
+exists.** `collisionGuard` compares PATHS — b touched `index.ts` while I touched
+`bin/` and `src/`, zero overlap, two answers to one question. The delegation
+ledger records work that was HANDED OVER, and neither of us was handed anything.
+The `tasks` table is the ledger of what is being worked on, and it holds four
+rows, two of them demo fixtures and one labelled PROOF ONLY.
+
+**So the gap is not tooling, it is that work an agent starts on its own
+initiative is written down nowhere until it is pushed** — and that is nearly all
+of the work. `check-first` closes the part that can be closed without anyone
+remembering to do anything: it declares nothing and stores nothing, it reads
+branches and commits, which cannot be forgotten because they already exist.
+
+**ASK THE SERVER, NEVER `origin/master`.** This clone's fetch refspec is
+`+refs/heads/main:refs/remotes/origin/main`, so `origin/master` is frozen and
+`git log --all` inherits the lie. That is not a footnote — it is *why* the
+65-minute duplication happened. `check-first` uses `git ls-remote`, which cannot
+be stale. If you check by hand, use `git ls-remote --heads origin`.
+
+**WHAT IT STILL CANNOT DO, stated so nobody trusts it too far.** It finds work
+that has been PUSHED. It cannot find work that exists only in another agent's
+head or working tree, which is exactly the nine-minute case — b had committed
+but the window was minutes. The only thing that closes that is claiming a task
+before starting, and the `tasks` table is where that goes.
+
+**A FAILED LOOKUP IS NOT AN ABSENCE OF PRIOR WORK.** If the server cannot be
+reached, `check-first` prints LOOKUP INCOMPLETE and exits 2. "Nothing found" is
+what you want to hear before starting, so it must never be what an error looks
+like.
 
 ## Two agents, one clone
 

@@ -120,6 +120,140 @@ async function patch(pathAndQuery, body) {
   if (!res.ok) throw new Error(`supabase-write-failed:${res.status}:${(await res.text()).slice(0, 200)}`);
   return res.json();
 }
+/**
+ * ACTIVITY IS LIVENESS, AND UNTIL NOW ONLY A DAEMON COULD SAY SO.
+ *
+ * THE DEFECT. `observedCapacity` reports a registration offline once its
+ * heartbeat is older than the stale window, and the ONLY thing that moved a
+ * heartbeat was `register-session --watch` -- a process the worker starts as a
+ * child of its own shell. When the session ends the watcher dies with it, and
+ * nothing supervises watchers, so nothing restarts one and nothing notices.
+ *
+ * Measured on 2026-09-16: every registration row on this bridge had
+ * `heartbeat_at` exactly equal to `updated_at` -- registered once, never
+ * refreshed. code-d was 163 minutes stale while it was merging to master,
+ * code-c read offline while it was messaging, and code-b sat stale for six
+ * hours while making authenticated calls to this very function. The roster was
+ * not describing agents. It was describing which daemons happened to be alive.
+ *
+ * So a worker that is demonstrably talking to the Bridge is now recorded as
+ * alive by the act of talking. The watcher becomes an optimisation rather than
+ * the only source of truth.
+ *
+ * WHY ONLY THESE CALLS, AND THIS IS THE PART THAT CONSTRAINS THE FIX.
+ *
+ * It would be easy to stamp liveness on every authenticated request. That
+ * would be wrong. A coordinator token can name any agent it likes in
+ * `from_agent`, so stamping on a coordinator call would let the command centre
+ * forge liveness for a worker that died hours ago -- a roster that cannot tell
+ * a live worker from a coordinator talking about one is exactly the control
+ * this project keeps discovering it does not have.
+ *
+ * This is therefore called ONLY where a registration token was presented AND
+ * the caller named a session that is in the registry: /task, /return, /wait and
+ * /review. That is the same evidence /register itself acts on.
+ *
+ * KNOWN LIMIT, STATED RATHER THAN DISCOVERED. The registration token is SHARED
+ * by every worker -- the comment on `registered_by` says so plainly -- so one
+ * worker can refresh another's heartbeat by naming its session. That does not
+ * widen the trust surface, because naming another session already returns that
+ * session's tasks through /task, but it does mean this proves "somebody holding
+ * the worker token spoke for this session", not "this session is alive". Per
+ * agent tokens are what would close it.
+ *
+ * FAILURE IS SILENT ON PURPOSE. A heartbeat is a side effect of the real
+ * request. If the stamp fails, the answer the caller asked for is still
+ * correct, and turning a successful return into an error because a bookkeeping
+ * write failed would be a worse bug than the one this fixes.
+ */
+/**
+ * A NEW SESSION RETIRES THIS AGENT'S DEAD SEATS ON THIS MACHINE.
+ *
+ * THE DEFECT. Registration upserts on `session_id`, but identity is
+ * `agent_id`. Every new session of the same agent therefore ADDS a row rather
+ * than replacing one, and nothing ever removes the old one -- rows do not
+ * expire, they only go stale. So one agent accumulates a seat per session it
+ * has ever had.
+ *
+ * That is not cosmetic. `resolveLiveAgent` refuses with `ambiguous-session`
+ * when an agent has more than one candidate seat, so the accumulated debris
+ * eventually stops the agent being assignable at all. On 2026-09-16 code-b had
+ * two seats, both stale, and clearing one needed direct SQL because
+ * `unregister-session` exits 0 without touching the hosted row when it is run
+ * from a machine that did not create it.
+ *
+ * ONLY STALE SEATS, AND ONLY ON THE SAME MACHINE. Both halves are load-bearing.
+ *
+ * A LIVE second seat is not debris -- one agent can legitimately hold two
+ * worktrees at once, and deleting the other one would silently destroy a
+ * working registration. Ambiguity between two LIVE seats is a real conflict
+ * that a human should see, and `resolveLiveAgent` already refuses it loudly;
+ * quietly deleting one would replace a visible refusal with an invisible
+ * choice, which is the worse of the two.
+ *
+ * And a row belonging to the same agent on a DIFFERENT machine is not this
+ * machine's to retire. `guard_session_owner` already enforces that ownership on
+ * (agent_id, machine_id); this respects the same boundary rather than inventing
+ * a second, weaker one beside it.
+ *
+ * FAILURE IS SILENT, for the same reason as touchLiveness: this is cleanup
+ * attached to a registration that has already succeeded, and failing the
+ * registration because the tidying failed would break the thing that works to
+ * report the thing that does not.
+ */
+async function retireStaleSeats(row) {
+  const agentId = typeof row?.agent_id === 'string' ? row.agent_id : '';
+  const machineId = typeof row?.machine_id === 'string' ? row.machine_id : '';
+  const keep = typeof row?.session_id === 'string' ? row.session_id : '';
+  if (!agentId || !machineId || !keep) return [];
+
+  try {
+    const rows = await get(
+      'session_registrations?select=*'
+      + `&agent_id=eq.${encodeURIComponent(agentId)}`
+      + `&machine_id=eq.${encodeURIComponent(machineId)}`,
+    );
+    const now = new Date().toISOString();
+    const retired = [];
+    for (const r of rows) {
+      if (!r || r.session_id === keep) continue;
+      if (isLive(r, { now })) continue;
+      if (await removeSeat(r.session_id)) retired.push(r.session_id);
+    }
+    return retired;
+  } catch {
+    return [];
+  }
+}
+
+/** DELETE one registration row. Returns whether the far end confirmed it. */
+async function removeSeat(sessionId) {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!id) return false;
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/session_registrations?session_id=eq.${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: restHeaders({ prefer: 'return=minimal' }) },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function touchLiveness(sessionId) {
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!id) return false;
+  try {
+    const rows = await patch(
+      `session_registrations?session_id=eq.${encodeURIComponent(id)}`,
+      { heartbeat_at: new Date().toISOString() },
+    );
+    return Array.isArray(rows) && rows.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 /**
 /**
@@ -1278,6 +1412,9 @@ Deno.serve(async (request) => {
         'session_registrations?on_conflict=session_id', v.row,
         'resolution=merge-duplicates,return=representation',
       );
+
+      // A new session retires this agent's dead seats here. See retireStaleSeats.
+      const retired = await retireStaleSeats(row);
       return json({
         ok: true,
         session_id: row?.session_id,
@@ -1285,6 +1422,7 @@ Deno.serve(async (request) => {
         capacity: row?.capacity,
         heartbeat_at: row?.heartbeat_at,
         verification_state: row?.verification_state,
+        retired_seats: retired,
       });
     } catch (e) {
       const detail = String(e?.message ?? e);
@@ -1365,6 +1503,9 @@ Deno.serve(async (request) => {
         detail: `session "${claimed}" is not registered; register before returning work`,
       }, 409);
     }
+
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(row.session_id);
 
     const verdict = canReturn(task, { agent_id: row.agent_id, session_id: row.session_id },
       { headSha: body?.head_sha });
@@ -1529,6 +1670,9 @@ Deno.serve(async (request) => {
         detail: `session "${claimed}" is not registered; register before reviewing work`,
       }, 409);
     }
+
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(row.session_id);
 
     if (path === '/review/claim') {
       const seconds = Number.isInteger(body?.lease_seconds) ? body.lease_seconds : 1800;
@@ -1707,6 +1851,24 @@ Deno.serve(async (request) => {
      * is needed.
      */
     const autoConfirm = (Deno.env.get('DISPATCH_AUTOCONFIRM') ?? 'on').toLowerCase() !== 'off';
+
+    /*
+     * THE DISPATCHER CONFIRMS AS ITSELF, AND THIS LINE IS WHY THE LOOP DID NOT RUN.
+     *
+     * This block used to call `store`, which is declared far below at the
+     * coordinator entrypoint. `const` is not hoisted, so every confirmation
+     * threw "Cannot access 'store' before initialization" -- on every proposal,
+     * on every tick, once a minute. The throw was caught and recorded in
+     * `refused`, the handler returned ok:true, and pg_cron logged SUCCEEDED, so
+     * from the outside the dispatcher looked perfectly healthy while confirming
+     * nothing. The only place it was visible was the response body in
+     * net._http_response, which nothing reads.
+     *
+     * Building the store HERE also fixes the attribution: a confirmation is now
+     * stamped with the dispatcher's own token label, the same one already used
+     * for prepared_by, instead of whatever the coordinator entrypoint resolved.
+     */
+    const dispatchStore = coordinatorStore(dispatchLabel);
     const confirmed = [];
     const refused = [];
     if (autoConfirm) {
@@ -1714,7 +1876,7 @@ Deno.serve(async (request) => {
         if (row?.kind !== 'assign') continue;
         if (row?.would_be_accepted !== true) continue;
         try {
-          const out = await store.confirmProposal({ proposal_id: row.proposal_id });
+          const out = await dispatchStore.confirmProposal({ proposal_id: row.proposal_id });
           if (out?.ok) confirmed.push(row.proposal_id);
           else refused.push({ proposal_id: row.proposal_id, errors: out?.errors ?? ['unknown'] });
         } catch (e) {
@@ -1933,6 +2095,9 @@ Deno.serve(async (request) => {
       }, 409);
     }
 
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(me.session_id);
+
     const rows = await get('tasks?select=*');
     const wanted = typeof body?.task_id === 'string' ? body.task_id.trim() : '';
 
@@ -1984,6 +2149,9 @@ Deno.serve(async (request) => {
         detail: `session "${claimed}" is not registered; register before waiting`,
       }, 409);
     }
+
+    // Talking to the Bridge IS checking in. See touchLiveness.
+    await touchLiveness(me.session_id);
 
     const MAX_WAIT_MS = 25000;
     const POLL_MS = 2000;

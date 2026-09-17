@@ -17,10 +17,70 @@ correctly behind the loop, not in front of it.
 
 ---
 
+## OWNER RULING — repair order, 2026-09-17
+
+EVIDENCE: commit 8157148 the concurrency fix; the measurements below were taken against this tree
+EVIDENCE: unverifiable the row counts are point-in-time readings of a live database and are recorded as the basis of a decision, not as current state. Re-measure with the queries in docs/LEDGER_MAP.md before acting on them.
+
+**The ruling:**
+
+```
+1  identity / per-session credentials
+2  stop review-proposal churn
+3  fenced attempt persistence, runAttempt integrated AFTER one real Loop B proof
+4  durable inbox receipts / acknowledgements
+5  completion fingerprint
+```
+
+**This supersedes an earlier owner decision of comms-first**, made the same
+night. Both positions are recorded because a superseded decision that vanishes
+teaches the next reader nothing, and this ledger is append-only for that reason.
+
+| measurement | value |
+|---|---|
+| outbox rows undelivered | 0 |
+| messages moved | 178, across 12 recipients |
+| review proposals, no consumer | ~48/hour, ongoing |
+| production attempt records | 0 |
+| registration credential | shared; one session can name another |
+
+**Position A, comms first.** A multi-lane repair cannot be coordinated while a
+message can be accepted under a free-text alias with no proof the intended agent
+received it. Rebuilding the ledger under unaccountable coordination risks a
+third round of duplicated work.
+
+**Position B, the measured order.** Delivery is not the binding constraint.
+Neither duplication that triggered this work was a comms failure — one fix sat
+on master for 65 minutes, the other on a pushed branch for nine, both
+discoverable by anyone who looked. Messages to offline agents were refused
+delivery by the Bridge rather than silently dropped. Review churn and unrecorded
+execution are bleeding now.
+
+**WHAT THE RULING DOES NOT SAY.** It does not declare messaging finished. Zero
+undelivered proves DELIVERY works and proves nothing about ACKNOWLEDGEMENT.
+Comms delivery is presently adequate; comms accountability remains unfinished
+and is slice 4, not abandoned. Identity moves first on its own merit: a shared
+credential is an authorization hole whatever the ordering.
+
+**Standing constraints carried by the ruling:**
+
+- **Messages are prose and never execution authority.** Already true; preserve
+  it through the rebuild rather than re-deriving it.
+- **No unattended production workers.** Nothing launches until its phase has a
+  measured end-to-end proof.
+- Stopping the churn is containment. **Review work stays dormant** until a real
+  reviewer consumer exists; silence is not the review seam closing.
+- Freezing dispatch must not freeze **lease and outbox reconciliation**.
+
+*Recorded by c8, who argued Position B.* A ruling that agrees with the
+recorder's own argument is the one most worth making auditable, which is why the
+numbers are here and not just the conclusion. The full plan is `docs/ROADMAP.md`.
+
 ## Blocking the loop
 
 **0. ~~Deploy the edge function.~~ ALREADY LIVE — closed 2026-09-16 08:18.**
-`/task` and `/renew` are in the deployed version 20 right now, with `/dispatch`,
+EVIDENCE: unverifiable live state is not in git; the provider is the only authority. deploy/last-deployment.json records what was shipped and has been reconciled after the fact four times today, which is itself the argument for asking the far end rather than the file.
+`/task` and `/renew` SHIPPED in version 20, along with `/dispatch`,
 `/register`, `/return`, `/wait` and `/health`. code-c's 04:53 report — *"until
 they ship a worker cannot read its task, cannot renew"* — was true against
 version 17 and stopped being true when version 20 shipped the outage fix and
@@ -45,7 +105,28 @@ fresh version number, which is what a successful deploy looks like from outside.
 **So the merge is not queued behind a deploy. The merge IS the deploy**, and any
 tree that ships must contain `fifth-hosted-path` or it goes backwards.
 
-**1. Merge THREE branches and deploy the result.** — code-c *(assigned)*
+**1. ~~Merge THREE branches and deploy the result.~~ DONE — verified 2026-09-17.** — was code-c
+EVIDENCE: merged bb899fc code-b/fifth-hosted-path
+EVIDENCE: merged 1a97aa0 work/recover-orphan-branches
+EVIDENCE: merged 8793112 work/support-modules
+EVIDENCE: merged 9ba9c96 code-b/lease-wiring — the one this entry warned to check by hand
+**All six branches are ancestors of master `6c8e181`**, checked with
+`git merge-base --is-ancestor` rather than read off a list: `code-b/fifth-hosted-path`
+(`bb899fc`), `work/recover-orphan-branches` (`1a97aa0`), `work/support-modules`
+(`8793112`), `b/attempt-record` (`a816ae4`), `work/reviewer-runtime` (`e992bec`),
+and `code-b/lease-wiring` (`9ba9c96`) — the one this entry specifically warned to
+check by hand rather than assume.
+
+**THIS ENTRY STAYED RED AFTER IT WAS GREEN, AND THAT IS THE EXPENSIVE PART.** It
+reads "nothing below can start until the pipeline is on master", so item 2 has
+been blocked on paper while being unblocked in fact, for hours, with its assignee
+dark since 12:30Z. Nobody rechecked because the document said not to bother. A
+blocker is a claim about the world and goes stale like any other; re-measure it
+before believing it, especially when it is the reason something is not being
+worked on.
+
+*(original brief kept below)*
+**1a. Merge THREE branches and deploy the result.** — was code-c
 `code-b/fifth-hosted-path` (what is live, 14 ahead), then
 `work/recover-orphan-branches` (11 ahead), then `work/support-modules`
 (22 ahead, ends at `50f28a2`). Each contains master entire, so none drops
@@ -57,12 +138,80 @@ Nothing below can start until the pipeline is on master, because the worker
 cannot call what is on a branch. *This is first and it is nobody's favourite
 task, which is exactly why it gets skipped.*
 
-**2. Wire the lease to the pipeline.** — code-c *(assigned)*
+**1b. THERE ARE TWO LOOPS, AND THE ONE THAT RUNS HAS NO GUARDS.** — code-a, ahead of item 2
+EVIDENCE: commit 4a4d0c4 the dispatcher that assigns work autonomously
+EVIDENCE: unverifiable the import counts below are a grep of master and are restated here rather than linked, because the point is the ZEROES and a reader must be able to see them without running anything. Re-measure with: grep -c preExecutionGuard src/worker.mjs
+
+Measured 2026-09-17 while answering "is the loop almost done". It is not, and the
+risk runs the opposite way from how this file has been reading.
+
+**THE LOOP ALREADY RUNS AUTONOMOUSLY.** Task `t-wire-gate-scripts` was created at
+23:35, assigned at 00:09 by the supabase pg_cron dispatcher, executed, and
+returned at 00:15 on attempt 2 with the note "worker: wired check:edge-deploy,
+deploy:check into package.json". No human in the path. That is real autonomous
+execution and it has already happened.
+
+**AND `attempts` IS STILL 0, WHICH MEANS SOMETHING WORSE THAN "NOTHING RAN".**
+There are two execution paths for the same job:
+
+    LOOP A   agentbridge work -> worker.mjs -> workerLoop.mjs -> workerDeps.startRun
+             RUNS. Did the task above.
+             preExecutionGuard 0   agentPermissions 0   attemptRecord 0
+             contextCompiler   0   loopDetector     0   evidenceCollector 0
+
+    LOOP B   runAttempt -> attemptPipeline
+             NEVER RUN. Nothing spawns bin/agentbridge-attempt.mjs.
+             Imports all twelve: guard, permissions, attempt record, context
+             compiler, evidence, fingerprint, loop detector, reviewer packet,
+             token telemetry.
+
+The loop that executes work has none of the safety. The loop carrying every
+control built over the last two days is the one nothing calls. Those are zeroes
+from a grep of master, not an impression.
+
+**THIS IS THE SECOND-SOURCE-OF-TRUTH FAILURE, in the most expensive place
+available.** Every guard written for the runtime guards a path that does not
+execute, and the path that executes was never reviewed as a runtime because
+nobody noticed it had become one.
+
+**SO ITEM 2 IS NOT THE NEXT MOVE, AND "WIRE THE SPAWN" IS THE WRONG FRAME.** The
+two paths have to be reconciled, not connected: either Loop A calls runAttempt,
+or Loop B's guards move into Loop A. That is a design decision with lease
+semantics in it and it belongs to whoever owns the loop. Connecting them without
+choosing would give this repository three paths.
+
+*Found by c8 while answering a question, not by any gate. Nothing in the suite
+compares the imports of the path that runs against the path that is guarded, and
+that check is worth writing once somebody has decided which path survives.*
+
+**2. Wire the lease to the pipeline.** — UNBLOCKED 2026-09-17, needs an owner
+*(was code-c, dark since 12:30Z; the autonomous-loop lane is code-a's as of the
+16th, and this is lease and fence semantics, so it is not c8's to take)*
+
+**DIAGNOSED 2026-09-17, so whoever picks it up does not start at the database.**
+`attempts` holds 0 rows, and it is not a silent write failure. `runAttempt` — the
+only path that writes an attempt record — is imported by exactly one file,
+`bin/agentbridge-attempt.mjs`, and **nothing spawns that binary.** Zero references
+from `daemon.mjs`, `worker.mjs`, `workerLoop.mjs`, `dispatch.mjs`, `runtime.mjs`
+or `bin/agentbridge.mjs`; the only mentions anywhere are its own `package.json`
+bin entry, `moduleGraph.mjs`, a comment in `agentbridge-review.mjs` and this
+document. The writer is fine and is covered by `test/attemptPipeline.test.mjs`
+and `test/unattendedLoop.test.mjs`. The row is missing because the spawn was
+never built, which is exactly this item and nothing else.
 claim → `runAttempt` → return. The daemon owns the lease, never the process it
 starts. `bin/agentbridge-attempt.mjs` is a working caller of everything except
 those three verbs.
 
-**3. ~~Persist the attempt record.~~ BUILT AND WIRED — 2026-09-16.** — b6 built it, c8 wired it
+**3. Persist the attempt record. BUILT, NOT WIRED — corrected 2026-09-17.** — b6 built it; I claimed to have wired it and had not
+EVIDENCE: commit e76fe61 the writer itself, which is real and is covered by attemptPipeline.test.mjs
+EVIDENCE: unverifiable the WIRING claim is false and was falsified by measurement, not by argument: the attempts table held 0 rows at 2026-09-16 22:33, and runAttempt is imported by exactly one file, bin/agentbridge-attempt.mjs, which nothing spawns. Closing this needs item 2, not more work here.
+
+**THIS LINE IS WHY THE GATE ABOVE EXISTS.** It read "BUILT AND WIRED" and named
+me as the one who wired it, for a day, while the table it writes to was empty. I
+wrote it after merging the writer and never checked that anything called it. A
+state written once by hand and then believed is indistinguishable from a true
+one until somebody measures, and nobody measures prose.
+
 code-b built the row and deliberately left it uncalled, declaring why in the
 orphan list: the write must happen under the lease that authorised the work, and
 a caller invented to satisfy a gate would put it outside the fence. Resolved by
@@ -166,6 +315,7 @@ earlier prepare/confirm split, so it needs his words. Nothing here proceeds
 unattended until it is recorded.
 
 **7b. Zero interactive prompts, as a hard acceptance test.** — ACCEPTANCE TEST BUILT
+EVIDENCE: commit dd63625 added test/unattendedLoop.test.mjs
 NEW, 2026-09-16, from a screenshot of a coding agent stopped on "Do you want to
 proceed?" for a local commit. Not an AI problem and not a policy problem: the
 policy in `permissionRequest.mjs` has classified `commit` as ROUTINE since it
@@ -209,6 +359,60 @@ Dependency unlock already works at the scheduler level — proven today, when a
 confirmed proposal assigned work without a human. The half after it is unproven.
 
 ---
+
+## The self-correction ingest — absorbed 2026-09-16, NOT started
+
+Danny handed over `agent_bridge_self_correction_oss_code_ingest_1.md` on the
+evening of the 16th and asked whether it was in this map. It was not, and that
+is recorded rather than quietly fixed: the pack is a roadmap, and a roadmap that
+lives only in an upload is a roadmap nobody is working from.
+
+Absorbed at `docs/SELF_CORRECTION_INGEST.md`, with every claim about what exists
+measured against master rather than remembered. **It is a different axis from
+`RELIABILITY_INGEST.md`** -- that one asks how work survives a crash, this one
+asks how a wrong patch fails to become a trusted patch. They meet at the attempt
+record and nowhere else, so neither substitutes for the other.
+
+**The honest position: twelve modules already implement the shape under
+different names**, so this is reconciliation, not greenfield. What does not exist
+at all is the evidence layer: no `AttemptStep`, no `FailureClass`, no clean-SHA
+verification, no `VerificationProof`. Nothing has been copied from any upstream
+project yet -- verified by search -- and `THIRD_PARTY_CODE.md` now exists empty
+so the first copy lands with its attribution instead of after it.
+
+**SC1. One real attempt row.** — RESOLVED TO ITEM 2; not a separate task
+I wrote this as "merged and unreached, or reached and failing silently, and
+nobody has established which". Established 2026-09-17: **unreached.** `runAttempt`
+is reachable only from `bin/agentbridge-attempt.mjs` and nothing spawns it, so no
+code path in the running system can produce an attempt row. The writer is not
+broken and needs no work. SC1 is therefore item 2 wearing a different name, and
+listing it twice would have had two people converge on a database that was never
+the problem.
+
+**SC2. `AttemptStep` persistence, then `FailureClass`.** — after SC1
+The trajectory, then the taxonomy. Section 4 of the pack begins with "classify",
+so the repair loop cannot be written before the classes exist. Every failed
+validation produces a typed failure artifact or the loop is reading prose.
+
+**SC3. Clean-SHA verification and `VerificationProof`.** — independent of SC1
+The one item worth pulling forward, because it is a live hole rather than a
+missing feature. **Nothing in this repository does a fresh checkout of an exact
+SHA and re-runs the suite.** `deployGate.mjs` checks that a commit was promoted
+and asks the far end what it serves; it never establishes that the commit passes
+from a clean tree. So `worktree passing != promotable` is currently unenforced,
+and the sibling repo grew `check:clean-checkout` because that exact gap shipped a
+route importing a module that was never committed.
+
+**SC4 onward.** Agentless localization, the typed reviewer loop
+(`ReviewFinding`, no plain "looks good"), Symphony reconciliation and bounded
+concurrency, mechanical invariants whose lint text says how to fix them, the
+`agentbridge inspect` surface, failure injection, and multi-candidate patches
+last. Ordering and rationale in the ingest doc.
+
+**Owner: the autonomous-loop lane.** Danny moved auto and dispatcher to code-a
+on the evening of the 16th. This sits squarely in that lane and is code-a's to
+sequence; it is written down here so it is sequenced by somebody rather than by
+nobody.
 
 ## Then harden it — the ingest's Phase B
 
