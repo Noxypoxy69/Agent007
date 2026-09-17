@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/scripts/claude-stop-gate.mjs\"",
-            "timeout": 190
+            "timeout": 420
           }
         ]
       }
