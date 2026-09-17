@@ -29,6 +29,12 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge heartbeat [--dry-run]      one-shot collect (+publish unless --dry-run)
   agentbridge lanes [--file <f>] [--path <p>] [--json]
                                         show the lane registry, or explain one path
+  agentbridge who [--hours 6] [--recent-min 30] [--repo <dir>] [--json]
+                                        who has PRODUCED work lately, read from commit
+                                        trailers rather than heartbeats. SITUATIONAL
+                                        AWARENESS ONLY -- it never names an agent and
+                                        must not be used to route work; status and the
+                                        lane registry remain the only answer to that
   agentbridge release-risk [--json] [--strict]
                                         exit 1 if any worktree carries release risk
   agentbridge delegate --id <id> --from <session> --to <session> --task <text>
@@ -2020,6 +2026,75 @@ try {
    * Validation errors exit 2 and print every problem at once: an operator
    * fixing a lane file should not discover its faults one run at a time.
    */
+  if (cmd === 'who') {
+    /*
+     * The roster reported fourteen sessions offline and idle_workers 0 while
+     * three agents were committing. The registry was not wrong -- a missing
+     * heartbeat is offline and must stay so, or a delegation gets addressed to
+     * nobody -- it was answering a different question from the one being asked.
+     * This asks the repository instead, because a commit is a side effect and
+     * cannot be forgotten the way a heartbeat can.
+     */
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const W = await import('../src/workEvidence.mjs');
+
+    const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
+    const hours = Number.isFinite(Number(args.hours)) && Number(args.hours) > 0 ? Number(args.hours) : 6;
+    const recentMin = Number.isFinite(Number(args['recent-min'])) && Number(args['recent-min']) > 0
+      ? Number(args['recent-min']) : 30;
+
+    let stdout;
+    try {
+      ({ stdout } = await run('git', ['log', '--all', `--since=${hours} hours ago`, `--format=${W.LOG_FORMAT}`],
+        { cwd: repo, maxBuffer: 32 * 1024 * 1024 }));
+    } catch (e) {
+      console.error(`cannot read git history in ${repo}: ${e?.message ?? e}`);
+      process.exit(2);
+    }
+
+    const now = new Date().toISOString();
+    const evidence = W.workEvidence(W.parseLog(stdout), { now, recentMs: recentMin * 60 * 1000 });
+
+    /*
+     * The registry count is read only if it is CHEAP AND CERTAIN. --registry-live
+     * is passed by a caller that already has the number; guessing it here would
+     * put a fabricated figure next to a measured one in the same table.
+     */
+    const declared = args['registry-live'];
+    const liveCount = Number.isInteger(Number(declared)) && String(declared).trim() !== ''
+      ? Number(declared) : null;
+    const rec = W.reconcile(evidence, liveCount);
+
+    if (args.json) {
+      console.log(JSON.stringify({ now, windowHours: hours, recentMinutes: recentMin, ...evidence, reconcile: rec }, null, 2));
+      handled = true; done(0);
+    }
+
+    const mins = (ms) => `${Math.round(ms / 60000)}m ago`;
+    console.log(`work produced in the last ${hours}h, by commit trailer (NOT a roster; never route on this)\n`);
+    if (!evidence.sessions.length && !evidence.unattributed) {
+      console.log('  no commits in the window — that is quiet, not offline');
+    }
+    for (const sess of evidence.sessions) {
+      console.log(`  ${sess.recent ? 'WORKING' : 'quiet  '}  ${sess.session}  ${String(sess.commits).padStart(3)} commits  last ${mins(sess.lastAgeMs)}  ${sess.lastSubject.slice(0, 48)}`);
+    }
+    if (evidence.unattributed) {
+      console.log(`\n  ${evidence.unattributed} commit(s) carry no session trailer (${evidence.unattributedRecent} recent).`);
+      console.log('  That is somebody unidentified, not nobody.');
+    }
+    if (rec.registryLive !== null) {
+      console.log(`\n  registry live: ${rec.registryLive}   producing now: ${rec.producingNow}`);
+      console.log(`  ${rec.note}`);
+      if (rec.disagrees) {
+        console.log('\n  THE REGISTRY SEES NOBODY AND THE REPOSITORY DISAGREES.');
+        console.log('  The workers are not registering. Fix registration — do not loosen liveness.');
+      }
+    }
+    handled = true; done(0);
+  }
+
   if (cmd === 'lanes') {
     const cfg = await loadConfig();
     const file = args.file || cfg?.lanesFile?.[0] || cfg?.lanesFile || 'lanes.registry.example.yml';
