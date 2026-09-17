@@ -182,6 +182,20 @@ test('a test created during the session stays editable; a baseline test does not
    * Seven of eleven commits on this branch modified an existing test.
    */
   const { writeFileSync } = await import('node:fs');
+  /*
+   * ISOLATE THE SNAPSHOT STORE FIRST. This was the ONE writeSnapshot call in this
+   * file that ran before any AGENTBRIDGE_HOME was set -- the first assignment is
+   * in a later test -- so it resolved to the operator's REAL guard store and
+   * wrote a fixture snapshot into it on every run. 62 of the 67 files found
+   * there were 770-byte fixtures with temp-dir repoRoots and sessionId sess-1.
+   *
+   * Not a breach: the key is sha256(repoRoot, sessionId) over a random temp
+   * directory, so it can never collide with a real session's baseline. It is a
+   * test writing outside its own fixtures, which is the property that should
+   * hold whether or not the consequence happens to be harmless. Found by an
+   * independent audit; every other call in this file already did this.
+   */
+  process.env.AGENTBRIDGE_HOME = mkdtempSync(path.join(tmpdir(), 'guard-home-'));
   const root = repoFixture();
   writeSnapshot(root, 'sess-1');                      // real.test.mjs is baseline
   writeFileSync(path.join(root, 'test', 'fresh.test.mjs'), 'x');
