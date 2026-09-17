@@ -37,8 +37,15 @@ import path from 'node:path';
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const NUL = String.fromCharCode(0);
 
-/** Every git invocation in this module refuses the repository's own executable config. */
-const SAFE_GIT_CONFIG = [
+/**
+ * EVERY git invocation on the authority path refuses the repository's own
+ * executable configuration. EXPORTED, and that is the point: this list was
+ * duplicated byte-for-byte into verifier.mjs and omitted entirely from
+ * verificationControl.mjs, so one concept lived in three places at two
+ * different values. A reviewer found it, not a test, which is why
+ * test/gitHardening.test.mjs now enumerates the call sites.
+ */
+export const SAFE_GIT_CONFIG = [
   '-c', 'core.hooksPath=/dev/null',
   '-c', 'core.fsmonitor=false',
   '-c', 'protocol.ext.allow=never',

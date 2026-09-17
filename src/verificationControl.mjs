@@ -7,16 +7,31 @@
  * approval stores live -- three copies of one fact, which is the drift this
  * repository has already paid for twice.
  *
- * AGENTBRIDGE_STATE_DIR is read from the ENVIRONMENT, not from a payload.
- * A worker cannot point verification at a store it prepared, because the value
- * never appears in anything the worker sends.
+ * AGENTBRIDGE_STATE_DIR is read from the ENVIRONMENT, not from a payload, so it
+ * is not a field a worker can set in a request.
+ *
+ * THAT IS NOT WHY THE CONTROL HOLDS, AND THE EARLIER WORDING HERE CLAIMED IT
+ * WAS. It said a worker "cannot point verification at a store it prepared,
+ * because the value never appears in anything the worker sends" -- which is only
+ * true of the request. Under the threat model this file concedes everywhere
+ * else, the worker runs as the same OS user and can set the environment
+ * directly.
+ *
+ * What actually holds the line is that promotion happens in a SEPARATE TRUSTED
+ * PROCESS, started by the integration owner, reading the real store from its own
+ * environment. A worker redirecting its own verification redirects only its own
+ * verification: the approval it mints lands in a store nothing trusted reads.
+ *
+ * The distinction matters to whoever comes next. The old reason would have
+ * looked satisfied by a single merged process that still took the value from the
+ * environment -- and that process would have had no control left at all.
  */
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createJobStore } from './jobStore.mjs';
-import { buildCandidateTree, materializeTree, resolveBaseline } from './candidateTree.mjs';
+import { buildCandidateTree, materializeTree, resolveBaseline, SAFE_GIT_CONFIG } from './candidateTree.mjs';
 import { createVerifier, POLICY_VERSION } from './verifier.mjs';
 
 export function stateDir() {
@@ -145,7 +160,7 @@ function snapshotCandidate(stateRoot, repoRoot, candidateWorkspace) {
   const treeSha = buildCandidateTree(candidateWorkspace);
   const materialized = materializeTree(candidateWorkspace, treeSha);
   try {
-    const git = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true }).trim();
+    const git = (args, cwd) => execFileSync('git', [...SAFE_GIT_CONFIG, ...args], { cwd, encoding: 'utf8', windowsHide: true }).trim();
     git(['-c', 'init.defaultBranch=main', 'init', '-q', '.'], materialized);
 
     /*

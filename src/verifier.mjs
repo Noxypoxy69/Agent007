@@ -20,20 +20,18 @@
  */
 import path from 'node:path';
 import { rmSync } from 'node:fs';
-import { candidateIdentity, materializeTree, resolveBaseline, treeDrift, buildCandidateTree, repoIdentity, IdentityError } from './candidateTree.mjs';
+import { candidateIdentity, materializeTree, resolveBaseline, treeDrift, buildCandidateTree, repoIdentity, SAFE_GIT_CONFIG, IdentityError } from './candidateTree.mjs';
 import { isProtectedRelPath, isBaselineTestPath } from './policy.mjs';
 import { createApprovalStore, ApprovalStoreError } from './approvalStore.mjs';
 import { runValidation } from './validationRunner.mjs';
 import { execFileSync } from 'node:child_process';
-
-const SAFE_GIT = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.ext.allow=never'];
 
 /**
  * Fetch the approved tree's objects into the authoritative repository and record
  * it as a commit under refs/agentbridge/promoted/. Never touches a branch.
  */
 function writeApprovedTree({ repoRoot, candidateWorkspace, treeSha, parentCommit, candidateId }) {
-  const git = (args, opts = {}) => execFileSync('git', [...SAFE_GIT, ...args], {
+  const git = (args, opts = {}) => execFileSync('git', [...SAFE_GIT_CONFIG, ...args], {
     cwd: repoRoot, encoding: 'utf8', timeout: 60000, windowsHide: true, maxBuffer: 256 * 1024 * 1024, ...opts,
   });
   /*
@@ -48,7 +46,7 @@ function writeApprovedTree({ repoRoot, candidateWorkspace, treeSha, parentCommit
    * candidate.
    */
   const anchorRef = `refs/agentbridge/anchor/${treeSha}`;
-  const candGit = (args, opts = {}) => execFileSync('git', [...SAFE_GIT, ...args], {
+  const candGit = (args, opts = {}) => execFileSync('git', [...SAFE_GIT_CONFIG, ...args], {
     cwd: candidateWorkspace, encoding: 'utf8', timeout: 60000, windowsHide: true, maxBuffer: 256 * 1024 * 1024, ...opts,
   });
   const anchorCommit = candGit(['commit-tree', treeSha, '-m', `anchor ${treeSha}`], {
