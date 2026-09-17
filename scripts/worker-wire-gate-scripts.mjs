@@ -95,8 +95,16 @@ try {
   git(
     '-c', 'user.name=agentbridge worker',
     '-c', 'user.email=worker@agentbridge.local',
-    'commit', '--', 'package.json',
-    '-m', `Wire ${added.join(' and ')} so the deploy gates are reachable by name`,
+    /*
+     * -m BEFORE the --, and this was wrong the first time. Everything after --
+     * is a PATHSPEC, so `commit -- package.json -m msg` asks git to commit three
+     * files named package.json, -m and the message, and fails with "pathspec
+     * '-m' did not match any file(s)". Caught by running the script against a
+     * scratch repository instead of trusting it, which is the only reason the
+     * loop was not re-run against a worker that cannot commit.
+     */
+    'commit', '-m', `Wire ${added.join(' and ')} so the deploy gates are reachable by name`,
+    '--', 'package.json',
   );
   console.log(`worker: committed ${git('rev-parse', '--short', 'HEAD')}`);
 } catch (err) {
