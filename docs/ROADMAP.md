@@ -2,7 +2,23 @@
 
 ## 2026-09-17. The decision, the architecture, and the order to build it in.
 
-**Read this first if you are implementing.** It is a PLAN, not a status
+> **THIS IS NOT THE COMPLETE DEFINITION OF AGENT BRIDGE.**
+> The parent specification is **`docs/AGENTBRIDGE_MASTER_BUILD_MAP.md`**. This
+> document is the *immediate repair sequence* and is deliberately narrower.
+>
+> **Measured gap, so nobody mistakes this for the map:** of the master map's 35
+> RPCs this document names 6; of its 43 tables it names 14; and its 34-row
+> failure-injection matrix does not appear here at all. Steps 6 through 15 of
+> the binding order — dependencies and approvals, supervised daemon, Attempt
+> Governor, repair envelope and budgets, isolation hardening, the Task A/Task B
+> closed-UI slice, the failure matrix, the twelve-hour soak and bounded rollout
+> — live in the master map and are **deferred, not cancelled**.
+>
+> I wrote this document as a summary of a specification and presented it as the
+> map. `test/masterMapCoverage.test.mjs` now ratchets that gap so it can only
+> close, never widen.
+
+**Read this first if you are implementing the immediate repair sequence.** It is a PLAN, not a status
 document. It records decisions, contracts and order. It deliberately contains no
 current-state facts — counts, deployed versions, who is online — because those
 rot, and twelve documents in this repository already rotted that way. For state,
