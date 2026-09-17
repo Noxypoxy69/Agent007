@@ -27,7 +27,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # FULL HISTORY, because a test here walks the commit graph.
+      #
+      # actions/checkout defaults to fetch-depth 1. doneClaims.test.mjs asks
+      # `git merge-base --is-ancestor` of every commit ORDER.md calls merged,
+      # and on a truncated graph that returns FALSE rather than erroring -- so
+      # the suite reported six claims as "NOT an ancestor of HEAD, so it is not
+      # done here" on a repository where all six are ancestors. Master was red
+      # on five consecutive runs for this and nothing was wrong with the tree.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:

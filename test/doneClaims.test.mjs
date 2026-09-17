@@ -75,8 +75,29 @@ test('EVERY claim that something is done carries evidence', async () => {
   );
 });
 
-test('every git-checkable piece of evidence still holds, re-measured now', async () => {
+test('every git-checkable piece of evidence still holds, re-measured now', async (t) => {
   const failures = [];
+  /*
+   * A SHALLOW CLONE CANNOT ANSWER THIS, AND MUST NOT GUESS.
+   *
+   * `merge-base --is-ancestor` walks the graph. Truncate the graph and it
+   * returns FALSE for a commit that IS an ancestor -- not an error, a wrong
+   * answer. That turned this gate red on five consecutive master runs and
+   * named six commits as unmerged when all six were merged, which is a control
+   * accusing a correct repository. Under CLAUDE.md's own rule, a shallow clone
+   * makes this UNKNOWN, and unknown is not "not done".
+   *
+   * CI now checks out with fetch-depth 0. This refuses loudly if anything else
+   * ever runs it shallow, because a silent skip renders "I could not check"
+   * identically to "I checked and it was fine".
+   */
+  const { stdout: shallow } = await run('git', ['rev-parse', '--is-shallow-repository'], { cwd: REPO });
+  if (shallow.trim() === 'true') {
+    return t.skip('NOT CHECKED: this clone is shallow, so ancestry is unknowable here. '
+      + 'A truncated graph reports a merged commit as NOT an ancestor, which is a wrong '
+      + 'answer rather than a missing one. Re-run with full history (fetch-depth 0).');
+  }
+
   for (const c of await claims()) {
     for (const e of c.evidence) {
       if (e.kind === 'unverifiable') continue;
