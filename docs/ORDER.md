@@ -20,6 +20,7 @@ correctly behind the loop, not in front of it.
 ## Blocking the loop
 
 **0. ~~Deploy the edge function.~~ ALREADY LIVE — closed 2026-09-16 08:18.**
+EVIDENCE: unverifiable live state is not in git; the provider is the only authority. deploy/last-deployment.json records what was shipped and has been reconciled after the fact four times today, which is itself the argument for asking the far end rather than the file.
 `/task` and `/renew` are in the deployed version 20 right now, with `/dispatch`,
 `/register`, `/return`, `/wait` and `/health`. code-c's 04:53 report — *"until
 they ship a worker cannot read its task, cannot renew"* — was true against
@@ -46,6 +47,10 @@ fresh version number, which is what a successful deploy looks like from outside.
 tree that ships must contain `fifth-hosted-path` or it goes backwards.
 
 **1. ~~Merge THREE branches and deploy the result.~~ DONE — verified 2026-09-17.** — was code-c
+EVIDENCE: merged bb899fc code-b/fifth-hosted-path
+EVIDENCE: merged 1a97aa0 work/recover-orphan-branches
+EVIDENCE: merged 8793112 work/support-modules
+EVIDENCE: merged 9ba9c96 code-b/lease-wiring — the one this entry warned to check by hand
 **All six branches are ancestors of master `6c8e181`**, checked with
 `git merge-base --is-ancestor` rather than read off a list: `code-b/fifth-hosted-path`
 (`bb899fc`), `work/recover-orphan-branches` (`1a97aa0`), `work/support-modules`
@@ -92,7 +97,16 @@ claim → `runAttempt` → return. The daemon owns the lease, never the process 
 starts. `bin/agentbridge-attempt.mjs` is a working caller of everything except
 those three verbs.
 
-**3. ~~Persist the attempt record.~~ BUILT AND WIRED — 2026-09-16.** — b6 built it, c8 wired it
+**3. Persist the attempt record. BUILT, NOT WIRED — corrected 2026-09-17.** — b6 built it; I claimed to have wired it and had not
+EVIDENCE: commit e76fe61 the writer itself, which is real and is covered by attemptPipeline.test.mjs
+EVIDENCE: unverifiable the WIRING claim is false and was falsified by measurement, not by argument: the attempts table held 0 rows at 2026-09-16 22:33, and runAttempt is imported by exactly one file, bin/agentbridge-attempt.mjs, which nothing spawns. Closing this needs item 2, not more work here.
+
+**THIS LINE IS WHY THE GATE ABOVE EXISTS.** It read "BUILT AND WIRED" and named
+me as the one who wired it, for a day, while the table it writes to was empty. I
+wrote it after merging the writer and never checked that anything called it. A
+state written once by hand and then believed is indistinguishable from a true
+one until somebody measures, and nobody measures prose.
+
 code-b built the row and deliberately left it uncalled, declaring why in the
 orphan list: the write must happen under the lease that authorised the work, and
 a caller invented to satisfy a gate would put it outside the fence. Resolved by
@@ -196,6 +210,7 @@ earlier prepare/confirm split, so it needs his words. Nothing here proceeds
 unattended until it is recorded.
 
 **7b. Zero interactive prompts, as a hard acceptance test.** — ACCEPTANCE TEST BUILT
+EVIDENCE: commit dd63625 added test/unattendedLoop.test.mjs
 NEW, 2026-09-16, from a screenshot of a coding agent stopped on "Do you want to
 proceed?" for a local commit. Not an AI problem and not a policy problem: the
 policy in `permissionRequest.mjs` has classified `commit` as ROUTINE since it
