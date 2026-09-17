@@ -31,6 +31,48 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
  * exists to catch, and clearing debt lowers it.
  */
 
+/*
+ * ============================================================================
+ * PROVISIONAL. A GREEN RUN HERE IS NOT EVIDENCE OF REACHABILITY.
+ * ============================================================================
+ *
+ * The second independent review rejected this gate's implementation, and the
+ * finding is correct: classification is built from repo-wide NAME MENTIONS, not
+ * from a resolved import graph. Consequences, stated rather than discovered
+ * later:
+ *
+ *   A same-named function, property or local variable in an unrelated module
+ *   marks an export as production-referenced. That is the resolveWork /
+ *   resolveWorker defect in a broader form -- word boundaries stop the substring
+ *   case and do nothing about a genuine name collision across modules.
+ *
+ *   The splice check asks whether a name occurs ANYWHERE in edge source, not
+ *   whether it occurs inside the splice target declared for THAT module in
+ *   DEFAULT_SPLICES.
+ *
+ *   Imported-but-unused, re-exported public surface, and dynamic/unresolved are
+ *   not distinguished at all.
+ *
+ * SO THE NUMBERS BELOW ARE A FLOOR, NOT A MEASUREMENT. They can only understate
+ * how much is unreferenced. The ratchet still catches a new export appearing
+ * with no mention anywhere, which is worth keeping running, but nobody may cite
+ * a pass here as proof that an export has a production caller -- that is
+ * contract item 1 and this does not currently satisfy it.
+ *
+ * THE REBUILD, specified by the review: reachability from parsed imports and
+ * re-exports with resolved module paths; splice checked source -> declared
+ * target; categories reported separately for imported-and-referenced,
+ * imported-but-unused, re-exported public surface, dynamic/unresolved,
+ * test-only, spliced-only and truly unreferenced; dynamic/unresolved fail-safe
+ * until exhaustively resolved; and the ratchet drawn ONLY from truly
+ * unreferenced, with exceptions listed as explicit names rather than a broad
+ * gate-machinery exclusion.
+ *
+ * parseImports currently returns specifiers without imported NAMES, so the
+ * rebuild needs a named-import parser. That is its own pass with its own
+ * mutation proofs, not a patch bolted onto this one.
+ */
+
 const IS_CONSTANT = /^[A-Z][A-Z0-9_]*$/;
 
 /** Exported functions and values, by category, excluding frozen constants. */
@@ -80,7 +122,7 @@ const BASELINE_TEST_ONLY = 124;
  */
 const GATE_MACHINERY = ['src/moduleGraph.mjs'];
 
-test('the unreferenced ratchet does not increase', () => {
+test('PROVISIONAL: the unreferenced ratchet does not increase', () => {
   const by = fnsByCategory(REPO_ROOT);
   assert.ok(
     by.unreferenced.length <= BASELINE_UNREFERENCED,
@@ -89,7 +131,7 @@ test('the unreferenced ratchet does not increase', () => {
   );
 });
 
-test('the test-only ratchet does not increase — contract item 1', () => {
+test('PROVISIONAL: the test-only floor does not increase (NOT contract item 1 yet)', () => {
   const by = fnsByCategory(REPO_ROOT, { excludeGateMachinery: true });
   assert.ok(
     by['test-only'].length <= BASELINE_TEST_ONLY,

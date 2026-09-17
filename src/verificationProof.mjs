@@ -218,54 +218,80 @@ function validate(o) {
 }
 
 /**
- * Which mandatory blockers still stand, and whether the policy was fully applied.
+ * Which mandatory blockers stand. TODAY THAT IS ALL OF THEM, UNCONDITIONALLY.
  *
- * EVERY REQUIRED BLOCKER IS VISITED. The result records a verdict for each name
- * in REQUIRED_BLOCKERS; if any name has no verdict the policy is incomplete and
- * `policyOk` is false, so an evaluator that silently stopped covering a blocker
- * cannot yield a promotable observation. That is the difference between failing
- * closed and merely having a list.
+ * THE SECOND REVIEW FOUND THE FALSE GREEN HERE, and it was mine, not the
+ * candidate's. The previous version cleared each blocker from a caller-supplied
+ * value -- a non-empty `signature` string, `suiteSource: 'trusted-policy'`,
+ * `isolated: true`. Nothing verified a signature, loaded a policy or checked an
+ * attestation. They were assertions, and assertObserved is exported, so:
+ *
+ *     assertObserved({ ...valid, signature: 'x',
+ *                      suiteSource: 'trusted-policy', isolated: true })
+ *     -> promotable: true
+ *
+ * I had shipped the claim "nothing in this repository can clear any of them".
+ * Three literals cleared all three. Worse, the exploit was in the suite as a
+ * PASSING test called "a signed, policy-sourced, isolated run WOULD be
+ * promotable", written by me as the positive direction.
+ *
+ * The move from candidate-controlled to caller-controlled verification is not a
+ * smaller defect. It is the same missing authority boundary one step up.
+ *
+ * SO NO INPUT CLEARS A BLOCKER. The trust fields are not read. A blocker is
+ * cleared only by a VERIFIER ADAPTER -- a function registered in this module
+ * that performs a real check -- and there are none, so `promotable` is false in
+ * every call, for every argument, including arguments that claim otherwise.
+ *
+ * WHEN AN ADAPTER ARRIVES it must be one of:
+ *   a cryptographically verified signature from an approved verifier identity;
+ *   a suite policy loaded by id AND digest from an authority outside the
+ *     candidate;
+ *   a signed or container-produced isolation attestation.
+ * Never a boolean. Never a string. Never anything the caller simply says.
  */
-function evaluateBlockers(o) {
-  const CLEARED_BY = {
-    // A signature from a verifier identity. Not the digest -- an unkeyed hash
-    // says nothing about who ran anything.
-    'unsigned-observation': () => isNonEmpty(o.signature),
-    // The suite command came from a trusted policy stored OUTSIDE the candidate.
-    'candidate-controlled-suite': () => o.suiteSource === 'trusted-policy',
-    // Install and suite ran somewhere the candidate cannot reach credentials.
-    'untrusted-execution-environment': () => o.isolated === true,
-  };
-  const DETAIL = {
-    'unsigned-observation':
-      'the observation is unsigned: an unkeyed digest cannot establish who verified, or that anyone did',
-    'candidate-controlled-suite':
-      'the suite command came from the commit under test, so the candidate defines what "the suite" means',
-    'untrusted-execution-environment':
-      'install and suite ran on the host with ambient credentials and network; unsafe for untrusted commits',
-  };
+const VERIFIER_ADAPTERS = Object.freeze({
+  // Deliberately empty. An entry here must perform a real verification and
+  // return a boolean it has EARNED, not one it was handed.
+});
 
+const BLOCKER_DETAIL = Object.freeze({
+  'unsigned-observation':
+    'no verifier adapter exists: an unkeyed digest cannot establish who verified, or that anyone did',
+  'candidate-controlled-suite':
+    'no trusted suite policy exists: the command came from the commit under test',
+  'untrusted-execution-environment':
+    'no isolation attestation exists: install and suite ran on the host with ambient credentials',
+});
+
+function evaluateBlockers(o) {
   const blockers = [];
   let evaluated = 0;
   for (const code of REQUIRED_BLOCKERS) {
-    const clears = CLEARED_BY[code];
-    if (typeof clears !== 'function') continue;   // unevaluated -> policyOk goes false below
     evaluated += 1;
-    if (!clears()) blockers.push({ code, detail: DETAIL[code] ?? 'no detail recorded' });
+    const adapter = VERIFIER_ADAPTERS[code];
+    // NO ADAPTER MEANS THE BLOCKER STANDS. Absent is not cleared, and the
+    // caller is not consulted -- `o` is deliberately unused for trust.
+    const cleared = typeof adapter === 'function' ? adapter(o) === true : false;
+    if (!cleared) blockers.push({ code, detail: BLOCKER_DETAIL[code] ?? 'no detail recorded' });
   }
 
   /*
-   * A CALLER-SUPPLIED POLICY VERSION MUST MATCH. A stored observation must not
-   * become promotable later under a weaker policy, and a caller asking for a
-   * version this module does not implement gets a refusal rather than today's
-   * rules applied to yesterday's question.
+   * THE POLICY VERSION IS THIS MODULE'S, NOT THE OBSERVATION'S.
+   *
+   * It previously read `o.blockerPolicyVersion === undefined || ... === CURRENT`,
+   * which fails OPEN: an observation carrying no version was accepted, and
+   * observation data got to select which policy judged it. Data under review
+   * does not choose its own reviewer. A caller-supplied version that differs is
+   * now a hard mismatch; absent is fine only because it is IGNORED.
    */
   const versionOk = o.blockerPolicyVersion === undefined
-    || o.blockerPolicyVersion === BLOCKER_POLICY_VERSION;
+    ? true
+    : o.blockerPolicyVersion === BLOCKER_POLICY_VERSION;
   if (!versionOk) {
     blockers.push({
       code: 'unsigned-observation',
-      detail: `blocker policy version ${o.blockerPolicyVersion} requested, this module implements ${BLOCKER_POLICY_VERSION}`,
+      detail: `observation claims blocker policy v${o.blockerPolicyVersion}; this module judges only by v${BLOCKER_POLICY_VERSION}`,
     });
   }
 

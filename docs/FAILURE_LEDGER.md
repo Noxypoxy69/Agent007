@@ -179,3 +179,54 @@ tests and says so to nobody. It is not refused and cannot be while the candidate
 defines its own suite. That is a live, known hole with a named blocker, not a
 solved problem, and no future attempt may quote this record as evidence that
 candidate-supplied suites are safe.
+
+---
+
+# Record 2 — the repair for Record 1 contained the same defect one level up
+
+```yaml
+failure_id: F-0002
+failure_class: gate_defect
+symptom: assertObserved returned promotable:true for three caller-supplied literals
+failure_fingerprint: hash(agent007 + gate_defect + [src/verificationProof.mjs] + "promotion blockers cleared by unverified caller input")
+affected_files:
+  - src/verificationProof.mjs
+command: assertObserved({ ...valid, signature: 'x', suiteSource: 'trusted-policy', isolated: true })
+exit_code: 0            # promotable:true, which the CLI maps to exit 0
+root_cause:
+  - promotion blockers were cleared by caller-supplied values
+  - no signature was verified, no policy loaded, no attestation checked
+  - the exported function itself could clear every blocker
+  - blocker policy version failed OPEN on an absent version
+missing_observation:
+  - nothing distinguished a claimed trust input from a verified one
+gate_that_should_have_caught_it:
+  - a caller asserting its own trust level
+repair:
+  - blockers are unconditional; the trust fields are not read at all
+  - a blocker clears only via a verifier adapter registered in the module
+  - VERIFIER_ADAPTERS is empty, so promotable is false for every input
+  - policy version is the module's; observation data cannot select its reviewer
+  - structural gate: only the CLI may import the module, no workflow invokes it,
+    no production module reads a verdict field, exit 0 asserted unreachable
+status: regression_proven
+introduced_sha: 6f91f5e
+found_by: independent review, second pass
+evidence_refs:
+  - the exploit was IN THE SUITE as a passing test named "a signed,
+    policy-sourced, isolated run WOULD be promotable", written by me as the
+    positive direction. It is now inverted and asserts the refusal.
+  - three mutations restore the defect and redden 3, 1 and 7 tests respectively
+```
+
+## What this record is for
+
+Record 1 was the candidate controlling verification. Record 2 is the CALLER
+controlling it, shipped in the fix for Record 1 and found by the next review.
+Better intention, same missing authority boundary.
+
+The pattern worth carrying forward, and the reason this is a ledger entry rather
+than a commit message: **a repair that moves who supplies the unchecked claim has
+not removed the unchecked claim.** Any future blocker, gate or verdict must be
+read for WHO asserts the thing it trusts, and a boolean or string from an
+argument is never an answer.

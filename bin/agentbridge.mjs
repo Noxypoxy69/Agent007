@@ -2261,7 +2261,9 @@ try {
       if (verdict.ok) {
         const p = verdict.proof;
         console.log(`OBSERVED ${p.sha}`);
-        console.log(`  ${p.pass}/${p.tests} pass, ${p.fail} fail, ${p.skip} skipped, exit 0, from a clean clone`);
+        // "suite exit 0", never bare "exit 0": this command's OWN exit is 3 here,
+        // and a reader skimming must not take the suite's status for the process's.
+        console.log(`  ${p.pass}/${p.tests} pass, ${p.fail} fail, ${p.skip} skipped, suite exit 0, from a clean clone`);
         console.log(`  digest ${p.digest}`);
       } else {
         console.error(`NOT PROMOTABLE ${sha} — ${verdict.refusals.length} refusal(s):`);
