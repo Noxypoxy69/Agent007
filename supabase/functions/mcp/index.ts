@@ -812,7 +812,17 @@ function coordinatorStore(label) {
       if (!task) return { ok: false, errors: [`no such task: ${task_id}`] };
 
       const at = new Date().toISOString();
-      const verdict = canAccept(task, { at });
+      /*
+       * `by` IS THE FENCE, and it was missing until 2026-09-17.
+       *
+       * This path PATCHes the row straight to `accepted`. It never calls
+       * submit_review, so the review lease is never held and claim_review's
+       * `self-review` refusal never runs -- that bar guards a door this one
+       * does not open. Until canAccept took the accepter's identity it could
+       * not have refused a self-accept even if asked, because the identity
+       * arrived one line later, at acceptRecord.
+       */
+      const verdict = canAccept(task, { at, by: label });
       if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
 
       const landed = writeLanded(
@@ -908,6 +918,9 @@ function coordinatorStore(label) {
       const resolved = p.kind === 'assign' ? resolveLiveAgent(reg.sessions, p.agent_id) : null;
 
       const verdict = canConfirm(p, {
+        // Confirming a REVIEW proposal is an accept, so the confirmer is named
+        // and canAccept refuses it if it is the session that returned the work.
+        by: label,
         task,
         worker: resolved?.ok ? resolved : null,
         tasks,

@@ -104,7 +104,7 @@ test('accept refuses anything that was never RETURNED', () => {
 
 test('accept succeeds on returned work and pins the sha FROM THE RETURN', () => {
   const t = task({ state: 'returned', returned_head_sha: SHA, returned_by: 'danny-win-f1' });
-  assert.equal(canAccept(t, { at: 'T' }).ok, true);
+  assert.equal(canAccept(t, { at: 'T', by: 'chatgpt-work coordinator' }).ok, true);
 
   const rec = acceptRecord(t, { by: 'chatgpt-work coordinator', at: 'T' });
   assert.equal(rec.state, 'accepted');
@@ -128,6 +128,43 @@ test('terminal states are terminal', () => {
     assert.match(canCancel(task({ state }), { reason: 'x' }).errors.join(' '), /already "/);
   }
   assert.deepEqual(TERMINAL, ['accepted', 'cancelled']);
+});
+
+/*
+ * NOBODY ACCEPTS THEIR OWN RETURN, AND THE ACCEPTER MUST BE NAMED.
+ *
+ * Written against a real row, not a hypothetical. On 2026-09-17 t-wire-gate-scripts
+ * went to `accepted` with reviewer NULL and review_lease_token NULL, because
+ * accept_task PATCHes the row directly and never passes through submit_review --
+ * the only path that holds a review lease. The self-review bar in SQL
+ * (claim_review, migration 20260915220223, "reason: self-review") guards a door
+ * that path never opens.
+ *
+ * The deeper defect was the SIGNATURE: canAccept(task, { at }) never received the
+ * accepter at all, so it was structurally incapable of refusing a self-accept
+ * however carefully anyone called it. That case did not fire on 2026-09-17 --
+ * code-d returned, c8 accepted -- but it was available to every caller.
+ *
+ * ABSENT IS NOT INNOCENT. An unnamed accepter is refused rather than waved
+ * through: an optional identity check is one that silently does not run, which is
+ * the hollow-gate shape this repository keeps paying for.
+ */
+test('accept refuses the session that returned the work', () => {
+  const t = task({ state: 'returned', returned_head_sha: SHA, returned_by: 'danny-win-d1' });
+
+  const self = canAccept(t, { at: 'T', by: 'danny-win-d1' });
+  assert.equal(self.ok, false, 'a session must not accept its own return');
+  assert.match(self.errors.join(' '), /returned this work/);
+
+  // A genuine second party still passes. A gate that only refuses is an outage.
+  assert.equal(canAccept(t, { at: 'T', by: 'danny-win-main' }).ok, true);
+});
+
+test('accept refuses when the accepter is not named at all', () => {
+  const t = task({ state: 'returned', returned_head_sha: SHA, returned_by: 'danny-win-d1' });
+  const r = canAccept(t, { at: 'T' });
+  assert.equal(r.ok, false, 'an unnamed accepter is unknown, not nobody');
+  assert.match(r.errors.join(' '), /not identified/);
 });
 
 test('accept requires a timestamp', () => {
@@ -158,7 +195,7 @@ test('THE LOOP: assigned -> returned -> accepted, and no step can be skipped', (
   let t = task();
 
   // Cannot accept yet.
-  assert.equal(canAccept(t, { at: 'T1' }).ok, false);
+  assert.equal(canAccept(t, { at: 'T1', by: 'coord' }).ok, false);
 
   // The worker returns.
   assert.equal(canReturn(t, worker(), { headSha: SHA }).ok, true);
@@ -167,12 +204,18 @@ test('THE LOOP: assigned -> returned -> accepted, and no step can be skipped', (
 
   // Now the coordinator may accept, and cannot return it again.
   assert.equal(canReturn(t, worker(), { headSha: SHA }).ok, false);
-  assert.equal(canAccept(t, { at: 'T2' }).ok, true);
+
+  // ...but NOT the worker that just returned it. The loop has two parties in it
+  // or it has none, and this is the step the accept_task door skipped entirely.
+  assert.equal(canAccept(t, { at: 'T2', by: t.returned_by }).ok, false,
+    'the returning session must not be able to close its own loop');
+
+  assert.equal(canAccept(t, { at: 'T2', by: 'coord' }).ok, true);
   t = { ...t, ...acceptRecord(t, { by: 'coord', at: 'T2' }) };
 
   // And it is finished.
   assert.equal(t.state, 'accepted');
   assert.equal(t.accepted_head_sha, SHA);
-  assert.equal(canAccept(t, { at: 'T3' }).ok, false);
+  assert.equal(canAccept(t, { at: 'T3', by: 'coord' }).ok, false);
   assert.equal(canCancel(t, { reason: 'no' }).ok, false);
 });

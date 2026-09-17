@@ -1607,10 +1607,40 @@ export function returnRecord(task, worker, { headSha, notes = null, at }) {
  * on a task nobody returned -- accepting straight from `assigned` would be
  * signing off work that was never handed in.
  */
-export function canAccept(task, { at } = {}) {
+export function canAccept(task, { at, by, forecast = false } = {}) {
   const errors = [];
 
   if (!task || !nonEmpty(task.task_id)) return { ok: false, errors: ['no such task'] };
+
+  /*
+   * WHO IS SIGNING THIS OFF, and it is a required answer.
+   *
+   * This function used to take (task, { at }) and never learned the accepter's
+   * identity at all -- it entered only at acceptRecord({ by }), AFTER the
+   * verdict had already been returned, so it could not refuse a self-accept
+   * however carefully anyone called it.
+   *
+   * There are TWO DOORS to `accepted` and only one was fenced. submit_review
+   * (migration 20260916180034) demands a current review lease, and claim_review
+   * (20260915220223) refuses with reason `self-review` when the claimer
+   * returned the work. accept_task takes neither: it PATCHes the row directly,
+   * so the SQL bar guards a door it never opens. On 2026-09-17
+   * t-wire-gate-scripts reached `accepted` with reviewer NULL and
+   * review_lease_token NULL by exactly that route.
+   *
+   * AN UNNAMED ACCEPTER IS UNKNOWN, NOT NOBODY. Absent refuses, unless the
+   * caller says `forecast` -- see the dispatcher, which prepares a review
+   * proposal before any accepter exists. `forecast` is never set on a path that
+   * writes.
+   */
+  if (!nonEmpty(by)) {
+    if (!forecast) {
+      errors.push('the accepter is not identified; an accept must name the session signing it off');
+    }
+  } else if (nonEmpty(task.returned_by) && task.returned_by === by) {
+    errors.push(`${by} returned this work and cannot also accept it`
+      + ' — one party on both sides is a formality, not a review');
+  }
 
   if (TERMINAL.includes(task.state)) {
     errors.push(`task is already "${task.state}"`);
@@ -1749,13 +1779,18 @@ export function proposeWork({ tasks = [], sessions = [], now, isLive }) {
      * worker's finished contract.
      */
     if (task.state === 'returned') {
-      const verdict = canAccept(task, { at: now });
+      // A FORECAST. No accepter exists yet, so the identity question is
+      // deferred rather than skipped, and the answer travels as
+      // `may_not_be_accepted_by`.
+      const verdict = canAccept(task, { at: now, forecast: true });
       proposals.push({
         kind: 'review',
         task_id: task.task_id,
         // Who did it, and what to look at. The dispatcher forms no opinion on
         // whether the work is GOOD -- it cannot read a diff.
         returned_by: task.returned_by ?? null,
+        // The worker that did it cannot be the one that signs it off.
+        may_not_be_accepted_by: task.returned_by ?? null,
         head_sha: task.returned_head_sha ?? null,
         notes: task.returned_notes ?? null,
         would_be_accepted: verdict.ok,
@@ -1839,7 +1874,7 @@ export function proposeWork({ tasks = [], sessions = [], now, isLive }) {
  * and trusting it would turn a supervised dispatcher into an autonomous one
  * with an hour of lag.
  */
-export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, staleAfterMs = PROPOSAL_STALE_AFTER_MS } = {}) {
+export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, by, staleAfterMs = PROPOSAL_STALE_AFTER_MS } = {}) {
   const errors = [];
 
   if (!proposal || !PROPOSAL_KINDS.includes(proposal.kind)) {
@@ -1871,7 +1906,9 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
   }
 
   if (proposal.kind === 'review') {
-    const verdict = canAccept(task, { at: now });
+    // NO `forecast` HERE. Confirming a review IS the accept, so the accepter is
+    // named and must not be the session that returned the work.
+    const verdict = canAccept(task, { at: now, by });
     if (!verdict.ok) errors.push(...verdict.errors);
     return { ok: errors.length === 0, errors };
   }

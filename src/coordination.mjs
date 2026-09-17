@@ -827,10 +827,53 @@ export function returnRecord(task, worker, { headSha, notes = null, at }) {
  * on a task nobody returned -- accepting straight from `assigned` would be
  * signing off work that was never handed in.
  */
-export function canAccept(task, { at } = {}) {
+export function canAccept(task, { at, by, forecast = false } = {}) {
   const errors = [];
 
   if (!task || !nonEmpty(task.task_id)) return { ok: false, errors: ['no such task'] };
+
+  /*
+   * WHO IS SIGNING THIS OFF, and it is a required answer.
+   *
+   * This function used to take (task, { at }) and never learned the accepter's
+   * identity at all -- it entered only at acceptRecord({ by }), AFTER the
+   * verdict had already been returned. So it could not refuse a self-accept
+   * however carefully anyone called it.
+   *
+   * That matters because there are TWO DOORS to `accepted` and only one was
+   * fenced. submit_review (migration 20260916180034) demands a current review
+   * lease, and claim_review (20260915220223) refuses with reason `self-review`
+   * when the claimer returned the work. The accept_task tool takes neither: it
+   * PATCHes the row directly, so the SQL bar guards a door it never opens. On
+   * 2026-09-17 t-wire-gate-scripts reached `accepted` with reviewer NULL and
+   * review_lease_token NULL by exactly that route.
+   *
+   * AN UNNAMED ACCEPTER IS UNKNOWN, NOT NOBODY. Absent refuses. An identity
+   * check that is skipped when the caller omits the identity is not a check --
+   * it is the hollow gate, and every caller that forgot would look green.
+   */
+  if (!nonEmpty(by)) {
+    /*
+     * FORECAST IS NOT AUTHORISATION, and it is a separate word on purpose.
+     *
+     * The dispatcher prepares a review proposal before any accepter exists, so
+     * at prepare time the identity is genuinely unknown rather than withheld.
+     * `forecast` says so out loud and buys exactly one thing: the row is judged
+     * on its own merits with the identity question deferred.
+     *
+     * It is never set on a path that WRITES. acceptTask and canConfirm both
+     * name their accepter, and `test/dispatch.test.mjs` asserts that the
+     * writing paths refuse an unnamed one -- because a flag that switches a
+     * check off is worth exactly as much as the test that proves nobody
+     * writing state sets it.
+     */
+    if (!forecast) {
+      errors.push('the accepter is not identified; an accept must name the session signing it off');
+    }
+  } else if (nonEmpty(task.returned_by) && task.returned_by === by) {
+    errors.push(`${by} returned this work and cannot also accept it`
+      + ' — one party on both sides is a formality, not a review');
+  }
 
   if (TERMINAL.includes(task.state)) {
     errors.push(`task is already "${task.state}"`);

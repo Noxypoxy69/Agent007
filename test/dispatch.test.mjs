@@ -103,6 +103,10 @@ test('RETURNED WORK IS A REVIEW, never a reassignment', () => {
   assert.equal(proposals[0].agent_id, undefined, 'a review proposal must not name a new assignee');
   assert.equal(proposals[0].head_sha, 'a'.repeat(40));
   assert.equal(proposals[0].would_be_accepted, true);
+
+  // The forecast defers the accepter's identity; it does not drop it. The one
+  // session that must not sign this off travels with the proposal.
+  assert.equal(proposals[0].may_not_be_accepted_by, 'danny-win-f1');
 });
 
 test('the dispatcher forms no opinion on whether work is GOOD', () => {
@@ -203,12 +207,42 @@ test('an undateable or future-dated proposal is refused', () => {
 test('confirming a review re-checks that the task is still returned', () => {
   const p = { kind: 'review', task_id: 't1', prepared_at: ago(60_000) };
   const returned = task({ state: 'returned', returned_by: 's1', returned_head_sha: 'c'.repeat(40) });
-  assert.equal(canConfirm(p, { task: returned, now: NOW, isLive: alive }).ok, true);
+  assert.equal(canConfirm(p, { task: returned, now: NOW, isLive: alive, by: 'coord' }).ok, true);
 
   // Somebody accepted it in the meantime.
   const r = canConfirm(p, { task: task({ state: 'accepted' }), now: NOW, isLive: alive });
   assert.equal(r.ok, false);
   assert.match(r.errors.join(' '), /already "accepted"/);
+});
+
+/*
+ * CONFIRMING A REVIEW IS AN ACCEPT, so it carries the accept's fence.
+ *
+ * `forecast` exists so the dispatcher can prepare a review proposal before any
+ * accepter is known. The danger of any flag that switches a check off is that
+ * a writing path sets it, so these two cases pin the writing path: confirm must
+ * name an accepter, and must refuse the session that returned the work.
+ *
+ * Written against the real hole. On 2026-09-17 t-wire-gate-scripts reached
+ * `accepted` with reviewer NULL and review_lease_token NULL, because the write
+ * path never asked who was signing it off.
+ */
+test('confirming a review REFUSES the session that returned the work', () => {
+  const p = { kind: 'review', task_id: 't1', prepared_at: ago(60_000) };
+  const returned = task({ state: 'returned', returned_by: 's1', returned_head_sha: 'c'.repeat(40) });
+
+  const self = canConfirm(p, { task: returned, now: NOW, isLive: alive, by: 's1' });
+  assert.equal(self.ok, false, 's1 returned this work and must not confirm its own review');
+  assert.match(self.errors.join(' '), /returned this work/);
+});
+
+test('confirming a review REFUSES an unnamed accepter — forecast is not a write mode', () => {
+  const p = { kind: 'review', task_id: 't1', prepared_at: ago(60_000) };
+  const returned = task({ state: 'returned', returned_by: 's1', returned_head_sha: 'c'.repeat(40) });
+
+  const anon = canConfirm(p, { task: returned, now: NOW, isLive: alive });
+  assert.equal(anon.ok, false, 'an unnamed accepter is unknown, not nobody');
+  assert.match(anon.errors.join(' '), /not identified/);
 });
 
 test('an unknown proposal kind confirms nothing', () => {

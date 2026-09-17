@@ -81,13 +81,21 @@ export function proposeWork({ tasks = [], sessions = [], now, isLive }) {
      * worker's finished contract.
      */
     if (task.state === 'returned') {
-      const verdict = canAccept(task, { at: now });
+      // A FORECAST. No accepter exists yet, so the identity question is
+      // deferred rather than skipped -- and the answer to it travels with the
+      // proposal as `may_not_be_accepted_by`, so whoever confirms can see the
+      // one session that must not be them.
+      const verdict = canAccept(task, { at: now, forecast: true });
       proposals.push({
         kind: 'review',
         task_id: task.task_id,
         // Who did it, and what to look at. The dispatcher forms no opinion on
         // whether the work is GOOD -- it cannot read a diff.
         returned_by: task.returned_by ?? null,
+        // The worker that did it cannot be the one that signs it off. Recorded
+        // so the constraint is visible in the proposal, not only enforced when
+        // somebody tries.
+        may_not_be_accepted_by: task.returned_by ?? null,
         head_sha: task.returned_head_sha ?? null,
         notes: task.returned_notes ?? null,
         would_be_accepted: verdict.ok,
@@ -171,7 +179,7 @@ export function proposeWork({ tasks = [], sessions = [], now, isLive }) {
  * and trusting it would turn a supervised dispatcher into an autonomous one
  * with an hour of lag.
  */
-export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, staleAfterMs = PROPOSAL_STALE_AFTER_MS } = {}) {
+export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, by, staleAfterMs = PROPOSAL_STALE_AFTER_MS } = {}) {
   const errors = [];
 
   if (!proposal || !PROPOSAL_KINDS.includes(proposal.kind)) {
@@ -203,7 +211,14 @@ export function canConfirm(proposal, { task, worker, tasks = [], now, isLive, st
   }
 
   if (proposal.kind === 'review') {
-    const verdict = canAccept(task, { at: now });
+    /*
+     * NO `forecast` HERE. Confirming a review IS the accept, so the accepter
+     * must be named and must not be the session that returned the work. This
+     * is the gate the accept_task door did not have: on 2026-09-17
+     * t-wire-gate-scripts reached `accepted` with reviewer NULL because the
+     * write path never asked who was signing it off.
+     */
+    const verdict = canAccept(task, { at: now, by });
     if (!verdict.ok) errors.push(...verdict.errors);
     return { ok: errors.length === 0, errors };
   }

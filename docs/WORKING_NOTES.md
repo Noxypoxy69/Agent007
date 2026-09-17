@@ -9,11 +9,17 @@ version — those rot, and twelve documents in this repository already rotted th
 way. Anything that changes lives behind a command, and the command is here.
 
 **Paths assume this machine.** The repository is
-`C:\Users\DANNY GARCIA\Documents\agentbridge\agentbridge` and the shorthand
+`$env:USERPROFILE\Documents\agentbridge\agentbridge` and the shorthand
 `$AB` below means exactly that. PowerShell, not bash.
 
+**The paths are written from `$env:USERPROFILE`, not spelled out.** Not style:
+`test/leakRegression.test.mjs` scans `src/` and `docs/` for real identity values
+and fails the build on one. The first version of this file hard-coded the home
+directory and went red the moment the suite ran over it — which is the gate
+working, on the person who widened it.
+
 ```powershell
-$AB = "C:\Users\DANNY GARCIA\Documents\agentbridge\agentbridge"
+$AB = "$env:USERPROFILE\Documents\agentbridge\agentbridge"
 $BR = "node `"$AB\bin\agentbridge.mjs`""
 ```
 
@@ -27,7 +33,7 @@ stale after 991 seconds with the process sitting right there. The watcher is a
 child of your own shell, it dies with your session, and nothing restarts it.
 
 ```powershell
-$env:AGENTBRIDGE_REGISTRATION_TOKEN = (Get-Content "C:\Users\DANNY GARCIA\Documents\agentbridge-secrets\registration-token.txt" -Raw).Trim()
+$env:AGENTBRIDGE_REGISTRATION_TOKEN = (Get-Content "$env:USERPROFILE\Documents\agentbridge-secrets\registration-token.txt" -Raw).Trim()
 node "$AB\bin\agentbridge.mjs" register-session --agent <you> --session <your-session> --lane <lane> --capacity idle --watch --interval 60
 ```
 
