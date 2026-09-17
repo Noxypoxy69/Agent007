@@ -13,7 +13,10 @@
  * not "nothing changed".
  */
 import { spawnSync } from 'node:child_process';
-import { readSnapshot, protectedDrift, baselineTestDrift, discoverTests } from '../src/guardSession.mjs';
+import {
+  readSnapshot, protectedDrift, baselineTestDrift, discoverTests,
+  baselineBlockingDriftFromGit, writeSnapshot,
+} from '../src/guardSession.mjs';
 
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
@@ -35,9 +38,58 @@ const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
  * overwrote one file.
  */
 const sessionId = input.session_id ?? null;
-const snapshot = readSnapshot(root, sessionId);
+let snapshot = readSnapshot(root, sessionId);
 if (!snapshot) {
-  out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}. Refusing: an absent baseline is not a clean one.`);
+  /*
+   * A MISSING BASELINE USED TO BE A DEAD END, AND IT BRICKED REAL SESSIONS.
+   *
+   * Refusing on an absent snapshot is right -- absent is not clean -- but there
+   * was no way back. A session whose SessionStart never ran (begun before the
+   * hook was wired, or outside the repo) cannot write its own baseline, because
+   * only --session-start does, and it cannot run that either: `node` is
+   * allowlisted only with --test. So it blocked, retried and blocked again,
+   * forever. Observed on the operator's machine 2026-09-17, on every terminal at
+   * once. A control with no recovery path is an outage, and an outage is how a
+   * guard gets switched off entirely.
+   *
+   * So the gate now asks git, which does not need a snapshot to have an opinion,
+   * and mints a baseline ONLY from a tree git calls clean. It still blocks this
+   * turn either way -- nothing here approves anything -- but a recoverable state
+   * becomes recoverable on the next one.
+   */
+  const gitDrift = baselineBlockingDriftFromGit(root);
+
+  /* null is "could not measure", which is not "measured clean" (rule: absent is not zero). */
+  if (gitDrift === null) {
+    out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}, and git could not be consulted to check the protected files independently. Refusing: unknown is not clean.`);
+  }
+
+  /*
+   * NEVER MINT A BASELINE FROM A MODIFIED TREE. That is exactly the reset bypass
+   * writeSnapshot's exclusive create exists to stop -- damage a protected file,
+   * acquire a baseline that says the damage was always there. If the protected
+   * files already differ, this session does not get to declare that normal.
+   */
+  if (gitDrift.length) {
+    /*
+     * The advice is per status code because "commit or restore these" is useless
+     * for an untracked file, and `.claude/` is a PREFIX entry -- so a stray
+     * untracked file under it blocks minting forever, which is its own outage.
+     * An untracked file there is still refused rather than waved through: local
+     * settings can switch hooks off, so a file this session could have created
+     * is not something it gets to certify as normal.
+     */
+    const advise = (code) => (code.startsWith('?')
+      ? 'untracked: delete it, commit it, or add it to .gitignore'
+      : 'modified or deleted: commit it or restore it with git');
+    out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}, and files the baseline would cover already differ from git, so a baseline taken now would adopt that state as normal:\n${gitDrift.map((d) => `  ${d.file} [${d.kind}] ${d.now} -- ${advise(d.now)}`).join('\n')}\nResolve these, or start a fresh session so SessionStart records a baseline properly.`);
+  }
+
+  const minted = writeSnapshot(root, sessionId);
+  if (!minted.ok) {
+    out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}, and one could not be created: ${minted.reason}`);
+  }
+  out(`[agentbridge:baseline-created] This session had no baseline, so THIS TURN COULD NOT BE VERIFIED and is not approved. git reports the protected files and baseline tests match the repository, so a baseline has now been recorded at ${minted.file}. The next turn will be checked against it normally.`);
 }
 
 const drift = protectedDrift(root, snapshot);

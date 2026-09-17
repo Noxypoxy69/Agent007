@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -219,6 +220,64 @@ export function protectedDrift(repoRoot, snapshot) {
         file: rel,
         now: now === null ? 'deleted' : (before === null ? 'added' : 'changed'),
       });
+    }
+  }
+  return drift;
+}
+
+/**
+ * Drift measured against git for a session that has NO snapshot: the protected
+ * paths AND the baseline tests, which are what a snapshot would have covered.
+ *
+ * WHY THIS EXISTS. A session whose SessionStart never ran -- because it began
+ * before the hook was wired, or outside the repo -- has no baseline, and the Stop
+ * gate refuses on a missing baseline because an absent one is not a clean one.
+ * That was correct and it BRICKED those sessions: they cannot write their own
+ * baseline (only --session-start does) and they cannot run that command either
+ * (`node` is allowlisted only with --test). Block, retry, block, forever, with no
+ * recovery path from inside. Observed on the operator's machine 2026-09-17.
+ *
+ * So the gate needs a second opinion that does not depend on a snapshot, and git
+ * is one: the protected files are all tracked, so git already knows whether they
+ * differ from HEAD.
+ *
+ * ASKS GIT RATHER THAN COMPARING BYTES, DELIBERATELY. Hashing the working file
+ * against `git show HEAD:path` reports every file as drifted on a checkout with
+ * core.autocrlf=true, which is the operator's. That would have turned a recovery
+ * path into a second outage. `git status` applies the repo's own eol and
+ * .gitattributes rules, so it answers the question actually being asked.
+ *
+ * COVERS BASELINE TESTS AS WELL AS PROTECTED PATHS, and the first version did
+ * not. A snapshot records every test file, but only test/claudeGuard.test.mjs is
+ * a PROTECTED path -- so checking protected paths alone let a session weaken any
+ * other test, mint a baseline from a tree this function called clean, and have
+ * the weakened test recorded as normal. That is the reset bypass rebuilt through
+ * a different door, and it was measured, not theorised.
+ *
+ * Returns null when git cannot answer -- NOT an empty array. A caller must treat
+ * "could not measure" as unknown, never as clean.
+ */
+export function baselineBlockingDriftFromGit(repoRoot) {
+  let out;
+  try {
+    out = execFileSync('git', ['status', '--porcelain'], {
+      cwd: repoRoot, encoding: 'utf8', timeout: 20000, windowsHide: true,
+    });
+  } catch {
+    return null;
+  }
+  const drift = [];
+  for (const line of out.split('\n')) {
+    if (line.trim() === '') continue;
+    const status = line.slice(0, 2);
+    /* Renames read "R  old -> new"; both sides matter. */
+    const paths = line.slice(3).split(' -> ').map((p) => p.trim().replace(/^"|"$/g, ''));
+    for (const rel of paths) {
+      if (rel === '') continue;
+      const norm = rel.split(path.sep).join('/');
+      const kind = isProtectedRelPath(norm) ? 'protected'
+        : (/^test\/.+\.test\.mjs$/i.test(norm) ? 'baseline-test' : null);
+      if (kind) drift.push({ file: norm, now: status.trim(), kind });
     }
   }
   return drift;
