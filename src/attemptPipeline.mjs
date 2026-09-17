@@ -28,6 +28,7 @@
 import { execute } from './executorAdapter.mjs';
 import { guardExecution, OUTCOME } from './preExecutionGuard.mjs';
 import { permissionScope, agentLaunch } from './agentPermissions.mjs';
+import { resolveBinary } from './resolveBinary.mjs';
 import { startAttempt, finishAttempt, crashAttempt } from './attemptRecord.mjs';
 import { compileContext } from './contextCompiler.mjs';
 import { collectEvidence } from './evidenceCollector.mjs';
@@ -167,6 +168,50 @@ export async function runAttempt({
     }
   }
 
+  /*
+   * CAN THIS ENGINE ACTUALLY BE LAUNCHED? Asked BEFORE a workspace exists, for
+   * the same reason the guard above is: an attempt that cannot start should not
+   * leave a directory behind for somebody to clean up.
+   *
+   * agentLaunch yields `file: binary ?? engine`, and executorLocal runs its
+   * child with an empty PATH -- deliberately, because an agent inheriting the
+   * daemon's environment inherits its credentials. So a bare engine name can
+   * never resolve, and every such attempt died as a spawn failure and then
+   * retried twice against a binary that was still missing. That is why Loop B
+   * had never launched.
+   *
+   * Resolution happens HERE, in the trusted parent, and only the absolute path
+   * travels in the argv. The child's environment is untouched; it still
+   * inherits nothing. Giving the child a PATH instead would widen exactly what
+   * the allow-list narrows, and for every command it ran afterwards.
+   */
+  let resolvedBinary = null;
+  if (!task.argv && task.engine) {
+    const wanted = task.binary ?? task.engine;
+    resolvedBinary = (io.resolveBinary ?? resolveBinary)(wanted);
+    if (!resolvedBinary) {
+      /*
+       * UNLAUNCHABLE, and deliberately NOT waiting_approval. That state means a
+       * person can unblock it by saying yes; no approval installs a missing
+       * binary, so filing it there would park the attempt in a queue for ever
+       * looking like a decision nobody had made.
+       */
+      return {
+        taskId,
+        attempt,
+        verdict: 'blocked',
+        blocked: {
+          state: 'UNLAUNCHABLE',
+          engine: task.engine,
+          wanted,
+          reason: `engine "${task.engine}" resolves to ${JSON.stringify(wanted)}, which was not `
+            + 'found on the daemon PATH; the executor runs with an empty environment, so a bare '
+            + 'name cannot resolve and retrying will not make it appear',
+        },
+      };
+    }
+  }
+
   const workspace = await workspaces.create({ taskId, baseSha: task.base_sha, attempt });
 
   /*
@@ -181,7 +226,8 @@ export async function runAttempt({
    */
   const launched = (!task.argv && task.engine)
     ? agentLaunch(task.engine, {
-        binary: task.binary ?? null,
+        // The ABSOLUTE path found above, never the bare name.
+        binary: resolvedBinary,
         scope: permissionScope(
           {
             isDisposable: true,

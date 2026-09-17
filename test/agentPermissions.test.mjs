@@ -127,9 +127,26 @@ test('A TASK THAT NAMES AN ENGINE IS LAUNCHED WITH A DERIVED SCOPE', async () =>
      * classifier wants a timestamp and the executor adapter wants a clock, and
      * one field was carrying both.
      */
-    executor, workspaces, io: { now: () => Date.parse(now) },
+    /*
+     * THE RESOLVER IS INJECTED, and this test is the reason it has to be.
+     *
+     * runAttempt now resolves an engine to an absolute path before launching,
+     * because executorLocal runs with an empty PATH and a bare name cannot
+     * resolve against it -- the reason Loop B never launched. Left to the real
+     * resolver this test asserts whether claude-code happens to be installed on
+     * the machine running it, which is not what it is about and would be red on
+     * every CI runner.
+     *
+     * Worth naming: before that change this test passed on a machine with no
+     * claude-code at all, because a spy executor never spawns anything. It
+     * proved the derived scope reached the argv while the launch itself could
+     * not have worked. That is the gap, not this edit.
+     */
+    executor, workspaces,
+    io: { now: () => Date.parse(now), resolveBinary: (n) => `/abs/bin/${n}` },
   });
   assert.ok(sawArgv, 'the executor was never given an argv');
+  assert.equal(sawArgv[0], '/abs/bin/claude-code', 'the launch must carry a resolved path');
   const joined = sawArgv.join(' ');
   assert.ok(joined.includes('--permission-mode'), 'launched without a non-interactive mode');
   assert.ok(joined.includes('Bash(git commit:*)'), 'the derived rules did not reach the launch');

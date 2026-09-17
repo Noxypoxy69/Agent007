@@ -346,3 +346,74 @@ test('without a stated lease the pipeline does not invent one', async () => {
   });
   assert.equal(out.accepted, true, 'a caller that has not said what the lease is gets no guess');
 });
+
+/*
+ * LAUNCHING AN ENGINE, WHICH IS THE PATH LOOP B DIES ON.
+ *
+ * agentLaunch returns `file: binary ?? engine`, so a task naming an engine with
+ * no configured binary yields a BARE executable name. executorLocal runs its
+ * child with an allow-list environment -- PATH empty unless the spec named one,
+ * because an agent inheriting the daemon's environment inherits its
+ * credentials -- so a bare name cannot resolve. Every such attempt died as
+ * `spawn claude ENOENT` and burned two retries on a failure that is permanent.
+ *
+ * The name is now resolved in the TRUSTED PARENT and the argv carries an
+ * absolute path. The child's environment is unchanged: it still inherits
+ * nothing. Handing the child a PATH instead would widen the exact thing the
+ * allow-list narrows, for every command the agent went on to run.
+ *
+ * There was no test on this path at all before now, which is consistent with it
+ * never having worked.
+ */
+test('an engine launch resolves to an ABSOLUTE path, and the child env stays empty', async () => {
+  let sawArgv = null;
+  let sawEnv;
+  const spy = defineExecutor({
+    id: 'spy',
+    capabilities: ['shell', 'write', 'commit'],
+    run: async (spec) => {
+      sawArgv = spec.argv;
+      sawEnv = spec.env;
+      return { outcome: 'exited', exitCode: 0, stdout: GREEN, durationMs: 10 };
+    },
+  });
+
+  const out = await runAttempt({
+    task: { ...task, argv: undefined, engine: 'claude-code', project: 'p', repo: 'r', lane: 'l' },
+    contract,
+    workspaces: fakeWorkspaces(),
+    io: { ...io(), resolveBinary: (n) => (n === 'claude-code' ? '/abs/bin/claude-code' : null) },
+    executor: spy,
+    reviewer: createFakeReviewer(),
+  });
+
+  assert.equal(out.blocked ?? null, null, `unexpectedly blocked: ${JSON.stringify(out.blocked)}`);
+  assert.equal(sawArgv?.[0], '/abs/bin/claude-code', 'the argv must carry the resolved absolute path');
+  assert.ok(!(sawEnv && sawEnv.PATH), 'resolving must NOT hand the child a PATH');
+});
+
+test('an engine that cannot be found REFUSES, instead of spawning a doomed argv', async () => {
+  const workspaces = fakeWorkspaces();
+  const out = await runAttempt({
+    task: { ...task, argv: undefined, engine: 'claude-code', project: 'p', repo: 'r', lane: 'l' },
+    contract,
+    workspaces,
+    io: { ...io(), resolveBinary: () => null },
+    executor: executorThat(GREEN),
+    reviewer: createFakeReviewer(),
+  });
+
+  assert.equal(out.verdict, 'blocked');
+  assert.equal(out.blocked.state, 'UNLAUNCHABLE');
+  assert.match(out.blocked.reason, /claude-code/);
+
+  /*
+   * NOT WAITING_APPROVAL. That state means a person can unblock it by saying
+   * yes, and no approval installs a missing binary -- it would sit in an
+   * approval queue for ever looking like a decision nobody made.
+   */
+  assert.notEqual(out.blocked.state, 'WAITING_APPROVAL');
+
+  // And it stops before making a workspace it would only have to clean up.
+  assert.deepEqual(workspaces.calls.created, []);
+});
