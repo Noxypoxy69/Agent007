@@ -1,6 +1,56 @@
 #!/usr/bin/env node
-import { evaluateClaudeTool, hookDecision } from '../src/claudeGuard.mjs';
-import { writeSnapshot } from '../src/guardSession.mjs';
+/*
+ * THE IMPORT IS GUARDED, BECAUSE THIS PROCESS FAILING IS A SILENT ALLOW.
+ *
+ * Claude Code treats a non-zero PreToolUse exit (other than 2) as a NON-BLOCKING
+ * error: the tool proceeds. With static imports, a missing or broken
+ * src/claudeGuard.mjs made node exit 1 with empty stdout, so every tool call was
+ * approved by a guard that was not there. Measured 2026-09-17: exit=1, stdout
+ * empty, ERR_MODULE_NOT_FOUND.
+ *
+ * That is not hypothetical. src/claudeGuard.mjs was really deleted on the
+ * operator's machine that morning. The path list protects this file so it cannot
+ * be removed -- but the protection is what disappears when the file does, which
+ * is a bootstrapping hole no amount of PROTECTED_PATHS can close from inside.
+ *
+ * So the refusal below does not depend on anything being importable. It is
+ * written out by hand, because a fail-closed default that needs a module to load
+ * is not a fail-closed default.
+ */
+const UNLOADABLE = (detail) => `${JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse',
+    permissionDecision: 'deny',
+    permissionDecisionReason:
+      `[agentbridge:guard-unloadable] The guard could not be loaded (${detail}), so it cannot establish that `
+      + 'this operation is safe. Restore src/claudeGuard.mjs and src/guardSession.mjs from git. '
+      + 'This guard fails closed; ask the owner for an intentional override.',
+  },
+})}\n`;
+
+let evaluateClaudeTool;
+let hookDecision;
+let writeSnapshot;
+try {
+  ({ evaluateClaudeTool, hookDecision } = await import('../src/claudeGuard.mjs'));
+  ({ writeSnapshot } = await import('../src/guardSession.mjs'));
+} catch (e) {
+  const detail = String(e?.code ?? e?.message ?? e).slice(0, 120);
+  if (process.argv.includes('--session-start')) {
+    /*
+     * A SessionStart hook cannot deny anything, so there is nothing to block
+     * here. Saying so is still worth it: no snapshot gets written, and the Stop
+     * gate already refuses outright when the snapshot is missing.
+     */
+    process.stdout.write(`${JSON.stringify({
+      systemMessage: `agentbridge guard: NOT INITIALISED -- the guard could not be loaded (${detail}). `
+        + 'No snapshot was written, so the Stop gate will refuse. Restore the guard from git.',
+    })}\n`);
+  } else {
+    process.stdout.write(UNLOADABLE(detail));
+  }
+  process.exit(0);
+}
 
 /*
  * --session-start records what the repository looked like BEFORE the session.
