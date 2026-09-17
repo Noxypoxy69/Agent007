@@ -88,6 +88,52 @@ Nothing below can start until the pipeline is on master, because the worker
 cannot call what is on a branch. *This is first and it is nobody's favourite
 task, which is exactly why it gets skipped.*
 
+**1b. THERE ARE TWO LOOPS, AND THE ONE THAT RUNS HAS NO GUARDS.** — code-a, ahead of item 2
+EVIDENCE: commit 4a4d0c4 the dispatcher that assigns work autonomously
+EVIDENCE: unverifiable the import counts below are a grep of master and are restated here rather than linked, because the point is the ZEROES and a reader must be able to see them without running anything. Re-measure with: grep -c preExecutionGuard src/worker.mjs
+
+Measured 2026-09-17 while answering "is the loop almost done". It is not, and the
+risk runs the opposite way from how this file has been reading.
+
+**THE LOOP ALREADY RUNS AUTONOMOUSLY.** Task `t-wire-gate-scripts` was created at
+23:35, assigned at 00:09 by the supabase pg_cron dispatcher, executed, and
+returned at 00:15 on attempt 2 with the note "worker: wired check:edge-deploy,
+deploy:check into package.json". No human in the path. That is real autonomous
+execution and it has already happened.
+
+**AND `attempts` IS STILL 0, WHICH MEANS SOMETHING WORSE THAN "NOTHING RAN".**
+There are two execution paths for the same job:
+
+    LOOP A   agentbridge work -> worker.mjs -> workerLoop.mjs -> workerDeps.startRun
+             RUNS. Did the task above.
+             preExecutionGuard 0   agentPermissions 0   attemptRecord 0
+             contextCompiler   0   loopDetector     0   evidenceCollector 0
+
+    LOOP B   runAttempt -> attemptPipeline
+             NEVER RUN. Nothing spawns bin/agentbridge-attempt.mjs.
+             Imports all twelve: guard, permissions, attempt record, context
+             compiler, evidence, fingerprint, loop detector, reviewer packet,
+             token telemetry.
+
+The loop that executes work has none of the safety. The loop carrying every
+control built over the last two days is the one nothing calls. Those are zeroes
+from a grep of master, not an impression.
+
+**THIS IS THE SECOND-SOURCE-OF-TRUTH FAILURE, in the most expensive place
+available.** Every guard written for the runtime guards a path that does not
+execute, and the path that executes was never reviewed as a runtime because
+nobody noticed it had become one.
+
+**SO ITEM 2 IS NOT THE NEXT MOVE, AND "WIRE THE SPAWN" IS THE WRONG FRAME.** The
+two paths have to be reconciled, not connected: either Loop A calls runAttempt,
+or Loop B's guards move into Loop A. That is a design decision with lease
+semantics in it and it belongs to whoever owns the loop. Connecting them without
+choosing would give this repository three paths.
+
+*Found by c8 while answering a question, not by any gate. Nothing in the suite
+compares the imports of the path that runs against the path that is guarded, and
+that check is worth writing once somebody has decided which path survives.*
+
 **2. Wire the lease to the pipeline.** — UNBLOCKED 2026-09-17, needs an owner
 *(was code-c, dark since 12:30Z; the autonomous-loop lane is code-a's as of the
 16th, and this is lease and fence semantics, so it is not c8's to take)*
