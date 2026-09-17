@@ -50,7 +50,10 @@ test('counts unpushed commits on a branch with no upstream', async () => {
 
   const s = await gitState(wtC);
   assert.equal(s.unpushed, 1);
-  assert.equal(s.unpushedReason, 'no-upstream:vs-merge-base');
+  /* The COUNT is unchanged; only the question asked to obtain it changed. A
+   * branch on no remote has every commit unpushed under either reading. The
+   * regression at the bottom of this file covers where the two diverge. */
+  assert.equal(s.unpushedReason, 'not-on-any-remote');
   assert.equal(s.aheadOfMain, 1);
   assert.equal(s.behindMain, 0);
   assert.notEqual(s.head, s.mainSha);
@@ -77,7 +80,7 @@ test('tracks upstream once the branch is pushed', async () => {
   const s = await gitState(wtC);
   assert.equal(s.upstream, 'origin/code-c/messaging-gates');
   assert.equal(s.unpushed, 0);
-  assert.equal(s.unpushedReason, 'vs-upstream');
+  assert.equal(s.unpushedReason, 'not-on-any-remote');
 });
 
 test('detects being behind origin/main after someone else lands work', async () => {

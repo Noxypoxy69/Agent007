@@ -161,17 +161,45 @@ export async function gitState(cwd, { mainRef = 'origin/main' } = {}) {
   let baseSha = null;
   if (mainSha) baseSha = line(await git(cwd, ['merge-base', 'HEAD', mainRef]));
 
-  // Unpushed: prefer the real upstream. With no upstream the branch has never
-  // been pushed, so everything since merge-base is unpushed.
+  /*
+   * UNPUSHED MEANS "ON NO REMOTE", NOT "AHEAD OF UPSTREAM".
+   *
+   * This counted `upstream..HEAD`, which is a different question, and the two
+   * diverge exactly where it matters: a feature branch whose upstream is
+   * origin/main is ahead of main by its whole length while being pushed in full
+   * to its OWN remote ref. On 2026-09-17 that reported `unpushed 14` for
+   * d-claims-authz-b6 whose origin ref was byte-identical to local HEAD. Zero
+   * commits existed only on that disk. The number was read by two agents as
+   * stranded work and acted on, which is the cost of a field that answers a
+   * question nobody asked.
+   *
+   * `--not --remotes` asks the real question: commits reachable from HEAD and
+   * from no remote-tracking ref at all. That is the set nobody else can fetch,
+   * which is what every consumer of this field actually means -- the deploy gate
+   * above refuses an unpushed HEAD precisely because "nobody else can check out
+   * what shipped".
+   *
+   * The ahead/behind counts below still report divergence from main, which is a
+   * real and separate thing. They were never the problem; the label was.
+   */
   let unpushed = null, unpushedReason = null;
-  if (upstream) {
-    const c = line(await git(cwd, ['rev-list', '--count', `${upstream}..HEAD`]));
-    unpushed = c == null ? null : Number(c);
-    unpushedReason = 'vs-upstream';
-  } else if (baseSha) {
-    const c = line(await git(cwd, ['rev-list', '--count', `${baseSha}..HEAD`]));
-    unpushed = c == null ? null : Number(c);
-    unpushedReason = 'no-upstream:vs-merge-base';
+  {
+    const c = line(await git(cwd, ['rev-list', '--count', 'HEAD', '--not', '--remotes']));
+    if (c != null) {
+      unpushed = Number(c);
+      unpushedReason = 'not-on-any-remote';
+    } else if (upstream) {
+      /* Fall back only when the real question could not be asked, and SAY which
+       * question was answered instead -- a count whose meaning is unknown is
+       * worse than no count. */
+      const u = line(await git(cwd, ['rev-list', '--count', `${upstream}..HEAD`]));
+      unpushed = u == null ? null : Number(u);
+      unpushedReason = 'fallback:vs-upstream';
+    } else if (baseSha) {
+      const b = line(await git(cwd, ['rev-list', '--count', `${baseSha}..HEAD`]));
+      unpushed = b == null ? null : Number(b);
+      unpushedReason = 'fallback:no-upstream:vs-merge-base';
+    }
   }
 
   // Divergence from origin/main, reported as observed counts.
