@@ -2,15 +2,35 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import { evaluateClaudeTool, hookDecision, isProtectedPath } from '../src/claudeGuard.mjs';
 import { buildSnapshot, writeSnapshot, protectedDrift, discoverTests, snapshotPath } from '../src/guardSession.mjs';
 
+/*
+ * A REAL GIT REPOSITORY, BECAUSE THE GUARD ONLY EVER RUNS IN ONE.
+ *
+ * This used to be a bare temp directory. That was invisible until writeSnapshot
+ * started refusing to mint a baseline from a tree git reports as already
+ * differing -- the fix for a measured cross-session bypass -- at which point
+ * three tests here failed for a reason none of them is about. Not one of them
+ * asserts anything concerning a directory outside git; they need a fixture a
+ * baseline can legitimately be taken from, and outside git there is no such
+ * thing, because "already differs from git" has no answer there.
+ *
+ * Every assertion in those tests is unchanged. Only the setup became honest.
+ */
 function repoFixture() {
   const root = mkdtempSync(path.join(tmpdir(), 'agentbridge-guard-'));
   mkdirSync(path.join(root, 'test'));
   mkdirSync(path.join(root, '.claude'));
   writeFileSync(path.join(root, 'test', 'real.test.mjs'), 'test("real", () => {});');
+  const git = (...a) => execFileSync('git', a, { cwd: root, stdio: 'ignore' });
+  git('init', '-q', '.');
+  git('config', 'user.name', 'fixture');
+  git('config', 'user.email', 'fixture@local');
+  git('add', '-A');
+  git('commit', '-qm', 'fixture baseline');
   return root;
 }
 

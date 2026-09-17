@@ -14,8 +14,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import {
-  readSnapshot, protectedDrift, baselineTestDrift, discoverTests,
-  baselineBlockingDriftFromGit, writeSnapshot,
+  readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot,
 } from '../src/guardSession.mjs';
 
 let raw = '';
@@ -71,37 +70,40 @@ if (!snapshot) {
    * turn either way -- nothing here approves anything -- but a recoverable state
    * becomes recoverable on the next one.
    */
-  const gitDrift = baselineBlockingDriftFromGit(root);
-
-  /* null is "could not measure", which is not "measured clean" (rule: absent is not zero). */
-  if (gitDrift === null) {
-    out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}, and git could not be consulted to check the protected files independently. Refusing: unknown is not clean.`);
-  }
-
   /*
-   * NEVER MINT A BASELINE FROM A MODIFIED TREE. That is exactly the reset bypass
-   * writeSnapshot's exclusive create exists to stop -- damage a protected file,
-   * acquire a baseline that says the damage was always there. If the protected
-   * files already differ, this session does not get to declare that normal.
+   * THE REFUSAL ITSELF NOW LIVES IN writeSnapshot, NOT HERE.
+   *
+   * This path used to perform the cleanliness check and then mint. That left
+   * every OTHER caller of writeSnapshot -- notably --session-start, which is the
+   * path every session actually takes -- minting with no check at all, so a new
+   * session could baseline a damaged tree and its Stop gate would report no
+   * drift. Duplicating the check into the second caller would have been the
+   * same mistake with a longer fuse; the control belongs to the act of minting.
+   *
+   * What stays here is the WORDING, because advice is caller-specific and a
+   * refusal a person cannot act on is an outage waiting to happen.
    */
-  if (gitDrift.length) {
-    /*
-     * The advice is per status code because "commit or restore these" is useless
-     * for an untracked file, and `.claude/` is a PREFIX entry -- so a stray
-     * untracked file under it blocks minting forever, which is its own outage.
-     * An untracked file there is still refused rather than waved through: local
-     * settings can switch hooks off, so a file this session could have created
-     * is not something it gets to certify as normal.
-     */
-    const advise = (code) => (code.startsWith('?')
-      ? 'untracked: delete it, commit it, or add it to .gitignore'
-      : 'modified or deleted: commit it or restore it with git');
-    out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}, and files the baseline would cover already differ from git, so a baseline taken now would adopt that state as normal:\n${gitDrift.map((d) => `  ${d.file} [${d.kind}] ${d.now} -- ${advise(d.now)}`).join('\n')}\nResolve these, or start a fresh session so SessionStart records a baseline properly.`);
-  }
-
   const minted = writeSnapshot(root, sessionId);
   if (!minted.ok) {
-    out(`[agentbridge:no-session-snapshot] No readable snapshot for session ${sessionId ?? '(none supplied)'}, and one could not be created: ${minted.reason}`);
+    const who = `No readable snapshot for session ${sessionId ?? '(none supplied)'}`;
+    if (minted.cause === 'unmeasurable') {
+      out(`[agentbridge:no-session-snapshot] ${who}, and git could not be consulted to check the protected files independently. Refusing: unknown is not clean.`);
+    }
+    if (minted.cause === 'dirty') {
+      /*
+       * The advice is per status code because "commit or restore these" is
+       * useless for an untracked file, and `.claude/` is a PREFIX entry -- so a
+       * stray untracked file under it blocks minting forever, which is its own
+       * outage. An untracked file there is still refused rather than waved
+       * through: local settings can switch hooks off, so a file this session
+       * could have created is not something it gets to certify as normal.
+       */
+      const advise = (code) => (code.startsWith('?')
+        ? 'untracked: delete it, commit it, or add it to .gitignore'
+        : 'modified or deleted: commit it or restore it with git');
+      out(`[agentbridge:no-session-snapshot] ${who}, and ${minted.reason}:\n${minted.drift.map((d) => `  ${d.file} [${d.kind}] ${d.now} -- ${advise(d.now)}`).join('\n')}\nResolve these, or start a fresh session so SessionStart records a baseline properly.`);
+    }
+    out(`[agentbridge:no-session-snapshot] ${who}, and one could not be created: ${minted.reason}`);
   }
   out(`[agentbridge:baseline-created] This session had no baseline, so THIS TURN COULD NOT BE VERIFIED and is not approved. git reports the protected files and baseline tests match the repository, so a baseline has now been recorded at ${minted.file}. The next turn will be checked against it normally.`);
 }
