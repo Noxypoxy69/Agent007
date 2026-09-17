@@ -1,14 +1,14 @@
 {
-  "_note": "Version 25, deployed by code-d (danny-win-d1) from merged master 24c0479, authorised as d-owner-deploy-24c0479-20260917 under the standing order d-owner-deploy-process-20260916: audit, then merge, then deploy. FIRST DEPLOY VERIFIED WITH THE TREE CHECK IN THE GATE: a fresh copy of the live function was downloaded and compared before shipping, reporting +53 -5, which is the right-tree signal. That comparison is the thing that was missing when v22 to v23 shipped nothing, and the gate now REFUSES an identical tree outright. Drift none, suite 1519 tests 1515 pass 0 fail 4 skipped, verify_jwt still false. WHAT CHANGED IN BEHAVIOUR, and it is the first deploy today that a user could notice. A worker is addressable again while it is asleep: knownActorIds took its worker list from the live roster, so with zero live workers every teammate became unreachable while chatgpt, removed from the team, stayed addressable forever. And the borrowed-session guard finally has a caller, so a session named after another actor is refused at registration -- checked against all five registrations BEFORE wiring, exactly one fails, and it is the one that made t-loop-proof record returned_by social-sparks-app-c8 for work code-b did. VERIFIED AFTER, with the 409-versus-401 probe rather than the unauthenticated 401 check, which passes whether or not the routes exist because the router has no 404 fallback: /review/claim and /review/submit both 409 unknown-session, /no-such-route 401, a borrowed session id refused by name at /register, and a legitimate registration still accepted with 200. NOT IN THIS ARTIFACT: code-a drain_outbox, migration 20260916230050, already applied and already working -- the outbox reads 2 rows, 2 delivered, which closes the nine-writers-no-reader finding.",
+  "_note": "Version 26, live 2026-09-16T23:52:13.185Z, RECONCILED not deployed by this commit. The ledger said 25 and the gate refused with live-artifact-drifted, correctly. WHO RAN 26 IS NOT RECORDED BECAUSE IT IS NOT KNOWN; this file has taken four attribution corrections today and every one came from crediting a deploy to whoever was nearest. WHAT 26 CONTAINS, measured by downloading it and comparing to master 6b1147d: _shared.js is byte-identical after newline normalisation, index.ts differs, and the difference is +150 -0 -- every differing line is one master ADDS. Live holds nothing master lacks, so the next deploy is a pure superset and cannot lose work. MISSING FROM LIVE: touchLiveness (0 occurrences live, 10 in master), retireStaleSeats (0 vs 3), removeSeat (0 vs 2) -- the liveness fix is not deployed.",
   "schemaVersion": 1,
   "headSha": "24c0479ed6b12040733eb809dc14fdcdad4b4331",
   "sourceDigest": "01030a4327feeaf1",
-  "liveArtifactHash": "5c25096bcaa8269951a7e098390462f937ae6ee13585ec8a3e1d3a4d96438c72",
-  "liveVersion": 25,
-  "deployedAt": "2026-09-16T23:21:07.542Z",
-  "deployedBy": "code-d (danny-win-d1), from merged master 24c0479",
+  "liveArtifactHash": "c810ccf43a5e0fa49276f9ff6e6b69a6ede62a6f91d7f595e31ba75804b03c14",
+  "liveVersion": 26,
+  "deployedAt": "2026-09-16T23:52:13.185Z",
+  "deployedBy": "UNATTRIBUTED - not this session. Whoever ran it should claim it.",
   "verifiedBy": "code-d -- tree compared against a downloaded copy of the live artifact BEFORE shipping (+53 -5), and after: 409/401 route probe, the new borrowed-session refusal exercised by name, and a legitimate registration confirmed still accepted",
-  "previousVersion": 24,
+  "previousVersion": 25,
   "rollbackTo": {
     "version": 24,
     "liveArtifactHash": "ebf479e4f58e8f1f06b62245fe21b5d576cc26a9343bdac50e1a9de047a3ea38"
