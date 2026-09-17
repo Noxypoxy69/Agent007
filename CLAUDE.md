@@ -274,6 +274,69 @@ so `agentbridge:write-nothing` does not grant write.
 coordinator token. Do not type the coordinator token into that form unless the
 client genuinely needs to assign, accept, cancel, or record owner decisions.
 
+**A CLI OR LOCAL SESSION USES NEITHER OF THOSE.** The consent page is for remote
+MCP clients. A local session registers with `register-session`, which reads its
+credential from the environment and from nowhere else:
+
+    AGENTBRIDGE_REGISTRATION_TOKEN    a scoped token, NOT a database key
+
+Until 2026-09-17 that name appeared in ten source and test files and in no `.md`
+in this repo — the same defect the table above is about, one file lower down.
+
+**Where it is on the owner's machine, so nobody has to probe for it again:**
+
+    C:\Users\DANNY GARCIA\Documents\agentbridge-secrets\registration-token.txt
+
+That directory is OUTSIDE every worktree on purpose, so no `git add` can reach
+it. Read it at login, export it, and do not copy it into the repo, into a
+settings file, or into a shell history that gets committed:
+
+```bash
+AGENTBRIDGE_REGISTRATION_TOKEN=$(cat "/c/Users/DANNY GARCIA/Documents/agentbridge-secrets/registration-token.txt") \
+  node bin/agentbridge.mjs register-session --agent <id> --session <session> --lane <lane> --capacity idle
+```
+
+The path is recorded here; the value is not, and must never be.
+
+**Unset, registration degrades to local-only AND STILL EXITS 0:**
+
+    hosted   NOT CONFIGURED — local only, not visible to other machines
+
+The warning is printed, the exit code says success, and the agent is invisible to
+every other machine. Measured registering `fixer`, 2026-09-17.
+
+**`agentbridge heartbeat` cannot publish to the Supabase data plane.** Two
+independent reasons, both measured the same day:
+
+- `src/client.mjs:66` builds `new URL('/v1/heartbeat', bridgeUrl)`. A leading
+  slash is origin-absolute, so `/functions/v1/mcp` is discarded and the POST
+  lands on the bare origin.
+- The edge function has no heartbeat route. `index.ts:1355` strips `/mcp` and
+  dispatches `/health`, `/register`, `/return`, `/dispatch`, `/renew`, `/task`,
+  `/wait`. Nothing else.
+
+Measured 2026-09-17, unpiped so the exit code is node's and not a pipeline's,
+the two configurations fail in two DIFFERENT ways and neither is exit 0 with a
+published payload:
+
+    bridgeUrl unset  -> "local-only: no bridgeUrl configured, nothing published"
+                        exit 0.   Nothing reached the network; nothing says so
+                        louder than that line.
+    bridgeUrl set    -> "publish failed: 404", then
+                        Assertion failed: !(handle->flags & UV_HANDLE_CLOSING),
+                        file src\win\async.c, line 94
+                        exit 127.  The process ABORTS on the way out; it does
+                        not return a status anyone can branch on.
+
+So the local-only path is the 404-as-success shape that `bin/agentbridge.mjs:293`
+records as fixed on `register-session` and left in `heartbeat` — a silent no-op
+that exits clean. The configured path is worse and differently broken: a libuv
+abort on Windows, exit 127, which is the shell's "command not found" and tells a
+caller nothing true about what happened.
+
+Heartbeat is the OLD daemon protocol. The bridge roster is built from
+`/register`, which is why every row on it carries a sessionId.
+
 ## Before you start: check that nobody already did it
 
 Run this. It takes two seconds and it is the whole checklist:
