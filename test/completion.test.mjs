@@ -11,6 +11,11 @@ import {
   ATTACH,
   REFUSE,
   UNKNOWN,
+  overlapReport,
+  OVERLAP_COLLISION,
+  OVERLAP_NONE,
+  OVERLAP_UNREAD,
+  OVERLAP_NO_PATHS,
 } from '../src/completion.mjs';
 
 /**
@@ -342,4 +347,44 @@ test('goal normalisation drops stopwords and order, keeps identity', () => {
   assert.equal(normaliseGoal('Fix the CI failure'), normaliseGoal('failure CI fix'));
   assert.notEqual(normaliseGoal('wire the lease'), normaliseGoal('delete the lease'));
   assert.equal(normaliseGoal(undefined), '');
+});
+
+/* ------------------------------------------------- THE FOUR OUTCOMES */
+
+test('REFUSAL: an unread path contract is UNREAD, never "none"', () => {
+  /*
+   * THE HOLLOW-GATE FIX. The CLI test for this asserted that a HEALTHY
+   * repository reports healthy, which passed against the restored bug. Here the
+   * failure is a value, so the branch is reachable without breaking git.
+   */
+  const r = overlapReport({ overlaps: [], myPaths: [], myPathsRead: false, pathErrors: ['boom'] });
+  assert.equal(r.state, OVERLAP_UNREAD);
+  assert.notEqual(r.state, OVERLAP_NONE, 'nobody looked is not the same as nothing found');
+  assert.notEqual(r.state, OVERLAP_NO_PATHS, 'and it is not the same as a clean tree');
+  assert.equal(r.checked, false);
+  assert.deepEqual(r.pathErrors, ['boom'], 'the cause must survive to the report');
+});
+
+test('an unread contract stays UNREAD even when paths happen to be present', () => {
+  // A partial read that yielded something is still not a read.
+  const r = overlapReport({ overlaps: [], myPaths: ['src/a.mjs'], myPathsRead: false });
+  assert.equal(r.state, OVERLAP_UNREAD);
+});
+
+test('a clean tree is NO_PATHS, and a real check with no hits is NONE', () => {
+  assert.equal(overlapReport({ myPaths: [], myPathsRead: true }).state, OVERLAP_NO_PATHS);
+  const none = overlapReport({ myPaths: ['src/a.mjs'], myPathsRead: true, frontsChecked: 7 });
+  assert.equal(none.state, OVERLAP_NONE);
+  assert.equal(none.checked, true, 'NONE is the only no-collision outcome that was actually checked');
+  assert.equal(none.frontsChecked, 7);
+});
+
+test('a collision outranks everything, including an unread contract', () => {
+  const r = overlapReport({
+    overlaps: [{ work_item_id: 'b/x', shared_paths: ['src/a.mjs'] }],
+    myPaths: [],
+    myPathsRead: false,
+  });
+  assert.equal(r.state, OVERLAP_COLLISION, 'a collision already found is not erased by a later failure');
+  assert.equal(r.checked, true);
 });

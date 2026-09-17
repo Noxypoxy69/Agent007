@@ -2093,6 +2093,22 @@ try {
       return n;
     })();
 
+    /*
+     * VALIDATED BEFORE ANY SUBPROCESS RUNS. This used to sit after the ls-remote
+     * loop, so a typo cost a full remote scan before the refusal, and it called
+     * process.exit(2) where every other refusal in this command calls done(2) --
+     * inconsistent, and process.exit after child_process work is the shape that
+     * trips the libuv assertion this file already documents elsewhere.
+     */
+    let pathsFlag = null;
+    if (args.paths !== undefined) {
+      if (typeof args.paths !== 'string' || args.paths.trim() === '') {
+        console.error('--paths: expected a comma-separated list of repository paths');
+        handled = true; done(2);
+      }
+      pathsFlag = args.paths;
+    }
+
     const errors = [];
     /*
      * A SEPARATE ERROR CHANNEL, BECAUSE THESE ARE DIFFERENT QUESTIONS.
@@ -2194,16 +2210,35 @@ try {
      * a contract out of it would reintroduce the failure this half exists for.
      */
     let myPaths = [];
-    if (typeof args.paths === 'string' && args.paths.trim() !== '') {
-      myPaths = args.paths.split(',').map((x) => x.trim()).filter((x) => x !== '');
-    } else if (args.paths !== undefined) {
-      console.error('--paths: expected a comma-separated list of repository paths');
-      process.exit(2);
+    /*
+     * myPathsRead DISTINGUISHES "you have touched nothing" FROM "I could not
+     * look". Without it an empty myPaths printed "your working tree is clean"
+     * after a failed read -- absent reported as zero, in the branch whose whole
+     * job is reporting it, under a comment claiming nothing is swallowed.
+     */
+    let myPathsRead = true;
+    if (pathsFlag !== null) {
+      myPaths = pathsFlag.split(',').map((x) => x.trim()).filter((x) => x !== '');
     } else {
+      /*
+       * TRACKED CHANGES **AND** UNTRACKED FILES. `git diff --name-only HEAD`
+       * lists neither new files nor anything never added, so two agents creating
+       * the SAME NEW MODULE -- the most ordinary duplication there is -- was
+       * invisible to this check. src/completion.mjs, the module that owns the
+       * overlap, was itself invisible to it on the run that shipped it.
+       */
       try {
-        const { stdout } = await run('git', ['diff', '--name-only', 'HEAD'], { cwd: repo, maxBuffer: 8e6 });
-        myPaths = stdout.split('\n').map((f) => f.trim()).filter((f) => f !== '');
-      } catch (e) { pathErrors.push(`working tree paths: ${e?.message ?? e}`); }
+        const [{ stdout: changed }, { stdout: untracked }] = await Promise.all([
+          run('git', ['diff', '--name-only', 'HEAD'], { cwd: repo, maxBuffer: 8e6 }),
+          run('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repo, maxBuffer: 8e6 }),
+        ]);
+        myPaths = [...new Set(
+          `${changed}\n${untracked}`.split('\n').map((f) => f.trim()).filter((f) => f !== ''),
+        )];
+      } catch (e) {
+        myPathsRead = false;
+        pathErrors.push(`working tree paths: ${e?.message ?? e}`);
+      }
     }
 
     /*
@@ -2218,12 +2253,20 @@ try {
       .filter((b) => !b.merged && Array.isArray(b.paths))
       .map((b) => ({ repo: repoId, work_item_id: b.name, agent_id: null, paths: b.paths }));
     const unreadableFronts = branches.filter((b) => !b.merged && b.paths === null).length;
-    // pathErrors is surfaced, never swallowed -- see the NOTE line in the output.
     const overlaps = C.overlapping({ repo: repoId, paths: myPaths, items: frontsWithPaths });
+    /*
+     * THE DECISION IS overlapReport(), NOT THESE BRANCHES. Rendering is all that
+     * happens here, so the four outcomes -- and especially "none" versus
+     * "nobody looked" -- stay testable without breaking git in a subprocess.
+     */
+    const report = C.overlapReport({
+      overlaps, myPaths, myPathsRead,
+      frontsChecked: frontsWithPaths.length, unreadableFronts, pathErrors,
+    });
 
     const result = P.priorWork({ branches, commits, query: topic, ok: errors.length === 0, errors });
 
-    if (args.json) { console.log(JSON.stringify({ topic, hours, myPaths, overlaps, unreadableFronts, pathErrors, ...result }, null, 2)); handled = true; done(result.verdict === 'unknown' ? 2 : 0); }
+    if (args.json) { console.log(JSON.stringify({ topic, hours, myPaths, myPathsRead, overlapState: report.state, overlaps, unreadableFronts, pathErrors, ...result }, null, 2)); handled = true; done(result.verdict === 'unknown' ? 2 : 0); }
 
     if (!topic) {
       console.log('check-first: name the topic you are about to work on, e.g.\n  agentbridge check-first "roster liveness heartbeat"\n');
@@ -2240,26 +2283,45 @@ try {
     }
 
     /*
-     * PRINTED BEFORE THE VERDICT, AND IT EXITS NON-ZERO ON ITS OWN. A path
-     * collision is a harder fact than a topic match: prose similarity is a
-     * guess, a shared file is not. Measured on the pair that started all this --
-     * 5083feb and 066d32e both changed test/leakRegression.test.mjs.
+     * PRINTED BEFORE THE VERDICT, AND IT DOES NOT CHANGE THE EXIT CODE -- see
+     * the note at the end of this command for why. This comment said "EXITS
+     * NON-ZERO ON ITS OWN" when it was committed, which was false: the exit had
+     * already been reverted to 0 and the comment was not updated. Shipped in the
+     * same commit that corrected a different false comment eleven lines above.
+     * A stale comment is not a smaller defect for being adjacent to the fix.
+     *
+     * A path collision is a harder fact than a topic match: prose similarity is
+     * a guess, a shared file is not. Measured on the pair that started all this
+     * -- 5083feb and 066d32e both changed test/leakRegression.test.mjs.
      */
-    if (overlaps.length) {
+    if (report.state === C.OVERLAP_COLLISION) {
       console.log(`\nPATH OVERLAP — ${overlaps.length} unmerged branch(es) already change files you are touching:`);
       for (const o of overlaps) {
         console.log(`  ${String(o.work_item_id).padEnd(44)} ${o.shared_paths.length} shared`);
         for (const sp of o.shared_paths.slice(0, 6)) console.log(`      ${sp}`);
       }
       console.log('\nThis is a FILE collision, not a guess. Read those branches before you write.');
-    } else if (myPaths.length === 0) {
+    } else if (report.state === C.OVERLAP_UNREAD) {
+      console.log('\npath overlap: NOT CHECKED — your own changed paths could not be read.');
+      console.log('  This is not "no collision". Re-run, or pass --paths explicitly.');
+    } else if (report.state === C.OVERLAP_NO_PATHS) {
       console.log('\npath overlap: not checked — no paths given and your working tree is clean.');
       console.log('  Pass --paths a,b to ask before you start rather than after.');
     } else {
       console.log(`\npath overlap: none, across ${frontsWithPaths.length} unmerged branch(es) (${myPaths.length} path(s) of yours).`);
     }
     if (unreadableFronts > 0) {
-      console.log(`  NOTE: ${unreadableFronts} unmerged branch(es) could not be read and were NOT checked.`);
+      console.log(`  NOTE: ${unreadableFronts} unmerged branch(es) were absent or unreadable and were NOT checked.`);
+    }
+    /*
+     * PRINTED ON ITS OWN CONDITION. Gating this on unreadableFronts meant a
+     * working-tree failure -- which increments no branch counter -- printed
+     * nothing at all, while the comment above it said pathErrors is never
+     * swallowed. A claim about output has to be checked against the branch that
+     * produces the output, not against the line that collects the data.
+     */
+    if (pathErrors.length > 0) {
+      console.log(`  ${pathErrors.length} path read(s) failed:`);
       for (const e of pathErrors.slice(0, 3)) console.log(`        ${e}`);
     }
 

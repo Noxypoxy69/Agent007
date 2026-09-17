@@ -325,3 +325,48 @@ export function canComplete({
 
   return { ok: errors.length === 0, errors };
 }
+
+/**
+ * WHAT THE OVERLAP CHECK SHOULD SAY — as a value, so the failure branches can
+ * be tested without arranging for git to break.
+ *
+ * THIS EXISTS BECAUSE A TEST OF THE INLINE VERSION WAS HOLLOW. The CLI decided
+ * this in four chained else-ifs, so the only way to reach the "I could not read
+ * your paths" branch was to genuinely break git in a child process. The test
+ * written instead asserted that a HEALTHY repository reports healthy, passed
+ * against the restored bug, and proved nothing -- a gate that only permits.
+ *
+ * FOUR OUTCOMES, AND THEY ARE NOT THREE. `none` and `unread` are both "no
+ * collision reported" and must never collapse: one means nothing overlaps, the
+ * other means nobody looked. That distinction is the entire lesson of this
+ * repository and it kept being lost at the point of rendering it.
+ */
+export const OVERLAP_COLLISION = 'collision';
+export const OVERLAP_NONE = 'none';
+export const OVERLAP_UNREAD = 'unread';
+export const OVERLAP_NO_PATHS = 'no-paths';
+
+export function overlapReport({
+  overlaps = [],
+  myPaths = [],
+  myPathsRead = true,
+  frontsChecked = 0,
+  unreadableFronts = 0,
+  pathErrors = [],
+} = {}) {
+  const base = { frontsChecked, unreadableFronts, pathErrors: [...pathErrors] };
+
+  if (Array.isArray(overlaps) && overlaps.length > 0) {
+    return { ...base, state: OVERLAP_COLLISION, overlaps, checked: true };
+  }
+  // ORDER MATTERS: an unread contract is checked BEFORE emptiness, because a
+  // failed read also produces an empty path list and would otherwise render as
+  // "your working tree is clean" -- the exact sentence that is false.
+  if (myPathsRead !== true) {
+    return { ...base, state: OVERLAP_UNREAD, overlaps: [], checked: false };
+  }
+  if (!Array.isArray(myPaths) || myPaths.length === 0) {
+    return { ...base, state: OVERLAP_NO_PATHS, overlaps: [], checked: false };
+  }
+  return { ...base, state: OVERLAP_NONE, overlaps: [], checked: true, pathCount: myPaths.length };
+}

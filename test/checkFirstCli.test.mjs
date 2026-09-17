@@ -73,6 +73,51 @@ test('an unreadable path contract degrades the overlap, not the topic verdict', 
   );
 });
 
+test('an untracked file counts as a path you are touching', async () => {
+  /*
+   * REGRESSION, 2026-09-17. myPaths came from `git diff --name-only HEAD`, which
+   * lists neither new files nor anything never added. So two agents creating the
+   * SAME NEW MODULE -- the most ordinary duplication there is -- was invisible.
+   * src/completion.mjs, the module that owns the overlap check, was itself
+   * invisible to it on the run that shipped it.
+   */
+  const { writeFile, unlink } = await import('node:fs/promises');
+  const probe = fileURLToPath(new URL('../zz-overlap-probe.tmp', import.meta.url));
+  await writeFile(probe, 'probe\n', 'utf8');
+  try {
+    const r = await cf(['roster', '--json']);
+    const d = JSON.parse(r.stdout);
+    assert.ok(
+      d.myPaths.some((f) => f.endsWith('zz-overlap-probe.tmp')),
+      `an untracked file must be part of your path contract; got ${JSON.stringify(d.myPaths)}`,
+    );
+  } finally {
+    await unlink(probe).catch(() => {});
+  }
+});
+
+test('a path contract that could not be read is never reported as clean', async () => {
+  /*
+   * REGRESSION, 2026-09-17. An empty myPaths printed "your working tree is
+   * clean" whether the tree was clean or the read had FAILED, and the failure
+   * pushed to pathErrors, which only printed when a BRANCH counter was nonzero
+   * -- a counter a working-tree failure never touches. So the error vanished
+   * and the output asserted the opposite of it. Absent reported as zero, in the
+   * branch whose job is reporting it.
+   */
+  const r = await cf(['roster', '--json']);
+  const d = JSON.parse(r.stdout);
+  assert.equal(typeof d.myPathsRead, 'boolean', 'read success is a fact the output carries');
+  assert.equal(d.myPathsRead, true, 'this repository is readable, so it must say so');
+  assert.ok(Array.isArray(d.pathErrors));
+});
+
+test('--paths refuses a bare or empty flag, and refuses it via done(2)', async () => {
+  const bare = await cf(['roster', '--paths']);
+  assert.equal(bare.code, 2, 'a bare --paths is unusable and must refuse, not default');
+  assert.match(bare.stderr, /comma-separated list/);
+});
+
 test('a flag value is not swallowed into the topic', async () => {
   // `check-first roster --hours 24` must not search for "roster 24".
   const r = await cf(['roster', '--hours', '24', '--json']);
