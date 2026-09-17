@@ -14,7 +14,9 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
     "bridge": "node bridge/server.mjs",
-    "mcp:stdio": "node mcp/stdio.mjs"
+    "mcp:stdio": "node mcp/stdio.mjs",
+    "check:edge-deploy": "node scripts/check-edge-deploy.mjs",
+    "deploy:check": "node bin/agentbridge-deploy-check.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
