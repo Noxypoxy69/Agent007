@@ -142,6 +142,25 @@ export function segments(command) {
     .filter((s) => s !== '');
 }
 
+/*
+ * THE ALLOWLIST, EXPORTED SO A GATE CAN GENERATE FROM IT RATHER THAN RESTATE IT.
+ *
+ * CLAUDE.md rule 2: a check that RECONSTRUCTS the rule agrees with itself
+ * straight through the regression it exists to catch. A gate that carried its
+ * own copy of these names would keep passing after somebody added a writer here.
+ *
+ * And rule 8: an adversarial probe bounds nothing. Listing the destructive verbs
+ * we happen to have thought of proves nothing about the ones we have not. The
+ * only total property available is the COMPLEMENT of this set -- everything not
+ * named here is refused -- and that property is only testable if the set itself
+ * is readable.
+ */
+export const ALLOWED_FIRST_TOKENS = Object.freeze([
+  ...SHAPES.map(([name]) => name),
+  ...PS_READ_ONLY,
+  'sed',
+]);
+
 /** Returns { allowed } or { allowed: false, reason }. */
 export function judgeShellCommand(command) {
   if (typeof command !== 'string' || command.trim() === '') {
