@@ -27,6 +27,7 @@
  */
 
 import { readFile, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 const WANTED = {
@@ -66,4 +67,42 @@ if (added.length === 0) {
 
 await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 console.log(`worker: wired ${added.join(', ')} into package.json`);
+
+/*
+ * AND COMMIT IT, BECAUSE THE FIRST RUN DID NOT AND THE WORK WAS DESTROYED.
+ *
+ * MEASURED: the first task this system ever carried end to end returned with
+ * returned_head_sha EQUAL TO ITS BASE. The edit was real -- the return note
+ * reads "wired check:edge-deploy, deploy:check into package.json" -- and it was
+ * made in an isolated worktree that the workspace manager then destroyed on
+ * success, exactly as designed. The loop faithfully delivered a result that no
+ * longer existed.
+ *
+ * The runtime is not at fault. A worktree is destroyed on success on purpose,
+ * and the only durable thing a worker can hand back is a COMMIT. Returning the
+ * base sha is how a worker says "I changed nothing", and that is what an
+ * uncommitted edit becomes the moment the directory is gone.
+ */
+const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+try {
+  git('add', '--', 'package.json');
+  /*
+   * Identity supplied explicitly: this runs in a throwaway worktree with no
+   * guarantee of a configured user, and a commit failing on missing identity
+   * looks exactly like a worker that did nothing.
+   */
+  git(
+    '-c', 'user.name=agentbridge worker',
+    '-c', 'user.email=worker@agentbridge.local',
+    'commit', '--', 'package.json',
+    '-m', `Wire ${added.join(' and ')} so the deploy gates are reachable by name`,
+  );
+  console.log(`worker: committed ${git('rev-parse', '--short', 'HEAD')}`);
+} catch (err) {
+  console.error(`worker: the edit was made and COULD NOT BE COMMITTED: ${err.message}`);
+  console.error('worker: refusing to exit 0 -- a destroyed worktree takes the change with it');
+  process.exit(1);
+}
+
 process.exit(0);
