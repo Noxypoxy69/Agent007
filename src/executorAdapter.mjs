@@ -37,6 +37,9 @@ const RAW_KEYS = Object.freeze([
   'artifacts',
   'notes',
   'durationMs',
+  // HOW a launch failed. Constrained to FAILURE_KINDS and re-stamped below, so
+  // reporting one is evidence rather than an adapter grading itself.
+  'failure',
   /*
    * WHAT THE RUNNER SAW A PROMPT SAY. Added after the first real end-to-end run
    * of this pipeline refused its own executor: the `prompted` outcome shipped
@@ -59,13 +62,32 @@ const USURPED = Object.freeze({
   commit: 'the commit is read from git, not reported by the work',
   verdict: 'no adapter decides whether its own run was acceptable',
   success: 'no adapter decides whether its own run was acceptable',
-  /*
-   * `failure` is written by THIS module when an adapter throws, and a decision
-   * reads it. That is exactly why an adapter may not supply one: an adapter
-   * that can label its own crash `transient` can buy itself retries forever.
-   */
-  failure: 'the crash reason is recorded by the runner, not reported by the work',
 });
+
+/*
+ * HOW A LAUNCH FAILED -- a closed set, because a decision reads it.
+ *
+ * An adapter MUST be able to say a spawn failed: the local executor does not
+ * throw on one, it answers `crashed` with no exit code, so the throwing path
+ * never sees the case this field exists for. But an adapter that could name the
+ * kind freely could label its own crash `transient` and buy itself retries for
+ * ever. So the KIND comes from here and nowhere else, and none of these grant
+ * leniency. The MESSAGE is free text because it is evidence rather than a
+ * claim, and the adapter id is stamped by `execute` from the adapter itself.
+ */
+export const FAILURE_KINDS = Object.freeze([
+  'spawn-failed', // the process never started -- a bad path, a missing binary
+  'adapter-threw', // set by `execute` alone, when `run` raised
+]);
+
+function normaliseFailure(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'object') fail('failure must be an object');
+  if (!FAILURE_KINDS.includes(raw.kind)) {
+    fail(`unknown failure kind ${JSON.stringify(raw.kind)}; known: ${FAILURE_KINDS.join(', ')}`);
+  }
+  return { kind: raw.kind, message: typeof raw.message === 'string' ? raw.message : '' };
+}
 
 function fail(message) {
   throw new TypeError(`executor: ${message}`);
@@ -149,6 +171,7 @@ export function normaliseResult(raw) {
     durationMs: raw.durationMs ?? null,
     notes: typeof raw.notes === 'string' ? raw.notes : '',
     prompt: raw.prompt ?? null,
+    failure: normaliseFailure(raw.failure),
   });
 }
 
@@ -198,7 +221,18 @@ export async function execute(adapter, spec, io = {}) {
     });
   }
   const normalised = normaliseResult(raw);
-  return normalised.durationMs === null
-    ? Object.freeze({ ...normalised, durationMs: now() - startedAt })
-    : normalised;
+  /*
+   * THE ADAPTER ID IS STAMPED, NEVER TAKEN FROM THE PAYLOAD. An adapter that
+   * could name somebody else in its own failure could put a crash on a
+   * different executor's record.
+   */
+  const stamped = normalised.failure === null
+    ? normalised
+    : Object.freeze({
+        ...normalised,
+        failure: Object.freeze({ ...normalised.failure, adapter: adapter.id }),
+      });
+  return stamped.durationMs === null
+    ? Object.freeze({ ...stamped, durationMs: now() - startedAt })
+    : stamped;
 }

@@ -108,3 +108,39 @@ test("the spec's deadline is the runner's deadline", async () => {
   await exec.run({ ...spec, timeoutMs: 1234 }, { now: () => 0 });
   assert.equal(seen.options.timeoutMs, 1234);
 });
+
+/*
+ * WHY THE SPAWN FAILED, not just that it did.
+ *
+ * This is the case Loop B dies on. The environment here is an ALLOW-LIST -- an
+ * agent that inherits the daemon's environment inherits its credentials -- so
+ * PATH defaults to empty, and a bare executable name cannot resolve. agentLaunch
+ * produces exactly that when a task names an engine with no binary configured:
+ * `file: binary ?? engine`. The runner answers with no exit code, this maps it
+ * to `crashed`, and the reason -- which exec.mjs already hands back as `error`
+ * -- was dropped on the floor.
+ *
+ * A missing binary is DETERMINISTIC. Retrying it spends the attempt budget on
+ * something that cannot succeed, and nothing downstream could tell that from a
+ * transient fault.
+ */
+test('a failed spawn carries its reason, so a retry decision can see it is permanent', async () => {
+  const runner = async () => ({ ok: false, code: null, error: 'spawn claude ENOENT', stderr: '' });
+  const ex = createLocalExecutor({ run: runner });
+
+  const r = await ex.run({ taskId: 't1', cwd: '/w', argv: ['claude'], timeoutMs: 1000 });
+
+  assert.equal(r.outcome, 'crashed');
+  assert.equal(r.failure?.kind, 'spawn-failed');
+  assert.match(r.failure?.message ?? '', /ENOENT/);
+});
+
+test('a crash with no reason from the runner records none, rather than an empty one', async () => {
+  const runner = async () => ({ ok: false, code: null, signal: 'SIGKILL', error: null });
+  const ex = createLocalExecutor({ run: runner });
+
+  const r = await ex.run({ taskId: 't1', cwd: '/w', argv: ['x'], timeoutMs: 1000 });
+  assert.equal(r.outcome, 'crashed');
+  assert.equal(r.signal, 'SIGKILL');
+  assert.equal(r.failure ?? null, null, 'absent is unknown, not a blank reason');
+});

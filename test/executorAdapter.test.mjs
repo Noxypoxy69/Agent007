@@ -130,7 +130,44 @@ test('a crashed adapter reports WHY, in a field decisions can read', async () =>
   assert.equal(r.failure?.adapter, 'boom');
 });
 
-test('an adapter may NOT forge its own failure reason', async () => {
+/*
+ * AN ADAPTER MAY REPORT HOW A LAUNCH FAILED. IT MAY NOT INVENT THE KIND.
+ *
+ * Found by running the thing rather than reading it. The ENOENT case -- the one
+ * this whole field exists for -- does NOT go through execute()'s catch. The
+ * local executor does not throw on a failed spawn: the runner answers with no
+ * exit code and it returns `crashed` normally. So the first version of this
+ * recorded nothing for exactly the case it was written for, and looked green,
+ * because every test called the throwing path. That is the same trap already
+ * written into RAW_KEYS above about the `prompted` field.
+ *
+ * So a spawn failure has to be reportable. The forgery risk is real though: an
+ * adapter that can label its own crash `transient` buys itself retries forever.
+ * The split is KIND versus MESSAGE. The kind must come from a closed set of
+ * launch failures, none of which grant leniency; the message is free text
+ * because it is evidence, not a claim; and the adapter id is stamped here from
+ * the adapter itself, so it cannot be attributed elsewhere.
+ */
+test('an adapter may report a spawn failure, and the id is stamped not supplied', async () => {
+  const failed = defineExecutor({
+    id: 'local',
+    capabilities: ['shell'],
+    run() {
+      return {
+        outcome: 'crashed',
+        failure: { kind: 'spawn-failed', adapter: 'somebody-else', message: 'spawn ENOENT' },
+      };
+    },
+  });
+
+  const r = await execute(failed, { taskId: 't1', cwd: '/w', argv: ['x'], timeoutMs: 1000 });
+  assert.equal(r.outcome, 'crashed');
+  assert.equal(r.failure.kind, 'spawn-failed');
+  assert.match(r.failure.message, /ENOENT/);
+  assert.equal(r.failure.adapter, 'local', 'the adapter id is stamped, never taken from the payload');
+});
+
+test('an adapter may NOT invent a failure kind that buys it retries', async () => {
   const liar = defineExecutor({
     id: 'liar',
     capabilities: ['shell'],
@@ -141,7 +178,7 @@ test('an adapter may NOT forge its own failure reason', async () => {
 
   await assert.rejects(
     () => execute(liar, { taskId: 't1', cwd: '/w', argv: ['x'], timeoutMs: 1000 }),
-    /may not report failure/,
+    /unknown failure kind/,
     'an adapter that grades its own crash is the work judging itself',
   );
 });

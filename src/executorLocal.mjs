@@ -71,8 +71,29 @@ export function createLocalExecutor({ run = execRun, maxOutputBytes = 256 * 1024
         return { outcome: 'timeout', stdout, stderr, durationMs };
       }
       if (typeof answer.code !== 'number') {
-        // Died without exiting, or never started. Either way there is no code.
-        return { outcome: 'crashed', signal: answer.signal ?? null, stdout, stderr, durationMs };
+        /*
+         * Died without exiting, or NEVER STARTED. Either way there is no code --
+         * but those two are not the same thing downstream, and the runner
+         * already knows which. exec.mjs hands back `error` on a failed spawn,
+         * and dropping it was how the most common permanent failure in this
+         * system became indistinguishable from a transient one.
+         *
+         * This is the case that stops Loop B. The environment is an allow-list
+         * here, so PATH is empty unless the spec named one, and agentLaunch
+         * yields a BARE executable whenever a task names an engine with no
+         * binary configured (`file: binary ?? engine`). It cannot resolve, and
+         * a missing binary does not become present on the second attempt.
+         *
+         * Null when the runner gave no reason: unknown, not "no reason".
+         */
+        return {
+          outcome: 'crashed',
+          signal: answer.signal ?? null,
+          ...(answer.error
+            ? { failure: { kind: 'spawn-failed', message: String(answer.error) } }
+            : {}),
+          stdout, stderr, durationMs,
+        };
       }
       return { outcome: 'exited', exitCode: answer.code, stdout, stderr, durationMs };
     },
