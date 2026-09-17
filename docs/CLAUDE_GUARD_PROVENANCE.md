@@ -199,9 +199,19 @@ that inspects the RESULT does not need to enumerate the ways of producing it.
 - **`src/shellAllowlist.mjs` is a fast-feedback rail.** It catches the honest
   mistake early, while the agent can still act on it. It is not a security
   boundary and its header says so.
-- **The Stop gate is the boundary.** Content against a pre-session snapshot,
-  which is indifferent to how the change arrived — shell, MCP write, subagent,
-  or a test file the session wrote.
+- **The Stop gate is the boundary — and a boundary has to SPEAK.** Content
+  against a pre-session snapshot, which is indifferent to how the change
+  arrived — shell, MCP write, subagent, or a test file the session wrote. Its
+  one failure mode is silence. Claude Code cancels a hook that reaches its
+  `timeout` and discards its output, and this gate blocks only by RENDERING a
+  decision, so a run still thinking when the deadline passes renders none — and
+  no decision from a Stop hook ends the turn approved. That state is reached by
+  loading the machine, not by an exploit. `scripts/claude-stop-gate.mjs` now
+  derives its budget from the timeout declared in `.claude/settings.json`,
+  charges its own startup and hashing against it, and refuses on its own terms
+  before the deadline. `test/stopGateDeadline.test.mjs` runs it against a
+  stand-in killer and asserts it speaks first — and that a green suite inside
+  the budget is still approved.
 - **Real containment is neither.** It is an ephemeral container or a read-only
   mount where the agent works in scratch space and only a patch comes back.
   Nothing here substitutes for that.
