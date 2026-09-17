@@ -1,14 +1,14 @@
 {
-  "_note": "Version 26, live 2026-09-16T23:52:13.185Z, RECONCILED not deployed by this commit. The ledger said 25 and the gate refused with live-artifact-drifted, correctly. WHO RAN 26 IS NOT RECORDED BECAUSE IT IS NOT KNOWN; this file has taken four attribution corrections today and every one came from crediting a deploy to whoever was nearest. WHAT 26 CONTAINS, measured by downloading it and comparing to master 6b1147d: _shared.js is byte-identical after newline normalisation, index.ts differs, and the difference is +150 -0 -- every differing line is one master ADDS. Live holds nothing master lacks, so the next deploy is a pure superset and cannot lose work. MISSING FROM LIVE: touchLiveness (0 occurrences live, 10 in master), retireStaleSeats (0 vs 3), removeSeat (0 vs 2) -- the liveness fix is not deployed.",
+  "_note": "Version 27, live 2026-09-17T01:18:56.256Z. THE FIRST DEPLOY TONIGHT WHOSE PROVENANCE IS NOT A GUESS: Danny ran the CLI himself in this session and the output is in the transcript. VERIFIED AT THE FAR END, all four ways, because any one alone is weak: updated_at MOVED (1789602733185 to 1789607936256), ezbr_sha256 CHANGED (c810ccf43a5e to ca618cb2b449), verify_jwt is still false, and the bundle was downloaded and hashed against the COMMIT rather than the working tree -- index.ts ff1f6eb38602 and _shared.js 036954b66666, both identical after newline normalisation. A version bump alone proves nothing; that is the mistake recorded in 04f6e34. WHAT IT SHIPS: touchLiveness (10 occurrences live), retireStaleSeats (3), removeSeat (2). The roster now records a worker as alive by the act of talking to the Bridge, instead of depending on a watcher daemon that dies with its session. ONE NEAR MISS WORTH KEEPING: the first attempt ran from the wrong directory. The CLI printed 'WARN: failed to read file: open supabase/functions/mcp/index.ts: no such file or directory' and PROCEEDED TO ATTEMPT A DEPLOY ANYWAY. The API refused it with a 400 and version 26 kept serving, so the far end caught what the tool waved through. A more permissive endpoint would have shipped an empty function on a warning.",
   "schemaVersion": 1,
-  "headSha": "24c0479ed6b12040733eb809dc14fdcdad4b4331",
-  "sourceDigest": "01030a4327feeaf1",
-  "liveArtifactHash": "c810ccf43a5e0fa49276f9ff6e6b69a6ede62a6f91d7f595e31ba75804b03c14",
-  "liveVersion": 26,
-  "deployedAt": "2026-09-16T23:52:13.185Z",
-  "deployedBy": "UNATTRIBUTED - not this session. Whoever ran it should claim it.",
-  "verifiedBy": "code-d -- tree compared against a downloaded copy of the live artifact BEFORE shipping (+53 -5), and after: 409/401 route probe, the new borrowed-session refusal exercised by name, and a legitimate registration confirmed still accepted",
-  "previousVersion": 25,
+  "headSha": "7620db6070eb",
+  "sourceDigest": "dcce3b4922fb90ff",
+  "liveArtifactHash": "ca618cb2b449fbba5561dd05bd720d89c675bafd31e3949e16217738abe16664",
+  "liveVersion": 27,
+  "deployedAt": "2026-09-17T01:18:56.256Z",
+  "deployedBy": "Danny, by hand from the agentbridge clone. Observed in this session, not inferred.",
+  "verifiedBy": "code-b: read the live bundle back and hashed both files against commit 7620db6",
+  "previousVersion": 26,
   "rollbackTo": {
     "version": 24,
     "liveArtifactHash": "ebf479e4f58e8f1f06b62245fe21b5d576cc26a9343bdac50e1a9de047a3ea38"
