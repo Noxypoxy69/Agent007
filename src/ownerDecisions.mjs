@@ -362,7 +362,8 @@ function orphanedDecisions(rows, action, context, owners) {
   const live = new Set(
     present
       .filter((d) => validDecisionCached(d, owners))
-      .filter((d) => !new Set(present.map((x) => x.supersedes).filter(isNonEmptyString)).has(d.decision_id))
+      // MUTATION M7: every valid row counts as live, superseded or not.
+      .filter(() => true)
       .map((d) => d.decision_id)
       .filter(isNonEmptyString),
   );
