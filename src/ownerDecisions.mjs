@@ -359,21 +359,32 @@ function orphanedDecisions(rows, action, context, owners) {
    * A REVOKED superseder does not suppress at all — revoked rows never enter
    * `present` — so revocation still restores what it replaced, unchanged.
    */
-  // MUTATION M3: the pre-b53581b predicate, "is the superseder INVALID?".
-  const validRows = [];
-  const invalidRows = [];
-  for (const d of present) (validDecisionCached(d, owners) ? validRows : invalidRows).push(d);
+  const live = new Set(
+    present
+      .filter((d) => validDecisionCached(d, owners))
+      .filter((d) => !new Set(present.map((x) => x.supersedes).filter(isNonEmptyString)).has(d.decision_id))
+      .map((d) => d.decision_id)
+      .filter(isNonEmptyString),
+  );
 
-  const supersededByValid = new Set(validRows.map((d) => d.supersedes).filter(isNonEmptyString));
-  const supersededByInvalid = new Set(invalidRows.map((d) => d.supersedes).filter(isNonEmptyString));
+  const supersededBy = new Map();
+  for (const d of present) {
+    if (!isNonEmptyString(d.supersedes)) continue;
+    if (!supersededBy.has(d.supersedes)) supersededBy.set(d.supersedes, []);
+    supersededBy.get(d.supersedes).push(d);
+  }
 
-  return validRows.filter((d) =>
-    isNonEmptyString(d.decision_id)
-    && supersededByInvalid.has(d.decision_id)
-    && !supersededByValid.has(d.decision_id)
-    && scopeMatches(d, context)
-    && Array.isArray(d.capabilities)
-    && d.capabilities.some((c) => capabilityMatches(c, action)));
+  return present.filter((d) => {
+    if (!isNonEmptyString(d.decision_id)) return false;
+    if (!validDecisionCached(d, owners)) return false;
+    const replacements = supersededBy.get(d.decision_id);
+    if (!replacements || replacements.length === 0) return false;
+    // Replaced by something that is itself in force: an ordinary supersession.
+    if (replacements.some((r) => isNonEmptyString(r.decision_id) && live.has(r.decision_id))) return false;
+    return scopeMatches(d, context)
+      && Array.isArray(d.capabilities)
+      && d.capabilities.some((c) => capabilityMatches(c, action));
+  });
 }
 
 const validDecisionCached = (d, owners) => validateDecision(d, { owners }).ok;

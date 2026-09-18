@@ -116,17 +116,22 @@ test('an unreported process probe is not reported as a healthy one', async () =>
    * the gate red at the tip. Found by blind audit. Both halves were mine: the
    * fix, and the failure to carry it here.
    *
-   * The assertions now say what the title always said. `locks` and `processes`
-   * follow the same rule — an unmeasured list is unknown, not empty — and they
-   * never executed before, because the first assertion threw.
+   * The probe assertion now says what the title always said.
+   *
+   * `locks` and `processes` ARE STILL `[]` HERE, AND THAT IS CORRECT — a point
+   * the audit got wrong and this fixture settles. The row carries `locks: []`
+   * and `processes: []`, which are MEASURED empty lists: the collector looked
+   * and found none. Only `process_probe_ok` is NULL. Mapping the measured
+   * empties to null would be the same defect pointing the other way, and it is
+   * pinned as a positive in the test below.
    */
   const store = storeWith([['sessions_latest', SESSION_ROWS]]);
   const out = await store.listSessions();
   assert.equal(out[1].processProbeOk, null,
     'a NULL probe column was reported as a healthy probe — the row least entitled to confidence');
   assert.equal(out[1].git, null);
-  assert.equal(out[1].locks, null, 'an unmeasured lock list was reported as "no locks"');
-  assert.equal(out[1].processes, null, 'an unmeasured process list was reported as "nothing running"');
+  assert.deepEqual(out[1].locks, [], 'a MEASURED empty lock list was turned into unknown');
+  assert.deepEqual(out[1].processes, [], 'a MEASURED empty process list was turned into unknown');
 });
 
 test('a MEASURED probe, lock list and process list still survive the projection', async () => {
