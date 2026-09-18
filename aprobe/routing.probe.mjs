@@ -11,7 +11,7 @@ const dec = (id, extra = {}) => ({
 });
 
 const ask = (label, decisions, request) => {
-  const r = classifyRequest(request, decisions, { now: Date.parse('2026-09-18T21:00:00Z') });
+  const r = classifyRequest({ requested_at: '2026-09-18T21:00:00.000Z', ...request }, decisions, { now: '2026-09-18T21:00:00.000Z' });
   console.log(`${label.padEnd(56)} decider=${String(r.decider).padEnd(12)} allowed=${String(r.allowed)}  ${String(r.reason).slice(0, 70)}`);
 };
 
