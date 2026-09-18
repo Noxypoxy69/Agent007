@@ -110,15 +110,17 @@ function selfReportedFields() {
   const m = /rows\s*\.\s*map\s*\(\s*\(\s*r\s*\)\s*=>\s*\(\s*\{/.exec(CODE);
   assert.ok(m, 'could not locate the registration projection (rows.map) in index.ts');
   const after = CODE.slice(m.index, m.index + 4000);
-  const out = new Set();
-  for (const hit of after.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*r\.[A-Za-z_][A-Za-z0-9_]*/g)) {
-    out.add(hit[1]);
+  const out = new Map();
+  for (const hit of after.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*r\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    if (!out.has(hit[1])) out.set(hit[1], hit[2]);
   }
-  for (const k of SERVER_STAMPED) out.delete(k);
-  return [...out];
+  return out;
 }
 
-const SELF_REPORTED = selfReportedFields();
+/** The whole projection, key -> the registration column it reads. */
+const PROJECTION = selfReportedFields();
+
+const SELF_REPORTED = [...PROJECTION.keys()].filter((k) => !SERVER_STAMPED.includes(k));
 
 test('THE EXTRACTION FOUND A REAL SET, not an empty one', () => {
   assert.ok(SELF_REPORTED.length >= 4,
@@ -203,11 +205,22 @@ test('EVERY SERVER-STAMPED EXCLUSION IS STILL A REAL COLUMN', () => {
    * checking any more and reads as coverage. Same rule toolDefsParity applies
    * to its DECLARED list — it may only shrink.
    */
+  /*
+   * ASKS THE PROJECTION FOR THE COLUMN RATHER THAN DERIVING IT.
+   *
+   * The first version converted the key to snake_case and looked for
+   * `r.last_seen_at`. The projection actually reads `r.heartbeat_at`, so the
+   * check failed against a spelling that never existed — a literal standing in
+   * for a fact the source already holds (rule 21: derive it, do not type it).
+   */
   for (const k of SERVER_STAMPED) {
-    const col = k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
-    assert.ok(CODE.includes(`r.${col}`),
-      `${k} is excluded as server-stamped but index.ts no longer projects r.${col}; `
+    assert.ok(PROJECTION.has(k),
+      `${k} is excluded as server-stamped but the projection no longer emits it; `
       + 'drop the exclusion rather than leaving it to rot');
+    const col = PROJECTION.get(k);
+    assert.ok(new RegExp(`\\b${col}\\s*:`).test(CODE),
+      `${k} is excluded because the server stamps ${col}, but nothing in index.ts writes `
+      + `${col} any more — re-check whether it is still server-stamped`);
   }
   assert.ok(/touchLiveness/.test(CODE),
     'touchLiveness is gone from index.ts — the reason lastSeenAt is excluded no longer holds');
