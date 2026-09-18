@@ -2222,17 +2222,19 @@ try {
       const dirtyOf = () =>
         runGit(['-C', work, 'status', '--porcelain', '--untracked-files=no'], { maxBuffer: 8e6 }).trim();
 
-      // headOf/dirtyOf are synchronous and throw on a git failure. exec's run
-      // did not throw -- it resolved { stdout: '' }, so the old code degraded to
-      // checkoutHead '' and sourceClean true here. This preserves exactly that,
-      // rather than letting a throw escape the catch-less try as a stack trace.
-      // (These reads follow a successful clone+detached-checkout, so a failure
-      // is near-unreachable; the fail-OPEN direction of sourceClean is
-      // pre-existing and flagged separately, not changed here.)
+      // headOf/dirtyOf are synchronous and throw on a git failure. The old code
+      // here was `await run(...)` where run is promisify(execFile), which REJECTS
+      // on a non-zero exit -- so the pre-migration lines threw uncaught too; there
+      // was no non-throwing degrade to restore. (An earlier comment here claimed
+      // otherwise; it confused this local run with exec.mjs's non-throwing run.)
+      // So this wraps them, and degrades FAIL-SAFE: checkoutHead '' forces a
+      // sha-mismatch refusal, and sourceClean false forces a source-mutated
+      // refusal -- matching the after-run re-measure below, which already fails
+      // to false. An unreadable tree must not count as clean.
       let checkoutHead = '';
       try { checkoutHead = headOf(); } catch { checkoutHead = ''; }
-      let sourceClean = true;
-      try { sourceClean = dirtyOf() === ''; } catch { sourceClean = true; }
+      let sourceClean = false;
+      try { sourceClean = dirtyOf() === ''; } catch { sourceClean = false; }
 
       let depsInstalled = false;
       let depsError = null;
