@@ -306,9 +306,15 @@ if (!snapshot) {
  */
 const GATE_SELF_CONFIG = new Set(['.claude/settings.json', '.claude/settings.local.json']);
 const allDrift = protectedDrift(root, snapshot);
-const grantApplies = (d) => !GATE_SELF_CONFIG.has(d.file) && Boolean(overrideCovers(root, d.file));
-const granted = allDrift.filter(grantApplies);
-const drift = allDrift.filter((d) => !grantApplies(d));
+// Partitioned from ONE read per entry, for the reason given at the test filter
+// below: two passes leave a window where an appearing grant puts an entry in
+// neither list, which is silent acceptance. Pre-existing here; closed with it.
+const driftDecisions = allDrift.map((d) => ({
+  entry: d,
+  granted: !GATE_SELF_CONFIG.has(d.file) && Boolean(overrideCovers(root, d.file)),
+}));
+const granted = driftDecisions.filter((x) => x.granted).map((x) => x.entry);
+const drift = driftDecisions.filter((x) => !x.granted).map((x) => x.entry);
 if (granted.length) {
   /*
    * RECORDED, NOT RETURNED. This must not call out() -- see its definition.
@@ -354,10 +360,24 @@ if (drift.length) {
  * carries the mitigation -- the change is permitted only while it is named, and
  * it is recorded every time rather than passing silently.
  */
+/*
+ * DECIDED ONCE PER ENTRY, NOT TWICE.
+ *
+ * Filtering the same list with the predicate and then with its negation reads
+ * the grant file twice per entry. If a grant APPEARS between the two passes, the
+ * entry is in neither list: no block and no announcement -- silent acceptance,
+ * which is the one outcome this whole path is supposed to make impossible.
+ * Expiry between the passes fails safe (the entry lands in both), so only the
+ * appearing-grant direction is dangerous, and partitioning from a single read
+ * removes the window rather than narrowing it.
+ *
+ * Raised by audit as a code-level observation it could not construct
+ * deterministically. It is cheaper to close than to argue about.
+ */
 const allTestDrift = baselineTestDrift(root, snapshot);
-const testGrantApplies = (d) => Boolean(overrideCovers(root, d.file));
-const grantedTests = allTestDrift.filter(testGrantApplies);
-const testDrift = allTestDrift.filter((d) => !testGrantApplies(d));
+const testDecisions = allTestDrift.map((d) => ({ entry: d, granted: Boolean(overrideCovers(root, d.file)) }));
+const grantedTests = testDecisions.filter((x) => x.granted).map((x) => x.entry);
+const testDrift = testDecisions.filter((x) => !x.granted).map((x) => x.entry);
 if (grantedTests.length) {
   const note = `[agentbridge:baseline-test-overridden] Baseline tests changed under an active override. Permitted, and recorded anyway:\n${grantedTests.map((d) => {
     const g = overrideCovers(root, d.file);

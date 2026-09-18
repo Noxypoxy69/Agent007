@@ -182,18 +182,79 @@ test('a grant for a DECOY path cannot reach a baseline test through a symlink', 
     'a grant for docs/notes.md became a permit to edit the baseline test it points at');
 });
 
-test('the refusal names a route that actually works', (t) => {
+test('FOLLOWING the refusal, literally, works — for every spelling it quotes back', (t) => {
   /*
-   * It previously named none, because none existed. Three times in one day this
-   * repository has shipped guidance whose audience cannot follow it, so a
-   * refusal that now HAS a remedy must say what it is.
+   * THIS TEST USED TO ASSERT /override/i AND NOTHING ELSE. It would have stayed
+   * green if the advice were "ask a wizard for an override", and it was: the
+   * message said "naming this exact path" and echoed the caller's spelling,
+   * while grant.paths is compared LITERALLY against the canonical form. An
+   * operator who copied TEST/ALPHA.TEST.MJS or ./test/alpha.test.mjs out of the
+   * refusal wrote a grant that did nothing, and the pressure went straight back
+   * to the session whose hooks had never loaded.
+   *
+   * Found by audit, in the commit that added the message specifically to stop
+   * naming routes that do not work -- the fourth instance of that class here in
+   * two days. So the test now DOES what the refusal says and asserts the result,
+   * which is the only form of this assertion that can fail for the real reason.
    */
   const dir = scratchProject(t);
-  withHome(t);
+  const home = withHome(t);
   writeSnapshot(dir, SESSION);
 
-  const v = edit(dir, 'test/alpha.test.mjs');
-  assert.match(v.reason, /override/i, 'the refusal must name the override route');
+  const spellings = [
+    'test/alpha.test.mjs',
+    './test/alpha.test.mjs',
+    'test/./alpha.test.mjs',
+    'TEST/ALPHA.TEST.MJS',
+  ];
+
+  for (const spelling of spellings) {
+    // A grant that names something else entirely, so each round starts refused.
+    grant(dir, home, ['nothing/at/all.txt']);
+
+    const refused = edit(dir, spelling);
+    assert.equal(refused.allowed, false, `${spelling}: precondition — must be refused before the grant`);
+
+    const named = /override naming (\S+)/.exec(refused.reason);
+    assert.ok(named, `${spelling}: the refusal must name a path to grant. Got: ${refused.reason}`);
+
+    // Do exactly what it says, with exactly the string it printed.
+    grant(dir, home, [named[1]]);
+    const after = edit(dir, spelling);
+    assert.equal(after.allowed, true,
+      `${spelling}: the refusal said to grant "${named[1]}", and that grant did not work`);
+  }
+});
+
+test('the announcement names the file that is WRITTEN, not the one that was typed', (t) => {
+  /*
+   * grantFor returned rels[0] -- the lexical candidate, i.e. the caller's
+   * spelling. So a grant for the test, exercised through a symlink, permitted
+   * correctly and then announced the symlink: the transcript recorded a doc
+   * edit while a baseline test was rewritten. The permit half of this hazard was
+   * hardened and the announcement half was not, in the commit whose own comment
+   * says the hardening exists because a grant "announced the wrong file".
+   */
+  const dir = scratchProject(t);
+  const home = withHome(t);
+  writeSnapshot(dir, SESSION);
+  grant(dir, home, ['test/alpha.test.mjs']);
+
+  const link = path.join(dir, 'docs', 'notes.md');
+  rmSync(link);
+  try {
+    symlinkSync(path.join(dir, 'test', 'alpha.test.mjs'), link);
+  } catch (e) {
+    t.skip(`symlinks not permitted here (${e.code})`);
+    return;
+  }
+
+  const v = edit(dir, 'docs/notes.md');
+  assert.equal(v.allowed, true, 'precondition: the grant names the real file, so the write is permitted');
+  assert.match(v.notice, /test\/alpha\.test\.mjs/,
+    `the notice must name the file actually written. Got: ${v.notice}`);
+  assert.ok(!/docs\/notes\.md/.test(v.notice),
+    `the notice named the typed path instead of the written file: ${v.notice}`);
 });
 
 /* ------------------------------------------------------------------ */
@@ -230,6 +291,38 @@ function stop(dir) {
   try { parsed = JSON.parse(r.stdout || '{}'); } catch { parsed = {}; }
   return { reason: parsed.reason ?? '', systemMessage: parsed.systemMessage ?? '' };
 }
+
+test('Stop APPENDS its notices — a granted control and a granted test are both announced', (t) => {
+  /*
+   * carriedNotice may already hold the protected-control announcement when the
+   * baseline-test one is produced. Assigning over it drops one of two records
+   * silently, and "recorded anyway" is the entire mitigation this design rests
+   * on. The commit argued for APPEND at length and tested it nowhere: an audit
+   * mutated it to an assignment and 104 guard/stop/override/roster tests stayed
+   * green while an announcement disappeared.
+   */
+  const dir = scratchRepoWithGuard(t);
+  const home = path.join(dir, 'home');
+  stop(dir);                                   // mints the baseline
+
+  // Drift BOTH a protected control and an inherited test, and grant both.
+  writeFileSync(path.join(dir, 'docs', 'ROADMAP.md'), 'roadmap, edited\n');
+  writeFileSync(path.join(dir, 'test', 'inherited.test.mjs'), "import {test} from 'node:test';\n// repaired\n");
+  mkdirSync(path.join(home, 'overrides'), { recursive: true });
+  writeFileSync(overridePath(dir, home), JSON.stringify({
+    paths: ['docs/ROADMAP.md', 'test/inherited.test.mjs'],
+    reason: 'repair both',
+    granted_by: 'danny',
+    expires_at: new Date(Date.now() + 3600e3).toISOString(),
+  }));
+
+  const after = stop(dir);
+  const all = `${after.systemMessage}${after.reason}`;
+  assert.match(all, /protected-control-overridden/,
+    'the protected-control announcement was dropped');
+  assert.match(all, /baseline-test-overridden/,
+    'the baseline-test announcement was dropped');
+});
 
 test('Stop still reports an UNGRANTED baseline-test change', (t) => {
   const dir = scratchRepoWithGuard(t);

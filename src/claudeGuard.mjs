@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers } from './guardSession.mjs';
+import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath } from './guardSession.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
 import { runGit } from './safeGit.mjs';
 
@@ -316,7 +316,17 @@ function grantFor(filePath, cwd) {
   if (rels.length === 0) return null;
   if (!rels.every((r) => overrideCovers(cwd, r))) return null;
   const grant = overrideCovers(cwd, rels[0]);
-  return grant ? { grant, rel: rels[0] } : null;
+  /*
+   * THE ANNOUNCEMENT NAMES THE FILE THAT GETS WRITTEN, NOT THE ONE THAT WAS
+   * TYPED. rels[0] is the LEXICAL candidate -- the caller's spelling -- so a
+   * grant for test/guardToolRoster.test.mjs, exercised through a symlink at
+   * docs/notes.md, permitted correctly and then announced "docs/notes.md" while
+   * a baseline test was rewritten. A reader auditing the transcript saw a doc
+   * edit. Measured by audit; the permit half was hardened and the announcement
+   * half was not, in the very commit whose comment says the hardening exists
+   * because a grant "announced the wrong file".
+   */
+  return grant ? { grant, rel: canonicalGrantPath(cwd, filePath) } : null;
 }
 
 function judgeWrite(filePath, input, cwd, sessionId) {
@@ -368,7 +378,7 @@ function judgeWrite(filePath, input, cwd, sessionId) {
           + `permits it. Granted by ${grant.granted_by}, expires ${grant.expires_at}. Reason: ${grant.reason}`,
       };
     }
-    return deny('protected-control', `${filePath} is part of the guard or completion contract`);
+    return deny('protected-control', `${filePath} is part of the guard or completion contract. An override must name it as ${canonicalGrantPath(cwd, filePath)}`);
   }
   if (isSessionBaselineTest(filePath, cwd, sessionId)) {
     /*
@@ -419,7 +429,15 @@ function judgeWrite(filePath, input, cwd, sessionId) {
      * is the defect class this repository met three times in one day: guidance
      * whose audience cannot follow it.
      */
-    return deny('baseline-test-immutable', `${filePath} was present when the session began; baseline tests are not editable from inside it. Ask the owner for an override naming this exact path`);
+    /*
+     * QUOTE THE SPELLING THAT ACTUALLY MATCHES. This said "naming this exact
+     * path" and echoed filePath as typed -- but grant.paths is compared
+     * literally against the CANONICAL form, so an operator who copied the quoted
+     * spelling (TEST/GUARDTOOLROSTER.TEST.MJS, or a ./ prefix) wrote a grant that
+     * did nothing at all. Advice that cannot be followed, in the commit that
+     * added this message to stop doing exactly that.
+     */
+    return deny('baseline-test-immutable', `${filePath} was present when the session began; baseline tests are not editable from inside it. Ask the owner for an override naming ${canonicalGrantPath(cwd, filePath)}`);
   }
   const content = String(input.content ?? input.new_string ?? '');
   SKIP_MARKER.lastIndex = 0;

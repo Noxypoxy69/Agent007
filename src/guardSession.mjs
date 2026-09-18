@@ -855,6 +855,23 @@ function canonicalSpelling(target) {
   } catch { return String(target).split('\\').join('/'); }
 }
 
+/**
+ * The repo-root-relative, canonically-spelled form of a path -- the ONE spelling
+ * a grant entry must contain in order to match.
+ *
+ * EXPORTED BECAUSE THE REFUSAL HAS TO QUOTE IT. overrideCovers canonicalises the
+ * candidate and then compares it LITERALLY against grant.paths, so the canonical
+ * spelling is the only one that ever matches. The refusal used to quote the path
+ * as the caller typed it and say "ask for an override naming this exact path" --
+ * so an operator who followed that instruction with TEST/GUARDTOOLROSTER.TEST.MJS
+ * or ./test/guardToolRoster.test.mjs wrote a grant that did nothing, and the
+ * pressure went back to the session whose hooks never loaded. Measured by audit,
+ * in the commit whose stated purpose was to stop naming routes that do not work.
+ */
+export function canonicalGrantPath(dir, rel) {
+  return repoRelative(dir, rel);
+}
+
 function repoRelative(dir, rel) {
   const resolved = path.resolve(dir);
   const asGiven = String(rel ?? '').split(path.sep).join('/').replace(/^\.\//, '');
