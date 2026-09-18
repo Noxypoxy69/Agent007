@@ -166,6 +166,48 @@ the operation rather than of the vocabulary. And measure against the REAL roster
 both failures came from guessing which tool names exist on a machine that was not
 the one under test.
 
+**20. NOBODY CERTIFIES THEIR OWN WORK. FINISHING MEANS HANDING IT TO AN AUDITOR
+THAT DID NOT WRITE IT.** This is a STEP, not a courtesy, and work is not done
+until it has run. The party that derived a finding cannot be the party that
+confirms it, and the party that wrote a fix cannot be the party that clears it —
+not because anyone is dishonest, but because the confident commit message and the
+green run are produced by the same reasoning that produced the bug.
+
+Measured 2026-09-18, on this repository, by an audit the author did not perform:
+a rail change whose message said it "closes the sweep class" had closed four
+enumerated spellings, and eight more members of that same class were still
+allowed — including `git add ./`, one character from the spelling it denied, and
+`git restore src`, one token from the spelling its own message called "the
+sharpest of them". The author had checked for over-blocks and generalised from a
+single benign case, so `git commit -m "handle --force flag"` was refused. The
+author's suite counts did not reproduce at all. Every one of those was found in
+one pass by a reader with no stake in the answer.
+
+WHAT THE STEP IS, CONCRETELY:
+
+- The auditor is a SEPARATE agent. Not a second pass by the author, not the agent
+  that reported the finding, not a peer that already holds a position on it.
+- It works in ITS OWN CLONE, and the shared worktree is READ-ONLY to it. This is
+  not politeness: suite counts measured in a worktree carrying other sessions'
+  untracked files are contaminated, and that is exactly how a wrong baseline got
+  reported three times in one session. `AGENTBRIDGE_HOME` goes to a temp dir, or
+  the audit writes fixtures into the operator's live store.
+- It may not push, merge, deploy, or apply a migration. Read-only outward.
+- It is told to BREAK the work, not to check it. A confident commit message is
+  grounds for suspicion, not comfort. It re-measures every claim, and it
+  establishes the pre-existing baseline ITSELF before attributing any failure.
+- It reports defects ranked by severity WITH the command that demonstrates each,
+  and separately lists the claims it checked and found TRUE — otherwise the
+  reader cannot tell what was covered from what was skipped.
+
+WHEN IT RUNS: before a migration, a deploy, or a merge to a shared branch, and
+whenever work is handed back as complete. An audit that runs on half-finished
+work is spent, so finish the class first — see 19 — and audit once.
+
+THE AUDIT IS NOT A VETO AND NOT AN APPROVAL. It produces evidence. Acting on
+it is still the owner's call, and an auditor that says "ship it" has not
+transferred that authority to itself.
+
 ---
 
 # The rest of the traps
