@@ -30,8 +30,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toolDefs as hostedDefs } from '../supabase/functions/mcp/_shared.js';
-import { toolDefs as twinDefs } from '../mcp/toolDefs.mjs';
+import { toolDefs as hostedDefs, INSTRUCTIONS as HOSTED_INSTRUCTIONS } from '../supabase/functions/mcp/_shared.js';
+import { toolDefs as twinDefs, INSTRUCTIONS as TWIN_INSTRUCTIONS } from '../mcp/toolDefs.mjs';
 
 /**
  * A store generous enough that both files build every tool they can.
@@ -121,6 +121,39 @@ test('A TOOL DEFINED IN BOTH ACCEPTS THE SAME INPUT IN BOTH', () => {
   assert.deepEqual(diverged, [],
     `these tools accept different arguments depending on which transport serves them:\n${
       diverged.map((d) => `  ${d.name}\n    hosted: ${d.hosted}\n    twin:   ${d.twin}`).join('\n')}`);
+});
+
+test('THE SENTENCE THAT TRAVELLED: INSTRUCTIONS is identical on both surfaces', () => {
+  /*
+   * THIS GATE PASSED THE DAY IT WAS WRITTEN, AND THAT IS THE FINDING.
+   *
+   * It was written expecting red. The two files' descriptions turned out to be
+   * byte-identical -- which is not the absence of the defect, it IS the defect.
+   * The same prose serves a store that observes git and the process table, and a
+   * store that hardcodes six fields. Copying kept the words in step while the
+   * stores diverged underneath them, so a gate comparing DECLARATIONS can never
+   * see it. Recorded here rather than quietly dropped, because a gate whose
+   * motivating defect it cannot detect is exactly the thing this repository is
+   * named after, and the next reader deserves to know which property this holds.
+   *
+   * WHAT IT HOLDS, AND WHY THAT IS STILL WORTH HAVING. Identical prose across
+   * two surfaces is only correct when it is TRUE of both. The contract already
+   * contains the clause that makes that achievable -- "fields that could not be
+   * determined are null, treat null as unknown, never as zero" -- and the fix
+   * for the hosted store is to obey it rather than to fork the sentence. Once it
+   * does, shared wording is right rather than misleading, and this is what stops
+   * it drifting apart again. Until then, this pins the thing that must NOT be
+   * fixed by editing one copy: forking INSTRUCTIONS per transport would make two
+   * surfaces promise different things under the same tool names, which is the
+   * failure mcp/toolDefs.mjs was written to prevent.
+   */
+  assert.equal(typeof HOSTED_INSTRUCTIONS, 'string');
+  assert.ok(HOSTED_INSTRUCTIONS.length > 200, 'INSTRUCTIONS is suspiciously short');
+  assert.equal(
+    HOSTED_INSTRUCTIONS, TWIN_INSTRUCTIONS,
+    'INSTRUCTIONS has forked between the two transports: the same tool names now '
+    + 'promise different things depending on who serves them',
+  );
 });
 
 test('THE CONTROL: the comparison can actually fail', () => {
