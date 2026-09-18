@@ -25,8 +25,10 @@
  *
  * PURE. Rows and the clock arrive as arguments.
  */
+import { inboxNames } from './coordination.mjs';
 
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
+const fold = (v) => String(v ?? '').trim().toLowerCase();
 const arr = (v) => (Array.isArray(v) ? v : []);
 
 /** Event kinds a worker can be woken for. */
@@ -46,8 +48,13 @@ const parse = (v) => {
  *   agent_id  the durable identity messages are addressed to
  *   session_id the runtime messages' work is assigned to
  *   since     ISO timestamp, exclusive; omit for "everything current"
+ *   actors    roster override for tests; omit to use the declared one. Injected
+ *             rather than read so a test never depends on the shipped table,
+ *             and so the alias table stays a single definition.
  */
-export function eventsFor({ tasks = [], messages = [], agent_id, session_id, since = null }) {
+export function eventsFor({
+  tasks = [], messages = [], agent_id, session_id, since = null, actors = undefined,
+}) {
   if (!nonEmpty(session_id)) {
     throw new TypeError('eventsFor requires a session_id: an event feed for nobody is a bug');
   }
@@ -117,8 +124,40 @@ export function eventsFor({ tasks = [], messages = [], agent_id, session_id, sin
     }
   }
 
+  /*
+   * A SEAT HAS MORE THAN ONE NAME, AND A MESSAGE IS STORED UNDER THE ONE THE
+   * SENDER TYPED.
+   *
+   * This was `m.to_agent !== agent_id`, a strict inequality, so a message
+   * addressed to a REGISTERED ALIAS never became an event. The send path stores
+   * the recipient verbatim -- index.ts writes m.to_agent as given, with no
+   * canonicalisation -- so the alias is what lands in the table.
+   *
+   * MEASURED 2026-09-18: fixer addressed code-b as "b", which
+   * src/coordination.mjs registers as a real alias of that seat. The long poll
+   * would have sat holding the request open while the message it was waiting
+   * for was already stored. The pull path has the same hole, one layer up.
+   *
+   * inboxNames IS THE READ HALF AND ALREADY EXISTED -- pure, spliced into
+   * _shared.js, tested, and with no caller anywhere. docs/ORDER.md says so in as
+   * many words: "The read half is inboxNames and no reader uses it yet." This is
+   * the caller, not a new mechanism, so there is still exactly one alias table.
+   *
+   * AN UNKNOWN NAME STILL POLLS ITSELF, and this is the regression the change
+   * could most easily have shipped. canonicalActor returns an unrecognised name
+   * UNCHANGED rather than null -- deliberately, its comment says so -- so
+   * inboxNames('fixer') is ['fixer'] and a seat absent from the roster keeps
+   * receiving its own mail. Had it returned null, every such seat would have
+   * gone silently deaf.
+   *
+   * FOLDED FOR CASE, because canonicalActor already matches that way and this
+   * seat's display name is "B" while its alias is "b". A recipient differing
+   * only in case is the same silent miss wearing different clothes.
+   */
+  const inbox = new Set(inboxNames(agent_id, actors).map(fold));
+
   for (const m of arr(messages)) {
-    if (!m || !nonEmpty(agent_id) || m.to_agent !== agent_id) continue;
+    if (!m || !nonEmpty(agent_id) || !inbox.has(fold(m.to_agent))) continue;
     if (!newer(m.created_at)) continue;
     out.push({
       kind: 'message',

@@ -2041,11 +2041,23 @@ const parse = (v) => {
  *   agent_id  the durable identity messages are addressed to
  *   session_id the runtime messages' work is assigned to
  *   since     ISO timestamp, exclusive; omit for "everything current"
+ *   actors    roster override for tests; omit to use the declared one.
  */
-export function eventsFor({ tasks = [], messages = [], agent_id, session_id, since = null }) {
+export function eventsFor({
+  tasks = [], messages = [], agent_id, session_id, since = null, actors = undefined,
+}) {
   if (!nonEmpty(session_id)) {
     throw new TypeError('eventsFor requires a session_id: an event feed for nobody is a bug');
   }
+
+  /*
+   * SPLICED FROM src/events.mjs. The only textual difference from the original
+   * is that `fold` is declared INSIDE this function rather than beside
+   * nonEmpty: this file is a hand-maintained concatenation and a new top-level
+   * const is a duplicate-declaration outage waiting to happen -- artifactLoads
+   * exists because one shipped. Behaviour is identical, which is what
+   * sharedSpliceMatches compares.
+   */
 
   /*
    * AN UNPARSEABLE CURSOR IS NOT "FROM THE BEGINNING".
@@ -2112,8 +2124,26 @@ export function eventsFor({ tasks = [], messages = [], agent_id, session_id, sin
     }
   }
 
+  /*
+   * A SEAT HAS MORE THAN ONE NAME, AND A MESSAGE IS STORED UNDER THE ONE THE
+   * SENDER TYPED. This was a strict inequality against agent_id, so a message
+   * addressed to a REGISTERED ALIAS never became an event -- the send path
+   * stores the recipient verbatim, so the alias is what lands in the table.
+   *
+   * Measured 2026-09-18: fixer addressed code-b as "b", a real alias of that
+   * seat, and the long poll would have held the request open while the message
+   * sat stored. inboxNames is the read half, already in this file, previously
+   * with no caller anywhere.
+   *
+   * AN UNKNOWN NAME STILL POLLS ITSELF: canonicalActor returns an unrecognised
+   * name unchanged rather than null, so a seat absent from the roster keeps
+   * receiving its own mail. That is the regression this could have shipped.
+   */
+  const fold = (v) => String(v ?? '').trim().toLowerCase();
+  const inbox = new Set(inboxNames(agent_id, actors).map(fold));
+
   for (const m of arr(messages)) {
-    if (!m || !nonEmpty(agent_id) || m.to_agent !== agent_id) continue;
+    if (!m || !nonEmpty(agent_id) || !inbox.has(fold(m.to_agent))) continue;
     if (!newer(m.created_at)) continue;
     out.push({
       kind: 'message',
