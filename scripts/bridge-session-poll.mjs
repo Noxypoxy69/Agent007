@@ -95,6 +95,46 @@ function alive(pid) {
 
 const readRecord = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 
+/**
+ * ADVANCE PAST WHAT WAS DELIVERED, given the previous cursor and the CLI's
+ * stdout. Returns the new cursor, which is `prev` when there is nothing to
+ * move to.
+ *
+ * EXPORTED SO IT CAN BE WATCHED FAILING. The supervisor's only other route to
+ * this logic is a live bridge, and the wiring test drives an unreachable host
+ * on purpose -- so the success path, which is the one carrying the defect this
+ * function fixes, had no coverage at all until it moved out here. CLAUDE.md
+ * rule 10: decision logic goes somewhere the suite can import.
+ *
+ * The CLI prints `  cursor  <iso>` after any batch of events. The value is the
+ * SERVER's, so there is no clock skew to reason about and no overlap window to
+ * tune -- which is what makes this better than any timestamp we could take.
+ *
+ * FORWARD ONLY. A malformed, unparseable or older value is ignored rather than
+ * rewinding, because rewinding re-delivers everything and re-delivery is the
+ * spin this whole change exists to stop.
+ *
+ * ANCHORED TO ITS OWN LINE. The CLI also prints event lines and an advisory
+ * about reading details; matching `cursor` loosely anywhere in stdout is how a
+ * check ends up agreeing with prose instead of data (rule 13).
+ */
+export function advanceCursor(prev, stdout) {
+  const lines = String(stdout ?? '').split('\n');
+  const prevMs = Date.parse(prev);
+  let best = prev;
+  let bestMs = Number.isFinite(prevMs) ? prevMs : -Infinity;
+
+  for (const line of lines) {
+    const m = /^\s*cursor\s+(\S+)\s*$/.exec(line);
+    if (!m) continue;
+    const t = Date.parse(m[1]);
+    if (!Number.isFinite(t) || t <= bestMs) continue;
+    best = m[1];
+    bestMs = t;
+  }
+  return best;
+}
+
 /* ── the supervisor: re-arm the poll until told to stop ──────────────────── */
 
 async function supervise({ sessionId, tokenFile }) {
@@ -103,28 +143,89 @@ async function supervise({ sessionId, tokenFile }) {
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
 
+  /*
+   * THE CURSOR IS CARRIED, AND NOT CARRYING IT WAS A SELF-INFLICTED REQUEST LOOP.
+   *
+   * This used to recompute `since` as `now - 600s` on EVERY iteration. The
+   * server returns the moment any event sits inside that window, so a single
+   * message made every cycle return instantly, and the supervisor re-spawned
+   * immediately because it only backs off on a FAILING status. A fresh node
+   * process and a /wait round trip every few hundred milliseconds -- each one
+   * pulling all tasks and 200 messages -- for the full ten minutes the event
+   * stayed inside the trailing window. Per session, per event. The mail this
+   * poll exists to deliver was the trigger, so the busiest moment was the one
+   * that hammered the edge function hardest. Found by blind audit, 2026-09-18.
+   *
+   * The far end already solves this and was being ignored: `wait-for-work`
+   * tracks the server's own cursor and PRINTS it on a line of its own. So the
+   * supervisor reads that line back and hands it to the next call.
+   *
+   * READING THE CURSOR IS NOT INTERPRETING THE EVENT. The comment below still
+   * holds -- this loop does not look at what arrived, and must not, or it
+   * becomes a dispatcher. A cursor is bookkeeping about WHERE it has read to,
+   * which is the one thing a poll is actually obliged to remember.
+   *
+   * The trailing window survives as the SEED only. It is what "catch up on
+   * anything from the last ten minutes" means at startup, and it is used
+   * exactly once.
+   */
+  let cursor = new Date(Date.now() - STALE_WINDOW_SECONDS * 1000).toISOString();
+
   while (!stopping) {
-    const since = new Date(Date.now() - STALE_WINDOW_SECONDS * 1000).toISOString();
     const r = spawnSync(process.execPath, [
       CLI, 'wait-for-work',
       '--session', sessionId,
       '--timeout', String(POLL_SECONDS),
-      '--since', since,
+      '--since', cursor,
       '--token-file', tokenFile,
     ], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: (POLL_SECONDS + 120) * 1000 });
 
+    cursor = advanceCursor(cursor, r.stdout);
+
+    const err = String(r.stderr ?? '');
+
     /*
-     * EXIT 3 IS "NOTHING HAPPENED" AND IS THE COMMON CASE, not a failure. Exit 0
-     * means an event arrived -- the CLI has already printed it, and this loop
-     * does NOT read or act on it: a poll that interpreted its own wake-up would
-     * be a dispatcher, and this is a heartbeat with a doorbell attached.
+     * A REFUSED CREDENTIAL IS PERMANENT, AND RETRYING IT IS A BUSY LOOP AGAINST
+     * A CLOSED DOOR. 66065c7 established that at registration and this loop was
+     * left retrying it every 15 seconds for the life of the session. The token
+     * will not become valid because we asked again.
+     *
+     * Matched on the message rather than the status because `wait-for-work`
+     * answers 2 for all four of NOT CONFIGURED, REFUSED, REJECTED and
+     * unreachable -- and unreachable is the one case that genuinely IS
+     * transient, so the exit code cannot be the discriminator.
+     */
+    if (/REFUSED this credential|no registration token/i.test(err)) {
+      process.stderr.write(`[poll] stopping: ${err.split('\n')[0].slice(0, 200)}\n`);
+      break;
+    }
+
+    /*
+     * r.status === null IS THE QUIET CASE, NOT A FAILURE, and reporting it as
+     * one was a false alarm every twelve minutes on a perfectly healthy session.
+     * Without --once the CLI waits internally until something arrives, so on a
+     * silent bridge it is still waiting when our own spawn timeout stops it.
+     * That is the poll working. Re-arm immediately and say nothing.
+     *
+     * (The comment below used to claim exit 3 was the common case. It is not
+     * reachable as this supervisor invokes the CLI -- exit 3 is set only under
+     * --once, which is not passed. Left handled anyway, because it is the
+     * documented contract and a future caller may pass it.)
+     */
+    if (r.status === null) continue;
+
+    /*
+     * EXIT 0 means an event arrived -- the CLI has already printed it, and this
+     * loop does NOT read or act on it beyond the cursor: a poll that interpreted
+     * its own wake-up would be a dispatcher, and this is a heartbeat with a
+     * doorbell attached. EXIT 3 means nothing came.
      *
      * Anything else is reported and the loop continues. A poll that gave up on
      * the first transient failure would leave the session silently invisible,
      * which is the exact condition it exists to prevent.
      */
     if (r.status !== 0 && r.status !== 3) {
-      process.stderr.write(`[poll] wait-for-work exited ${r.status}: ${String(r.stderr).slice(0, 200)}\n`);
+      process.stderr.write(`[poll] wait-for-work exited ${r.status}: ${err.slice(0, 200)}\n`);
       if (stopping) break;
       // Back off briefly so a hard failure cannot spin.
       await new Promise((resolve) => { setTimeout(resolve, 15_000); });
