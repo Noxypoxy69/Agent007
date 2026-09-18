@@ -1126,10 +1126,33 @@ function coordinatorStore(label) {
       /*
        * A COORDINATOR RECORDS WHAT THE OWNER DECIDED. IT DOES NOT DECIDE.
        *
-       * created_by is forced to owner_id here, and validateDecision refuses a
-       * record where they differ. A coordinator that could set created_by to
-       * itself could mint its own permissions, which is precisely the thing the
-       * decision ledger exists to constrain.
+       * created_by IS THE AUTHENTICATED CALLER, AND THAT IS THE WHOLE CONTROL.
+       *
+       * This line used to read `created_by: d.owner_id`, and the comment here
+       * claimed that forcing them equal was the protection. It was the opposite.
+       * validateDecision refuses a record whose created_by differs from its
+       * owner_id -- so forcing them equal meant THAT CHECK COULD NEVER FIRE from
+       * this call site. owner_id is taken verbatim from the caller's payload and
+       * was never compared against anything.
+       *
+       * The result was a hollow gate inside the authorization ledger. One call
+       * with owner_id "danny", scope_type "bridge" and capabilities ["*"] --
+       * capabilityMatches('*') is unconditionally true and scopeMatches is true
+       * for bridge -- and resolve_owner_decision answers `allowed` for every
+       * action with no narrower decision, while settleOpenRequestsAgainstPolicy
+       * auto-closes every open owner-routed request as decided_by "danny".
+       * bridge/httpStore.mjs already wrote the threat down: "An agent that could
+       * record a decision could grant itself permission."
+       *
+       * Found by a blind audit, 2026-09-18. NOT demonstrated live: doing so would
+       * have forged an owner decision in the operator's real ledger.
+       *
+       * Passing the token label makes the existing, tested check LIVE and fail
+       * CLOSED: a coordinator recording for someone else is now refused by
+       * validateDecision, naming both parties. Only a caller whose own
+       * authenticated label IS the owner may record -- which is what the tool
+       * description promises and what docs/ORDER.md records as the mechanism
+       * that "correctly refused c8 this morning".
        */
       const rec = createDecision({
         decision_id: d.decision_id,
@@ -1140,7 +1163,7 @@ function coordinatorStore(label) {
         effect: d.effect,
         capabilities: Array.isArray(d.capabilities) ? d.capabilities : [],
         constraints: d.constraints ?? {},
-        created_by: d.owner_id,
+        created_by: label,
         created_at: new Date().toISOString(),
         supersedes: d.supersedes ?? null,
       });
