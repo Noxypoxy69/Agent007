@@ -39,6 +39,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { evaluateClaudeTool, isProtectedPath } from '../src/claudeGuard.mjs';
 import { judgeShellCommand } from '../src/shellAllowlist.mjs';
 
@@ -715,7 +716,55 @@ test('npm forwards everything after -- to the script, so those operands are judg
  * All three were already on the server when they were found.
  * ==========================================================================*/
 
-test('8.3 SHORT NAMES are the same file, and case-folding alone did not cover them', () => {
+/*
+ * AN 8.3 ALIAS IS ASSIGNED BY CREATION ORDER, SO IT IS NOT A PROPERTY OF THE
+ * NAME AND MUST NEVER BE HARDCODED.
+ *
+ * The first version of this test asserted 'bin/AG8836~1.MJS'. That is the alias
+ * NTFS happened to give the guard binary in the operator's checkout. In a fresh
+ * `git clone` of the same repository the same file is AGENTB~2.MJS, because the
+ * directory's entries were created in a different order. So the test failed on
+ * every clone -- including the clone that rule 20 REQUIRES an auditor to make,
+ * which means the one test covering this attack was broken for exactly the
+ * reader whose job is to check it. Found by blind audit, 2026-09-18.
+ *
+ * Ask the OS for the alias instead. `dir /x` is the alias table's owner, the
+ * same reasoning that put realpathSync.native in the resolver: the OS owns the
+ * mapping, so the OS is what gets asked.
+ */
+function shortNamesIn(dir) {
+  const out = new Map();
+  if (process.platform !== 'win32') return out;
+  let text;
+  try {
+    text = execFileSync('cmd', ['/c', 'dir', '/x', dir], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+    });
+  } catch { return out; }
+  for (const line of text.split('\n')) {
+    // "09/17/2026  10:03 PM   5,940 AG8836~1.MJS agentbridge-claude-guard.mjs"
+    // The alias column is EMPTY when the long name is already 8.3-legal, so the
+    // tilde is the reliable marker for a generated alias. None of the names
+    // here contain spaces; a name that did would need a wider parse.
+    const m = line.match(/(\S*~\d\S*)\s+(\S+)\s*$/);
+    if (m) out.set(m[2].toLowerCase(), m[1]);
+  }
+  return out;
+}
+
+/** Rewrite each component of a repo-relative path as its 8.3 alias where one exists. */
+function shortPathOf(root, rel) {
+  let dir = root;
+  const parts = [];
+  for (const component of rel.split('/')) {
+    const alias = shortNamesIn(dir).get(component.toLowerCase());
+    parts.push(alias ?? component);
+    dir = path.join(dir, component);
+  }
+  return parts.join('/');
+}
+
+test('8.3 SHORT NAMES are the same file, and case-folding alone did not cover them', (t) => {
   /*
    * e4b1760 folded case and argued folding is "a PROPERTY, not a lookalike
    * list". It was a property of one alias class. realpathSync does not expand
@@ -723,16 +772,42 @@ test('8.3 SHORT NAMES are the same file, and case-folding alone did not cover th
    * Measured: writing CLAUDE~1/SETTIN~1.JSO modifies .claude/settings.json and
    * git reports the canonical path as modified.
    */
-  for (const p of ['CLAUDE~1/SETTIN~1.JSO', 'CLAUDE~1/settings.json', 'src/CLAUDE~1.MJS',
-    'src/GUARDS~1.MJS', 'src/SHELLA~1.MJS', 'bin/AG8836~1.MJS']) {
-    assert.equal(isProtectedPath(p, repoRoot), true, `${p} resolves to a protected file`);
-  }
+  const PROTECTED_SAMPLES = [
+    '.claude/settings.json',
+    'src/claudeGuard.mjs',
+    'src/guardSession.mjs',
+    'src/shellAllowlist.mjs',
+    'bin/agentbridge-claude-guard.mjs',
+  ];
+
+  const aliased = PROTECTED_SAMPLES
+    .map((rel) => [rel, shortPathOf(repoRoot, rel)])
+    .filter(([rel, short]) => short !== rel);
+
   /*
-   * The positive half, and it corrects the audit: bin/AGENTB~1.MJS resolves to
-   * agentbridge-attempt.mjs, which is NOT protected, so free is the right
-   * answer there. A short name is not automatically a control.
+   * RULE 6: ASSERT THE PRECONDITION, DO NOT GUARD ON IT. 8.3 generation can be
+   * switched off per volume (fsutil 8dot3name), and on such a machine there are
+   * no aliases and therefore no attack -- but "no aliases" and "the resolver is
+   * broken" must not look alike. Skip LOUDLY rather than passing quietly.
    */
-  assert.equal(isProtectedPath('bin/AGENTB~1.MJS', repoRoot), false);
+  if (aliased.length === 0) {
+    t.skip('this volume generates no 8.3 aliases, so there is nothing to resolve');
+    return;
+  }
+
+  for (const [rel, short] of aliased) {
+    assert.equal(isProtectedPath(short, repoRoot), true,
+      `${short} is the OS alias for ${rel} and must resolve to the protected file`);
+  }
+
+  /*
+   * THE NEGATIVE, and it corrects an earlier audit: an alias in bin/ is not
+   * automatically a control. agentbridge-attempt.mjs is NOT protected, so its
+   * alias must come back free -- whatever the OS happened to name it.
+   */
+  const freeAlias = shortPathOf(repoRoot, 'bin/agentbridge-attempt.mjs');
+  assert.equal(isProtectedPath(freeAlias, repoRoot), false,
+    `${freeAlias} is agentbridge-attempt.mjs, which is not a protected control`);
   assert.equal(isProtectedPath('docs/notes.md', repoRoot), false);
 });
 
