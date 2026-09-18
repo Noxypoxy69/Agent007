@@ -51,7 +51,12 @@ test('A TASK IS BORN CLAIMABLE, or it can never be picked up', () => {
   for (const state of RUNNABLE_STATES) {
     assert.equal(validateTask(good({ state })).ok, true, `${state} was refused`);
   }
-  for (const state of ['assigned', 'accepted', 'cancelled', 'open', '', null, undefined]) {
+  /*
+   * `undefined` is NOT in this list, and that is deliberate: it triggers the
+   * parameter default, which is `runnable`. Asserting it should be refused
+   * would be pinning that the default does not work.
+   */
+  for (const state of ['assigned', 'accepted', 'cancelled', 'open', '', null, 0, 'RUNNABLE']) {
     const v = validateTask(good({ state }));
     assert.equal(v.ok, false, `state ${JSON.stringify(state)} was accepted — it can never be claimed`);
     assert.match(v.errors.join(' '), /claim_task admits no others/);
