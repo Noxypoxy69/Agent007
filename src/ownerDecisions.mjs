@@ -429,23 +429,25 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
    * result.
    */
   const orphaned = orphanedDecisions(rows, action, context, owners);
-  if (orphaned.length > 0) {
-    return {
-      outcome: 'owner_required',
-      decision_id: null,
-      matched_scope: null,
-      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but was `
-        + 'superseded by a record that is not itself in force — the ledger cannot say what the owner '
-        + 'decided, so this goes back to the owner rather than being treated as unregulated',
-      constraints: {},
-      statement: null,
-      candidates: orphaned.map((d) => d.decision_id),
-    };
-  }
+  const orphanResult = () => ({
+    outcome: 'owner_required',
+    decision_id: null,
+    matched_scope: null,
+    reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but was `
+      + 'superseded by a record that is not itself in force — the ledger cannot say what the owner '
+      + 'decided, so this goes back to the owner rather than being treated as unregulated',
+    constraints: {},
+    statement: null,
+    candidates: orphaned.map((d) => d.decision_id),
+  });
 
   const live = activeDecisions(rows, { owners });
   const matches = live.filter((d) =>
     scopeMatches(d, context) && d.capabilities.some((c) => capabilityMatches(c, action)));
+
+  // MUTATION M2: the escalation is consulted only when nothing else matched.
+  if (matches.length > 0 && orphaned.length > 0) { /* masked */ }
+  if (matches.length === 0 && orphaned.length > 0) return orphanResult();
 
   if (matches.length === 0) {
     return {
