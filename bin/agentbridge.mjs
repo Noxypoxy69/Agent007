@@ -2266,8 +2266,14 @@ try {
        * Untracked files are excluded: node_modules and build output are not
        * source mutation.
        */
-      const headAfter = await headOf().catch(() => null);
-      const treeCleanAfter = (await dirtyOf().catch(() => 'unreadable')) === '';
+      // headOf/dirtyOf are synchronous (runGit is execFileSync) and throw on a
+      // git failure, so the fallback is a try/catch, not a Promise .catch --
+      // which would throw TypeError on the SUCCESS path, a string having no
+      // .catch. An unreadable tree stays not-clean, as the old 'unreadable' did.
+      let headAfter = null;
+      try { headAfter = headOf(); } catch { headAfter = null; }
+      let treeCleanAfter = false;
+      try { treeCleanAfter = dirtyOf() === ''; } catch { treeCleanAfter = false; }
 
       /*
        * EXACTLY ONE SUMMARY PER FIELD. Taking the first match anywhere in stdout
