@@ -293,6 +293,52 @@ test('THE PRODUCTION ROW WITH ITS PREDECESSOR, which is how it really sits', () 
   }
 });
 
+test('AN UNVALIDATED ROW CANNOT DELETE AN OWNER DECISION', () => {
+  /*
+   * THE DIRECTION I CHOSE, AND THE JUSTIFICATION I GAVE FOR IT, WAS FALSE.
+   *
+   * 62b3158 computes the superseded set from every surviving row WITHOUT
+   * validating it, and argued that was the safe direction because "a control
+   * that fails towards 'ask the owner' is recoverable". A blind audit measured
+   * it: it does not fail towards the owner. A standing owner DENY suppressed by
+   * a junk row resolves to `no_decision`, and for the elevated/reversible class
+   * the permission layer then routes it to `decider: "coordinator"` — a PEER
+   * AGENT, not Danny. I turned an unappealable owner refusal into something
+   * another agent can approve, and wrote in the commit message that it failed
+   * closed.
+   *
+   * The row does not have to be plausible. `{ supersedes: <id> }` is enough:
+   * no decision_id, no statement, no scope, no capabilities, no author.
+   *
+   * SO AN INVALID SUPERSEDER ESCALATES RATHER THAN DELETES. The predecessor
+   * still does not apply — reviving it is the resurrection 065ee23 closed — but
+   * the answer is owner_required, which is a question for the owner, not
+   * silence that a coordinator may fill.
+   */
+  const real = {
+    ...decisionBy('danny'),
+    decision_id: 'd-owner-deny-prod',
+    effect: 'deny',
+    capabilities: ['deploy.*'],
+  };
+  const junk = { supersedes: 'd-owner-deny-prod' };
+
+  for (const [name, , active, resolve] of SURFACES) {
+    assert.equal(resolve([real], 'deploy.production').outcome, 'denied',
+      `${name}: the owner's DENY does not apply even on its own — fixture is wrong`);
+
+    assert.deepEqual(active([real, junk]), [],
+      `${name}: the suppressed decision is live again — that is the resurrection`);
+
+    const r = resolve([real, junk], 'deploy.production');
+    assert.notEqual(r.outcome, 'no_decision',
+      `${name}: a bare {supersedes} object silently deleted the owner's DENY, leaving `
+      + 'no_decision — which the permission layer routes to a COORDINATOR for anything reversible');
+    assert.equal(r.outcome, 'owner_required',
+      `${name}: expected owner_required, got ${r.outcome}`);
+  }
+});
+
 test('A VALID SUPERSESSION STILL WORKS, so the fix above is not a blunt instrument', () => {
   /*
    * Rule 5 again. "Nothing is ever active" satisfies every assertion above.
