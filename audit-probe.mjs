@@ -1,7 +1,7 @@
 import { toolDefs as hostedDefs } from './supabase/functions/mcp/_shared.js';
 import { toolDefs as twinDefs } from './mcp/toolDefs.mjs';
 import { resolveOwnerDecision, activeDecisions } from './src/ownerDecisions.mjs';
-import { routePermissionRequest } from './src/permissionRequest.mjs';
+import { classifyRequest } from './src/permissionRequest.mjs';
 
 /* ---- D8: the contradiction list_locks was supposed to remove, at b53581b ---- */
 // index.ts:402 hardcodes `locks: null` for every session on the deployed surface.
@@ -48,10 +48,8 @@ const r = resolveOwnerDecision(ledger, 'deploy.production', {});
 console.log('resolveOwnerDecision ->', r.outcome, '|', r.reason.slice(0, 120));
 console.log('candidates ->', JSON.stringify(r.candidates));
 
-const routed = routePermissionRequest({
-  action: 'deploy.production', requested_by: 'code-b', risk: 'elevated',
-  reversible: true, decisions: ledger, context: {},
-});
-console.log('routePermissionRequest ->', JSON.stringify({
-  decider: routed.decider, outcome: routed.outcome ?? routed.state ?? null,
-}));
+for (const [label, rows] of [['3-chain', ledger], ['2-chain control', ledger.slice(1)]]) {
+  const c = classifyRequest({ action: 'deploy.production', requested_by: 'code-b', reversible: true },
+    rows, { now: '2026-09-18T00:00:00Z' });
+  console.log(`classifyRequest ${label.padEnd(16)} decider=${c.decider} allowed=${c.allowed} id=${c.decision_id}`);
+}
