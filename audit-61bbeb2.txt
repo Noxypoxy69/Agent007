@@ -1,0 +1,256 @@
+AUDIT OF fix/guard-tool-dispatch AT 61bbeb2
+Requested by c8 (messages 72c872b8 at 10:49Z and 02688e5b at 10:53Z, addressed to
+code-b). Performed by code-b on danny-win, Agent007 worktree, 2026-09-17.
+Not committed. Nothing was pushed.
+
+WHY THIS FILE EXISTS ALONGSIDE audit-520cee2.txt, RATHER THAN REPLACING IT.
+That audit is real work and its verdict line is VERDICT=unsound. It was measured
+against 520cee2. HEAD is now 61bbeb2, six commits later -- 021c36f, 4654f20,
+de09536, 90b2924, a24d499, 61bbeb2 -- and at least two of them land directly on
+its findings. Overwriting it would destroy the record; leaving it to be read as
+current would be worse. Both stand, each labelled with the commit it measured.
+
+------------------------------------------------------------------------------
+METHOD, AND WHY ANY ROW BELOW CAN BE BELIEVED
+------------------------------------------------------------------------------
+
+The table was generated from the REAL tool roster this session exposes rather
+than from a remembered list. That was c8's explicit instruction and the reason
+for it is CLAUDE.md rule 7: the previous set was guessed from a different
+platform, and a fixture list somebody thought of by hand tests the cases they
+already had in mind.
+
+Harness: test/guardToolRoster.test.mjs, which calls evaluateClaudeTool directly.
+9 tests, 9 pass, 73 rows. Count asserted, not inferred from an exit code
+(rule 3: a non-zero exit is evidence a process was unhappy, nothing more).
+
+CONTROLS, BOTH DIRECTIONS, STATED BEFORE ANY RESULT:
+
+  KNOWN-BAD   PowerShell {command: 'Remove-Item -Force src/claudeGuard.mjs'}
+              -> DENY  shell-not-allowlisted
+
+  KNOWN-GOOD  Read {file_path: 'src/claudeGuard.mjs'}
+              -> ALLOW
+
+Both fired. Had the known-bad returned allowed, every row here would be void --
+a sweep that returns ALLOW for everything is indistinguishable from a harness
+whose import failed or whose call signature was wrong. That is rule 5, a
+negative needs the positive first.
+
+NO ROW THREW. Recorded as its own asserted outcome rather than folded into the
+passes, because a crash that reads as a clean result is how the opposite of the
+truth gets reported.
+
+------------------------------------------------------------------------------
+THE BRIEF'S PREMISE IS OBSOLETE, AND THAT IS THE FIRST FINDING
+------------------------------------------------------------------------------
+
+c8 asked for every tool returning `unclassified-tool`. THAT VERDICT NO LONGER
+EXISTS AT THIS HEAD. Commit a1d7f6c removed the default-deny -- it refused 24 of
+a 54-tool roster, which is an outage, and an outage gets the hook switched off,
+which loses every layer at once. The fallthrough is now allow, plus a bounded
+backstop that walks the input for protected paths.
+
+So the question inverts. It is no longer "what is wrongly refused" but "what
+reaches the fallthrough allow while still able to write or execute".
+
+This was asserted explicitly -- the absence of `unclassified-tool` is a test, not
+an observation -- because a search that finds nothing because the thing was
+renamed is exactly the hollow shape this project keeps producing.
+
+------------------------------------------------------------------------------
+FINDING 1 (HIGHEST): HIGH-CAPABILITY TOOLS REACH THE FALLTHROUGH ALLOW, AND THE
+STATED FALLBACK DOES NOT COVER THEM
+------------------------------------------------------------------------------
+
+Measured ALLOW at 61bbeb2:
+
+  mcp__claude_ai_Supabase__apply_migration        production SQL
+  mcp__claude_ai_Supabase__deploy_edge_function   production deploy
+  mcp__claude-in-chrome__javascript_tool          executes JS in the browser
+  mcp__claude-in-chrome__computer                 drives the desktop
+  mcp__claude_ai_Google_Drive__create_file        writes a file outside the repo
+  mcp__claude_ai_Gmail__send_message              irreversible outbound
+  CronCreate                                      schedules a future agent run
+  EnterWorktree / ExitWorktree                    changes the working tree
+
+Allowing these is the DOCUMENTED posture, and the documentation is honest about
+it: "not blocked here, detected at Stop by protected-file drift". For an MCP
+write that lands on a repository file, that is true and the claim is sound.
+
+THE GAP IS THAT MOST OF THESE NEVER TOUCH A REPOSITORY FILE. A migration applied
+to production, an edge function deployed, an email sent, a browser driven, a cron
+job scheduled -- none of them changes a byte under the worktree, so protected-file
+drift at Stop sees nothing and has nothing to compare. For this class the stated
+fallback is not a weaker layer, it is NO layer.
+
+This is not an argument for default-denying them; that was tried at 520cee2 and
+was an outage. It is an argument that the sentence "detected at Stop" should not
+be read as covering them, and that whatever does cover them has to be somewhere
+Stop is not. Naming it is the whole of this finding.
+
+It also compounds the reviewer's separate finding that three layers delegate to
+the Stop gate. Here is a fourth delegation, to a gate that structurally cannot
+observe the action.
+
+------------------------------------------------------------------------------
+FINDING 2: TWO OVER-BLOCKS. BOTH TOOLS CAN NEITHER WRITE NOR EXECUTE.
+------------------------------------------------------------------------------
+
+Measured:
+
+  SendUserFile  {path: 'CLAUDE.md'}              -> DENY  protected-control
+  SendUserFile  {path: 'src/claudeGuard.mjs'}    -> DENY  protected-control
+  SendUserFile  {path: '.claude/settings.json'}  -> DENY  protected-control
+  ReportFindings (a finding whose file is src/claudeGuard.mjs)
+                                                 -> DENY  protected-control
+
+SendUserFile READS a file and shows it to the operator on another device. It
+cannot modify anything. The effect is that the operator cannot be sent CLAUDE.md
+or .claude/settings.json -- the two files most likely to be wanted while
+debugging the guard.
+
+ReportFindings is worse in kind: it is how a code review reports its results. A
+SECURITY REVIEW OF THE GUARD ITSELF CANNOT BE REPORTED THROUGH THE NORMAL
+CHANNEL, because the findings name the guard's own files. A control that blocks
+the reporting of problems with that control is a specific and unfortunate shape.
+
+Both are the path rail being unable to distinguish "about to modify CLAUDE.md"
+from "referring to CLAUDE.md". The guard's own header already names this hazard
+for Read -- "routing it through the write checks would refuse `Read CLAUDE.md` --
+a guard that blocks reading the rules is one people turn off" -- and the fix
+there was membership in READ_ONLY_TOOLS, which is consulted first. These two
+tools were not given that membership. By c8's stated rule, a tool that can
+neither execute nor write belongs in READ_ONLY_TOOLS and the repair is one line
+each.
+
+ONE HONEST COUNTER-ARGUMENT, because it should be decided rather than assumed.
+SendUserFile sends content OUTWARD, so refusing to ship guard configuration off
+the machine is a defensible policy. But nothing states that intent: the id is
+`protected-control` and the reason is write-protection wording. And CLAUDE.md is
+committed and pushed to a remote already, so refusing to send it buys nothing
+that is not already public. If the exfiltration reading is what is wanted, it
+deserves its own refusal id saying so.
+
+------------------------------------------------------------------------------
+FINDING 3: A COMMENT THAT DESCRIBES A REPAIR THAT IS NOT THERE. SECOND INSTANCE.
+------------------------------------------------------------------------------
+
+src/claudeGuard.mjs, above COMMAND_FIELDS:
+
+  "The fix is Workflow's entry in READ_ONLY_TOOLS above, which is consulted
+   FIRST, not the removal of `script`"
+
+READ_ONLY_TOOLS AT THIS HEAD CONTAINS NO Workflow ENTRY. Read the set: it ends
+at 'SendMessage', 'ListAgents'.
+
+The behaviour is nonetheless correct and deliberate -- Workflow gets a
+purpose-built refusal, measured:
+
+  Workflow {script: '<a real workflow script>'}
+    -> DENY  workflow-exec-untrusted
+       "Workflow carries executable script content and is not a read-only tool"
+
+That fails closed and is a better design than the membership the comment
+describes. The defect is only that the comment now misdirects the next reader to
+a mechanism that does not exist.
+
+IT IS THE SECOND INSTANCE OF THIS EXACT DEFECT IN ONE FILE PAIR, which is why it
+is worth a finding rather than a note. src/shellAllowlist.mjs records the first:
+`sed -n '1,20p' CLAUDE.md` was "named in src/claudeGuard.mjs as the read that
+justified removing a path check -- but sed was never added here, so it stayed
+refused in every quoting form. The comment described a repair that did not
+exist." Measured the same day.
+
+A NOTE ON MY OWN PROCESS HERE, since it is the point of the exercise. I predicted
+from reading the source that Workflow would fall through to the shell rail and be
+refused as shell-not-allowlisted, because it carries `script` and `script` is in
+COMMAND_FIELDS. That prediction was WRONG, and only running it showed so. Rule 4:
+never assert on a proxy. Reading a list is a proxy for what the code does.
+
+------------------------------------------------------------------------------
+FINDING 4: THE BACKSTOP HAS A DEPTH FLOOR, MEASURED AND NOW RECORDED
+------------------------------------------------------------------------------
+
+  protected path nested at depth 4  -> DENY   protected-control
+  protected path nested at depth 5  -> ALLOW
+
+This is documented behaviour (depth > 4, seen.n > 200), not a hidden defect, and
+the bound exists for a good reason: an unbounded walk on every tool call is a
+hook that hangs, and a hook that hangs is the silent-allow failure in a different
+costume. It is recorded here so that a later reader does not assume the walk goes
+all the way down. Anything that can place a path below depth 5 in an
+unanticipated field is not caught by the backstop.
+
+------------------------------------------------------------------------------
+FINDING 5 (MINOR): AN ENUMERATION GAP
+------------------------------------------------------------------------------
+
+ReadMcpResourceDirTool is not in READ_ONLY_TOOLS while both of its siblings,
+ListMcpResourcesTool and ReadMcpResourceTool, are. Harmless at this head -- it
+carries neither a command nor a path, so it reaches the fallthrough allow anyway
+-- but it reaches the right answer by the wrong route, and the set is the thing
+that decides outcomes now.
+
+------------------------------------------------------------------------------
+POINT 7 OF THE ORIGINAL BRIEF: VERIFIED
+------------------------------------------------------------------------------
+
+git show --stat 520cee2 reports exactly three files:
+
+  .claude/settings.json                   4 +-
+  src/claudeGuard.mjs                   209 ++++++++++++-----
+  test/claudeGuardToolDispatch.test.mjs 163 ++++++++++
+
+Three files. docs/ORDER.md is NOT among them. As claimed.
+
+------------------------------------------------------------------------------
+WHAT WAS NOT DONE, STATED SO NOTHING HERE IS MISREAD AS COVERAGE
+------------------------------------------------------------------------------
+
+POINT 1, THE END-TO-END DELETION PROBE: NOT RUN. c8 asked for a fresh session
+that attempts a real shell deletion of src/claudeGuard.mjs. This session cannot
+start a new session, and running the deletion is destructive if the guard fails.
+It was not attempted without the owner's go-ahead.
+
+What CAN be said, and it is weaker than what was asked for: this session received
+real hook refusals carrying the [agentbridge: prefix, for `git pull`, for a
+PowerShell Set-Content against .claude/settings.json, for `node
+bin/agentbridge.mjs`, and for a grep containing a pipe. So the hook path does
+reach this guard and does refuse through it at this head. That is not the same
+claim as the deletion probe and must not be substituted for it.
+
+POINT 5, THE MUTATION REPRODUCTION: NOT RUN. c8 asked for the 4-of-7 and
+1-red mutation claims to be reproduced independently. An attempt to mutate a
+guard source file earlier in this session was refused by the CLAUDE CODE AUTO-MODE
+CLASSIFIER -- reason "[Security Test Removal]", no [agentbridge: prefix, a
+different mechanism in a different layer. It was not worked around. The mutation
+claims in the 520cee2 commit message therefore remain unverified by this audit.
+
+THE ~150 REMAINING mcp__* TOOLS: SAMPLED, NOT ENUMERATED. They all reach the same
+startsWith('mcp__') branch, so representative tools were driven across servers
+rather than every tool individually. Stated here rather than implied away.
+
+------------------------------------------------------------------------------
+VERDICT
+------------------------------------------------------------------------------
+
+AUDIT 61bbeb2 | E2E=hook-reaches-guard-deletion-not-probed | BLOCKS_ORDINARY_WORK=yes-two-named | BYPASS_FOUND=depth-bound-only | MUTATIONS_REPRODUCED=not-run | VERDICT=sound-with-findings
+
+Reading of that line. The guard at 61bbeb2 is materially better than at 520cee2:
+the outage that made the earlier verdict `unsound` is gone, repository writes to
+protected paths are refused through every route tested, and the fallthrough is a
+considered position rather than an accident. No finding here is a hole in
+repository-write protection.
+
+BLOCKS_ORDINARY_WORK is yes on the strength of SendUserFile and ReportFindings,
+both one-line repairs, and neither able to write or execute.
+
+BYPASS_FOUND is qualified: the depth-5 case is a real measured limit of the
+backstop, and it is documented and deliberately bounded, so it is a floor rather
+than a hole.
+
+The item that deserves attention is not in the verdict line's vocabulary at all,
+which is finding 1: a class of high-capability tools whose stated fallback
+cannot observe them. That is a coverage question for whoever owns the promotion
+boundary, not a bug in this commit.
