@@ -440,14 +440,42 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    */
   if (toolName.startsWith('mcp__')) return { allowed: true };
 
+  /*
+   * A TOOL CARRYING BOTH SHAPES IS JUDGED ON BOTH, AND THIS RETURNED ON THE
+   * FIRST ONE IT FOUND.
+   *
+   * The comment above says tools are routed by the SHAPE of their input, and it
+   * never considered an input carrying two shapes at once. Because the command
+   * branch returned unconditionally, a decoy command field skipped the write
+   * judgment entirely:
+   *
+   *   {"tool_name":"Write","tool_input":{"command":"ls",
+   *                                      "file_path":"src/claudeGuard.mjs","content":"x"}}
+   *     -> allowed, where the same call without the decoy is deny protected-control
+   *
+   * Found by audit. Whether a harness forwards unmodelled fields is not
+   * something this layer should be betting on -- it is the layer that exists
+   * because such bets were lost before. Both shapes are now judged and the
+   * first refusal wins; a call that is somehow both a shell command and a write
+   * has to satisfy the rules for both.
+   */
   const command = firstStringField(input, COMMAND_FIELDS);
+  const target = firstStringField(input, PATH_FIELDS);
+
+  if (command && target) {
+    const shellVerdict = judgeShell(command.value, cwd);
+    if (!shellVerdict.allowed) return shellVerdict;
+    const writeVerdict = judgeWrite(target.value, input, cwd, sessionId);
+    if (!writeVerdict.allowed) return writeVerdict;
+    return shellVerdict.overridden ? shellVerdict : writeVerdict;
+  }
+
   if (command) return judgeShell(command.value, cwd);
 
   if (SHELL_TOOL_NAMES.has(toolName)) {
     return deny('missing-command', `${toolName} did not provide a command string`);
   }
 
-  const target = firstStringField(input, PATH_FIELDS);
   if (target) return judgeWrite(target.value, input, cwd, sessionId);
 
   if (STRUCTURED_EDIT_TOOLS.has(toolName)) {

@@ -104,6 +104,16 @@ const UNDECLARED_SUITE_MS = 180_000;
  * session is protected-control drift, and the drift check above has already
  * blocked and exited before this function is ever consulted.
  *
+ * THAT ARGUMENT WAS FALSIFIED FOR A WHILE AND IS TRUE AGAIN, WHICH IS WORTH
+ * RECORDING RATHER THAN QUIETLY RESTORING. The override channel added a filter
+ * that moved granted drift out of the blocking path, so a grant naming
+ * .claude/settings.json let execution reach this function and read a timeout the
+ * granted edit had chosen -- measured at 99999, and the gate did not block. The
+ * comment above stayed true-looking and stopped being true. GATE_SELF_CONFIG now
+ * excludes this gate's own configuration from override suppression, so the
+ * sentence holds again. A control that reads its own limits from a file has to
+ * re-check that argument every time something new can write that file.
+ *
  * THE SMALLEST DECLARATION WINS, not the first one found. Claude Code merges
  * project and local settings, so this script can be registered more than once --
  * and several registrations mean several killers, of which the EARLIEST governs.
@@ -276,9 +286,29 @@ if (!snapshot) {
  * channel's whole safety argument is that a forged grant does not disappear
  * into a clean run -- staying silent here is exactly how it would.
  */
+/*
+ * THIS GATE'S OWN CONFIGURATION IS NOT OVERRIDABLE, WHATEVER THE GRANT SAYS.
+ *
+ * hookBudget below reads this gate's kill deadline out of .claude/settings.json,
+ * and its stated reason for trusting that file is that `.claude/` is a protected
+ * prefix, so any edit is drift and the check here has already blocked and exited
+ * before the budget is consulted. That argument was true when it was written and
+ * the override channel falsified it: a grant naming .claude/settings.json moved
+ * the drift into `granted`, which records and continues, so execution reached
+ * hookBudget and read a number the edit had chosen. Measured by audit -- with
+ * such a grant and the timeout rewritten to 99999 the gate did not block.
+ *
+ * An override is a decision to permit a REPAIR. It cannot also be a decision to
+ * let the repaired file dictate how long this gate is allowed to look, because
+ * then the grant is not scoped to a file, it is scoped to the check itself.
+ * These paths stay drift no matter what is granted; a genuine repair to them is
+ * visible in the refusal and lands on the next session's clean baseline.
+ */
+const GATE_SELF_CONFIG = new Set(['.claude/settings.json', '.claude/settings.local.json']);
 const allDrift = protectedDrift(root, snapshot);
-const granted = allDrift.filter((d) => overrideCovers(root, d.file));
-const drift = allDrift.filter((d) => !overrideCovers(root, d.file));
+const grantApplies = (d) => !GATE_SELF_CONFIG.has(d.file) && Boolean(overrideCovers(root, d.file));
+const granted = allDrift.filter(grantApplies);
+const drift = allDrift.filter((d) => !grantApplies(d));
 if (granted.length) {
   /*
    * RECORDED, NOT RETURNED. This must not call out() -- see its definition.
