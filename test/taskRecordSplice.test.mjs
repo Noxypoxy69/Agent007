@@ -36,8 +36,19 @@ import {
 
 const AT = '2026-09-18T23:00:00.000Z';
 
+/*
+ * BUILT BY HAND, SO IT MUST CARRY `state` EXPLICITLY.
+ *
+ * The first version omitted it and every "well-formed" assertion failed: the
+ * parameter default lives in `createTask`, and a record handed straight to
+ * `validateTask` never passes through it. Worth leaving visible — a corpus
+ * whose baseline case is invalid makes the whole comparison agree on "both
+ * refuse", which is exactly the vacuous agreement the next test exists to
+ * refuse.
+ */
 const base = {
   task_id: 't-splice', title: 'x', lane_id: 'agentbridge', repo_id: 'Agent007',
+  state: 'runnable',
   allowed_paths: ['src/a.mjs'], created_at: AT, created_by: 'code-b',
 };
 
