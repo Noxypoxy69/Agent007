@@ -1,6 +1,6 @@
 /* AUDIT PROBE 9 — what the escalation actually changes for a REQUESTER,
  * through src/permissionRequest.mjs, which is what consumes the outcome. */
-import { routePermission } from '../src/permissionRequest.mjs';
+import { classifyRequest } from '../src/permissionRequest.mjs';
 
 const dec = (id, extra = {}) => ({
   decision_id: id, owner_id: 'danny', decision_type: 'policy',
@@ -11,7 +11,7 @@ const dec = (id, extra = {}) => ({
 });
 
 const ask = (label, decisions, request) => {
-  const r = routePermission(request, decisions);
+  const r = classifyRequest(request, decisions, { now: Date.parse('2026-09-18T21:00:00Z') });
   console.log(`${label.padEnd(56)} decider=${String(r.decider).padEnd(12)} allowed=${String(r.allowed)}  ${String(r.reason).slice(0, 70)}`);
 };
 
