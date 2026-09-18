@@ -204,6 +204,31 @@ WHEN IT RUNS: before a migration, a deploy, or a merge to a shared branch, and
 whenever work is handed back as complete. An audit that runs on half-finished
 work is spent, so finish the class first — see 19 — and audit once.
 
+THE SECOND LAP IS A NEW AUDIT, NOT A CHECKLIST WALK, AND IT NEEDS A NEW
+AUDITOR. When an audit finds defects and the author fixes them, do not send the
+fixes back to the auditor that found them. Two reasons, and the first is the one
+that actually bites:
+
+An auditor that has published findings verified a list of claims TRUE, and on a
+second pass it walks its own defect list and does not re-check what it already
+blessed. But a FIX IS NEW CODE, and new code breaks what was previously fine.
+Measured here: `a0bdbf9` correctly closed the sweep spellings AND refused
+`git commit -m "handle --force flag"`, which worked at its parent. An auditor
+asking "are my defects closed?" gets a yes for each one and never sees the one
+the fix created. Second: an agent that has stated a position defends it, so the
+re-audit becomes an argument about the old findings instead of a measurement of
+the new code.
+
+SO THE ORDER IS FIXED. A fresh auditor audits the new commits FROM SCRATCH,
+told nothing about the previous findings — that pass is what catches the
+regression the fix introduced. Only AFTERWARDS is it handed the old defect list
+to confirm closure. Give it the list first and you have bought a checklist walk,
+which is the thing the whole rule exists to avoid.
+
+AND AUDITS COST. The first one here ran 158k tokens and twenty-three minutes.
+Batch the fixes and audit once; one audit per patch spends the budget that the
+next real finding needs.
+
 THE AUDIT IS NOT A VETO AND NOT AN APPROVAL. It produces evidence. Acting on
 it is still the owner's call, and an auditor that says "ship it" has not
 transferred that authority to itself.
