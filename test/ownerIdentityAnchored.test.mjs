@@ -128,8 +128,38 @@ const ROSTER_IMPOSTORS = ACTORS
  * adding an owner spelling extends them too.
  */
 const NEAR_MISSES = [...OWNER_IDS].flatMap((o) => [
+  /*
+   * LONGER THAN AN OWNER NAME — catches a matcher that widened to "contains".
+   */
   `not-${o}`, `${o}-impostor`, `x${o}`, `${o}x`, `c8-${o}`, `${o}.evil`,
   `${o} `.repeat(2).trim(), `${o}${o}`,
+
+  /*
+   * SHORTER THAN AN OWNER NAME, AND THIS DIRECTION WAS COVERED BY ACCIDENT.
+   *
+   * An audit measured which fixtures actually caught the widening mutations
+   * `o.includes(want)` and `o.startsWith(want)`. The answer was not one of the
+   * near-misses above — every one of them is strictly LONGER than an owner name,
+   * so none can be contained in one. What caught them were the roster entries
+   * "a" and "d", the single-letter aliases of code-a and code-d. A roster
+   * cleanup that dropped those aliases would silently reopen two widenings and
+   * nothing here would notice.
+   *
+   * Coverage that depends on an unrelated list keeping an incidental property
+   * is not coverage. These are derived from the owner names themselves, so the
+   * direction is covered by design.
+   */
+  ...(o.length > 1 ? [o.slice(0, 1), o.slice(0, -1), o.slice(1)] : []),
+
+  /*
+   * SEPARATED — catches a matcher that normalises punctuation away.
+   *
+   * Mutating `isOwnerId` to strip non-alphanumerics before comparing was
+   * UNCAUGHT: `d-a-n-n-y` and `D.A.N.N.Y` both became the owner. Every fixture
+   * above differs from an owner name by ADDED WORDS, and none by interior
+   * punctuation, so a normalising widening passed straight through.
+   */
+  o.split('').join('-'), o.split('').join('.'), o.split('').join(' '), o.split('').join('_'),
 ]);
 
 const IMPOSTORS = [...ROSTER_IMPOSTORS, ...NEAR_MISSES];
@@ -139,6 +169,24 @@ test('NO NON-OWNER ACTOR CAN RECORD A DECISION IN ITS OWN NAME', () => {
     `the roster yielded only ${ROSTER_IMPOSTORS.length} non-owner names; this gate is covering almost nothing`);
   assert.ok(NEAR_MISSES.length >= 8,
     `only ${NEAR_MISSES.length} near-misses were derived; a substring match would go unnoticed`);
+
+  /*
+   * THE CORPUS MUST COVER BOTH DIRECTIONS BY DESIGN, not by accident.
+   *
+   * Asserting the near-misses exist says nothing about their SHAPE. These pin
+   * that the corpus contains names shorter than an owner name (so a matcher
+   * widened to `owner.includes(candidate)` is reachable) and names differing
+   * only by interior punctuation (so a matcher that normalises it away is
+   * reachable). Without these two, the gate was relying on `code-a` and
+   * `code-d` keeping their single-letter aliases.
+   */
+  const shortest = Math.min(...[...OWNER_IDS].map((o) => o.length));
+  assert.ok(NEAR_MISSES.some((n) => n.length < shortest),
+    'no near-miss is shorter than an owner name: a widening to "the owner name contains the '
+    + 'candidate" cannot be reached by this corpus');
+  assert.ok(NEAR_MISSES.some((n) => /[^a-z0-9]/i.test(n) && n.replace(/[^a-z0-9]/gi, '').length <= shortest),
+    'no near-miss is an owner name broken up by punctuation: a matcher that strips separators '
+    + 'before comparing cannot be reached by this corpus');
 
   for (const [name, validate] of SURFACES) {
     const accepted = [];
