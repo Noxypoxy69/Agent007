@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers } from './guardSession.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
@@ -287,14 +287,53 @@ function judgeShell(command, cwd) {
    * no, and `node <file>` is refused rather than assumed safe.
    */
   const mayExecute = (target) => {
-    if (!cwd) return false;
+    if (!cwd) return 'untracked-file';
+    let rel;
     try {
-      const rel = path.relative(path.resolve(cwd), path.resolve(cwd, target)).split(path.sep).join('/');
-      if (rel === '' || rel.startsWith('..')) return false;   // outside the repo: not inherited from it
-      runGit(['cat-file', '-e', `HEAD:${rel}`], { cwd, stdio: 'ignore' });
-      return true;
+      rel = path.relative(path.resolve(cwd), path.resolve(cwd, target)).split(path.sep).join('/');
     } catch {
-      return false;
+      return 'untracked-file';
+    }
+    if (rel === '' || rel.startsWith('..')) return 'untracked-file';  // outside the repo is not inherited from it
+    try {
+      runGit(['cat-file', '-e', `HEAD:${rel}`], { cwd, stdio: 'ignore' });
+      /*
+       * THE NAME BEING IN HEAD IS NOT THE POINT. THE BYTES ARE.
+       *
+       * The first version asked only whether a blob existed at that path in
+       * HEAD, which made every tracked, unprotected .mjs a free execution slot:
+       *
+       *   Write scripts/probe-git-branch-matcher.mjs  {"content":"evil"}   allowed
+       *   node  scripts/probe-git-branch-matcher.mjs                       ALLOWED
+       *
+       * Two calls, no --test, no commit, and the commit message claiming the
+       * residual was "three calls and a commit a reader can see" was wrong by
+       * one call and one commit. Measured by audit at 2812d8a.
+       *
+       * So a path counts as inherited only while its working-tree content still
+       * MATCHES what the repository shipped. Modify it and it becomes code this
+       * session wrote, under a name the session did not choose. Committing it
+       * first restores the property and leaves the trace, which is the residual
+       * as it was always meant to read.
+       */
+      runGit(['diff', '--quiet', 'HEAD', '--', rel], { cwd, stdio: 'ignore' });
+      return 'inherited';
+    } catch { /* absent from HEAD, or present and modified: ask the disk */ }
+    /*
+     * NOT IN HEAD IS NOT THE SAME AS NOT A FILE. `status` is a subcommand and
+     * `helper.mjs` is a payload, and treating both as untracked refused the
+     * repository's own CLI. Only a real file on disk is a smuggling risk; a
+     * token that is not a file cannot be executed by node at all.
+     *
+     * A directory is not runnable either, and existsSync alone would call one a
+     * file. Anything that cannot be stat'd is treated as a file, because unknown
+     * is not clean.
+     */
+    try {
+      const abs = path.resolve(cwd, target);
+      return statSync(abs).isFile() ? 'untracked-file' : 'not-a-file';
+    } catch {
+      return 'not-a-file';
     }
   };
 

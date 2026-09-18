@@ -385,3 +385,78 @@ test('and a PROTECTED path is refused by every verb, recorders included', () => 
   assert.equal(judgeShellCommand('git add -N test/claudeGuard.test.mjs').allowed, false);
   assert.equal(judgeShellCommand('git commit test/claudeGuard.test.mjs -m msg').allowed, false);
 });
+
+/* ============================================================================
+ * THE node EXECUTION GATE. Shipped once with no tests, and three bypasses
+ * passed a fully green suite because of it.
+ *
+ * Every assertion here drives judgeShellCommand with an INJECTED classifier, so
+ * the rail stays pure and the cases are the ones that were actually measured as
+ * working disarms at 2812d8a. The gate's default is permissive by design -- a
+ * caller with no session context must not be broken -- which is exactly why the
+ * gated behaviour needs its own coverage: with no predicate supplied, none of
+ * these assertions would fail even if the gate were deleted.
+ * ==========================================================================*/
+
+/** bin/ and scripts/ shipped; helper.mjs is a file the session wrote; the rest are arguments. */
+const classify = (t) => {
+  if (t.startsWith('bin/') || t.startsWith('scripts/') || t.startsWith('test/')) return 'inherited';
+  if (/\.(mjs|js|cjs)$/i.test(t)) return 'untracked-file';
+  return 'not-a-file';
+};
+const nodeVerdict = (cmd) => judgeShellCommand(cmd, { mayExecute: classify }).allowed;
+
+test('THE TWO-CALL DISARM: a script the session wrote cannot be run', () => {
+  assert.equal(nodeVerdict('node helper.mjs'), false);
+  assert.equal(nodeVerdict('node ./helper.mjs'), false);
+});
+
+test('--test DOES NOT EXEMPT THE LINE, which is how the first fix was bypassed', () => {
+  /*
+   * `tokens.includes('--test')` returned allowed before the gate ran, and node
+   * passes a trailing --test to the SCRIPT as argv, so the payload executed.
+   * Both spellings were measured running the file end to end.
+   */
+  assert.equal(nodeVerdict('node helper.mjs --test'), false);
+  assert.equal(nodeVerdict('node --test helper.mjs'), false);
+  assert.equal(nodeVerdict('node -r ./helper.mjs --test'), false);
+});
+
+test('an option VALUE cannot launder the real script past the check', () => {
+  /*
+   * node options taking a separate value put that value first, so reading only
+   * the first operand judged the tracked path and ran the untracked one behind
+   * it. Measured: this command really did execute helper.mjs.
+   */
+  assert.equal(nodeVerdict('node --title bin/agentbridge.mjs helper.mjs'), false);
+});
+
+test('A SUBCOMMAND IS NOT A SCRIPT -- the repository CLI must keep working', () => {
+  /*
+   * Judging every operand refused `node bin/agentbridge.mjs status` and with it
+   * every command in this repo. That is the outage rule 17 is about, and it was
+   * caught by writing this row down rather than by anything in the suite.
+   */
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs status'), true);
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs check-first topic'), true);
+  assert.equal(nodeVerdict('node scripts/claude-stop-gate.mjs'), true);
+});
+
+test('node --test on an inherited test is allowed; node -e is still refused', () => {
+  assert.equal(nodeVerdict('node --test test/claudeGuard.test.mjs'), true);
+  assert.equal(nodeVerdict('node -e x'), false);
+  assert.equal(nodeVerdict('node --eval x'), false);
+});
+
+test('MUTATION: deleting the gate must break these, or they prove nothing', () => {
+  /*
+   * The default classifier is permissive, so a caller passing no predicate sees
+   * the pre-gate behaviour. If these tests were written without the injected
+   * classifier they would pass with the gate removed -- which is precisely how
+   * three measured bypasses shipped under a green suite.
+   */
+  assert.equal(judgeShellCommand('node helper.mjs').allowed, true,
+    'with no classifier the gate is inert -- if this flips, the default changed and every caller without session context is now refused');
+  assert.equal(nodeVerdict('node helper.mjs'), false,
+    'with a classifier it bites -- if this flips, the gate is gone');
+});

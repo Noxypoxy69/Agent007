@@ -374,7 +374,7 @@ export const ALLOWED_FIRST_TOKENS = Object.freeze([
  * looking for an answer. With no predicate supplied the behaviour is exactly
  * what it was, which keeps every existing test and caller honest.
  */
-export function judgeShellCommand(command, { isOverridden = () => false, mayExecute = () => true } = {}) {
+export function judgeShellCommand(command, { isOverridden = () => false, mayExecute = () => 'inherited' } = {}) {
   if (typeof command !== 'string' || command.trim() === '') {
     return { allowed: false, reason: 'no command string was supplied' };
   }
@@ -412,7 +412,7 @@ export function judgeShellCommand(command, { isOverridden = () => false, mayExec
     : { allowed: true };
 }
 
-function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () => true) {
+function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () => 'inherited') {
   const command = String(segment).replace(FD_REDIRECTS, ' ').trim();
   if (command === '') {
     return { allowed: false, reason: 'no command string was supplied' };
@@ -644,21 +644,83 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * have no session context are not broken by this.
      */
     /*
-     * `node --test` IS EXEMPT, DELIBERATELY. It is the declared shape for this
-     * binary and `npm test` runs the same repository JavaScript with no gate at
-     * all, so refusing it buys nothing and breaks test iteration -- which is the
-     * thing the header says gets the rail switched off. A test the session wrote
-     * is covered by baseline-test drift at Stop; a bare script is covered by
-     * nothing, and that asymmetry is the whole reason for the gate below.
+     * EVERY NON-FLAG TOKEN IS JUDGED. NOTHING IS EXEMPT.
+     *
+     * The first version of this gate exempted the whole command when `--test`
+     * appeared ANYWHERE in it, via tokens.includes. That exemption WAS the
+     * bypass, and it re-opened the exact two-call disarm the gate was written to
+     * close -- `node` passes `--test` after the script path straight through to
+     * the script as argv, so:
+     *
+     *   Write helper.mjs  <payload>      allowed
+     *   node helper.mjs --test           ALLOWED, and the payload ran
+     *
+     * Measured end to end through the shipped binary at 2812d8a. The commit's
+     * own proof table listed `node --test test/a.test.mjs` and `node helper.mjs`
+     * and never ran `node --test helper.mjs`; six true lines offered as evidence
+     * for a property none of them tested.
+     *
+     * AND THE REASON GIVEN FOR THE EXEMPTION WAS FALSE. It claimed a test the
+     * session wrote is covered by baseline-test drift at Stop. baselineTestDrift
+     * iterates snapshot.tests, which holds only files present at SESSION START,
+     * so a test created during the session is never hashed and never compared.
+     * The asymmetry the exemption rested on does not exist.
+     *
+     * So `--test` now only means what the declared shape ['node', /^--test$/]
+     * always said it meant: the token IMMEDIATELY after `node`. It suppresses
+     * nothing -- every remaining non-flag token still goes through mayExecute,
+     * which is also what removes the option-value laundering below.
      */
-    if (tokens.includes('--test')) return { allowed: true };
-    const target = tokens.slice(1).find((t) => !t.startsWith('-'));
-    if (target && !mayExecute(target)) {
+    const isFlag = (t) => t.startsWith('-');
+    const operands = tokens.slice(1).filter((t) => !isFlag(t));
+    /*
+     * A SUBCOMMAND IS NOT A SCRIPT, AND JUDGING EVERY OPERAND BROKE THE CLI.
+     *
+     * `node bin/agentbridge.mjs status` carries two operands. The second is an
+     * argument to the program, not something node executes, and refusing it
+     * killed every command in this repository -- status, check-first,
+     * register-session, observe-sha. That is the outage I said twice I would not
+     * ship, caught here by writing the expectation row down and finding my own
+     * row was wrong.
+     *
+     * So the classification is by SHAPE ON DISK, not by position:
+     *   'inherited'      the repository shipped it; node may run it
+     *   'untracked-file' a real file this session could have written; never
+     *   anything else    not a file at all -- a subcommand, a topic string, a
+     *                    number -- which node cannot execute and which is none
+     *                    of this gate's business
+     *
+     * The first operand must be inherited, because that is the program. No LATER
+     * operand may be an untracked file, because that is how an option value
+     * launders the real script past the first check:
+     * `node --title bin/agentbridge.mjs helper.mjs` puts a tracked path first
+     * and the payload second. `status` is not a file and passes; `helper.mjs`
+     * is one and does not.
+     */
+    /*
+     * ALL OPERANDS, NOT THE FIRST ONE. Taking the first non-flag token let an
+     * option VALUE stand in for the program: node options that take a separate
+     * value put that value first, so `node --title bin/agentbridge.mjs helper.mjs`
+     * judged the tracked path and ran the untracked script behind it. Measured.
+     * Judging every operand costs a false refusal on an option value that is not
+     * a path, which is the safe direction and is visible when it happens.
+     */
+    const program = operands[0];
+    if (program && mayExecute(program) !== 'inherited') {
       return {
         allowed: false,
-        reason: `"${target}" is not part of the repository this session inherited, so running it would `
+        reason: `"${program}" is not part of the repository this session inherited, so running it would `
           + 'execute code this session wrote -- which is how a guard gets disarmed in two calls. '
           + 'Commit it first, or run it outside the repository',
+      };
+    }
+    const smuggled = operands.slice(1).find((t) => mayExecute(t) === 'untracked-file');
+    if (smuggled) {
+      return {
+        allowed: false,
+        reason: `"${smuggled}" is a file this session could have written, passed where an option value `
+          + 'or argument would sit. node options that take a separate value can push the real script '
+          + 'past a check that only reads the first operand, so no argument may be an untracked file',
       };
     }
     return { allowed: true };
