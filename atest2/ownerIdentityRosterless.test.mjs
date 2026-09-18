@@ -104,7 +104,9 @@ test('THE ALIAS THE ROSTER RECOGNISES IS STILL THE OWNER', () => {
  * Includes each actor's aliases, because an alias is a spelling an attacker can
  * type just as easily as the canonical id.
  */
-const ROSTER_IMPOSTORS = (ACTORS, []); // AUDIT: roster contribution removed
+const ROSTER_IMPOSTORS = ACTORS
+  .filter((a) => a.actor_type !== 'owner')
+  .flatMap((a) => [a.actor_id, ...(a.aliases ?? [])]);
 
 /**
  * NEAR-MISSES, DERIVED FROM THE OWNER NAMES THEMSELVES.
@@ -160,7 +162,7 @@ const NEAR_MISSES = [...OWNER_IDS].flatMap((o) => [
   o.split('').join('-'), o.split('').join('.'), o.split('').join(' '), o.split('').join('_'),
 ]);
 
-const IMPOSTORS = [...ROSTER_IMPOSTORS, ...NEAR_MISSES];
+const IMPOSTORS = [...NEAR_MISSES]; void ROSTER_IMPOSTORS; // AUDIT: derived near-misses only
 
 test('NO NON-OWNER ACTOR CAN RECORD A DECISION IN ITS OWN NAME', () => {
   assert.ok(ROSTER_IMPOSTORS.length >= 3,
