@@ -56,8 +56,23 @@ export function normalizedCandidates(filePath, cwd = process.cwd()) {
   try {
     out.push(realpathSync(absolute).replaceAll('\\', '/'));
   } catch {
+    /*
+     * A FILE THAT DOES NOT EXIST YET IS THE CASE THAT MATTERS MOST HERE.
+     *
+     * Both realpath calls throw for a path with no file behind it, so this
+     * fallback resolves the PARENT and rejoins the basename. It used the
+     * non-native realpathSync, which does not expand 8.3 aliases -- so a
+     * short-named DIRECTORY plus a not-yet-existing file walked through:
+     *
+     *   Write CLAUDE~1/settings.json   DENY   (the file exists)
+     *   Write CLAUDE~1/newhook.json    ALLOW  (it does not)
+     *
+     * CREATING a file under .claude is the attack the whole entry exists to
+     * stop -- a hooks config where none was, or a settings.local.json. Covering
+     * only files that already exist covers the wrong half. Found by blind audit.
+     */
     try {
-      out.push(path.join(realpathSync(path.dirname(absolute)), path.basename(absolute)).replaceAll('\\', '/'));
+      out.push(path.join(canonicalDir(path.dirname(absolute)), path.basename(absolute)).replaceAll('\\', '/'));
     } catch {
       // A missing parent is still judged by its lexical absolute path.
     }
@@ -65,13 +80,48 @@ export function normalizedCandidates(filePath, cwd = process.cwd()) {
   return [...new Set(out)];
 }
 
+/**
+ * Resolve a directory the way the OS does, expanding 8.3 aliases. Falls back
+ * through the non-native resolver and finally to the lexical path, because a
+ * directory that cannot be resolved must still be judged rather than skipped.
+ */
+function canonicalDir(dir) {
+  try { return realpathSync.native(dir); } catch { /* not native-resolvable */ }
+  try { return realpathSync(dir); } catch { /* does not exist */ }
+  return dir;
+}
+
+/*
+ * THE ROOT HAS TO BE SPELLED THE SAME WAY THE CANDIDATES ARE.
+ *
+ * Every candidate above is passed through realpathSync.native, and the root was
+ * NOT -- it was lexical. A hash is not involved here, but path.relative is just
+ * as total: if cwd arrives spelled with an 8.3 alias and the candidate resolves
+ * to the long form, the two have no common prefix, every rel starts with ".."
+ * and the function returns FALSE FOR EVERYTHING.
+ *
+ *   cwd = C:/Users/DANNYG~1/.../repo   ->  CLAUDE~1/settings.json   ALLOW
+ *                                          src/CLAUDE~1.MJS         ALLOW
+ *                                          bin/<guard alias>        ALLOW
+ *   cwd = C:/Users/DANNY GARCIA/.../repo -> all four DENY
+ *
+ * So the shipped binary and the unit-level function disagreed purely on how cwd
+ * was SPELLED, and cwd arrives from the payload or CLAUDE_PROJECT_DIR -- neither
+ * of which the guard controls. That made the entire alias fix conditional on
+ * something an attacker picks. Found by blind audit.
+ *
+ * Both spellings of the root are kept and a candidate matching EITHER is judged,
+ * because more matching means more refusals, which is the direction this
+ * function is allowed to be wrong in.
+ */
 export function isProtectedPath(filePath, cwd = process.cwd()) {
-  const root = path.resolve(cwd);
-  return normalizedCandidates(filePath, cwd).some((candidate) => {
+  const lexicalRoot = path.resolve(cwd);
+  const roots = [...new Set([lexicalRoot, canonicalDir(lexicalRoot)])];
+  return normalizedCandidates(filePath, cwd).some((candidate) => roots.some((root) => {
     const rel = path.relative(root, candidate).split(path.sep).join('/');
     if (rel.startsWith('..')) return false;      // outside the repo is not ours to judge
     return isProtectedRelPath(rel);
-  });
+  }));
 }
 
 /**

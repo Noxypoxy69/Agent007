@@ -746,7 +746,12 @@ function shortNamesIn(dir) {
     // The alias column is EMPTY when the long name is already 8.3-legal, so the
     // tilde is the reliable marker for a generated alias. None of the names
     // here contain spaces; a name that did would need a wider parse.
-    const m = line.match(/(\S*~\d\S*)\s+(\S+)\s*$/);
+    // The long name may contain SPACES -- "DANNY GARCIA" is exactly the
+    // directory that matters on this machine -- so the tail is captured lazily
+    // rather than as a single non-space token. Requiring \S+ made this find
+    // nothing for that directory, and the test above then SKIPPED loudly, which
+    // is how it was caught instead of passing as a phantom.
+    const m = line.match(/(\S*~\d\S*)\s+(.+?)\s*$/);
     if (m) out.set(m[2].toLowerCase(), m[1]);
   }
   return out;
@@ -809,6 +814,133 @@ test('8.3 SHORT NAMES are the same file, and case-folding alone did not cover th
   assert.equal(isProtectedPath(freeAlias, repoRoot), false,
     `${freeAlias} is agentbridge-attempt.mjs, which is not a protected control`);
   assert.equal(isProtectedPath('docs/notes.md', repoRoot), false);
+});
+
+/**
+ * The 8.3 spelling of a WHOLE absolute directory path, built by asking dir /x
+ * about each ancestor in turn.
+ *
+ * The first version shelled out to `cmd /c for %I in ("<dir>") do @echo %~sI`,
+ * which is the documented way to get a short path -- and through execFileSync
+ * the quoting came back mangled as C:\"C:UsersDANNY GARCIAAgent007\". The test
+ * then asserted against a nonsense root, and because a CANONICAL relative path
+ * resolves under ANY root, the assertions passed anyway. A broken helper and a
+ * fixture that could not fail, agreeing with each other.
+ *
+ * Reuses shortNamesIn, which is already proven above, instead of a second
+ * mechanism that needed its own quoting rules.
+ */
+function shortDirOf(dir) {
+  if (process.platform !== 'win32') return null;
+  const parts = dir.split(/[\\/]/).filter(Boolean);
+  if (parts.length === 0) return null;
+  let cursor = `${parts[0]}\\`;
+  const spelled = [parts[0]];
+  for (const part of parts.slice(1)) {
+    const alias = shortNamesIn(cursor).get(part.toLowerCase());
+    spelled.push(alias ?? part);
+    cursor = path.join(cursor, part);
+  }
+  const joined = spelled.join('\\');
+  return joined !== dir ? joined : null;
+}
+
+test('THE ROOT IS SPELLED THE SAME WAY THE CANDIDATES ARE, or nothing matches', (t) => {
+  /*
+   * Every candidate goes through realpathSync.native; the root did not, it was
+   * lexical. path.relative is total: if cwd arrives as an 8.3 alias and the
+   * candidate resolves to the long form, they share no prefix, every rel starts
+   * with ".." and isProtectedPath returns FALSE FOR EVERYTHING.
+   *
+   * Measured before the fix, cwd spelled with the alias:
+   *   CLAUDE~1/settings.json   ALLOW      (DENY with the long spelling)
+   *   CLAUDE~1/SETTIN~1.JSO    ALLOW
+   *   src/CLAUDE~1.MJS         ALLOW
+   *
+   * cwd reaches the guard from the payload or CLAUDE_PROJECT_DIR, neither of
+   * which the guard controls, so the whole alias defence was conditional on a
+   * spelling an attacker picks. Found by blind audit.
+   */
+  const shortRoot = shortDirOf(repoRoot);
+  if (!shortRoot) {
+    t.skip('no 8.3 spelling for the repo root on this volume, so there is nothing to confuse');
+    return;
+  }
+
+  /*
+   * THE PATHS MUST BE ALIAS-SPELLED TOO, and the first version of this test was
+   * a hollow gate for exactly that reason. With a CANONICAL path like
+   * ".claude/settings.json", the lexical candidate is shortRoot + that path,
+   * which sits under the lexical root and matches whatever the root spelling is
+   * -- so the assertion passed with the fix reverted. Watched: mutating the root
+   * back to lexical-only left it GREEN.
+   *
+   * The defect needs BOTH halves spelled as aliases: then the lexical candidate
+   * reads "CLAUDE~1/..." which isProtectedRelPath does not recognise, and the
+   * native candidate resolves to the LONG root which the lexical root cannot be
+   * relative to. Neither matches, and everything is permitted.
+   */
+  const aliased = ['.claude/settings.json', 'src/claudeGuard.mjs']
+    .map((rel) => [rel, shortPathOf(repoRoot, rel)])
+    .filter(([rel, alias]) => alias !== rel);
+
+  if (aliased.length === 0) {
+    t.skip('no component of these paths has an 8.3 alias on this volume');
+    return;
+  }
+
+  // RULE 5: the positive first. The alias must be understood under the LONG
+  // root, or "unprotected under the short root" says nothing about the root.
+  for (const [rel, alias] of aliased) {
+    assert.equal(isProtectedPath(alias, repoRoot), true,
+      `precondition: ${alias} (for ${rel}) is protected under the long root`);
+  }
+
+  for (const [rel, alias] of aliased) {
+    assert.equal(isProtectedPath(alias, shortRoot), true,
+      `${alias} (for ${rel}) must stay protected when cwd is ALSO spelled as an alias`);
+  }
+
+  // Canonical spellings must keep working under the short root as well.
+  for (const rel of ['.claude/settings.json', 'src/claudeGuard.mjs', 'CLAUDE.md']) {
+    assert.equal(isProtectedPath(rel, shortRoot), true,
+      `${rel} must stay protected when cwd is spelled ${shortRoot}`);
+  }
+  for (const rel of ['docs/notes.md', 'src/tokenFile.mjs']) {
+    assert.equal(isProtectedPath(rel, shortRoot), false,
+      `${rel} is not a control and must stay free under either spelling`);
+  }
+});
+
+test('A FILE THAT DOES NOT EXIST YET under an aliased directory is still protected', (t) => {
+  /*
+   * Both realpath calls throw when nothing is behind the path, so the fallback
+   * resolves the PARENT -- and it used the non-native resolver, which does not
+   * expand 8.3 names. So an EXISTING file under .claude was caught and a NEW one
+   * was not:
+   *
+   *   Write CLAUDE~1/settings.json   DENY
+   *   Write CLAUDE~1/newhook.json    ALLOW
+   *
+   * Creating a hooks config where none exists is the attack the entry exists to
+   * stop, so that covered the wrong half.
+   */
+  const aliasedDotClaude = shortPathOf(repoRoot, '.claude');
+  if (aliasedDotClaude === '.claude') {
+    t.skip('.claude has no 8.3 alias on this volume');
+    return;
+  }
+
+  // The positive: the ALIAS is genuinely understood for a file that exists.
+  assert.equal(isProtectedPath(`${aliasedDotClaude}/settings.json`, repoRoot), true,
+    'precondition: the alias resolves for an existing file');
+
+  for (const name of ['newhook.json', 'settings.local.json', 'brandnew.json']) {
+    assert.equal(isProtectedPath(`${aliasedDotClaude}/${name}`, repoRoot), true,
+      `creating ${name} under the aliased control directory must be refused`);
+    assert.equal(isProtectedPath(`.claude/${name}`, repoRoot), true,
+      `creating ${name} under the canonical control directory must be refused`);
+  }
 });
 
 test('a flag can carry the pathspec list out of the command, and that is refused', () => {
