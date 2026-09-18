@@ -5,8 +5,8 @@
  * different root. Measured on the operator's machine before the fix, across
  * every root git knew about:
  *
- *   HAS GRANT  c6e20b3e89303f44   C:/Users/DANNY GARCIA/Agent007   (main)
- *   NO GRANT   f9d997f2d8cd6ee6   C:/Users/DANNY GARCIA/Documents/wt-code-a
+ *   HAS GRANT  <key A>   <home>/Agent007                (the main checkout)
+ *   NO GRANT   <key B>   <home>/Documents/wt-code-a     (an agent worktree)
  *   NO GRANT   ...15 more agent worktrees, each with its own key
  *
  * Every grant the owner had written applied to exactly one directory, and not
@@ -104,6 +104,65 @@ test('a directory that is not a repository grants NOTHING and does not throw', a
   // which Claude Code reads as NON-BLOCKING. That is a disarm, not a refusal.
   assert.doesNotThrow(() => overridePath(dir));
   assert.equal(readOverride(dir), null);
+});
+
+test('the AMBIENT GIT ENVIRONMENT cannot redirect which repository answers', async (t) => {
+  /*
+   * git resolves GIT_DIR and GIT_COMMON_DIR BEFORE -C, so an inherited variable
+   * silently answers for a different repository:
+   *
+   *   GIT_DIR=<A>/.git git -C <B> rev-parse --git-common-dir   ->  <A>/.git
+   *
+   * Measured through the shipped hook binary: with GIT_DIR set, three unrelated
+   * repositories produced ONE key, and a grant written for repository A ALLOWED
+   * a protected write in repository B. Git exports GIT_DIR into every hook
+   * process it spawns, so any session launched from a git hook, a rebase --exec
+   * or a filter carries it -- no attacker required, only an ordinary launch.
+   */
+  const a = await repoWithWorktrees(t, 0);
+  const b = await repoWithWorktrees(t, 0);
+
+  const cleanA = keyOf(a.main);
+  const cleanB = keyOf(b.main);
+  assert.notEqual(cleanA, cleanB, 'precondition: two repos differ with a clean environment');
+
+  for (const varName of ['GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE']) {
+    const prev = process.env[varName];
+    process.env[varName] = varName === 'GIT_WORK_TREE' ? a.main : join(a.main, '.git');
+    try {
+      assert.equal(keyOf(b.main), cleanB,
+        `${varName} redirected repository B's key to another repository`);
+      assert.equal(keyOf(a.main), cleanA,
+        `${varName} changed repository A's own key`);
+    } finally {
+      if (prev === undefined) delete process.env[varName];
+      else process.env[varName] = prev;
+    }
+  }
+});
+
+test('the NON-REPOSITORY fallback keys on the directory, not one global constant', async (t) => {
+  /*
+   * THE SUITE PASSED WITH THIS REPLACED BY A LITERAL. An auditor mutated the
+   * fallback to `return 'CONSTANT-FALLBACK'` -- behaviourally real, two unrelated
+   * non-repo directories then shared one key -- and all seven tests stayed green.
+   *
+   * The test named "a directory that is not a repository grants NOTHING" asserts
+   * readOverride(dir) === null, which is true of ANY key with no file behind it,
+   * so it cannot tell "its own key" from "one global key shared by every non-repo
+   * directory on the machine". Nothing covered what the fallback RETURNS. The
+   * commit's stated negative control guarded only the git-success path.
+   */
+  const one = await mkdtemp(join(tmpdir(), 'ab-notrepo-a-'));
+  const two = await mkdtemp(join(tmpdir(), 'ab-notrepo-b-'));
+  t.after(() => rm(one, { recursive: true, force: true }));
+  t.after(() => rm(two, { recursive: true, force: true }));
+
+  assert.notEqual(keyOf(one), keyOf(two),
+    'two unrelated non-repository directories share a grant key, so one grant would cover both');
+
+  // And the fallback still identifies a directory with itself.
+  assert.equal(keyOf(one), keyOf(one));
 });
 
 test('the key is stable across repeated calls', async (t) => {

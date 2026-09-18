@@ -720,7 +720,8 @@ test('npm forwards everything after -- to the script, so those operands are judg
  * AN 8.3 ALIAS IS ASSIGNED BY CREATION ORDER, SO IT IS NOT A PROPERTY OF THE
  * NAME AND MUST NEVER BE HARDCODED.
  *
- * The first version of this test asserted 'bin/AG8836~1.MJS'. That is the alias
+ * The first version of this test asserted a literal 8.3 alias for the guard
+ * binary. That is the alias
  * NTFS happened to give the guard binary in the operator's checkout. In a fresh
  * `git clone` of the same repository the same file is AGENTB~2.MJS, because the
  * directory's entries were created in a different order. So the test failed on
@@ -742,11 +743,12 @@ function shortNamesIn(dir) {
     });
   } catch { return out; }
   for (const line of text.split('\n')) {
-    // "09/17/2026  10:03 PM   5,940 AG8836~1.MJS agentbridge-claude-guard.mjs"
+    // "09/17/2026  10:03 PM   5,940 SOMEAL~1.MJS a-long-file-name.mjs"
     // The alias column is EMPTY when the long name is already 8.3-legal, so the
     // tilde is the reliable marker for a generated alias. None of the names
     // here contain spaces; a name that did would need a wider parse.
-    // The long name may contain SPACES -- "DANNY GARCIA" is exactly the
+    // The long name may contain SPACES -- a home directory with a space in it
+    // is exactly the
     // directory that matters on this machine -- so the tail is captured lazily
     // rather than as a single non-space token. Requiring \S+ made this find
     // nothing for that directory, and the test above then SKIPPED loudly, which
@@ -822,7 +824,8 @@ test('8.3 SHORT NAMES are the same file, and case-folding alone did not cover th
  *
  * The first version shelled out to `cmd /c for %I in ("<dir>") do @echo %~sI`,
  * which is the documented way to get a short path -- and through execFileSync
- * the quoting came back mangled as C:\"C:UsersDANNY GARCIAAgent007\". The test
+ * the quoting came back mangled, doubling the drive and dropping every
+ * separator. The test
  * then asserted against a nonsense root, and because a CANONICAL relative path
  * resolves under ANY root, the assertions passed anyway. A broken helper and a
  * fixture that could not fail, agreeing with each other.

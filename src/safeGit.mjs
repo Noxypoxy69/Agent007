@@ -51,13 +51,52 @@ export const SAFE_GIT_CONFIG = Object.freeze([
  * a caller that wants a sentinel must write one deliberately, because a failure
  * that produces a usable value is a failure that produces an approval.
  */
+/*
+ * GIT_DIR BEATS -C, SO THE ENVIRONMENT COULD ANSWER FOR A DIFFERENT REPOSITORY.
+ *
+ * Every question this module is asked is about a DIRECTORY -- what does this
+ * pathspec cover, which repository is this, is this file inherited. The answers
+ * are asked with -C. But git resolves GIT_DIR and GIT_COMMON_DIR BEFORE -C, so
+ * an inherited variable silently redirects the answer:
+ *
+ *   GIT_DIR=<A>/.git git -C <B> rev-parse --git-common-dir   ->  <A>/.git
+ *
+ * Measured 2026-09-18 by blind audit, through the shipped hook binary: with
+ * GIT_DIR set, three unrelated repositories produced ONE grant key, and a grant
+ * written for repository A ALLOWED a protected write in repository B. Without
+ * it, the same write was denied. Git exports GIT_DIR into every hook process it
+ * spawns, so any session started from a git hook, a rebase --exec or a filter
+ * carries it -- this needs no attacker, only an ordinary launch path.
+ *
+ * So the inherited environment is stripped of everything git-controlling before
+ * the call. The test is the PREFIX, not a list of names: enumerating GIT_DIR,
+ * GIT_COMMON_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,
+ * GIT_CEILING_DIRECTORIES, GIT_CONFIG_* and the rest is the enumeration mistake
+ * this repository keeps losing to, and git adds new ones.
+ *
+ * AN EXPLICIT env FROM THE CALLER IS LEFT ALONE. src/candidateTree.mjs passes
+ * GIT_INDEX_FILE deliberately, to point git at a temporary index it built; that
+ * is a caller taking control on purpose, not an ambient value leaking in, and
+ * silently dropping it would break the thing it was added for.
+ */
+function environmentWithoutGitRedirection() {
+  const cleaned = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (/^GIT_/i.test(key)) continue;
+    cleaned[key] = value;
+  }
+  return cleaned;
+}
+
 export function runGit(args, options = {}) {
+  const { env: callerEnv, ...rest } = options;
   return execFileSync('git', [...SAFE_GIT_CONFIG, ...args], {
     encoding: 'utf8',
     timeout: 60_000,
     windowsHide: true,
     maxBuffer: 256 * 1024 * 1024,
-    ...options,
+    ...rest,
+    env: callerEnv ?? environmentWithoutGitRedirection(),
   });
 }
 

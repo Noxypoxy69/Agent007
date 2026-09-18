@@ -100,10 +100,10 @@ function canonicalDir(dir) {
  * to the long form, the two have no common prefix, every rel starts with ".."
  * and the function returns FALSE FOR EVERYTHING.
  *
- *   cwd = C:/Users/DANNYG~1/.../repo   ->  CLAUDE~1/settings.json   ALLOW
+ *   cwd spelled with an 8.3 alias  ->  CLAUDE~1/settings.json   ALLOW
  *                                          src/CLAUDE~1.MJS         ALLOW
  *                                          bin/<guard alias>        ALLOW
- *   cwd = C:/Users/DANNY GARCIA/.../repo -> all four DENY
+ *   cwd spelled in full            ->  all four DENY
  *
  * So the shipped binary and the unit-level function disagreed purely on how cwd
  * was SPELLED, and cwd arrives from the payload or CLAUDE_PROJECT_DIR -- neither

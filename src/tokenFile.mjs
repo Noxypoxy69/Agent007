@@ -99,6 +99,43 @@ export function readTokenFile(file) {
     return { token: '', problem: 'has more than one line, and a token file holds the token alone with no comments' };
   }
 
+  /*
+   * EVERY BYTE MUST BE LEGAL IN AN HTTP HEADER, OR THE CREDENTIAL GETS PRINTED.
+   *
+   * Refusing CR and LF was not enough. undici rejects a NUL in a header value
+   * and puts THE WHOLE VALUE IN THE ERROR MESSAGE, which the CLI prints:
+   *
+   *   hosted UNREACHABLE (Headers.append: "Bearer SECRETTOKEN_abc123\u0000x" is
+   *   an invalid header value.) -- registered LOCALLY ONLY
+   *
+   * A BOM-less UTF-16LE file -- what [IO.File]::WriteAllText with
+   * UnicodeEncoding(false,false) produces -- is the same shape and echoes every
+   * character of the secret interleaved with NULs. Measured by blind audit.
+   *
+   * This is NEW reachability rather than an old leak: a Windows environment
+   * variable cannot contain a NUL, so before the file route existed the value
+   * could not get to that code path at all. The commit that added the flag
+   * claimed "the value never appears in an error string", and that was true of
+   * this module's own strings and false end to end.
+   *
+   * So the check is what a token IS rather than which characters are known to
+   * be dangerous: printable ASCII, no spaces. Every credential this project
+   * issues is base64url-ish, and enumerating the bad bytes is the mistake that
+   * lost here repeatedly -- NUL was the one nobody listed.
+   */
+  const ILLEGAL = /[^\x21-\x7e]/;
+  if (ILLEGAL.test(token)) {
+    /*
+     * The POSITION is reported, never the character and never the value. A byte
+     * echoed back is a byte of the credential, which is the defect being fixed.
+     */
+    const at = token.search(ILLEGAL);
+    return {
+      token: '',
+      problem: `contains a character at position ${at} that cannot appear in an HTTP header; a token is printable ASCII with no spaces`,
+    };
+  }
+
   return { token, problem: null };
 }
 

@@ -738,8 +738,8 @@ const MAX_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
  * ROOT. Measured on the operator's machine, 2026-09-18, across all 17 roots
  * git knows about:
  *
- *   HAS GRANT  c6e20b3e89303f44  C:/Users/DANNY GARCIA/Agent007   (main)
- *   NO GRANT   f9d997f2d8cd6ee6  C:/Users/DANNY GARCIA/Documents/wt-code-a
+ *   HAS GRANT  <key A>  <home>/Agent007                 (the main checkout)
+ *   NO GRANT   <key B>  <home>/Documents/wt-code-a      (an agent worktree)
  *   NO GRANT   ...15 more agent worktrees, each its own key
  *
  * So every grant the owner has ever written applied to exactly one directory --
@@ -755,8 +755,8 @@ const MAX_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
  * resolved against the root either way.
  *
  * AND THE SPELLING IS CANONICALISED, because a hash makes every difference
- * total. An 8.3 alias (DANNYG~1) and a case variant are the same directory and
- * hashed to different keys -- the same class that let CLAUDE~1/settings.json
+ * total. An 8.3 alias and a case variant are the same directory and hash to
+ * different keys -- the same class that let CLAUDE~1/settings.json
  * past isProtectedPath until realpathSync.native was used there. A grant that
  * silently does not apply because cwd was spelled differently is the failure
  * this whole comment is about, arrived at a second way.

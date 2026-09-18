@@ -108,6 +108,52 @@ test('the problem text never contains the token value', async (t) => {
   assert.ok(!r.problem.includes('SUPERSECRET'), `problem text leaked part of the token: ${r.problem}`);
 });
 
+test('a byte that cannot appear in a header is refused, and NEVER echoed', async (t) => {
+  /*
+   * Refusing CR and LF was not enough. undici rejects a NUL in a header value
+   * and puts THE WHOLE VALUE in the error message, which the CLI prints:
+   *
+   *   hosted UNREACHABLE (Headers.append: "Bearer <the entire token>" is an
+   *   invalid header value.) -- registered LOCALLY ONLY
+   *
+   * NEW reachability rather than an old leak: a Windows environment variable
+   * cannot contain a NUL, so before the file route the value could not reach
+   * that code path. Found by blind audit on the commit that added the flag,
+   * whose message claimed "the value never appears in an error string" -- true
+   * of this module's own strings, false end to end.
+   */
+  const dir = await tmp(t);
+  const SECRET = 'SECRETTOKEN_abc123';
+  const NUL = String.fromCharCode(0);
+
+  const cases = [
+    ['nul-suffix', SECRET + NUL + 'x'],
+    // What [IO.File]::WriteAllText with UnicodeEncoding(false,false) produces.
+    ['utf16le-ish', [...SECRET].map((c) => c + NUL).join('')],
+    ['tab', SECRET.slice(0, 5) + String.fromCharCode(9) + SECRET.slice(5)],
+    ['non-ascii', `${SECRET}\u2014`],
+    ['inner-space', 'SECRET TOKEN'],
+  ];
+
+  for (const [name, content] of cases) {
+    const f = join(dir, name);
+    await writeFile(f, content);
+    const r = readTokenFile(f);
+    assert.equal(r.token, '', `${name}: must not yield a token`);
+    assert.ok(r.problem, `${name}: must report a problem`);
+    // The position may be named. The value may not, in any form.
+    const problemWithoutNuls = r.problem.split(NUL).join('');
+    assert.ok(!problemWithoutNuls.includes('SECRET'),
+      `${name}: the problem text leaked the token: ${r.problem}`);
+  }
+
+  // RULE 5: the positive. A well-formed token of the same shape still works, or
+  // this is just a test that everything is refused.
+  const good = join(dir, 'good');
+  await writeFile(good, SECRET);
+  assert.deepEqual(readTokenFile(good), { token: SECRET, problem: null });
+});
+
 test('an oversized file is refused — it would go into an Authorization header', async (t) => {
   const dir = await tmp(t);
   const f = join(dir, 'big');

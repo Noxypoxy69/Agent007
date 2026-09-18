@@ -237,7 +237,8 @@ transferred that authority to itself.
 AUTHOR'S CHECKOUT IS THE LEAST REPRESENTATIVE MACHINE THERE IS.**
 
 Measured 2026-09-18. The one test covering the 8.3 short-name bypass asserted
-`bin/AG8836~1.MJS`. NTFS assigns 8.3 aliases **by creation order**, not from the
+a literal 8.3 alias for the guard binary. NTFS assigns those **by creation
+order**, not from the
 filename, so that string is a fact about one directory's history. In a fresh
 `git clone` of the same repository the same file is `AGENTB~2.MJS`.
 
