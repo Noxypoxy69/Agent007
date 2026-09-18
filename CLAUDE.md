@@ -263,11 +263,37 @@ Two rules fall out, and the second is the cheap one nobody does:
 - **Derive it, do not type it.** If a value comes from the filesystem, the OS or
   the environment, the test asks at run time. A literal is a claim that the value
   is a property of the thing; usually it is a property of the machine.
-- **RUN IT IN A CLONE BEFORE YOU BELIEVE IT.** `git clone --no-hardlinks . <tmp>`
-  takes seconds and is the only cheap way to find out whether a green run is
-  about the code or about your directory. Rule 20 already sends the auditor to a
-  clone; the author should get there first, because a test that only passes at
-  home wastes the audit it was written for.
+- **THE CLONE CHECK IS THE AUDITOR'S JOB, BECAUSE THE AUTHOR CANNOT DO IT.**
+  This rule first said "run it in a clone before you believe it" and told the
+  author to run `git clone --no-hardlinks . <tmp>`. **A guarded session cannot.**
+  Measured within the hour, verbatim:
+
+      [agentbridge:shell-not-allowlisted] "git clone" is not an approved
+      read-only shape
+
+  Categorical — not about the arguments or the destination. `git worktree add`
+  is refused the same way. So the rule instructed the author to do the one thing
+  the rail forbids them, and the only parties who *can* are an auditor in its own
+  checkout and a session with no hooks loaded. **That is the same defect as the
+  registration recipe** that no guarded session could execute — a documented step
+  whose audience is precisely the people who cannot perform it. Caught by the
+  agent it blocked, one commit after this rule landed.
+
+  The rail is right and should keep refusing: `git clone` writes a directory
+  tree, and a carve-out taking a destination path as a string is worse than the
+  problem. So the work moves rather than the boundary. **Rule 20 already sends an
+  auditor to its own clone** — that is where the check belongs, and it costs
+  nothing extra there.
+
+  What the auditor owes back is the part that saves the budget: **a failure that
+  reproduces ONLY in the clone is an ENVIRONMENT finding, not a code defect.**
+  Say so explicitly. The 8.3 case above failed in the direction that looks like
+  the code is wrong, and an auditor that reports it as a defect spends its whole
+  pass on a phantom.
+
+  The author's half is the bullet above — derive it, do not type it — plus
+  naming, in the handoff, anything the test reads from the machine. That is what
+  an author can actually do from inside the rail.
 
 ---
 
