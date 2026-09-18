@@ -332,3 +332,38 @@ test('MUTATION: the verb classification is derived from GIT_WRITE and cannot sil
   assert.match(src, /GIT_WRITE_VERBS\s*=\s*Object\.freeze\(\s*\n?\s*GIT_WRITE\.source/,
     'the verb list must be DERIVED from GIT_WRITE, not typed beside it');
 });
+
+/* ============================================================================
+ * RECORDING A TEST IS NOT OVERWRITING ONE, AND THE RAIL CONFLATED THEM.
+ *
+ * The baseline-test clause exists because `git restore test/a.test.mjs` REPLACES
+ * an inherited test with whatever HEAD holds. add and commit cannot alter a
+ * file's content; they record it. The clause applied to both, and once the sweep
+ * spellings were closed alongside it, the two checks together left NO permitted
+ * spelling for staging any test file from a guarded session -- not the orphaned
+ * ones, not a test written a minute ago. Rule 17: an outage is how a guard gets
+ * switched off, which loses every layer at once.
+ *
+ * isProtectedRelPath stays unconditional; only the broader glob is narrowed.
+ * Measured against the rail at a0bdbf9 plus this change.
+ * ==========================================================================*/
+
+test('a session can stage and commit a test it wrote, which the rail had made impossible', () => {
+  assert.equal(judgeShellCommand('git add -N test/anything.test.mjs').allowed, true);
+  assert.equal(judgeShellCommand('git commit test/anything.test.mjs -m msg').allowed, true);
+});
+
+test('but a baseline test still cannot be OVERWRITTEN by the verbs that overwrite', () => {
+  assert.equal(judgeShellCommand('git restore test/anything.test.mjs').allowed, false);
+  assert.equal(judgeShellCommand('git checkout HEAD -- test/anything.test.mjs').allowed, false);
+});
+
+test('and a PROTECTED path is refused by every verb, recorders included', () => {
+  /*
+   * The narrowing must not reach isProtectedRelPath. test/claudeGuard.test.mjs
+   * is protected by name, so `git add` of it stays refused while `git add` of an
+   * ordinary test is now permitted -- that pair is the whole point.
+   */
+  assert.equal(judgeShellCommand('git add -N test/claudeGuard.test.mjs').allowed, false);
+  assert.equal(judgeShellCommand('git commit test/claudeGuard.test.mjs -m msg').allowed, false);
+});

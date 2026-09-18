@@ -162,6 +162,26 @@ const GIT_JUDGED_ABOVE = new Set(['push']);
  */
 const GIT_IMPORTS_HISTORY = new Set(['merge', 'rebase', 'stash', 'cherry-pick', 'apply', 'revert', 'pull']);
 
+/*
+ * VERBS THAT OVERWRITE THE FILE THEY NAME, as against verbs that merely RECORD
+ * it. The distinction matters because the baseline-test clause below is about
+ * overwriting and was applied to both.
+ *
+ * `git restore test/a.test.mjs` replaces that test with whatever HEAD holds, and
+ * protecting an inherited test from that is the clause's stated purpose. `git add`
+ * and `git commit` cannot alter a file's content at all -- they record it. Because
+ * the clause did not distinguish them, and because the sweep spellings were closed
+ * at the same time, the two checks together left NO permitted spelling for staging
+ * any test file from a guarded session: not the five orphaned ones, not a test
+ * written sixty seconds ago. That is an outage, and an outage is how a guard gets
+ * switched off, which loses every layer at once.
+ *
+ * isProtectedRelPath stays UNCONDITIONAL below. test/claudeGuard.test.mjs is a
+ * protected path and must remain unstageable by every verb; this narrows only the
+ * broader test glob.
+ */
+const GIT_OVERWRITES_NAMED_PATH = new Set(['restore', 'checkout', 'switch']);
+
 {
   const classified = new Set([
     ...GIT_SWEEPS_TREE, ...GIT_REF_ONLY, ...GIT_JUDGED_ABOVE, ...GIT_IMPORTS_HISTORY,
@@ -493,7 +513,8 @@ function judgeOneSegment(segment) {
          * has existed.
          */
         .find((t) => t !== '' && t !== '--'
-          && (isProtectedRelPath(t) || /^test\/.+\.test\.mjs$/i.test(t)));
+          && (isProtectedRelPath(t)
+            || (GIT_OVERWRITES_NAMED_PATH.has(verb) && /^test\/.+\.test\.mjs$/i.test(t))));
       if (named) {
         return {
           allowed: false,
