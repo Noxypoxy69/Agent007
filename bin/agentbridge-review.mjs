@@ -32,7 +32,15 @@
 
 import { readFile } from 'node:fs/promises';
 import { mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { run } from '../src/exec.mjs';
+/*
+ * GIT GOES THROUGH safeGit, NOT exec. Every git call in this file went through
+ * the exec runner, which applies no SAFE_GIT_CONFIG and strips no
+ * repository-redirecting environment -- so a repository config could execute
+ * and GIT_DIR could redirect the answer. That runner now refuses git, so these
+ * five were dead until routed. runGit returns stdout and throws on failure, and
+ * each site below adapts to the throw in the direction the old code chose.
+ */
+import { runGit } from '../src/safeGit.mjs';
 import { createWorkspaceManager } from '../src/workspaceManager.mjs';
 import { runReview, STAGE } from '../src/reviewRunner.mjs';
 import { reviewConfig } from '../src/hostedRegistry.mjs';
@@ -73,19 +81,28 @@ if (envelope.taskId !== task.task_id) {
 
 const git = {
   async addWorktree({ path, baseSha, detach }) {
-    const r = await run('git', ['worktree', 'add', ...(detach ? ['--detach'] : []), path, baseSha], {
-      cwd: repo, timeoutMs: 120_000,
-    });
-    if (!r.ok) die(`git worktree add failed: ${r.error ?? r.stderr}`);
+    try {
+      runGit(['worktree', 'add', ...(detach ? ['--detach'] : []), path, baseSha], {
+        cwd: repo, timeout: 120_000,
+      });
+    } catch (e) {
+      die(`git worktree add failed: ${e?.stderr ?? e?.message ?? e}`);
+    }
   },
   async removeWorktree({ path, force }) {
-    await run('git', ['worktree', 'remove', ...(force ? ['--force'] : []), path], {
-      cwd: repo, timeoutMs: 60_000,
-    });
+    // The original ignored the result, so a cleanup failure stays tolerated.
+    try {
+      runGit(['worktree', 'remove', ...(force ? ['--force'] : []), path], {
+        cwd: repo, timeout: 60_000,
+      });
+    } catch { /* best-effort cleanup */ }
   },
   async isDirty(path) {
-    const r = await run('git', ['status', '--porcelain'], { cwd: path, timeoutMs: 60_000 });
-    return !r.ok || r.stdout.trim().length > 0;
+    // A throw is "could not look", and the old code answered dirty when it
+    // could not look. Keeping that: refusing to destroy is the safe direction.
+    try {
+      return String(runGit(['status', '--porcelain'], { cwd: path, timeout: 60_000 })).trim().length > 0;
+    } catch { return true; }
   },
 };
 
@@ -104,14 +121,13 @@ const fs = {
  */
 const workspaceGit = {
   async headSha(path) {
-    const r = await run('git', ['rev-parse', 'HEAD'], { cwd: path, timeoutMs: 30_000 });
-    if (!r.ok) throw new Error(r.error ?? r.stderr);
-    return r.stdout.trim();
+    // This already threw on failure, and runGit throws by itself, so the
+    // check is deleted rather than reimplemented.
+    return String(runGit(['rev-parse', 'HEAD'], { cwd: path, timeout: 30_000 })).trim();
   },
   async dirtyFiles(path) {
-    const r = await run('git', ['status', '--porcelain'], { cwd: path, timeoutMs: 30_000 });
-    if (!r.ok) throw new Error(r.error ?? r.stderr);
-    return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    return String(runGit(['status', '--porcelain'], { cwd: path, timeout: 30_000 }))
+      .split('\n').map((l) => l.trim()).filter(Boolean);
   },
 };
 

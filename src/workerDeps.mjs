@@ -18,6 +18,7 @@
 import { spawn } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { run } from './exec.mjs';
+import { runGit } from './safeGit.mjs';
 import {
   waitForEvents, fetchOwnTask, renewLease, returnWork, publishRegistration, HOSTED,
 } from './hostedRegistry.mjs';
@@ -43,12 +44,23 @@ export async function prepareWorktree({ dir, task }, { gitDir = process.cwd() } 
   const base = nonEmpty(task?.base_sha) ? task.base_sha : 'HEAD';
   const branch = `work/${String(task?.task_id ?? 'task').replace(/[^A-Za-z0-9._-]/g, '-')}`;
 
+  /*
+   * GIT GOES THROUGH safeGit, NOT exec -- exec applies no SAFE_GIT_CONFIG and
+   * strips no repository-redirecting environment, so a repository config could
+   * execute and GIT_DIR could answer for a different repository. run() now
+   * THROWS for git, so these calls were dead until routed. runGit returns
+   * stdout and throws on failure, so each site below adapts to the throw.
+   */
   // Delete any branch left by a previous attempt, or `worktree add -b` refuses.
-  await run('git', ['branch', '-D', branch], { cwd: gitDir, timeoutMs: 15000 });
+  // Best-effort: the branch usually does not exist, and that is not an error.
+  try { runGit(['branch', '-D', branch], { cwd: gitDir, timeout: 15000 }); } catch { /* no such branch */ }
 
-  const added = await run('git', ['worktree', 'add', '-b', branch, dir, base],
-    { cwd: gitDir, timeoutMs: 120000 });
-  if (!added.ok) return { ok: false, error: (added.stderr || added.error || '').slice(0, 300) };
+  try {
+    runGit(['worktree', 'add', '-b', branch, dir, base], { cwd: gitDir, timeout: 120000 });
+  } catch (e) {
+    const detail = e?.stderr ? String(e.stderr) : String(e?.message ?? e);
+    return { ok: false, error: detail.slice(0, 300) };
+  }
 
   return { ok: true, dir, branch, base };
 }
@@ -57,15 +69,19 @@ export async function cleanupWorktree(dir, { gitDir = process.cwd() } = {}) {
   if (!nonEmpty(dir)) return;
   // --force because the agent may have left untracked files; this directory is
   // ours and disposable by construction.
-  await run('git', ['worktree', 'remove', '--force', dir], { cwd: gitDir, timeoutMs: 60000 });
+  // Both are best-effort cleanup, as before: the original ignored the result,
+  // and the directory removal below is what actually has to happen.
+  try { runGit(['worktree', 'remove', '--force', dir], { cwd: gitDir, timeout: 60000 }); } catch { /* best effort */ }
   await rm(dir, { recursive: true, force: true }).catch(() => {});
-  await run('git', ['worktree', 'prune'], { cwd: gitDir, timeoutMs: 15000 });
+  try { runGit(['worktree', 'prune'], { cwd: gitDir, timeout: 15000 }); } catch { /* best effort */ }
 }
 
 /** The commit that actually holds the work. Derived, never supplied. */
 export async function headSha(dir) {
-  const out = await run('git', ['rev-parse', 'HEAD'], { cwd: dir, timeoutMs: 15000 });
-  const sha = (out.stdout ?? '').trim();
+  // A throw is "could not look", which the shape-check below already treats as
+  // null -- the same answer the failed-result path gave before.
+  let sha = '';
+  try { sha = String(runGit(['rev-parse', 'HEAD'], { cwd: dir, timeout: 15000 })).trim(); } catch { return null; }
   return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
 }
 

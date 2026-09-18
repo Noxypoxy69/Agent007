@@ -13,7 +13,34 @@ import http from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { run } from '../src/exec.mjs';
+import { runGit } from '../src/safeGit.mjs';
+
+/*
+ * GIT GOES THROUGH safeGit HERE TOO. 560ba4d taught src/exec.mjs to refuse git,
+ * and this file built its fixtures on that runner -- so the refusal took the
+ * whole file down with it. That was the right refusal and the wrong blast
+ * radius: the scan in test/safeGit.test.mjs only reads src, bin and scripts, so
+ * nothing pointed at test/ until the suite went red.
+ *
+ * This keeps the { ok, stdout, stderr } shape the call sites below already
+ * read, so the routing changes no test's meaning. It asserts its first argument
+ * is git rather than ignoring it, so a non-git command added later fails loudly
+ * instead of being silently handed to a git-only path.
+ */
+const run = async (file, args, options = {}) => {
+  assert.equal(file, 'git', 'this helper routes git only -- use a runner of your own for anything else');
+  const { timeoutMs, ...rest } = options;
+  try {
+    return { ok: true, code: 0, stdout: String(runGit(args, { ...rest, timeout: timeoutMs ?? 20000 })), stderr: '' };
+  } catch (e) {
+    return {
+      ok: false,
+      code: typeof e?.status === 'number' ? e.status : null,
+      stdout: String(e?.stdout ?? ''),
+      stderr: String(e?.stderr ?? e?.message ?? e),
+    };
+  }
+};
 import { verify, sign, newNonce } from '../src/sign.mjs';
 import { collect } from '../src/collect.mjs';
 import { publish } from '../src/client.mjs';

@@ -90,22 +90,124 @@ function sourceFiles() {
   return out;
 }
 
-test('EVERY git invocation under src, bin and scripts goes through safeGit', () => {
-  const offenders = [];
+/*
+ * THIS SCAN NAMED FOUR SPELLINGS AND CALLED IT A PROPERTY.
+ *
+ * It matched /(execFileSync|spawnSync|execFile|spawn)\(\s*['"]git['"]/ and was
+ * green across the whole tree. Two different accidents walked past it:
+ *
+ *   src/git.mjs      held `const GIT = 'git'` and passed the VARIABLE
+ *   bin/agentbridge-attempt.mjs  passed the literal to run(), a WRAPPER
+ *
+ * Neither was deliberate. Both left a git invocation outside safeGit while a
+ * test named "EVERY git invocation goes through safeGit" reported success --
+ * rule 17, a control that is never consulted, except worse, because this one
+ * answered and the answer was wrong.
+ *
+ * The property is not "which function was called". It is "this source hands the
+ * NAME OF GIT to something that will spawn it". So the scan now matches any
+ * call whose first argument is that literal, wrapper or not.
+ *
+ * WHAT A PATTERN OVER SOURCE STILL CANNOT SEE, said here rather than implied by
+ * a confident test name: a variable. Put the name in a const, or compute it, and
+ * no regex finds it. That is why the real enforcement is in the CODE --
+ * src/exec.mjs throws when asked for git, inspecting the actual argument at
+ * runtime, which is what caught bin/agentbridge-attempt.mjs. This scan is the
+ * fast signal that fails at lint time instead of in somebody's worktree. It is a
+ * second layer, not the boundary, and it is named for what it does.
+ */
+const GIT_CALL = /\b([A-Za-z_$][A-Za-z0-9_$.]*)\s*\(\s*['"](git(?:\.exe)?)['"]\s*,/gi;
+
+/*
+ * SIXTEEN CALL SITES THAT ARE NOT FIXED, LISTED RATHER THAN EXCLUDED.
+ *
+ * bin/agentbridge.mjs declares a local runner in three function scopes --
+ * `const run = promisify(execFile)` -- which shadows the name and never reaches
+ * src/exec.mjs. Measured, not assumed: a promisified execFile call to git from
+ * this repo returns a branch name with no refusal. So these sixteen are outside
+ * BOTH layers: invisible to the lint and invisible to refuseGit. No hooksPath,
+ * fsmonitor or GIT_DIR hardening applies to them.
+ *
+ * They are not fixed here because routing them changes the behaviour of three
+ * shipped commands, one of which clones a caller-supplied path. That is an
+ * owner decision, and it is recorded as one rather than fixed quietly at the end
+ * of a long night.
+ *
+ * THE COUNT IS ASSERTED EXACT, NOT AS A CEILING. Rule 19: enumeration fails in
+ * both directions. A NEW unrouted call site in this file pushes the count above
+ * the declared number and fails; a FIXED one pushes it below and fails too, so
+ * the entry cannot rot into a permanent exemption nobody rereads.
+ *
+ * IT IS A COUNT AND NOT A LINE LIST ON PURPOSE. The first version of this
+ * quarantine keyed on file:line, and the numbers were stale before it ever ran
+ * -- every edit above a call site moves it, so the list would demand updating
+ * for reasons that have nothing to do with git. A count is stable under edits
+ * and still fails in both directions, which is the property that was wanted.
+ */
+const KNOWN_UNROUTED = Object.freeze({ 'bin/agentbridge.mjs': 18 });
+
+function gitCallSites() {
+  const found = [];
   for (const file of sourceFiles()) {
     const rel = path.relative(REPO, file).split(path.sep).join('/');
     if (rel === 'src/safeGit.mjs') continue; // the one place allowed to spawn git directly
 
-    const text = execFileSync(process.execPath, ['-e', `process.stdout.write(require('fs').readFileSync(${JSON.stringify(file)},'utf8'))`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-    // Strip block and line comments so a comment mentioning the pattern is not a finding.
-    const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const raw = readFileSync(file, 'utf8');
+    // Blank comments out IN PLACE, so a comment mentioning the pattern is not a
+    // finding and every surviving line number still matches the real file.
+    const code = raw
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .replace(/^\s*\/\/.*$/gm, (m) => ' '.repeat(m.length));
 
-    for (const m of code.matchAll(/(execFileSync|spawnSync|execFile|spawn)\(\s*['"]git['"]/g)) {
-      offenders.push(`${rel}: ${m[1]}('git', ...)`);
+    for (const m of code.matchAll(GIT_CALL)) {
+      const line = code.slice(0, m.index).split('\n').length;
+      found.push({ id: `${rel}:${line}`, rel, line, callee: m[1], spelling: m[2] });
     }
   }
+  return found;
+}
+
+test('EVERY git invocation under src, bin and scripts goes through safeGit, wrapper or not', () => {
+  const sites = gitCallSites();
+
+  /*
+   * RULE 5, and it is not decorative here: the previous scan's failure mode was
+   * matching NOTHING and reporting success. A scan that silently stops finding
+   * call sites is indistinguishable from a clean tree, so assert it still sees
+   * the ones we know exist before trusting an empty offender list.
+   */
+  const declared = Object.values(KNOWN_UNROUTED).reduce((a, b) => a + b, 0);
+  assert.ok(sites.length >= declared,
+    `the scan found ${sites.length} git call sites, fewer than the ${declared} known to exist -- ` +
+    'the pattern has stopped matching, and an empty result means nothing');
+
+  const offenders = sites
+    .filter((s) => !(s.rel in KNOWN_UNROUTED))
+    .map((s) => `${s.id}: ${s.callee}('${s.spelling}', ...)`);
+
   assert.deepEqual(offenders, [],
-    `these invoke git directly instead of importing runGit from src/safeGit.mjs:\n  ${offenders.join('\n  ')}`);
+    'these hand the name of git to something that spawns it, instead of importing runGit ' +
+    `from src/safeGit.mjs:\n  ${offenders.join('\n  ')}`);
+});
+
+test('the unrouted count is exact in both directions', () => {
+  /*
+   * The other direction. Without this, the quarantine is a place to park a
+   * finding forever: route the calls and the stale entry sits there implying
+   * debt that no longer exists, which is how an exemption stops being read.
+   */
+  const actual = {};
+  for (const s of gitCallSites()) actual[s.rel] = (actual[s.rel] ?? 0) + 1;
+
+  const wrong = [];
+  for (const [rel, expected] of Object.entries(KNOWN_UNROUTED)) {
+    const got = actual[rel] ?? 0;
+    if (got === expected) continue;
+    wrong.push(got < expected
+      ? `${rel}: ${got} unrouted git calls, quarantine still declares ${expected} -- if these were routed through safeGit, lower or remove the entry`
+      : `${rel}: ${got} unrouted git calls, quarantine declares ${expected} -- ${got - expected} new one(s) went in outside safeGit`);
+  }
+  assert.deepEqual(wrong, [], wrong.join('\n  '));
 });
 
 test('the hardening list itself is frozen and names all three surfaces', () => {
