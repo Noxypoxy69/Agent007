@@ -335,7 +335,40 @@ if (drift.length) {
  * below and pass -- the suite grading itself against rules the session had just
  * relaxed. Measured: a weakened baseline test produced zero drift.
  */
-const testDrift = baselineTestDrift(root, snapshot);
+/*
+ * AND THE GRANT REACHES THIS COMPARISON TOO, OR IT REACHES NOTHING.
+ *
+ * PreToolUse now permits editing a granted baseline test. If this gate still
+ * refused the result, the grant would buy the write and then block the turn --
+ * a permission that cannot be spent, which is worse than no permission because
+ * it looks like one. Both layers or neither.
+ *
+ * Filtered exactly like protectedDrift above, including the re-read per entry:
+ * a grant may have expired between the write and the Stop, and a missing grant
+ * degrades to naming the file rather than dereferencing null. This script has no
+ * try/catch anywhere, and an uncaught throw here exits 1 with empty stdout,
+ * which Claude Code reads as NON-BLOCKING -- a disarm, not a refusal.
+ *
+ * NO GATE_SELF_CONFIG EQUIVALENT, deliberately: that list stops a grant deciding
+ * how long this gate may look. A test does not set the budget, so the notice
+ * carries the mitigation -- the change is permitted only while it is named, and
+ * it is recorded every time rather than passing silently.
+ */
+const allTestDrift = baselineTestDrift(root, snapshot);
+const testGrantApplies = (d) => Boolean(overrideCovers(root, d.file));
+const grantedTests = allTestDrift.filter(testGrantApplies);
+const testDrift = allTestDrift.filter((d) => !testGrantApplies(d));
+if (grantedTests.length) {
+  const note = `[agentbridge:baseline-test-overridden] Baseline tests changed under an active override. Permitted, and recorded anyway:\n${grantedTests.map((d) => {
+    const g = overrideCovers(root, d.file);
+    return g
+      ? `  ${d.file}: ${d.now} -- granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`
+      : `  ${d.file}: ${d.now} -- the grant that permitted this is no longer readable`;
+  }).join('\n')}`;
+  // APPEND. carriedNotice may already hold the protected-control notice, and
+  // assigning over it would silently drop one of two announcements.
+  carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
+}
 if (testDrift.length) {
   out(`[agentbridge:baseline-test-changed] Tests present at session start differ from the snapshot:\n${testDrift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
 }

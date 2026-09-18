@@ -287,6 +287,38 @@ function firstStringField(input, fields) {
   return null;
 }
 
+/**
+ * The grant covering this path, or null. Returns {grant, rel}.
+ *
+ * THE GRANT IS MATCHED ON EVERY SPELLING THE PROTECTION USED, NOT ON THE ONE
+ * THE CALLER TYPED. An earlier version compared only the LEXICAL path while
+ * isProtectedPath decides over normalizedCandidates, which includes realpath --
+ * so the two disagreed through a symlink and the grant won.
+ *
+ * Measured 2026-09-18: with a grant for `docs/notes.md`, making that path a
+ * symlink to `../.claude/settings.json` and writing to it was ALLOWED, the write
+ * landed on the hook configuration, and the notice named docs/notes.md. A grant
+ * for any one path was a write permit for every protected path, and the
+ * announcement pointed at the wrong file.
+ *
+ * So the grant must cover EVERY candidate this path resolves to. If the lexical
+ * and resolved spellings disagree, no grant applies -- an override is a decision
+ * about a named file, and a path that is two files is not the file anybody named.
+ *
+ * FACTORED OUT so the baseline-test branch cannot accidentally get a weaker
+ * version of this. It had no grant check at all; giving it one by copying four
+ * lines is how the symlink hole would have been reintroduced in a second place.
+ */
+function grantFor(filePath, cwd) {
+  const root = path.resolve(cwd);
+  const rels = normalizedCandidates(filePath, cwd)
+    .map((abs) => path.relative(root, abs).split(path.sep).join('/'));
+  if (rels.length === 0) return null;
+  if (!rels.every((r) => overrideCovers(cwd, r))) return null;
+  const grant = overrideCovers(cwd, rels[0]);
+  return grant ? { grant, rel: rels[0] } : null;
+}
+
 function judgeWrite(filePath, input, cwd, sessionId) {
   if (isProtectedPath(filePath, cwd)) {
     /*
@@ -326,14 +358,9 @@ function judgeWrite(filePath, input, cwd, sessionId) {
      * is a decision about a named file, and a path that is two files is not the
      * file anybody named.
      */
-    const root = path.resolve(cwd);
-    const rels = normalizedCandidates(filePath, cwd)
-      .map((abs) => path.relative(root, abs).split(path.sep).join('/'));
-    const rel = rels[0];
-    const grant = rels.length > 0 && rels.every((r) => overrideCovers(cwd, r))
-      ? overrideCovers(cwd, rel)
-      : null;
-    if (grant) {
+    const covered = grantFor(filePath, cwd);
+    if (covered) {
+      const { grant, rel } = covered;
       return {
         allowed: true,
         overridden: true,
@@ -344,7 +371,55 @@ function judgeWrite(filePath, input, cwd, sessionId) {
     return deny('protected-control', `${filePath} is part of the guard or completion contract`);
   }
   if (isSessionBaselineTest(filePath, cwd, sessionId)) {
-    return deny('baseline-test-immutable', `${filePath} was present when the session began; baseline tests are not editable from inside it`);
+    /*
+     * A BASELINE TEST WAS THE ONE CONTROL WITH NO DOOR AT ALL, AND THAT IS AN
+     * OVERSIGHT RATHER THAN A DECISION.
+     *
+     * The paragraph above argues that a control repairable only from the
+     * operator's terminal or from a session whose hook never loaded is a BUG
+     * being spent as a permission, and that this trains everybody to evade the
+     * guard. That reasoning was applied to protected paths and not here.
+     *
+     * Measured 2026-09-18, exactly as predicted: the over-block ratchet in
+     * test/guardToolRoster.test.mjs went red DEMANDING the deletion of two stale
+     * entries, and no guarded session could perform it -- refused at PreToolUse
+     * by this branch and re-refused at Stop by baselineTestDrift, with a grant
+     * making no difference at either layer. A guarded agent diagnosed it exactly
+     * and hit the wall. It was cleared by the one session whose hooks had never
+     * loaded, which is the bug-as-permission this comment is about, happening in
+     * front of us.
+     *
+     * The same narrow door, and it costs nothing the protected branch has not
+     * already paid: exact paths, an expiry, a reason, a named grantor, and an
+     * announcement on every permit. The grant resolution is SHARED with the
+     * branch above rather than copied, so the symlink hardening cannot drift
+     * apart between the two.
+     *
+     * WHAT THIS DELIBERATELY DOES NOT DO: there is no equivalent of
+     * GATE_SELF_CONFIG here. That list exists because a grant must not let a
+     * repaired file decide how long the Stop gate may look -- a grant scoped to
+     * the check rather than to a file. A test does not set the gate's budget, so
+     * the announcement carries the whole mitigation: a weakened baseline test is
+     * permitted only while it is NAMED, by somebody, with an expiry, and it says
+     * so in the transcript every time.
+     */
+    const covered = grantFor(filePath, cwd);
+    if (covered) {
+      const { grant, rel } = covered;
+      return {
+        allowed: true,
+        overridden: true,
+        notice: `[agentbridge:baseline-test-overridden] ${rel} was present when the session began; `
+          + `an active override permits editing it. Granted by ${grant.granted_by}, `
+          + `expires ${grant.expires_at}. Reason: ${grant.reason}`,
+      };
+    }
+    /*
+     * The refusal now names a route that WORKS. It previously named none, which
+     * is the defect class this repository met three times in one day: guidance
+     * whose audience cannot follow it.
+     */
+    return deny('baseline-test-immutable', `${filePath} was present when the session began; baseline tests are not editable from inside it. Ask the owner for an override naming this exact path`);
   }
   const content = String(input.content ?? input.new_string ?? '');
   SKIP_MARKER.lastIndex = 0;
