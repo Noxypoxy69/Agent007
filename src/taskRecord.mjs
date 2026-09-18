@@ -141,12 +141,27 @@ export function createTask({
   created_by,
   notes = null,
 }) {
+  /*
+   * COPIED WHEN IT IS A LIST, PASSED THROUGH WHEN IT IS NOT.
+   *
+   * The first version spread these unconditionally and THREW on a non-array —
+   * so `createTask({allowed_paths: null})` died before `validateTask` could
+   * refuse it, and the refusal that exists for exactly that input was
+   * unreachable through the constructor every caller is told to use. A builder
+   * that rejects by crashing hands the caller a stack trace where the validator
+   * would have handed them a sentence.
+   *
+   * Copying matters on its own account: aliasing the caller's array means a
+   * later `push` rewrites a task that has already been stored.
+   */
+  const copy = (v) => (Array.isArray(v) ? [...v] : v);
+
   return {
     task_id, title, lane_id, repo_id, state,
-    allowed_paths: [...allowed_paths],
-    forbidden_paths: [...forbidden_paths],
-    shared_paths: [...shared_paths],
-    depends_on: [...depends_on],
+    allowed_paths: copy(allowed_paths),
+    forbidden_paths: copy(forbidden_paths),
+    shared_paths: copy(shared_paths),
+    depends_on: copy(depends_on),
     base_sha,
     created_at,
     created_by,
