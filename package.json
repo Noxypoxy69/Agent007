@@ -17,7 +17,8 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "audit:workspace": "node scripts/audit-workspace.mjs",
     "bridge": "node bridge/server.mjs",
-    "mcp:stdio": "node mcp/stdio.mjs"
+    "mcp:stdio": "node mcp/stdio.mjs",
+    "agent": "node scripts/start-agent.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
