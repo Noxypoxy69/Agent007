@@ -524,7 +524,55 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * first, and the general case is still Stop's job. It closes the one route
        * that turns a permitted write into a disarm.
        */
-      const named = tokens.slice(2)
+      /*
+       * A FLAG CAN CARRY THE PATHSPEC LIST OUT OF THE COMMAND ENTIRELY.
+       *
+       * The resolver is only ever asked about literal operand tokens, and git
+       * has flags that take the pathspecs from a FILE instead. So the list
+       * never appears in the command string, git is never asked, and every
+       * check below sees nothing:
+       *
+       *   printf 'src/claudeGuard.mjs\\nsrc/shellAllowlist.mjs\\n' > ps.txt
+       *   git restore --source=2829c0a --pathspec-from-file=ps.txt   ALLOWED
+       *
+       * Measured: that rolled the guard and the rail back fifteen commits, to
+       * before the node and pathspec hardening, in one permitted command -- and
+       * the hook re-imports claudeGuard on every call, so PreToolUse is the old
+       * version for the rest of the session. 29c0957 claimed "a spelling nobody
+       * has thought of is answered correctly for free, because git answers it".
+       * Git is never asked when the spelling is not an operand. Same
+       * option-value laundering the node branch closed in its round three,
+       * left open in the git branch by the commit that claimed the class.
+       *
+       * These two flags are refused rather than resolved: they are git's only
+       * documented way to source pathspecs from outside the argument list, so
+       * this is a closed set defined by git's semantics, not a guess at
+       * spellings. Reading the file to resolve it would mean trusting a file
+       * the session can rewrite between the check and the command.
+       */
+      const pathspecFromFile = tokens.find((t) => /^--pathspec-from-file(=|$)/.test(t) || t === '--pathspec-file-nul');
+      if (pathspecFromFile) {
+        return {
+          allowed: false,
+          reason: `"${pathspecFromFile}" takes the pathspec list out of the command, so what it would touch `
+            + 'cannot be judged from the command string. Name the paths as operands instead',
+        };
+      }
+      /*
+       * AND A FLAG'S VALUE IS NOT A PATHSPEC. Feeding every token to the
+       * resolver refused ordinary one-word commit messages, because the message
+       * is a tracked path: `git commit -m test` named test/claudeGuard.test.mjs,
+       * `-m docs` named docs/CLAUDE_GUARD_PROVENANCE.md, `-m bin` named the hook
+       * binary. Longer messages passed, so it bit exactly the shortest ones, and
+       * the refusal text was unintelligible to whoever hit it.
+       */
+      const VALUE_TAKING = /^(-m|--message|-F|--file|-C|--reuse-message|-c|--reedit-message|--author|--date|--source|-S|--gpg-sign|-b|-B|--orphan)$/;
+      const operandTokens = [];
+      for (let i = 2; i < tokens.length; i += 1) {
+        if (VALUE_TAKING.test(tokens[i])) { i += 1; continue; }
+        operandTokens.push(tokens[i]);
+      }
+      const named = operandTokens
         .map((t) => t.replace(/^['"]|['"]$/g, ''))
         .map((t) => t.split('\\').join('/'))
         /*

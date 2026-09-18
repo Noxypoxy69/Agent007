@@ -27,6 +27,32 @@ export function normalizedCandidates(filePath, cwd = process.cwd()) {
   if (typeof filePath !== 'string' || filePath.length === 0) return [];
   const absolute = path.resolve(cwd, filePath);
   const out = [absolute.replaceAll('\\', '/')];
+  /*
+   * THE NATIVE RESOLVER, BECAUSE CASE IS NOT THE ONLY ALIAS WINDOWS GIVES A FILE.
+   *
+   * e4b1760 folded case and argued that folding is "a PROPERTY, not a lookalike
+   * list". It was a property of ONE alias class. 8.3 short names are a second
+   * spelling of the same inode, and realpathSync does NOT expand them -- so
+   * normalizedCandidates produced the same wrong spelling twice, which is
+   * verbatim the failure mode that commit said it had closed. Measured through
+   * the shipped binary, every one ALLOW while its canonical spelling denied:
+   *
+   *   CLAUDE~1/SETTIN~1.JSO   src/CLAUDE~1.MJS   src/GUARDS~1.MJS
+   *   src/SHELLA~1.MJS        bin/AGENTB~1.MJS
+   *
+   * Writing CLAUDE~1/SETTIN~1.JSO modifies the real file -- git reports the
+   * canonical path as modified -- so one permitted write carrying
+   * disableAllHooks removed PreToolUse and the Stop hook together, and
+   * src/CLAUDE~1.MJS disarms the guard without naming .claude at all.
+   *
+   * realpathSync.native asks the operating system, which owns the alias table,
+   * and expands short names as well as case. That is the difference between
+   * ASKING and ENUMERATING -- the same lesson as asking git what a pathspec
+   * covers instead of listing spellings, learned again one alphabet later.
+   */
+  try {
+    out.push(realpathSync.native(absolute).replaceAll('\\', '/'));
+  } catch { /* fall through: the lexical and non-native candidates still apply */ }
   try {
     out.push(realpathSync(absolute).replaceAll('\\', '/'));
   } catch {
@@ -690,7 +716,37 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
  * Still a backstop and still not a boundary: a path under a key called `arg1` is
  * missed. That is the direction this is allowed to fail in.
  */
-const PATH_SHAPED_KEY = /(^|_)(path|file|dir|folder|src|source|dest|destination|target|to|from|location|uri|url)(s?)($|_)/i;
+/*
+ * A KEY READS LIKE A LOCATION -- AND THE FIRST VERSION COULD NOT SEE camelCase.
+ *
+ * The alternatives were delimited by underscore or a string boundary, so
+ * `filename`, `filePath`, `outputPath`, `targetFile`, `destPath`, `newPath` and
+ * `dst` never matched. That REOPENED keys the previous commit had closed -- it
+ * missed the most common path key in existence, while this file's own
+ * PATH_FIELDS already lists camelCase `filePath`, so the codebase models a
+ * convention its backstop could not express.
+ *
+ * SUBSTRING FOR THE UNAMBIGUOUS STEMS, WORD MATCH FOR THE SHORT ONES, and the
+ * split is not tidiness. `source` as a substring matches `new_source`, which is
+ * NotebookEdit's CONTENT field -- so a loose list here walks straight back into
+ * the over-block that refused ordinary edits an hour ago. `to` as a substring
+ * matches `prototype` and `history`. Those go in the word list, matched only as
+ * whole words after splitting on camelCase and punctuation.
+ *
+ * `source` is deliberately in NEITHER: it is genuinely ambiguous, and a mover
+ * carrying `source` also carries `destination`, which is caught. Missing a lone
+ * `source` is the direction a backstop is allowed to fail in; refusing every
+ * notebook edit is not.
+ */
+const PATH_STEM = /(path|file|dir|folder|dest|target|location|url|uri)/i;
+const PATH_WORD = new Set(['to', 'from', 'dst', 'src']);
+const isPathShapedKey = (key) => {
+  if (typeof key !== 'string' || key === '') return false;
+  if (PATH_STEM.test(key)) return true;
+  return key
+    .split(/[^A-Za-z0-9]+|(?=[A-Z])/)
+    .some((w) => PATH_WORD.has(w.toLowerCase()));
+};
 
 function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }, inheritedKey = null) {
   if (depth > 4 || seen.n > 200) return null;
@@ -701,7 +757,7 @@ function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }, inheritedKey
     seen.n += 1;
     if (typeof value === 'string') {
       if (value.length === 0 || value.length > 4096) continue;
-      if (!key || !PATH_SHAPED_KEY.test(key)) continue;
+      if (!isPathShapedKey(key)) continue;
       if (isProtectedPath(value, cwd)) return value;
     } else if (value && typeof value === 'object') {
       const hit = protectedMentionIn(value, cwd, depth + 1, seen, key);

@@ -39,7 +39,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { evaluateClaudeTool } from '../src/claudeGuard.mjs';
+import { evaluateClaudeTool, isProtectedPath } from '../src/claudeGuard.mjs';
 import { judgeShellCommand } from '../src/shellAllowlist.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -708,4 +708,91 @@ test('npm forwards everything after -- to the script, so those operands are judg
   assert.equal(judgeShellCommand('npm test -- ./pwn.mjs', { mayExecute: classify }).allowed, false);
   assert.equal(judgeShellCommand('npm test -- test/a.test.mjs', { mayExecute: classify }).allowed, true);
   assert.equal(judgeShellCommand('npm test', { mayExecute: classify }).allowed, true);
+});
+
+/* ============================================================================
+ * THREE LIVE DEFECTS FROM THE AUDIT OF 29c0957, a02f408 AND e4b1760.
+ * All three were already on the server when they were found.
+ * ==========================================================================*/
+
+test('8.3 SHORT NAMES are the same file, and case-folding alone did not cover them', () => {
+  /*
+   * e4b1760 folded case and argued folding is "a PROPERTY, not a lookalike
+   * list". It was a property of one alias class. realpathSync does not expand
+   * short names; realpathSync.native does, because the OS owns the alias table.
+   * Measured: writing CLAUDE~1/SETTIN~1.JSO modifies .claude/settings.json and
+   * git reports the canonical path as modified.
+   */
+  for (const p of ['CLAUDE~1/SETTIN~1.JSO', 'CLAUDE~1/settings.json', 'src/CLAUDE~1.MJS',
+    'src/GUARDS~1.MJS', 'src/SHELLA~1.MJS', 'bin/AG8836~1.MJS']) {
+    assert.equal(isProtectedPath(p, repoRoot), true, `${p} resolves to a protected file`);
+  }
+  /*
+   * The positive half, and it corrects the audit: bin/AGENTB~1.MJS resolves to
+   * agentbridge-attempt.mjs, which is NOT protected, so free is the right
+   * answer there. A short name is not automatically a control.
+   */
+  assert.equal(isProtectedPath('bin/AGENTB~1.MJS', repoRoot), false);
+  assert.equal(isProtectedPath('docs/notes.md', repoRoot), false);
+});
+
+test('a flag can carry the pathspec list out of the command, and that is refused', () => {
+  /*
+   * The resolver is only asked about literal operands. --pathspec-from-file
+   * sources them from a file, so git is never asked and every check sees
+   * nothing. Measured: `git restore --source=2829c0a --pathspec-from-file=ps.txt`
+   * rolled the guard and the rail back fifteen commits in one permitted command.
+   */
+  for (const cmd of [
+    'git restore --pathspec-from-file=ps.txt',
+    'git restore --pathspec-from-file ps.txt',
+    'git checkout HEAD --pathspec-from-file=ps.txt',
+    'git add --pathspec-from-file=ps.txt',
+    'git restore --source=HEAD~3 --pathspec-from-file=ps.txt',
+    'git restore --pathspec-file-nul',
+  ]) {
+    assert.equal(judgeShellCommand(cmd).allowed, false, `ALLOWED: ${cmd}`);
+  }
+});
+
+test('a flag VALUE is not a pathspec, so one-word commit messages work again', () => {
+  /*
+   * Feeding every token to the resolver refused `git commit -m test`, because
+   * "test" names test/claudeGuard.test.mjs. It bit exactly the shortest, most
+   * ordinary messages, and the refusal named a file the author never mentioned.
+   */
+  /*
+   * The stand-in must agree with the real resolver on the cases the test uses.
+   * A first version listed only the message words, so it reported the sweeping
+   * operand as harmless and the test passed for the wrong reason -- the exact
+   * stub-disagrees-with-reality shape the audit found in the node tests.
+   */
+  const covers = (t) => (['test', 'docs', 'bin', 'src', 'package.json', ':/', '.', '*'].includes(t) ? ['CLAUDE.md'] : []);
+  for (const cmd of ['git commit -m test', 'git commit -m docs', 'git commit -m bin', 'git commit -m src']) {
+    assert.equal(judgeShellCommand(cmd, { pathspecCovers: covers }).allowed, true, `refused: ${cmd}`);
+  }
+  assert.equal(judgeShellCommand('git commit :/ -m msg', { pathspecCovers: covers }).allowed, false,
+    'but an actual sweeping operand still dies, message or not');
+});
+
+test('the key gate sees camelCase, and still does not see content fields', () => {
+  /*
+   * The first key gate delimited its alternatives on underscore or a string
+   * boundary, so `filename` -- the most common path key there is -- went ALLOW,
+   * reopening what the previous commit closed. Substring stems fix that; but a
+   * substring list containing `source` would match NotebookEdit's `new_source`
+   * and re-break the over-block, so the short ambiguous ones are word-matched
+   * and `source` is in neither list.
+   */
+  const named = (k) => evaluateClaudeTool({
+    tool_name: 'MoverTool', tool_input: { [k]: '.claude/settings.json' }, cwd: repoRoot, session_id: 's',
+  }).allowed;
+  for (const k of ['filename', 'filepath', 'pathname', 'fileName', 'filePath', 'outputPath',
+    'targetFile', 'destPath', 'newPath', 'dst', 'srcFile', 'TargetPath', 'output_path', 'destination']) {
+    assert.equal(named(k), false, `${k} must be treated as naming a path`);
+  }
+  const content = (tool, input) => evaluateClaudeTool({ tool_name: tool, tool_input: input, cwd: repoRoot, session_id: 's' }).allowed;
+  assert.equal(content('NotebookEdit', { notebook_path: 'docs/n.ipynb', new_source: 'CLAUDE.md' }), true,
+    'new_source is content, not a location -- this is why source is in neither list');
+  assert.equal(content('Edit', { file_path: 'docs/notes.md', old_string: 'CLAUDE.md', new_string: 'x' }), true);
 });
