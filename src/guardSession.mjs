@@ -599,7 +599,13 @@ export function readSnapshot(repoRoot, sessionId) {
      * than adopted as somebody else's baseline.
      */
     if (path.resolve(parsed.repoRoot ?? '') !== path.resolve(repoRoot)) return null;
-    const want = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : null;
+    // sessionId is a non-empty string here -- the guard at the top of this
+    // function returns null for every missing/empty id -- so the old
+    // `... ? sessionId.trim() : null` ternary's null arm was unreachable dead
+    // code (D3 from the null-session audit; a mutation confirmed removing it
+    // fails nothing). A dead arm that looks like a check is worse than none,
+    // because the next reader counts it as coverage.
+    const want = sessionId.trim();
     if ((parsed.sessionId ?? null) !== want) return null;
     return parsed;
   } catch { return null; }
