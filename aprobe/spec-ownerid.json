@@ -1,0 +1,114 @@
+{
+  "rev": "e59a431",
+  "restore": ["src/ownerDecisions.mjs", "supabase/functions/mcp/_shared.js"],
+  "cases": [
+    {
+      "name": "M1 substring: owner name CONTAINS candidate  (o.includes(want))",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().includes(want)" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().includes(want)" }
+      ]
+    },
+    {
+      "name": "M2 substring: candidate CONTAINS owner name  (want.includes(o))",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "want.includes(o.trim().toLowerCase())" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "want.includes(o.trim().toLowerCase())" }
+      ]
+    },
+    {
+      "name": "M3 startsWith: owner name starts with candidate",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().startsWith(want)" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().startsWith(want)" }
+      ]
+    },
+    {
+      "name": "M4 startsWith: candidate starts with owner name",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "want.startsWith(o.trim().toLowerCase())" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "want.startsWith(o.trim().toLowerCase())" }
+      ]
+    },
+    {
+      "name": "M5 endsWith: candidate ends with owner name",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "want.endsWith(o.trim().toLowerCase())" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "want.endsWith(o.trim().toLowerCase())" }
+      ]
+    },
+    {
+      "name": "M6 strip non-alphanumerics before comparing",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().replace(/[^a-z0-9]/g,'') === want.replace(/[^a-z0-9]/g,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().replace(/[^a-z0-9]/g,'') === want.replace(/[^a-z0-9]/g,'')" }
+      ]
+    },
+    {
+      "name": "M7 unicode fold: NFKD + strip combining marks",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" }
+      ]
+    },
+    {
+      "name": "M8 case-only: drop the candidate's toLowerCase (exact, case-sensitive)",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "const want = value.trim().toLowerCase();", "to": "const want = value.trim();" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "const want = value.trim().toLowerCase();", "to": "const want = value.trim();" }
+      ]
+    },
+    {
+      "name": "M9 whitespace-collapsing widening (interior spaces removed)",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase() === want.replace(/\\s+/g,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase() === want.replace(/\\s+/g,'')" }
+      ]
+    },
+    {
+      "name": "M10 ONE SURFACE ONLY: widen src, leave hosted exact",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "want.includes(o.trim().toLowerCase())" }
+      ]
+    },
+    {
+      "name": "M11 ONE SURFACE ONLY: widen hosted, leave src exact",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "want.includes(o.trim().toLowerCase())" }
+      ]
+    },
+    {
+      "name": "M12 remove the escalation entirely (the d8f6d2b fix)",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);\n  if (orphaned.length > 0) {", "to": "  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);\n  if (false) {" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);\n  if (orphaned.length > 0) {", "to": "  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);\n  if (false) {" }
+      ]
+    },
+    {
+      "name": "M13 escalation AFTER match handling instead of before",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "    && !supersededByValid.has(d.decision_id)\n    && scopeMatches(d, context)", "to": "    && !supersededByValid.has(d.decision_id)\n    && resolveOwnerDecision(rows.filter((r) => r !== d), action, context, { owners }).outcome !== 'allowed'\n    && scopeMatches(d, context)" }
+      ]
+    },
+    {
+      "name": "M14 revokeDecision anchor removed on the HOSTED surface only",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "supabase/functions/mcp/_shared.js", "from": "  if (!isOwnerId(by, owners)) {\n    return { ok: false, errors: [`\"${by}\" is not the owner: a worker cannot revoke the owner's decision`] };", "to": "  if (isNonEmptyString(d.owner_id) && by !== d.owner_id) {\n    return { ok: false, errors: [`\"${by}\" is not the owner: a worker cannot revoke the owner's decision`] };" }
+      ]
+    }
+  ]
+}
