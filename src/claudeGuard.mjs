@@ -263,7 +263,7 @@ function judgeWrite(filePath, input, cwd, sessionId) {
   return { allowed: true };
 }
 
-function judgeShell(command) {
+function judgeShell(command, cwd) {
   /*
    * ALLOWLIST, NOT DETECTION. Mutation used to be detected by extracting path
    * tokens, which closed the spellings it knew and nothing else: node -e,
@@ -272,7 +272,26 @@ function judgeShell(command) {
    * denylist of a programming language cannot win. So the question is now what
    * is KNOWN read-only, and everything else is refused.
    */
-  const verdict = judgeShellCommand(command);
+  const verdict = judgeShellCommand(command, {
+    isOverridden: (rel) => Boolean(cwd && overrideCovers(cwd, rel)),
+  });
+  /*
+   * ANNOUNCE THE SHELL PERMIT TOO. The Edit announced itself and the commit that
+   * recorded it did not, which is the same silence in a different layer -- and
+   * the commit is the half that ends up in history.
+   */
+  if (verdict.allowed && verdict.overriddenPath && cwd) {
+    const g = overrideCovers(cwd, verdict.overriddenPath);
+    if (g) {
+      return {
+        allowed: true,
+        overridden: true,
+        notice: `[agentbridge:protected-control-overridden] this command names ${verdict.overriddenPath}, `
+          + `which is protected; an active override permits it. Granted by ${g.granted_by}, `
+          + `expires ${g.expires_at}. Reason: ${g.reason}`,
+      };
+    }
+  }
   if (!verdict.allowed) {
     return deny('shell-not-allowlisted',
       `${verdict.reason}. Repository writes go through the structured edit tools, where the path is a field rather than a string to be parsed`);
@@ -348,7 +367,7 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
   if (toolName.startsWith('mcp__')) return { allowed: true };
 
   const command = firstStringField(input, COMMAND_FIELDS);
-  if (command) return judgeShell(command.value);
+  if (command) return judgeShell(command.value, cwd);
 
   if (SHELL_TOOL_NAMES.has(toolName)) {
     return deny('missing-command', `${toolName} did not provide a command string`);

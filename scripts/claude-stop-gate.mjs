@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot,
+  readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot, overrideCovers,
 } from '../src/guardSession.mjs';
 
 /*
@@ -241,7 +241,30 @@ if (!snapshot) {
   out(`[agentbridge:baseline-created] This session had no baseline, so THIS TURN COULD NOT BE VERIFIED and is not approved. git reports the protected files and baseline tests match the repository, so a baseline has now been recorded at ${minted.file}. The next turn will be checked against it normally.`);
 }
 
-const drift = protectedDrift(root, snapshot);
+/*
+ * A GRANTED CHANGE IS REPORTED, NOT REFUSED -- AND REPORTED EITHER WAY.
+ *
+ * PreToolUse consulted the override and this gate did not, so an operator could
+ * approve a repair, watch the edit land, and then have the turn blocked by the
+ * same protection that had just permitted it. The change was already made by
+ * then, so refusing here prevented nothing; it only stopped the session being
+ * able to say so. That is the deadlock the override channel was built to end
+ * and ended only one layer of.
+ *
+ * THE GRANT SUPPRESSES THE REFUSAL, NEVER THE RECORD. An overridden file is
+ * still named on its own line, with who granted it, why, and until when. The
+ * channel's whole safety argument is that a forged grant does not disappear
+ * into a clean run -- staying silent here is exactly how it would.
+ */
+const allDrift = protectedDrift(root, snapshot);
+const granted = allDrift.filter((d) => overrideCovers(root, d.file));
+const drift = allDrift.filter((d) => !overrideCovers(root, d.file));
+if (granted.length) {
+  out(`[agentbridge:protected-control-overridden] Protected controls changed under an active override. Permitted, and recorded here anyway:\n${granted.map((d) => {
+    const g = overrideCovers(root, d.file);
+    return `  ${d.file}: ${d.now} -- granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`;
+  }).join('\n')}`);
+}
 if (drift.length) {
   out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
 }

@@ -361,7 +361,20 @@ export const ALLOWED_FIRST_TOKENS = Object.freeze([
  * refused outright one function below -- the answer was already written down and
  * nothing called it.
  */
-export function judgeShellCommand(command) {
+/*
+ * THE OVERRIDE IS INJECTED, NOT IMPORTED, AND THAT IS THE WHOLE DESIGN.
+ *
+ * This rail is PURE -- it sees a command string and nothing else, which is why
+ * it is testable and why the standing instruction is not to plumb session state
+ * into it. It also needs to honour an operator's grant, or a granted repair can
+ * be made and not committed, which is the deadlock the override channel was
+ * built to end and only half ended.
+ *
+ * So the caller hands in a predicate. The rail asks a question; it does not go
+ * looking for an answer. With no predicate supplied the behaviour is exactly
+ * what it was, which keeps every existing test and caller honest.
+ */
+export function judgeShellCommand(command, { isOverridden = () => false } = {}) {
   if (typeof command !== 'string' || command.trim() === '') {
     return { allowed: false, reason: 'no command string was supplied' };
   }
@@ -378,18 +391,28 @@ export function judgeShellCommand(command) {
   if (parts.length === 0) {
     return { allowed: false, reason: 'no command string was supplied' };
   }
+  /*
+   * THE OVERRIDDEN PATHS SURVIVE AGGREGATION. Collapsing every segment to a bare
+   * `{allowed:true}` discarded which path a grant had opened, so the caller could
+   * not announce it and the permit went out silent -- the same silence the Stop
+   * gate and PreToolUse were both just fixed for, arriving one layer lower.
+   */
+  const overriddenPaths = [];
   for (const part of parts) {
-    const verdict = judgeOneSegment(part);
+    const verdict = judgeOneSegment(part, isOverridden);
     if (!verdict.allowed) {
       return parts.length === 1
         ? verdict
         : { allowed: false, reason: `${verdict.reason} (in "${part}")` };
     }
+    if (verdict.overriddenPath) overriddenPaths.push(verdict.overriddenPath);
   }
-  return { allowed: true };
+  return overriddenPaths.length
+    ? { allowed: true, overriddenPath: overriddenPaths[0], overriddenPaths }
+    : { allowed: true };
 }
 
-function judgeOneSegment(segment) {
+function judgeOneSegment(segment, isOverridden = () => false) {
   const command = String(segment).replace(FD_REDIRECTS, ' ').trim();
   if (command === '') {
     return { allowed: false, reason: 'no command string was supplied' };
@@ -515,6 +538,15 @@ function judgeOneSegment(segment) {
         .find((t) => t !== '' && t !== '--'
           && (isProtectedRelPath(t)
             || (GIT_OVERWRITES_NAMED_PATH.has(verb) && /^test\/.+\.test\.mjs$/i.test(t))));
+      if (named && isOverridden(named)) {
+        /*
+         * A grant names this exact path, so recording the change is permitted.
+         * Editing it was already permitted by PreToolUse; refusing the commit
+         * here left the repair unrecordable, which is not a safer state -- it is
+         * the same change sitting in a dirty tree with nothing describing it.
+         */
+        return { allowed: true, overriddenPath: named };
+      }
       if (named) {
         return {
           allowed: false,
