@@ -1,0 +1,151 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+/*
+ * FIXTURES ARE BUILT WITH execFileSync, NOT WITH THE PRODUCTION RUNNER.
+ *
+ * src/exec.mjs now REFUSES to spawn git: it applies no SAFE_GIT_CONFIG and
+ * strips no repository-redirecting environment, so src/git.mjs calling it was
+ * how a repository config could execute and GIT_DIR could redirect an answer.
+ * This file used the same door to CREATE its repositories, which is a fine
+ * thing to want and the wrong way to get it - a test that sets up through the
+ * production runner is also asserting that the runner permits what it needs.
+ */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync = promisify(execFile);
+const run = async (file, args, opts = {}) => {
+  try {
+    const { stdout, stderr } = await execFileAsync(file, args, { ...opts, windowsHide: true });
+    return { ok: true, code: 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') };
+  } catch (e) {
+    return { ok: false, code: e?.code ?? null, stdout: String(e?.stdout ?? ''), stderr: String(e?.stderr ?? '') };
+  }
+};
+import { gitState, listWorktrees } from '../src/git.mjs';
+import { discoverLocks } from '../src/locks.mjs';
+
+let root, origin, repo, wtC;
+const g = (cwd, ...args) => run('git', args, { cwd });
+
+before(async () => {
+  root = await mkdtemp(path.join(tmpdir(), 'ab-'));
+  origin = path.join(root, 'origin.git');
+  repo = path.join(root, 'repo');
+  wtC = path.join(root, 'repo-code-c');
+
+  await run('git', ['init', '--bare', '-b', 'main', origin]);
+  await run('git', ['clone', origin, repo]);
+  for (const [k, v] of [['user.email', 'a@b.c'], ['user.name', 'T'], ['commit.gpgsign', 'false']]) {
+    await g(repo, 'config', k, v);
+  }
+  await mkdir(path.join(repo, 'scripts'), { recursive: true });
+  await writeFile(path.join(repo, 'scripts/check-gates-can-fail.mjs'), '// base\n');
+  await writeFile(path.join(repo, 'README.md'), '# base\n');
+  await g(repo, 'add', '-A');
+  await g(repo, 'commit', '-m', 'base');
+  await g(repo, 'push', '-u', 'origin', 'main');
+
+  await g(repo, 'worktree', 'add', '-b', 'code-c/messaging-gates', wtC);
+});
+
+after(async () => { await rm(root, { recursive: true, force: true }); });
+
+test('reports branch, head, base and origin/main from a real worktree', async () => {
+  const s = await gitState(wtC);
+  assert.equal(s.ok, true);
+  assert.equal(s.branch, 'code-c/messaging-gates');
+  assert.match(s.head, /^[0-9a-f]{40}$/);
+  assert.equal(s.baseSha, s.mainSha, 'fresh branch: merge-base equals origin/main');
+  assert.equal(s.upstream, null, 'never pushed, so no upstream');
+  assert.equal(s.unpushed, 0);
+});
+
+test('counts unpushed commits on a branch with no upstream', async () => {
+  await writeFile(path.join(wtC, 'scripts/check-gates-can-fail.mjs'), '// hardened\n');
+  await g(wtC, 'add', '-A');
+  await g(wtC, 'commit', '-m', 'harden gate harness');
+
+  const s = await gitState(wtC);
+  assert.equal(s.unpushed, 1);
+  assert.equal(s.unpushedReason, 'no-upstream:vs-merge-base');
+  assert.equal(s.aheadOfMain, 1);
+  assert.equal(s.behindMain, 0);
+  assert.notEqual(s.head, s.mainSha);
+  assert.equal(s.baseSha, s.mainSha, 'base still pins to where the branch forked');
+});
+
+test('separates staged, dirty and untracked', async () => {
+  await writeFile(path.join(wtC, 'scripts/check-gates-can-fail.mjs'), '// staged change\n');
+  await g(wtC, 'add', 'scripts/check-gates-can-fail.mjs');
+  await writeFile(path.join(wtC, 'README.md'), '# dirty\n');
+  await writeFile(path.join(wtC, 'notes.tmp'), 'scratch\n');
+
+  const s = await gitState(wtC);
+  assert.deepEqual(s.staged.map((f) => f.path), ['scripts/check-gates-can-fail.mjs']);
+  assert.deepEqual(s.dirty.map((f) => f.path), ['README.md']);
+  assert.deepEqual(s.untracked.map((f) => f.path), ['notes.tmp']);
+});
+
+test('tracks upstream once the branch is pushed', async () => {
+  await g(wtC, 'add', '-A');
+  await g(wtC, 'commit', '-m', 'wip');
+  await g(wtC, 'push', '-u', 'origin', 'code-c/messaging-gates');
+
+  const s = await gitState(wtC);
+  assert.equal(s.upstream, 'origin/code-c/messaging-gates');
+  assert.equal(s.unpushed, 0);
+  assert.equal(s.unpushedReason, 'vs-upstream');
+});
+
+test('detects being behind origin/main after someone else lands work', async () => {
+  await writeFile(path.join(repo, 'other.md'), 'from another lane\n');
+  await g(repo, 'add', '-A');
+  await g(repo, 'commit', '-m', 'other lane');
+  await g(repo, 'push', 'origin', 'main');
+  await g(wtC, 'fetch', 'origin');
+
+  const s = await gitState(wtC);
+  assert.equal(s.behindMain, 1, 'origin/main moved under this branch');
+  assert.ok(s.aheadOfMain >= 1);
+});
+
+test('paths with spaces survive the porcelain round trip', async () => {
+  await writeFile(path.join(wtC, 'a file with spaces.ts'), 'x\n');
+  const s = await gitState(wtC);
+  assert.ok(s.untracked.some((f) => f.path === 'a file with spaces.ts'));
+});
+
+test('a worktree path containing shell metacharacters is inert', async () => {
+  const nasty = path.join(root, "we're; rm -rf $(x) `y`");
+  await g(repo, 'worktree', 'add', '-b', 'weird-lane', nasty);
+  const s = await gitState(nasty);
+  assert.equal(s.ok, true);
+  assert.equal(s.branch, 'weird-lane');
+});
+
+test('non-git directory reports a reason instead of throwing', async () => {
+  const s = await gitState(path.join(root, 'nope'));
+  assert.equal(s.ok, false);
+  assert.equal(s.reason, 'not-a-git-worktree');
+});
+
+test('worktree enumeration sees every registered worktree', async () => {
+  const w = await listWorktrees(repo);
+  const branches = w.map((x) => x.branch);
+  assert.ok(branches.includes('main'));
+  assert.ok(branches.includes('code-c/messaging-gates'));
+});
+
+test('lock files are discovered with holder and age', async () => {
+  await mkdir(path.join(wtC, '.agentbridge/locks'), { recursive: true });
+  await writeFile(path.join(wtC, '.agentbridge/locks/gates-can-fail.json'),
+    JSON.stringify({ agent: 'code-c', pid: 4242, acquiredAt: new Date().toISOString() }));
+  const locks = await discoverLocks(wtC);
+  assert.equal(locks.length, 1);
+  assert.equal(locks[0].resource, 'gates-can-fail');
+  assert.equal(locks[0].heldBy, 'code-c');
+  assert.equal(locks[0].pid, 4242);
+});
