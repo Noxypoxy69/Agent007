@@ -848,6 +848,53 @@ function shortDirOf(dir) {
   return joined !== dir ? joined : null;
 }
 
+test('A CONTROL IS PROTECTED FROM A SUBDIRECTORY TOO — both rails share the repository frame', () => {
+  /*
+   * isProtectedPath judged relative to the session's CWD and returned false for
+   * anything starting with ".." -- reading "outside this directory" as "outside
+   * the repository, not ours to judge". So every control was unprotected from
+   * any subdirectory. Measured through the shipped binary with cwd at
+   * <repo>/projA, all ALLOW:
+   *
+   *   ../.claude/settings.json   ../src/claudeGuard.mjs
+   *   ../CLAUDE.md               ../package.json
+   *   <absolute>/.claude/settings.json      ../../src/claudeGuard.mjs
+   *
+   * THE DISCRIMINATOR, and the reason this is a bug rather than a scope
+   * decision: ../test/claudeGuard.test.mjs was DENIED throughout, because the
+   * baseline-test rail already resolved into the repository. Two rails, one
+   * repository, opposite answers. cwd arrives from the hook payload, and
+   * starting a session in a subdirectory is ordinary rather than an attack.
+   */
+  const sub = path.join(repoRoot, 'test');
+  const deeper = path.join(repoRoot, 'src', 'memory');
+
+  // RULE 5: the positive first. These are protected from the root, or the
+  // subdirectory assertions below say nothing about the frame.
+  for (const rel of ['src/claudeGuard.mjs', 'CLAUDE.md', '.claude/settings.json', 'package.json']) {
+    assert.equal(isProtectedPath(rel, repoRoot), true, `precondition: ${rel} from the repo root`);
+  }
+
+  for (const rel of ['../src/claudeGuard.mjs', '../CLAUDE.md', '../.claude/settings.json', '../package.json']) {
+    assert.equal(isProtectedPath(rel, sub), true,
+      `${rel} must stay protected when the session stands in a subdirectory`);
+  }
+
+  // Two levels down, and by absolute path.
+  assert.equal(isProtectedPath('../../src/claudeGuard.mjs', deeper), true,
+    'two levels down must not escape the repository frame');
+  assert.equal(isProtectedPath(path.join(repoRoot, '.claude', 'settings.json'), sub), true,
+    'an absolute path to a control must be protected from anywhere in the repo');
+
+  // THE NEGATIVES, which are what keep this usable rather than a blanket refusal.
+  assert.equal(isProtectedPath('../docs/notes.md', sub), false,
+    'an ordinary file must stay writable from a subdirectory');
+  assert.equal(isProtectedPath('scratch.txt', sub), false,
+    'an ordinary file in the subdirectory itself must stay writable');
+  assert.equal(isProtectedPath(path.join(repoRoot, '..', 'outside-the-repo.txt'), repoRoot), false,
+    'a file genuinely outside the repository is still not ours to judge');
+});
+
 test('THE ROOT IS SPELLED THE SAME WAY THE CANDIDATES ARE, or nothing matches', (t) => {
   /*
    * Every candidate goes through realpathSync.native; the root did not, it was

@@ -868,6 +868,32 @@ function canonicalSpelling(target) {
  * pressure went back to the session whose hooks never loaded. Measured by audit,
  * in the commit whose stated purpose was to stop naming routes that do not work.
  */
+/**
+ * The repository root containing this directory, canonically spelled, or null.
+ *
+ * EXPORTED BECAUSE PROTECTION AND GRANTS HAVE TO JUDGE IN THE SAME FRAME. The
+ * grant side already resolved into the repository; isProtectedPath judged
+ * relative to the session's cwd and returned false for anything starting with
+ * "..". So from a subdirectory the two rails disagreed about one repository:
+ *
+ *   cwd = <repo>/projA
+ *   Write '../.claude/settings.json'  ALLOW    <- the hook configuration
+ *   Write '../src/claudeGuard.mjs'    ALLOW
+ *   Write '../test/alpha.test.mjs'    DENY     <- baseline tests already resolved
+ *
+ * That last line is why this is a bug rather than a policy: one rail had the
+ * repository frame and the other did not. cwd arrives from the hook payload, and
+ * starting a session in a subdirectory is ordinary rather than an attack.
+ *
+ * Null when git cannot answer, and the caller keeps its cwd-relative judgement
+ * in that case -- the direction that judges MORE, never less.
+ */
+export function repoRootOf(dir) {
+  const resolved = path.resolve(dir);
+  const top = gitRevParse(resolved, '--show-toplevel');
+  return top ? canonicalSpelling(top) : null;
+}
+
 export function canonicalGrantPath(dir, rel) {
   return repoRelative(dir, rel);
 }

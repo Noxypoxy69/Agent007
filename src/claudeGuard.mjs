@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath, isGateSelfConfig } from './guardSession.mjs';
+import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath, isGateSelfConfig, repoRootOf } from './guardSession.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
 import { runGit } from './safeGit.mjs';
 
@@ -116,7 +116,25 @@ function canonicalDir(dir) {
  */
 export function isProtectedPath(filePath, cwd = process.cwd()) {
   const lexicalRoot = path.resolve(cwd);
-  const roots = [...new Set([lexicalRoot, canonicalDir(lexicalRoot)])];
+  /*
+   * THE REPOSITORY ROOT IS A ROOT, NOT JUST THE SESSION'S DIRECTORY.
+   *
+   * Judging only against cwd meant every control was unprotected from any
+   * subdirectory: path.relative gave "../src/claudeGuard.mjs", the startsWith
+   * ".." guard read that as "outside the repo, not ours", and the write was
+   * permitted. Measured through the shipped binary with cwd at <repo>/projA:
+   * .claude/settings.json, src/claudeGuard.mjs, CLAUDE.md and package.json all
+   * ALLOW, including by absolute path and from two levels down.
+   *
+   * The baseline-test rail was already resolving into the repository, so the two
+   * rails disagreed about the same files -- which is the evidence that this was
+   * an oversight and not a decision about scope.
+   *
+   * Adding a root can only make MORE paths protected, never fewer, and "outside
+   * the repository is not ours to judge" still holds: a file genuinely outside
+   * is outside BOTH roots.
+   */
+  const roots = [...new Set([lexicalRoot, canonicalDir(lexicalRoot), repoRootOf(cwd)].filter(Boolean))];
   return normalizedCandidates(filePath, cwd).some((candidate) => roots.some((root) => {
     const rel = path.relative(root, candidate).split(path.sep).join('/');
     if (rel.startsWith('..')) return false;      // outside the repo is not ours to judge
