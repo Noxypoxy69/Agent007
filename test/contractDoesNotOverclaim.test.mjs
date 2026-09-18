@@ -79,12 +79,24 @@ test('THE POSITIVE FIRST: the self-reported projection is still there to find', 
  * else is not self-reported and is deliberately excluded.
  */
 function selfReportedFields() {
-  const at = CODE.indexOf("session_registrations?select=*");
-  assert.notEqual(at, -1, 'could not locate the registration read');
-  const after = CODE.slice(at, at + 4000);
+  /*
+   * ANCHORED ON THE PROJECTION, NOT ON THE TABLE NAME.
+   *
+   * The first version searched for the first `session_registrations?select=*`
+   * and read the next few thousand characters. index.ts reads that table in at
+   * least five places and the first is not the projection, so the window landed
+   * on unrelated code and the extraction came back EMPTY — which the
+   * "found a real set" assertion caught rather than passing over.
+   *
+   * `rows.map((r) => ({ ... }))` is the shape that actually hands registration
+   * columns to a caller, so that is what this looks for.
+   */
+  const m = /rows\s*\.\s*map\s*\(\s*\(\s*r\s*\)\s*=>\s*\(\s*\{/.exec(CODE);
+  assert.ok(m, 'could not locate the registration projection (rows.map) in index.ts');
+  const after = CODE.slice(m.index, m.index + 4000);
   const out = new Set();
-  for (const m of after.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*r\.[A-Za-z_][A-Za-z0-9_]*/g)) {
-    out.add(m[1]);
+  for (const hit of after.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*r\.[A-Za-z_][A-Za-z0-9_]*/g)) {
+    out.add(hit[1]);
   }
   return [...out];
 }
