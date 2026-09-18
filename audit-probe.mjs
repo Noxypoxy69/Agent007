@@ -93,7 +93,7 @@ let differ = 0;
 for (const c of CASES) {
   const a = parseCursorInstant(c); const b = eventsParse(c);
   if (a !== b) differ++;
-  console.log(`  ${JSON.stringify(c).padEnd(36)} poll=${String(a).padEnd(18)} events=${String(b).padEnd(18)} ${a === b ? '' : '*** DIFFER ***'}  livenessMs=${parseInstant(c)}`);
+  console.log(`  ${String(JSON.stringify(c)).padEnd(36)} poll=${String(a).padEnd(18)} events=${String(b).padEnd(18)} ${a === b ? '' : '*** DIFFER ***'}  livenessMs=${parseInstant(c)}`);
 }
 say('C5 divergences', differ);
 
