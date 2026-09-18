@@ -24,7 +24,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { mkdir, readFile as readBytes, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { run } from '../src/exec.mjs';
+import { runGit } from '../src/safeGit.mjs';
 import { createLocalExecutor } from '../src/executorLocal.mjs';
 import { createWorkspaceManager } from '../src/workspaceManager.mjs';
 import { openVerificationJob } from '../src/verificationControl.mjs';
@@ -54,25 +54,45 @@ if (!task.task_id) die('the task file needs a task_id');
 if (!task.base_sha) die('the task file needs a base_sha: a worktree is made at a commit, never a branch');
 if (!Array.isArray(task.argv) || task.argv.length === 0) die('the task file needs an argv');
 
+/*
+ * GIT GOES THROUGH safeGit, NOT exec. Every call here used run() from
+ * src/exec.mjs, which 560ba4d taught to THROW for git -- exec applies no
+ * SAFE_GIT_CONFIG and strips no repository-redirecting environment, so a
+ * repository config could execute and GIT_DIR could redirect the answer. That
+ * throw correctly caught this file: the shipped controller could not open a
+ * worktree at all (step4aWiring "G" failed at refuseGit). runGit is the hardened
+ * path. It THROWS on failure and RETURNS stdout, where run returned
+ * { ok, stdout, stderr }, so each site adapts: a throw is the failed case.
+ */
 const git = {
   async addWorktree({ path, baseSha, detach }) {
-    const r = await run('git', ['worktree', 'add', ...(detach ? ['--detach'] : []), path, baseSha], {
-      cwd: repo,
-      timeoutMs: 120_000,
-    });
-    if (!r.ok) die(`git worktree add failed: ${r.error ?? r.stderr}`);
+    try {
+      runGit(['worktree', 'add', ...(detach ? ['--detach'] : []), path, baseSha], {
+        cwd: repo,
+        timeout: 120_000,
+      });
+    } catch (e) {
+      die(`git worktree add failed: ${e?.stderr ?? e?.message ?? e}`);
+    }
   },
   async removeWorktree({ path, force }) {
-    await run('git', ['worktree', 'remove', ...(force ? ['--force'] : []), path], {
-      cwd: repo,
-      timeoutMs: 60_000,
-    });
+    // Cleanup: the original ignored the result, so a failure here is tolerated
+    // rather than fatal.
+    try {
+      runGit(['worktree', 'remove', ...(force ? ['--force'] : []), path], {
+        cwd: repo,
+        timeout: 60_000,
+      });
+    } catch { /* best-effort cleanup */ }
   },
   async isDirty(path) {
-    const r = await run('git', ['status', '--porcelain'], { cwd: path, timeoutMs: 60_000 });
     // A status we could not read is treated as dirty. Refusing to destroy is
-    // recoverable; destroying on a failed check is not.
-    return !r.ok || r.stdout.trim().length > 0;
+    // recoverable; destroying on a failed check is not -- so a throw means dirty.
+    try {
+      return runGit(['status', '--porcelain'], { cwd: path, timeout: 60_000 }).trim().length > 0;
+    } catch {
+      return true;
+    }
   },
 };
 
@@ -132,15 +152,19 @@ const io = {
   sink: cas.sink,
   git: {
     headSha: async () => {
-      const r = await run('git', ['rev-parse', 'HEAD'], { cwd: workspacePath, timeoutMs: 30_000 });
-      return r.ok ? r.stdout.trim() : null;
+      try {
+        return runGit(['rev-parse', 'HEAD'], { cwd: workspacePath, timeout: 30_000 }).trim();
+      } catch {
+        return null;
+      }
     },
     changedFiles: async () => {
-      const r = await run('git', ['diff', '--name-only', task.base_sha], {
-        cwd: workspacePath,
-        timeoutMs: 60_000,
-      });
-      return r.ok ? r.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+      try {
+        return runGit(['diff', '--name-only', task.base_sha], { cwd: workspacePath, timeout: 60_000 })
+          .split('\n').map((s) => s.trim()).filter(Boolean);
+      } catch {
+        return [];
+      }
     },
   },
 };
