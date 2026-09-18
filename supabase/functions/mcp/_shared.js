@@ -2391,14 +2391,54 @@ export function messagesQuery({ to_agent, from_agent, task_id, type, since, limi
    * wrong, a misrouted blocker reads as ordinary traffic. Escaped here, and
    * asserted in both directions.
    */
-  const ilikePattern = (v) => encodeURIComponent(
-    String(v).replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_'),
-  );
+  /*
+   * ilike IS ONLY USED FOR NAMES THAT CANNOT CARRY A PATTERN AT ALL.
+   *
+   * The first version escaped backslash, percent and underscore and called the
+   * result literal. It was not. PostgREST documents `*` as an ALIAS for `%` in
+   * like/ilike, and encodeURIComponent does not encode `*`, so `to_agent=*`
+   * became the pattern `%` and matched every row -- and `C*` matched code-a,
+   * code-b and chatgpt-work. Found by audit.
+   *
+   * The deeper mistake was the shape of the fix, not the missing character.
+   * Enumerating the wildcards I happened to know is rule 8: a matcher written
+   * against the strings a prober tried, which the next alias in the next
+   * PostgREST version walks straight past.
+   *
+   * SO THIS ROUTES ON THE SHAPE OF THE NAME INSTEAD. A real seat matches
+   * AGENT_ID -- letters, digits, dot, dash, underscore -- and can therefore
+   * contain no pattern metacharacter except `_`, which is escaped. Anything
+   * else is not a name this roster can hold, so it is matched EXACTLY with eq,
+   * where no pattern language exists and nothing needs escaping. A caller
+   * supplying `*` now gets rows addressed to the literal string `*`, which is
+   * none.
+   *
+   * The cost is that a non-seat name loses case folding. That is the right
+   * trade: case folding exists so a seat reaches its own mail, and a string
+   * that cannot be a seat has no mail to reach.
+   */
+  const CAN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+  const ilikePattern = (v) => encodeURIComponent(String(v).replace(/_/g, '\\_'));
+  const clause = (v) => (CAN_PATTERN.test(String(v))
+    ? `to_agent.ilike.${ilikePattern(v)}`
+    : `to_agent.eq.${encodeURIComponent(String(v))}`);
+
   const inbox = inboxNames(to_agent);
   if (inbox.length === 1) {
-    q.push(`to_agent=ilike.${ilikePattern(inbox[0])}`);
+    q.push(clause(inbox[0]).replace(/^to_agent\./, 'to_agent='));
   } else if (inbox.length > 1) {
-    q.push(`or=(${inbox.map((v) => `to_agent.ilike.${ilikePattern(v)}`).join(',')})`);
+    /*
+     * QUOTED INSIDE THE GROUP. PostgREST needs a value containing a reserved
+     * character -- comma, dot, parenthesis -- double-quoted within an or group,
+     * and AGENT_ID permits a dot. The in.(...) branch this replaced did quote;
+     * dropping it here would have been a silent regression the moment somebody
+     * registered a seat named code.b.
+     */
+    q.push(`or=(${inbox.map((v) => {
+      const c = clause(v);
+      const i = c.indexOf('.', 'to_agent'.length + 1);
+      return `${c.slice(0, i)}."${c.slice(i + 1)}"`;
+    }).join(',')})`);
   }
 
   eq('from_agent', from_agent);
