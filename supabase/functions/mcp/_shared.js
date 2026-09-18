@@ -348,6 +348,123 @@ export function createDecision({
   };
 }
 
+/* ── tasks: spliced from src/taskRecord.mjs ──────────────────────────────── */
+
+/**
+ * SPLICED SO A CREATE ROUTE CAN REFUSE BEFORE IT WRITES.
+ *
+ * There is no way to create a task on this bridge: assign_task assigns an
+ * existing one, the CLI has no create command, and agentbridge.tasks is written
+ * only by this function and by migrations. The record half lives in
+ * src/taskRecord.mjs with its own tests; this is the copy the edge function can
+ * reach, because a Supabase edge function cannot import from outside its own
+ * directory.
+ *
+ * test/taskRecordSplice.test.mjs compares the two copies BEHAVIOURALLY, which is
+ * the only comparison that catches a splice drifting — see the note in
+ * CLAUDE.md about fixtures that cannot reach the branch that diverged.
+ */
+export const RUNNABLE_STATES = Object.freeze(['runnable', 'returned']);
+export const TASK_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+export const REPO_PATH = /^(?!\/)(?![A-Za-z]:)[^\\\0]+$/;
+
+const hasDotDot = (p) => String(p).split('/').includes('..');
+
+export function validateTask(t) {
+  const errors = [];
+  if (!isPlainObject(t)) return { ok: false, errors: ['task must be an object'] };
+
+  if (!isNonEmptyString(t.task_id)) errors.push('task_id is required');
+  else if (!TASK_ID.test(t.task_id.trim())) {
+    errors.push(`task_id "${t.task_id}" must be a file-safe token: letters, digits, dot, dash, underscore, 64 max`);
+  }
+
+  if (!isNonEmptyString(t.title)) {
+    errors.push('title is required — a task nobody can identify from the roster is one nobody picks up');
+  }
+
+  if (!isNonEmptyString(t.lane_id)) errors.push('lane_id is required — assign_task refuses a lane mismatch');
+  if (!isNonEmptyString(t.repo_id)) errors.push('repo_id is required — assign_task refuses a repo mismatch');
+
+  if (!RUNNABLE_STATES.includes(t.state)) {
+    errors.push(`state must be one of ${RUNNABLE_STATES.join(', ')} — claim_task admits no others, `
+      + 'so any other value is a task that can never be picked up');
+  }
+
+  if (!Array.isArray(t.allowed_paths) || t.allowed_paths.length === 0) {
+    errors.push('allowed_paths must be a non-empty array — an empty list means "unrestricted" to a '
+      + 'reader and "nothing" to a collision check, and the difference is a race nobody sees');
+  } else {
+    for (const p of t.allowed_paths) {
+      if (!isNonEmptyString(p)) { errors.push('every allowed path must be a non-empty string'); break; }
+      if (!REPO_PATH.test(p) || hasDotDot(p)) {
+        errors.push(`allowed path "${p}" must be repo-relative with forward slashes and no ".." segment`);
+      }
+    }
+  }
+
+  for (const field of ['forbidden_paths', 'shared_paths', 'depends_on']) {
+    if (t[field] !== undefined && !Array.isArray(t[field])) errors.push(`${field} must be an array when present`);
+  }
+
+  if (Array.isArray(t.depends_on) && isNonEmptyString(t.task_id)
+      && t.depends_on.includes(t.task_id)) {
+    errors.push(`task "${t.task_id}" depends on itself, so it can never become assignable`);
+  }
+
+  if (!isNonEmptyString(t.created_at)) errors.push('created_at is required');
+  if (!isNonEmptyString(t.created_by)) {
+    errors.push('created_by is required — an unattributed assignment is one nobody can ask about');
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+export function createTask({
+  task_id, title, lane_id, repo_id,
+  state = 'runnable',
+  allowed_paths = [],
+  forbidden_paths = [],
+  shared_paths = [],
+  depends_on = [],
+  base_sha = null,
+  created_at,
+  created_by,
+  notes = null,
+}) {
+  const copy = (v) => (Array.isArray(v) ? [...v] : v);
+  return {
+    task_id, title, lane_id, repo_id, state,
+    allowed_paths: copy(allowed_paths),
+    forbidden_paths: copy(forbidden_paths),
+    shared_paths: copy(shared_paths),
+    depends_on: copy(depends_on),
+    base_sha,
+    created_at,
+    created_by,
+    notes,
+    assigned_agent: null,
+    assigned_session: null,
+    assigned_at: null,
+    assigned_by: null,
+    lease_token: null,
+    lease_expires_at: null,
+    attempt: 0,
+  };
+}
+
+export function pathsCollide(a = [], b = []) {
+  const norm = (p) => String(p).replace(/\/+$/, '');
+  const covers = (x, y) => x === y || y.startsWith(`${x}/`);
+  const hits = [];
+  for (const p of a.map(norm)) {
+    for (const q of b.map(norm)) {
+      if (covers(p, q) || covers(q, p)) hits.push([p, q]);
+    }
+  }
+  return hits;
+}
+
 export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('activeDecisions requires an array');
 
