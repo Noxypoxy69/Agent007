@@ -280,15 +280,23 @@ function judgeShell(command, cwd) {
    * recorded it did not, which is the same silence in a different layer -- and
    * the commit is the half that ends up in history.
    */
-  if (verdict.allowed && verdict.overriddenPath && cwd) {
-    const g = overrideCovers(cwd, verdict.overriddenPath);
-    if (g) {
+  if (verdict.allowed && verdict.overriddenPaths?.length && cwd) {
+    /*
+     * EVERY granted path is named. The first version announced only
+     * verdict.overriddenPath while the rail had already collected the full list,
+     * so a command exercising two protected paths under one grant reported one
+     * of them and the data for the other was collected and thrown away.
+     */
+    const grants = verdict.overriddenPaths
+      .map((rel) => [rel, overrideCovers(cwd, rel)])
+      .filter(([, g]) => g);
+    if (grants.length === verdict.overriddenPaths.length && grants.length > 0) {
       return {
         allowed: true,
         overridden: true,
-        notice: `[agentbridge:protected-control-overridden] this command names ${verdict.overriddenPath}, `
-          + `which is protected; an active override permits it. Granted by ${g.granted_by}, `
-          + `expires ${g.expires_at}. Reason: ${g.reason}`,
+        notice: `[agentbridge:protected-control-overridden] this command names ${grants.length} protected `
+          + `path(s), all permitted by an active override: `
+          + grants.map(([rel, g]) => `${rel} (granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason})`).join('; '),
       };
     }
   }

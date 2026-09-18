@@ -152,8 +152,28 @@ for await (const chunk of process.stdin) raw += chunk;
 let input;
 try { input = JSON.parse(raw || '{}'); } catch { input = null; }
 
+/*
+ * `out` ALWAYS TERMINATES, AND A REPORT IS NOT A REFUSAL.
+ *
+ * The first attempt at announcing a granted change called out() with a message
+ * string, which emits decision:"block" AND exits. Two things followed, both
+ * measured by audit: the grant refused the turn it was meant to permit -- so
+ * Blocker 1 was not fixed at this layer, only reworded -- and because out()
+ * exits, a grant naming ONE path skipped the report of every OTHER drifted
+ * control, skipped the baseline-test comparison, skipped test discovery and
+ * skipped the entire suite run. A single narrow grant turned this gate into a
+ * one-line notice that concealed arbitrary tampering. The exact inverse of the
+ * property it was written to preserve.
+ *
+ * So a notice is carried and emitted WITH the final verdict, whatever that
+ * verdict turns out to be. It never decides anything and it never short-
+ * circuits the checks below it.
+ */
+let carriedNotice = null;
 const out = (reason) => {
-  process.stdout.write(`${JSON.stringify(reason ? { decision: 'block', reason } : {})}\n`);
+  const decision = reason ? { decision: 'block', reason } : {};
+  if (carriedNotice) decision.systemMessage = carriedNotice;
+  process.stdout.write(`${JSON.stringify(decision)}\n`);
   process.exit(0);
 };
 
@@ -260,10 +280,20 @@ const allDrift = protectedDrift(root, snapshot);
 const granted = allDrift.filter((d) => overrideCovers(root, d.file));
 const drift = allDrift.filter((d) => !overrideCovers(root, d.file));
 if (granted.length) {
-  out(`[agentbridge:protected-control-overridden] Protected controls changed under an active override. Permitted, and recorded here anyway:\n${granted.map((d) => {
+  /*
+   * RECORDED, NOT RETURNED. This must not call out() -- see its definition.
+   * The grant is re-read per entry and may be gone by now (expiry, deletion),
+   * so a missing grant degrades to naming the file rather than dereferencing
+   * null: 95725a3 added three unguarded overrideCovers calls to a script that
+   * has no try/catch anywhere, and an uncaught throw here exits 1 with empty
+   * stdout, which Claude Code reads as non-blocking.
+   */
+  carriedNotice = `[agentbridge:protected-control-overridden] Protected controls changed under an active override. Permitted, and recorded anyway:\n${granted.map((d) => {
     const g = overrideCovers(root, d.file);
-    return `  ${d.file}: ${d.now} -- granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`;
-  }).join('\n')}`);
+    return g
+      ? `  ${d.file}: ${d.now} -- granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`
+      : `  ${d.file}: ${d.now} -- the grant that permitted this is no longer readable`;
+  }).join('\n')}`;
 }
 if (drift.length) {
   out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);

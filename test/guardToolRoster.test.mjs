@@ -1,3 +1,21 @@
+/*
+ * ISOLATE THE GUARD HOME BEFORE ANYTHING ELSE IN THIS FILE.
+ *
+ * These assertions ask whether a protected path is refused. That answer depends
+ * on the OVERRIDE STORE, which lives outside the repository -- so without this
+ * line an operator's grant, a file this suite does not control and cannot see,
+ * changes the verdict. Measured 2026-09-18 by audit: with a grant active for
+ * src/guardSession.mjs this file went from 0 failures to 1, and two sibling
+ * files moved the same way. A security test an operator can flip is not a test.
+ *
+ * Set before the guard modules are imported, because readOverride resolves the
+ * home per call from this variable.
+ */
+import { mkdtempSync as __iso } from 'node:fs';
+import { tmpdir as __tmp } from 'node:os';
+import __isoPath from 'node:path';
+process.env.AGENTBRIDGE_HOME = __iso(__isoPath.join(__tmp(), 'guard-test-home-'));
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';

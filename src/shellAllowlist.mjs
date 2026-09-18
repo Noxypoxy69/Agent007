@@ -535,22 +535,35 @@ function judgeOneSegment(segment, isOverridden = () => false) {
          * way: a baseline test that has asserted this for longer than this rail
          * has existed.
          */
-        .find((t) => t !== '' && t !== '--'
+        .filter((t) => t !== '' && t !== '--'
           && (isProtectedRelPath(t)
             || (GIT_OVERWRITES_NAMED_PATH.has(verb) && /^test\/.+\.test\.mjs$/i.test(t))));
-      if (named && isOverridden(named)) {
-        /*
-         * A grant names this exact path, so recording the change is permitted.
-         * Editing it was already permitted by PreToolUse; refusing the commit
-         * here left the repair unrecordable, which is not a safer state -- it is
-         * the same change sitting in a dirty tree with nothing describing it.
-         */
-        return { allowed: true, overriddenPath: named };
+      /*
+       * EVERY PROTECTED PATH IN THE COMMAND MUST BE GRANTED, NOT THE FIRST ONE.
+       *
+       * This used .find(), so it saw only the FIRST protected token and returned
+       * allowed on it -- the rest were never examined. Ordering the granted path
+       * first was the entire attack. Measured by audit:
+       *
+       *   grant names src/guardSession.mjs only
+       *   git checkout HEAD -- src/guardSession.mjs src/claudeGuard.mjs .claude/settings.json
+       *     -> ALLOWED, and it reverts the guard source and the hook config
+       *
+       * The comment above this block is explicit that reverting that module
+       * disarms PreToolUse for the rest of the session. It did. One grant opened
+       * every protected path that shared a command line with it, and the
+       * announcement named only the granted one, so no layer could report the
+       * others.
+       */
+      const ungranted = named.filter((t) => !isOverridden(t));
+      if (named.length > 0 && ungranted.length === 0) {
+        return { allowed: true, overriddenPath: named[0], overriddenPaths: [...named] };
       }
-      if (named) {
+      if (ungranted.length) {
+        const first = ungranted[0];
         return {
           allowed: false,
-          reason: `"git ${tokens[1]}" names ${named}, which is a guard or completion control`,
+          reason: `"git ${tokens[1]}" names ${first}, which is a guard or completion control`,
         };
       }
       return { allowed: true };
