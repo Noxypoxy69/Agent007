@@ -118,3 +118,30 @@ test('a grant with no reason is refused, because the reason is the audit trail',
   s.grant({ paths: ['src/guardSession.mjs'], reason: '   ', granted_by: 'd', expires_at: FUTURE() });
   assert.equal(s.judge().allowed, false, 'and whitespace is not a reason');
 });
+
+
+test('THE PERMIT IS VISIBLE THROUGH hookDecision, not just on the return value', async (t) => {
+  /*
+   * THIS IS THE ASSERTION WHOSE ABSENCE HID A SHIPPED FALSEHOOD. The original
+   * tests checked `notice` on evaluateClaudeTool's return and never called
+   * hookDecision -- which discarded it and emitted a bare {} for every allow.
+   * So the override was byte-identical to an ordinary approval on stdout while
+   * the commit message and the source both claimed it "ANNOUNCES itself".
+   *
+   * The channel's safety argument is that a forged grant "does not vanish into
+   * a clean run". A silent permit IS a clean run, so this assertion is the
+   * property, not a formatting detail. Test the boundary the hook actually
+   * emits, not the function underneath it.
+   */
+  const { hookDecision } = await import('../src/claudeGuard.mjs');
+  const s = await sandbox(t);
+
+  assert.deepEqual(hookDecision({ allowed: true }), {}, 'an ordinary allow stays silent');
+
+  s.grant({ paths: ['src/guardSession.mjs'], reason: 'repair the guard', granted_by: 'danny', expires_at: FUTURE() });
+  const emitted = hookDecision(s.judge());
+  assert.match(emitted.systemMessage ?? '', /protected-control-overridden/);
+  assert.match(emitted.systemMessage ?? '', /danny/);
+  assert.match(emitted.systemMessage ?? '', /repair the guard/);
+  assert.notDeepEqual(emitted, {}, 'an overridden permit must not look like an ordinary allow');
+});

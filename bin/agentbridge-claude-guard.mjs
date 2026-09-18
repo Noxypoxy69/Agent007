@@ -99,8 +99,39 @@ try {
   payload = null;
 }
 
-const result = payload
-  ? evaluateClaudeTool({ ...payload, cwd: payload.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), session_id: payload.session_id ?? null })
-  : { allowed: false, id: 'invalid-json', reason: 'Claude hook input was not valid JSON' };
+/*
+ * A THROW FROM THE JUDGE IS A DENY, NOT AN ALLOW, AND THAT IS NOT BELT AND
+ * BRACES. An uncaught error here exits 1 with EMPTY STDOUT, and this file's own
+ * header records that Claude Code reads an empty non-zero result as NON-BLOCKING
+ * and lets the tool proceed. So every unhandled exception anywhere under
+ * evaluateClaudeTool was an ALLOW.
+ *
+ * Measured 2026-09-18: an override grant carrying `"expires_at":{"toString":1}`
+ * made Date.parse throw, the throw travelled out through overrideCovers and
+ * judgeWrite, and a Write of {"hooks":{"disableAllHooks":true}} to
+ * .claude/settings.json was permitted. The grant did not have to name the file
+ * it unlocked. The module-load fallback above did not help, because the crash
+ * happened AFTER a successful import.
+ *
+ * The root cause is fixed at its source in guardSession.mjs. This is the
+ * class-level repair: the bug was one way to reach a general property, that
+ * anything thrown here fails open, and fixing only the instance leaves the
+ * property. Refusing on an unknown error is the same posture the rest of this
+ * guard takes -- unknown is not clean.
+ */
+let result;
+try {
+  result = payload
+    ? evaluateClaudeTool({ ...payload, cwd: payload.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), session_id: payload.session_id ?? null })
+    : { allowed: false, id: 'invalid-json', reason: 'Claude hook input was not valid JSON' };
+} catch (err) {
+  result = {
+    allowed: false,
+    id: 'guard-threw',
+    reason: `the guard threw while judging this call (${String(err?.message ?? err).slice(0, 200)}). `
+      + 'An error is not permission: refusing rather than exiting non-zero with no decision, '
+      + 'which Claude Code would treat as non-blocking',
+  };
+}
 
 process.stdout.write(`${JSON.stringify(hookDecision(result))}\n`);

@@ -152,13 +152,36 @@ export function protectedFilesIn(repoRoot) {
         try { st = statSync(abs); } catch { continue; }
         const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
         /*
-         * The walk must skip the exemption too, and skip it at the DIRECTORY so
-         * it never descends. Filtering only the files would still stat and
-         * recurse through an entire second checkout on every session start.
+         * THE WALK CONSULTS THE MATCHER RATHER THAN CARRYING ITS OWN RULE.
+         *
+         * It used to skip an exempt directory outright and then add every file
+         * beneath a walked prefix unconditionally -- a SECOND definition of
+         * "protected", living in the walk, which is the duplication this file's
+         * header is about. The two definitions then diverged: 436b927 taught the
+         * matcher that a `.claude/` directory ANYWHERE inside a worktree is a
+         * control again, and the walk was not taught the same thing.
+         *
+         * Measured on a fixture before this change: three paths were
+         * matcher=true / walk=false, all of them a nested `.claude/` inside an
+         * agent worktree. PreToolUse refused a direct write to them while the
+         * Stop gate held no hash for them at all, so a change arriving by any
+         * route that bypasses PreToolUse -- an MCP write, `npm test` executing
+         * repository JavaScript, a git operation -- was undetectable. Prevention
+         * without detection, on the files that decide whether a guard runs.
+         *
+         * THE COST IS REAL AND WAS MEASURED, NOT ESTIMATED. Descending means
+         * walking each agent worktree: 18 files in 0.3ms became 23 files in
+         * 211ms on the operator's repo, 5049 entries across 626 directories,
+         * with 0 paths LOST from the previous result. That zero is the evidence
+         * that "under a walked prefix" and isProtectedRelPath agree everywhere
+         * outside the exemption, which is what makes the swap safe rather than
+         * merely stricter. Danny took the trade explicitly.
+         *
+         * IF THIS EVER GETS SLOW, PRUNE BY NAME -- `node_modules`, `.git` -- and
+         * do NOT restore the blanket skip. The skip is what produced the gap.
          */
-        if (PROTECTION_EXEMPT_PREFIXES.some((p) => `${rel}/`.startsWith(p))) continue;
         if (st.isDirectory()) visit(abs);
-        else out.add(rel);
+        else if (isProtectedRelPath(rel)) out.add(rel);
       }
     };
     visit(base);
@@ -521,7 +544,21 @@ export function readOverride(repoRoot, now = Date.now()) {
   if (!parsed || typeof parsed !== 'object') return null;
   if (!Array.isArray(parsed.paths) || parsed.paths.length === 0) return null;
   if (typeof parsed.reason !== 'string' || parsed.reason.trim() === '') return null;
-  const expires = Date.parse(parsed.expires_at ?? '');
+  /*
+   * expires_at MUST BE A STRING, AND THE CHECK IS LOAD-BEARING RATHER THAN
+   * TIDINESS. The comment above promises "never throws", the try/catch covers
+   * only readFileSync and JSON.parse, and Date.parse coerces its argument -- so
+   * `{"expires_at":{"toString":1}}` threw a TypeError straight out of this
+   * function, through overrideCovers and judgeWrite, out of the hook binary,
+   * which then exited 1 with empty stdout. Claude Code reads that as
+   * NON-BLOCKING and lets the tool through. A malformed grant did not fail
+   * closed; it disabled the guard, and it did not have to name the file it was
+   * unlocking. Found by audit, 2026-09-18, one commit after I shipped it.
+   *
+   * An array also coerced: ["2099-01-01"] parsed as a valid future expiry.
+   */
+  if (typeof parsed.expires_at !== 'string') return null;
+  const expires = Date.parse(parsed.expires_at);
   if (!Number.isFinite(expires)) return null;
   /*
    * NO EXPIRY IS NOT A LONG EXPIRY. A grant without a usable timestamp is

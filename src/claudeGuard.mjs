@@ -218,8 +218,30 @@ function judgeWrite(filePath, input, cwd, sessionId) {
      * which path, on whose authority and until when, so an override nobody
      * granted is a question somebody can ask rather than a clean-looking run.
      */
-    const rel = path.relative(path.resolve(cwd), path.resolve(cwd, filePath)).split(path.sep).join('/');
-    const grant = overrideCovers(cwd, rel);
+    /*
+     * THE GRANT IS MATCHED ON EVERY SPELLING THE PROTECTION USED, NOT ON THE
+     * ONE THE CALLER TYPED. This compared only the LEXICAL path while
+     * isProtectedPath decides over normalizedCandidates, which includes
+     * realpathSync -- so the two disagreed through a symlink and the grant won.
+     *
+     * Measured 2026-09-18: with a grant for `docs/notes.md`, making that path a
+     * symlink to `../.claude/settings.json` and writing to it was ALLOWED, the
+     * write landed on the hook configuration, and the notice named docs/notes.md.
+     * A grant for any one path was a write permit for every protected path, and
+     * the announcement pointed at the wrong file.
+     *
+     * So: the grant must cover EVERY candidate this path resolves to. If the
+     * lexical and resolved spellings disagree, no grant applies -- an override
+     * is a decision about a named file, and a path that is two files is not the
+     * file anybody named.
+     */
+    const root = path.resolve(cwd);
+    const rels = normalizedCandidates(filePath, cwd)
+      .map((abs) => path.relative(root, abs).split(path.sep).join('/'));
+    const rel = rels[0];
+    const grant = rels.length > 0 && rels.every((r) => overrideCovers(cwd, r))
+      ? overrideCovers(cwd, rel)
+      : null;
     if (grant) {
       return {
         allowed: true,
@@ -388,6 +410,23 @@ function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }) {
 }
 
 export function hookDecision(result) {
+  /*
+   * AN OVERRIDDEN PERMIT MUST LOOK DIFFERENT FROM AN ORDINARY ONE, AND IT DID
+   * NOT. This returned a bare `{}` for every allow, so the notice built in
+   * judgeWrite was discarded here and the override was byte-identical to a
+   * normal approval on stdout. The commit that introduced the channel claimed
+   * "it ANNOUNCES itself with the path, the grantor, the expiry and the reason"
+   * and the source said "The permit is ANNOUNCED, never silent"; both were false
+   * as shipped. The unit test asserted the notice on evaluateClaudeTool's return
+   * value and never called this function, which is why nothing caught it.
+   *
+   * That mattered more than a missing log line. The channel's whole safety
+   * argument is that a forged grant "does not vanish into a clean run" -- and a
+   * silent permit is exactly a clean run. Found by audit, 2026-09-18.
+   */
+  if (result?.allowed === true && result?.overridden === true && result?.notice) {
+    return { systemMessage: result.notice };
+  }
   if (result?.allowed === true) return {};
   const id = result?.id ?? 'guard-error';
   const reason = result?.reason ?? 'Guard could not establish that this operation is safe';
