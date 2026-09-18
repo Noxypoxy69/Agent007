@@ -5,6 +5,7 @@ import { collect } from '../src/collect.mjs';
 import { runDaemon } from '../src/daemon.mjs';
 import { publish } from '../src/client.mjs';
 import { resolveCommit } from '../src/git.mjs';
+import { runGit } from '../src/safeGit.mjs';
 import { envWithTokenFile } from '../src/tokenFile.mjs';
 
 function parseArgs(argv) {
@@ -2170,7 +2171,7 @@ try {
     try {
       let sha = null;
       try {
-        const { stdout: full } = await run('git', ['rev-parse', `${want}^{commit}`], { cwd: repo });
+        const full = runGit(['rev-parse', `${want}^{commit}`], { cwd: repo });
         sha = full.trim();
       } catch (e) {
         console.error(`observe-sha: ${JSON.stringify(want)} did not resolve to a commit in ${repo}`);
@@ -2187,7 +2188,7 @@ try {
        */
       let repoId = '';
       try {
-        const { stdout: url } = await run('git', ['remote', 'get-url', 'origin'], { cwd: repo });
+        const url = runGit(['remote', 'get-url', 'origin'], { cwd: repo });
         repoId = url.trim().toLowerCase()
           .replace(/^git\+/, '').replace(/\.git$/, '')
           .replace(/^ssh:\/\/git@/, '').replace(/^git@([^:]+):/, '$1/')
@@ -2196,12 +2197,16 @@ try {
 
       tmp = await mkdtemp(path.join(tmpdir(), 'agentbridge-verify-'));
       const work = path.join(tmp, 'src');
-      await run('git', ['clone', '--no-local', '--quiet', repo, work], { maxBuffer: 3.2e7 });
-      await run('git', ['-C', work, 'checkout', '--quiet', '--detach', sha], { maxBuffer: 8e6 });
+      // clone gets a generous timeout because runGit defaults to 60s and a real
+      // clone can exceed it; the original passed none. The hardening here is the
+      // point: SAFE_GIT_CONFIG neutralises the CLONED repo's executable config,
+      // and the env strip stops GIT_DIR redirecting which repo is cloned.
+      runGit(['clone', '--no-local', '--quiet', repo, work], { maxBuffer: 3.2e7, timeout: 6e5 });
+      runGit(['-C', work, 'checkout', '--quiet', '--detach', sha], { maxBuffer: 8e6 });
 
-      const headOf = async () => (await run('git', ['-C', work, 'rev-parse', 'HEAD'])).stdout.trim();
-      const dirtyOf = async () =>
-        (await run('git', ['-C', work, 'status', '--porcelain', '--untracked-files=no'], { maxBuffer: 8e6 })).stdout.trim();
+      const headOf = () => runGit(['-C', work, 'rev-parse', 'HEAD']).trim();
+      const dirtyOf = () =>
+        runGit(['-C', work, 'status', '--porcelain', '--untracked-files=no'], { maxBuffer: 8e6 }).trim();
 
       const checkoutHead = await headOf();
       const sourceClean = (await dirtyOf()) === '';
