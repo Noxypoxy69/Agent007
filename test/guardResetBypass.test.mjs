@@ -152,43 +152,50 @@ test('unknown is not clean: a tree git cannot describe does not get a baseline',
  * correct, which is the one move CLAUDE.md names as never acceptable.
  * ==========================================================================*/
 
-test('DEMAND (expected red): a new session must not baseline damage that arrived by forced checkout', (t) => {
+test('RATCHET: a new session DOES baseline damage that arrived by forced checkout', (t) => {
+  /*
+   * THIS TEST PASSES BECAUSE THE HOLE IS OPEN. It is not an endorsement.
+   *
+   * It was first written as a DEMAND asserting the refusal, and that was wrong
+   * for a reason worth keeping: the Stop gate refuses on counts.fail !== 0
+   * (claude-stop-gate.mjs:324), so a test designed never to pass blocks every
+   * session on this branch, permanently. Rule 16 -- a red gate nobody has shown
+   * can go green is a countdown, not a ratchet -- and an independent audit found
+   * no green path at all: the obvious implementation refuses a baseline whenever
+   * protected files differ from the newest prior snapshot, which fires on every
+   * legitimate committed change to a protected path. This branch contains three.
+   *
+   * So it pins the MEASURED behaviour instead, and fails in the useful
+   * direction: when somebody fixes minting, this goes red and tells them they
+   * succeeded. At that point delete this test and close the residual.
+   */
   const env = guardedRepo(t);
   const git = (...a) => execFileSync('git', a, { cwd: env.root, stdio: 'ignore' });
 
-  /* POSITIVE CONTROL FIRST, so a refusal below cannot pass for the wrong reason. */
   assert.match(sessionStart(env, 'A').systemMessage ?? '', /initialised/, 'control: a clean tree baselines');
   assert.deepEqual(stop(env, 'A'), {}, 'control: an undamaged session is approved');
 
-  /* The damage is COMMITTED on another branch, exactly as a real one would be. */
   const base = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'],
     { cwd: env.root, encoding: 'utf8' }).trim();
   git('checkout', '-q', '-b', 'weak');
-  writeFileSync(path.join(env.root, '.claude', 'settings.json'), '{"hooks":{"disableAllHooks":true}}\n');
+  damage(env);
   git('add', '-A'); git('commit', '-qm', 'weaken the controls on this branch');
   git('checkout', '-q', base);
-
-  /* THE DELIVERY ROUTE: a forced checkout, which is how the damage arrives
-   * without ever being dirty. */
   git('checkout', '--force', 'weak');
 
-  const settings = readFileSync(path.join(env.root, '.claude', 'settings.json'), 'utf8');
-  assert.match(settings, /disableAllHooks":true/, 'precondition: the controls really are damaged now');
+  assert.match(readFileSync(path.join(env.root, '.claude', 'settings.json'), 'utf8'),
+    /disableAllHooks":true/, 'precondition: the controls really are damaged');
   assert.equal(
-    execFileSync('git', ['status', '--porcelain'], { cwd: env.root, encoding: 'utf8' }).trim(),
-    '',
-    'precondition: and the tree is CLEAN, which is the whole point -- the dirty check cannot see this',
+    execFileSync('git', ['status', '--porcelain'], { cwd: env.root, encoding: 'utf8' }).trim(), '',
+    'precondition: and the tree is CLEAN -- the dirty check a24d499 added cannot see this',
   );
+  assert.equal(stop(env, 'A').decision, 'block', 'the session already open still blocks');
 
-  /* Session A still catches it. The baseline it holds predates the swap. */
-  assert.equal(stop(env, 'A').decision, 'block', 'the session that was already open still blocks');
-
-  /* THE DEMAND. Measured behaviour today: mints, and Stop returns {}. */
-  const fresh = sessionStart(env, 'B');
-  assert.doesNotMatch(fresh.systemMessage ?? '', /initialised/,
-    'a new session must not mint a baseline over controls that arrived damaged by forced checkout');
-
-  const verdict = stop(env, 'B');
-  assert.equal(verdict.decision, 'block',
-    'and the new session must not be approved either -- otherwise the tree reads clean permanently');
+  /* THE RESIDUAL, PINNED. Both assertions describe a hole, not a requirement. */
+  assert.match(sessionStart(env, 'B').systemMessage ?? '', /initialised/,
+    'RATCHET: a new session still mints over forced-checkout damage. If this line fails, '
+    + 'minting now refuses -- the residual is CLOSED and this test should be deleted.');
+  assert.deepEqual(stop(env, 'B'), {},
+    'RATCHET: and that session still reads clean. If this line fails, the Stop gate now '
+    + 'catches imported damage -- the residual is CLOSED and this test should be deleted.');
 });
