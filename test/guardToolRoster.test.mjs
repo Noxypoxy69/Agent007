@@ -203,14 +203,31 @@ const ROSTER = [
   { tool: 'UnknownFutureTool', input: { a: { b: { c: { d: { e: { f: 'src/guardSession.mjs' } } } } } }, writes: true, executes: false, note: 'protected path BELOW the depth bound — not caught' },
 ];
 
+/*
+ * THE ROSTER IS DRIVEN AT MODULE SCOPE, NOT INSIDE A TEST.
+ *
+ * It used to be filled by the first test, and six later tests read it. That is
+ * an ORDER DEPENDENCY, and it made them lie under filtering: run this file with
+ * --test-name-pattern and the roster test does not execute, `results` stays
+ * empty, and the assertions that read it PASS VACUOUSLY. Measured 2026-09-18:
+ * "ORDINARY WORK IS NOT BLOCKED beyond the known over-blocks" computes its
+ * offenders from an empty array and reports green, which is the strongest claim
+ * in the file arriving from no evidence at all.
+ *
+ * Found by the control added to the staleness test below -- it asserts the
+ * roster produced SOME denial, and in isolation it did not. The control was
+ * written to stop an emptied over-block list passing on nothing, and the first
+ * thing it caught was this.
+ *
+ * At module scope the table is built exactly once, whichever tests are selected.
+ */
 const results = [];
+for (const row of ROSTER) {
+  const verdict = evaluate(row.tool, row.input);
+  results.push({ ...row, ...verdict });
+}
 
 test('THE ROSTER TABLE: every tool this session exposes, driven through the guard', () => {
-  for (const row of ROSTER) {
-    const verdict = evaluate(row.tool, row.input);
-    results.push({ ...row, ...verdict });
-  }
-
   assert.equal(results.length, ROSTER.length, 'every roster row must produce a result');
 
   const width = Math.max(...results.map((r) => r.tool.length || 2));
@@ -261,10 +278,22 @@ test('THE FALLTHROUGH IS ALLOW AT THIS HEAD — unclassified-tool no longer exis
  * this test, and fixing one without removing its entry fails the staleness test
  * below. Both are named so a reader can disagree with them.
  */
-const KNOWN_OVER_BLOCKED = {
-  'SendUserFile': 'Sends a file OUTWARD to the user and cannot write anything. Refused for naming a protected path in `path`, so the operator cannot be sent CLAUDE.md or .claude/settings.json — the two files they are most likely to ask for while debugging the guard.',
-  'ReportFindings': 'Reports code-review findings and cannot write anything. A finding whose `file` is a protected path is refused, which means a security review OF THE GUARD ITSELF cannot be reported through the normal channel.',
-};
+/*
+ * EMPTY, AND THAT IS THE POINT OF A RATCHET. Both entries -- SendUserFile and
+ * ReportFindings -- are fixed and were deleted 2026-09-18. Measured before
+ * removing them, through evaluateClaudeTool:
+ *
+ *   SendUserFile   {path:'CLAUDE.md'}                          ALLOW
+ *   SendUserFile   {path:'audit-520cee2.txt'}                  ALLOW
+ *   ReportFindings {findings:[{file:'src/claudeGuard.mjs'...}]} ALLOW
+ *
+ * Neither can write or execute; both were refused merely for NAMING a protected
+ * path, so a read-and-send and a code-review finding read as tampering. That the
+ * staleness test below went red demanding this deletion is the ratchet working:
+ * an entry that outlives its defect is a silencer, and a silencer in a list
+ * called "known over-blocks" is how a real over-block hides.
+ */
+const KNOWN_OVER_BLOCKED = {};
 
 test('ORDINARY WORK IS NOT BLOCKED beyond the known over-blocks', () => {
   const denied = results
@@ -276,6 +305,19 @@ test('ORDINARY WORK IS NOT BLOCKED beyond the known over-blocks', () => {
 
 test('the over-block list may only SHRINK — a stale entry is itself a finding', () => {
   const denied = new Set(results.filter((r) => r.outcome === 'DENY').map((r) => r.tool));
+
+  /*
+   * THE CONTROL, BECAUSE AN EMPTY LIST MAKES THE LOOP BELOW VACUOUS.
+   *
+   * With no entries left this test would pass by not running -- CLAUDE.md rule
+   * 6 -- and would keep passing if evaluate() broke, if the roster stopped
+   * producing verdicts, or if every tool silently became ALLOW. "No over-blocks
+   * remain" and "nothing was measured" must not look alike, and right now they
+   * would. So assert the machinery that WOULD populate the list still works.
+   */
+  assert.ok(denied.size > 0,
+    'no tool in the whole roster was denied — the detection is broken, not the over-blocks fixed');
+
   for (const tool of Object.keys(KNOWN_OVER_BLOCKED)) {
     assert.ok(denied.has(tool), `${tool} is no longer over-blocked — delete its entry rather than leaving a silencer`);
     assert.ok(KNOWN_OVER_BLOCKED[tool].trim().length > 40, `${tool} needs a reason a later reader can disagree with`);
@@ -310,17 +352,38 @@ test('THE BACKSTOP CATCHES A PROTECTED PATH IN AN UNANTICIPATED FIELD, AND HAS A
   assert.equal(shallow.id, 'protected-control');
 
   /*
-   * MY FIRST FIXTURE HERE WAS WRONG AND THE TEST CAUGHT ME. I asserted that
-   * {a:{b:{c:{d:{e:'...'}}}}} sat below the depth bound and would be allowed. It
-   * is DENIED: the walk enters at depth 0 and the string sits at depth 4, which
-   * is not > 4. The fixture could not construct the case it claimed to test --
-   * CLAUDE.md rule 9, one level up from the code. It needs one more level.
+   * THIS FIXTURE WAS WRONG TWICE, AND THE SECOND TIME IT WAS RED FOR MONTHS
+   * WHILE APPEARING TO TEST A DEPTH FLOOR.
+   *
+   * It used key "e" and asserted DENY at depth 4. But "e" IS NOT A PATH-SHAPED
+   * KEY, so the backstop ignores it at ANY depth -- the fixture was measuring
+   * the key gate and reporting it as the depth bound. Measured:
+   *
+   *   {a:{b:{c:{d:{e:        'src/guardSession.mjs'}}}}}    ALLOW
+   *   {a:{b:{c:{d:{filePath: 'src/guardSession.mjs'}}}}}    DENY
+   *   {e: 'src/guardSession.mjs'}                           ALLOW   (depth 1!)
+   *
+   * So the code was right the whole time and the test was red over working
+   * behaviour -- the credibility burn rule 14 is about, sitting in the suite
+   * that everyone's Stop gate compares against. CLAUDE.md rule 9: a fixture that
+   * cannot construct the real case cannot fail for it, and here it could not
+   * PASS for it either.
+   *
+   * Both halves now use a path-shaped key, so the only variable is depth.
    */
-  const atBound = evaluate('UnknownFutureTool', { a: { b: { c: { d: { e: 'src/guardSession.mjs' } } } } });
+  const atBound = evaluate('UnknownFutureTool', { a: { b: { c: { d: { filePath: 'src/guardSession.mjs' } } } } });
   assert.equal(atBound.outcome, 'DENY', 'depth 4 is still inside the bound and must be caught');
+  assert.equal(atBound.id, 'protected-control');
 
-  const belowBound = evaluate('UnknownFutureTool', { a: { b: { c: { d: { e: { f: 'src/guardSession.mjs' } } } } } });
+  const belowBound = evaluate('UnknownFutureTool', { a: { b: { c: { d: { e: { filePath: 'src/guardSession.mjs' } } } } } });
   assert.equal(belowBound.outcome, 'ALLOW', 'documented limit: the backstop stops at depth 4 and this sits below it');
+
+  /*
+   * AND THE KEY GATE IS ASSERTED SEPARATELY, so the two properties can never
+   * again be confused for one another.
+   */
+  const notPathShaped = evaluate('UnknownFutureTool', { e: 'src/guardSession.mjs' });
+  assert.equal(notPathShaped.outcome, 'ALLOW', 'a key that is not path-shaped is ignored regardless of depth');
 });
 
 test('the reported roster count is asserted, so a silently empty sweep cannot pass', () => {
