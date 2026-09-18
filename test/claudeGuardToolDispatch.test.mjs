@@ -644,3 +644,68 @@ test('with no resolver the behaviour is the old literal check, so other callers 
   assert.equal(judgeShellCommand('git restore :/').allowed, true, 'no resolver: unchanged');
   assert.equal(judgeShellCommand('git restore .').allowed, false, 'the literal dot still dies on its own');
 });
+
+/* ============================================================================
+ * THE KEY DECIDES, NOT THE STRING. Both directions, because the first attempt
+ * at this failed in each of them within an hour.
+ * ==========================================================================*/
+
+test('a field that CONTAINS a protected name is not a field that NAMES one', () => {
+  /*
+   * Relocating the backstop made it scan every unjudged field, so editing an
+   * UNPROTECTED file was refused because a replacement string mentioned a
+   * protected one. With seventeen protected entries including package.json and
+   * five src module paths, that is every import-path rename and every doc edit
+   * quoting the rules. Measured against the parent: all four newly refused.
+   */
+  const j = (tool, input) => evaluateClaudeTool({
+    tool_name: tool, tool_input: input, cwd: repoRoot, session_id: 's',
+  }).allowed;
+  assert.equal(j('Edit', { file_path: 'docs/notes.md', old_string: 'CLAUDE.md', new_string: 'README.md' }), true);
+  assert.equal(j('Write', { file_path: 'docs/n.md', content: 'CLAUDE.md' }), true);
+  assert.equal(j('Bash', { command: 'ls', description: 'CLAUDE.md' }), true);
+  assert.equal(j('MultiEdit', { file_path: 'docs/n.md', edits: [{ old_string: 'CLAUDE.md', new_string: 'x' }] }), true);
+});
+
+test('but a path-shaped key is caught at ANY depth, including under a container that is not', () => {
+  /*
+   * The first fix filtered top-level keys only, so {ops:[{to:"..."}]} was
+   * skipped wholesale -- the container's name is not path-shaped even though
+   * the leaf's is. An existing test caught that, which is the only reason it
+   * did not ship. Containers are traversed; leaves are gated by their own key.
+   */
+  const j = (input) => evaluateClaudeTool({
+    tool_name: 'SomeBatchTool', tool_input: input, cwd: repoRoot, session_id: 's',
+  }).allowed;
+  assert.equal(j({ source: 'a.txt', destination: '.claude/settings.json' }), false);
+  assert.equal(j({ ops: [{ to: 'docs/ORDER.md' }] }), false, 'nested under a non-path key');
+  assert.equal(j({ paths: ['CLAUDE.md'] }), false, 'array elements inherit the array key');
+  assert.equal(j({ command: 'ls', source: 'a', destination: '.claude/settings.json' }), false,
+    'a benign judged field must not switch it off');
+});
+
+test('node cannot be pointed at a DIRECTORY to run what the session put inside it', () => {
+  /*
+   * git cat-file -e succeeds for a tree and git diff --quiet reports nothing
+   * about untracked files, so every tracked directory answered "inherited" --
+   * and node resolves a directory to its main. Write src/index.js, then
+   * `node src`, and the payload ran. Two calls, no flag, no metacharacter.
+   */
+  const dirs = (t) => (t === 'src' || t === 'test' || t === '.' ? 'not-a-file' : 'inherited');
+  assert.equal(judgeShellCommand('node src', { mayExecute: dirs }).allowed, false);
+  assert.equal(judgeShellCommand('node .', { mayExecute: dirs }).allowed, false);
+  assert.equal(judgeShellCommand('node --test test', { mayExecute: dirs }).allowed, false);
+});
+
+test('npm forwards everything after -- to the script, so those operands are judged too', () => {
+  /*
+   * `npm test -- pwn.mjs` becomes `node --test "test/**" pwn.mjs` and executed.
+   * The node branch had just been hardened against exactly that command; the
+   * identical execution was one npm spelling away and unjudged.
+   */
+  const classify = (t) => (t.startsWith('test/') ? 'inherited' : /\.mjs$/.test(t) ? 'untracked-file' : 'not-a-file');
+  assert.equal(judgeShellCommand('npm test -- pwn.mjs', { mayExecute: classify }).allowed, false);
+  assert.equal(judgeShellCommand('npm test -- ./pwn.mjs', { mayExecute: classify }).allowed, false);
+  assert.equal(judgeShellCommand('npm test -- test/a.test.mjs', { mayExecute: classify }).allowed, true);
+  assert.equal(judgeShellCommand('npm test', { mayExecute: classify }).allowed, true);
+});

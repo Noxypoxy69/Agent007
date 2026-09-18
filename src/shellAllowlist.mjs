@@ -633,9 +633,36 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
   }
 
   if (first === 'npm') {
-    return NPM_SHAPE.test(tokens[1] ?? '')
-      ? { allowed: true }
-      : { allowed: false, reason: `"npm ${tokens[1] ?? '(none)'}" is not an approved shape` };
+    if (!NPM_SHAPE.test(tokens[1] ?? '')) {
+      return { allowed: false, reason: `"npm ${tokens[1] ?? '(none)'}" is not an approved shape` };
+    }
+    /*
+     * npm FORWARDS EVERYTHING AFTER `--` TO THE SCRIPT, so judging tokens[1]
+     * alone left the node gate one spelling away from useless:
+     *
+     *   npm test -- pwn.mjs
+     *     -> node --test "test/**\/*.test.mjs" pwn.mjs
+     *     -> PAYLOAD EXECUTED
+     *
+     * Measured. The sibling branch had just been hardened to refuse
+     * `node --test <inherited> pwn.mjs`, and the identical execution went
+     * through here unjudged because nothing looked past the verb. Forwarded
+     * operands are operands, so they get the same question the node branch
+     * asks: a file this session could have written is not runnable.
+     */
+    const sep = tokens.indexOf('--');
+    if (sep !== -1) {
+      const forwarded = tokens.slice(sep + 1).filter((t) => !t.startsWith('-'));
+      const smuggled = forwarded.find((t) => mayExecute(t) === 'untracked-file');
+      if (smuggled) {
+        return {
+          allowed: false,
+          reason: `"${smuggled}" is forwarded to the script npm runs and is not part of the repository `
+            + 'this session inherited, so running it would execute code this session wrote',
+        };
+      }
+    }
+    return { allowed: true };
   }
 
   if (first === 'node') {

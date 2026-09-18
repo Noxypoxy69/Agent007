@@ -310,6 +310,29 @@ function judgeShell(command, cwd) {
     }
     if (rel === '' || rel.startsWith('..')) return 'untracked-file';  // outside the repo is not inherited from it
     try {
+      /*
+       * A TREE IS NOT A FILE, AND cat-file -e CANNOT TELL YOU THAT.
+       *
+       * `-e` succeeds for a directory because a tree is an object, and
+       * `git diff --quiet HEAD -- <dir>` says nothing about UNTRACKED files
+       * inside it. So every tracked directory answered "inherited" no matter
+       * what the session had just dropped into it, and node resolves a
+       * directory operand to its main -- reopening the two-call disarm by
+       * spelling the program as its parent:
+       *
+       *   Write src/index.js  <payload>   allowed (not protected, not a test)
+       *   node src                        ALLOWED, and the payload executed
+       *
+       * Measured end to end. The statSync guard below, whose comment says "A
+       * directory is not runnable either", was unreachable because this branch
+       * returned first. a75fb5d was the commit titled "write node's grammar
+       * down instead of guessing it" and `node <dir>` is part of that grammar;
+       * the grammar was right and the oracle underneath it was not.
+       *
+       * Asking for the TYPE costs one more git call and answers it exactly.
+       */
+      const type = String(runGit(['cat-file', '-t', `HEAD:${rel}`], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim();
+      if (type !== 'blob') return 'not-a-file';
       runGit(['cat-file', '-e', `HEAD:${rel}`], { cwd, stdio: 'ignore' });
       /*
        * THE NAME BEING IN HEAD IS NOT THE POINT. THE BYTES ARE.
@@ -369,7 +392,7 @@ function judgeShell(command, cwd) {
   const pathspecCovers = (operand) => {
     if (!cwd || typeof operand !== 'string' || operand === '') return [];
     try {
-      const out = runGit(['ls-files', '-z', '--', operand], { cwd, encoding: 'utf8' });
+      const out = runGit(['ls-files', '-z', '--', operand], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       return String(out)
         .split(String.fromCharCode(0))
         .filter((f) => f !== '')
@@ -560,6 +583,37 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    * look, whether or not a modelled field was present alongside them.
    */
   const judged = new Set([...commands, ...targets].map((f) => f.field));
+  /*
+   * ONLY FIELDS THAT NAME A PATH, NOT FIELDS THAT CONTAIN ONE.
+   *
+   * Scanning every unjudged field refused ordinary work within an hour of
+   * shipping. `content`, `old_string`, `new_string`, `new_source`, `description`
+   * and the strings inside `edits` legitimately CONTAIN protected path names --
+   * they are the text being written, not the file being written to. Measured
+   * against the parent, all newly refused:
+   *
+   *   Edit  {file_path:"docs/notes.md", old_string:"CLAUDE.md", new_string:"README.md"}
+   *   Write {file_path:"docs/n.md", content:"CLAUDE.md"}
+   *   Bash  {command:"ls", description:"CLAUDE.md"}
+   *
+   * With seventeen protected entries including package.json, CLAUDE.md and five
+   * src module paths, that is every import-path rename and every doc edit that
+   * mentions the rules. The commit that introduced it justified the design by
+   * saying a whole-input scan "would refuse cat CLAUDE.md" -- and then
+   * reintroduced exactly that class for the unjudged half. Its own test only
+   * exercised content:'x', so it stayed green while the regression shipped.
+   *
+   * The backstop's stated purpose is "a protected path appearing in some field
+   * name nobody anticipated -- a hypothetical mover with source and
+   * destination". Both of those NAME a path, and so does any spelling of the
+   * same idea. So the filter is on the KEY, by shape rather than by a list of
+   * known-bad field names: a key that reads like a location is scanned, a key
+   * that reads like payload is not.
+   *
+   * This is a backstop and is documented as not a boundary, so a path hidden in
+   * a field called `arg1` is missed. That is the direction this check is
+   * allowed to fail in; refusing a doc edit is not.
+   */
   const unmodelled = Object.fromEntries(
     Object.entries(input).filter(([k]) => !judged.has(k)),
   );
@@ -614,16 +668,43 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
  * Depth- and count-bounded because this runs on every tool call and a hook that
  * hangs is a hook somebody disables.
  */
-function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }) {
+/*
+ * THE KEY DECIDES, AT EVERY DEPTH, AND A FIRST ATTEMPT AT THIS FILTERED ONLY THE
+ * TOP LEVEL.
+ *
+ * A string is tested only when the key holding it reads like a LOCATION. That is
+ * what separates a mover's `destination` from an editor's `old_string`: one
+ * names a file, the other is the text being written. Scanning every string
+ * refused ordinary work -- an Edit whose replacement mentions CLAUDE.md, a Write
+ * whose content does, a Bash whose description does.
+ *
+ * Filtering the input before recursing was wrong in the other direction: a
+ * path-shaped key can be NESTED under a container whose own name is not, and
+ * `{ops:[{to:"docs/ORDER.md"}]}` was then skipped wholesale. Containers are
+ * always traversed; only leaf strings are gated, by their own key.
+ *
+ * An array's elements inherit the key of the array that holds them, so
+ * `{paths:["CLAUDE.md"]}` is tested and `{edits:[{old_string:"CLAUDE.md"}]}` is
+ * not.
+ *
+ * Still a backstop and still not a boundary: a path under a key called `arg1` is
+ * missed. That is the direction this is allowed to fail in.
+ */
+const PATH_SHAPED_KEY = /(^|_)(path|file|dir|folder|src|source|dest|destination|target|to|from|location|uri|url)(s?)($|_)/i;
+
+function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }, inheritedKey = null) {
   if (depth > 4 || seen.n > 200) return null;
-  const values = Array.isArray(input) ? input : (input && typeof input === 'object' ? Object.values(input) : []);
-  for (const value of values) {
+  const entries = Array.isArray(input)
+    ? input.map((v) => [inheritedKey, v])
+    : (input && typeof input === 'object' ? Object.entries(input) : []);
+  for (const [key, value] of entries) {
     seen.n += 1;
     if (typeof value === 'string') {
       if (value.length === 0 || value.length > 4096) continue;
+      if (!key || !PATH_SHAPED_KEY.test(key)) continue;
       if (isProtectedPath(value, cwd)) return value;
     } else if (value && typeof value === 'object') {
-      const hit = protectedMentionIn(value, cwd, depth + 1, seen);
+      const hit = protectedMentionIn(value, cwd, depth + 1, seen, key);
       if (hit) return hit;
     }
   }
