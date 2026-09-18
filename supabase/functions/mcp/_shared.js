@@ -2870,7 +2870,7 @@ export function toolDefs(store) {
          * session whose locks were never measured contributes nothing rather
          * than contributing "no locks". See mcp/toolDefs.mjs.
          */
-        (Array.isArray(s.locks) ? s.locks : []).map((l) => ({ agentId: s.agentId, worktree: s.worktree, ...l })))),
+        (s.locks ?? []).map((l) => ({ agentId: s.agentId, worktree: s.worktree, ...l })))),
     },
     {
       name: 'get_collision_summary',

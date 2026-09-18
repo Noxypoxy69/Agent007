@@ -295,7 +295,7 @@ export function toolDefs(store) {
          * is a real gap and is named in the tool's description rather than
          * papered over here.
          */
-        (Array.isArray(s.locks) ? s.locks : []).map((l) => ({ agentId: s.agentId, worktree: s.worktree, ...l })))),
+        (s.locks ?? []).map((l) => ({ agentId: s.agentId, worktree: s.worktree, ...l })))),
     },
     {
       name: 'get_collision_summary',
