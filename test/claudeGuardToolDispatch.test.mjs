@@ -946,6 +946,44 @@ test('A FILE THAT DOES NOT EXIST YET under an aliased directory is still protect
   }
 });
 
+test('a refusal must not advise something the same refusal would reject', () => {
+  /*
+   * The node refusal used to end "Commit it first, or run it outside the
+   * repository". The second half is false -- a path outside the repository is
+   * not inherited either, so it is refused by the same check, with the same
+   * message, which then repeats the advice. An auditor spent part of a pass
+   * following it.
+   *
+   * This is the third instance in one day of guidance aimed at people it cannot
+   * work for: the registration recipe no guarded session could run, and rule 21
+   * telling authors to clone when the rail refuses git clone. So the property is
+   * asserted rather than the wording: every path shape the message could be read
+   * as suggesting is measured, and the message must not recommend one that is
+   * refused.
+   */
+  const judge = (command) => judgeShellCommand(command, {
+    isOverridden: () => false,
+    mayExecute: () => 'untracked-file',
+    pathspecCovers: () => [],
+  });
+
+  const verdict = judge('node scratch/probe.mjs');
+  assert.equal(verdict.allowed, false, 'precondition: an uninherited program is refused');
+
+  // Every "somewhere else" a reader might try, and all of them refused.
+  for (const elsewhere of ['node /tmp/probe.mjs', 'node ../probe.mjs', 'node C:/temp/probe.mjs']) {
+    assert.equal(judge(elsewhere).allowed, false,
+      `${elsewhere} is refused, so the message must not suggest it`);
+  }
+
+  assert.ok(!/run it outside the repository/i.test(verdict.reason),
+    `the refusal recommends an action it also refuses: ${verdict.reason}`);
+
+  // And it must still say the thing that DOES work.
+  assert.match(verdict.reason, /commit it first/i,
+    'the refusal no longer names the one action that actually resolves it');
+});
+
 test('a flag can carry the pathspec list out of the command, and that is refused', () => {
   /*
    * The resolver is only asked about literal operands. --pathspec-from-file

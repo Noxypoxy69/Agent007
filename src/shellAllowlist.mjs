@@ -1007,9 +1007,25 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
     if (notInherited) {
       return {
         allowed: false,
+        /*
+         * DO NOT OFFER AN ESCAPE THAT IS ALSO REFUSED.
+         *
+         * This said "Commit it first, or run it outside the repository". The
+         * second half is false: a path outside the repo is not inherited either,
+         * so it is refused by the same check. Measured -- /tmp/probe.mjs, an
+         * absolute scratchpad path and ../probe.mjs are all DENY with this very
+         * message, which then tells the reader to do the thing it just refused.
+         *
+         * An auditor spent part of a pass following that advice. It is the same
+         * defect as the registration recipe no guarded session could execute,
+         * and as rule 21 telling authors to run a clone command the rail
+         * forbids: guidance whose audience is precisely the people it does not
+         * work for. Found 2026-09-18, third instance in one day.
+         */
         reason: `"${notInherited}" is not part of the repository this session inherited, so running it would `
           + 'execute code this session wrote -- which is how a guard gets disarmed in two calls. '
-          + 'Commit it first, or run it outside the repository',
+          + 'Commit it first; moving it outside the repository does not help, because a path that is '
+          + 'not inherited is refused wherever it lives',
       };
     }
     return { allowed: true };
