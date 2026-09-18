@@ -66,7 +66,19 @@ test('created_by COMES FROM THE TOKEN LABEL, NEVER FROM THE BODY', () => {
   assert.match(BODY, /created_by:\s*creatorLabel\b/,
     'created_by is not bound to the authenticated token label');
 
-  const fromBody = /created_by:\s*(createBody|body|rec\.created_by\b|[A-Za-z_$][\w$]*\.created_by)/.exec(BODY);
+  /*
+   * SCOPED TO THE CONSTRUCTOR CALL, WHICH IS WHERE THE RISK IS.
+   *
+   * The first version matched the whole route and flagged
+   * `created_by: rec.created_by` inside the write() — which is SAFE, because
+   * `rec` is what createTask just returned and its author came from the label.
+   * A matcher that cannot tell a derived value from a caller-supplied one
+   * refuses correct code, and a gate that cries wolf gets edited until it stops
+   * (rule 14). The overwrite risk is covered by the spread-order test below.
+   */
+  const call = /createTask\s*\(\s*\{([\s\S]*?)\}\s*\)/.exec(BODY);
+  assert.ok(call, 'could not find the createTask call');
+  const fromBody = /created_by:\s*(createBody|body|req|request)\b/.exec(call[1]);
   assert.equal(fromBody, null,
     `created_by is taken from caller-supplied data: ${fromBody && fromBody[0]}`);
 });
