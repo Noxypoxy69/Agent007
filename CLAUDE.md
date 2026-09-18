@@ -492,20 +492,44 @@ credential from the environment and from nowhere else:
 Until 2026-09-17 that name appeared in ten source and test files and in no `.md`
 in this repo — the same defect the table above is about, one file lower down.
 
-**Where it is on the owner's machine, so nobody has to probe for it again:**
+**Where it is, so nobody has to probe for it again:**
 
-    %USERPROFILE%\Documents\agentbridge-secrets\registration-token.txt
+    ~/Documents/agentbridge-secrets/registration-token.txt
 
 That directory is OUTSIDE every worktree on purpose, so no `git add` can reach
-it. Read it at login, export it, and do not copy it into the repo, into a
-settings file, or into a shell history that gets committed:
+it. Pass the PATH; never the value:
 
 ```bash
-AGENTBRIDGE_REGISTRATION_TOKEN=$(cat "$HOME/Documents/agentbridge-secrets/registration-token.txt") \
-  node bin/agentbridge.mjs register-session --agent <id> --session <session> --lane <lane> --capacity idle
+node bin/agentbridge.mjs register-session --agent <id> --session <session> \
+  --lane <lane> --capacity idle \
+  --token-file ~/Documents/agentbridge-secrets/registration-token.txt
 ```
 
-The path is recorded here; the value is not, and must never be.
+**THE SPELLING OF THAT PATH IS LOAD-BEARING, and three of the four obvious ones
+do not work.** Measured 2026-09-18, through the rail and through the shell:
+
+| form | rail | expands |
+|---|---|---|
+| `~/Documents/...` **unquoted** | ALLOW | yes |
+| `"~/Documents/..."` quoted | ALLOW | **no** — quoting suppresses tilde expansion |
+| `$HOME/...` | **DENY** | — `$` is a refused metacharacter |
+| `%USERPROFILE%/...` | ALLOW | **no** — not a variable in bash, arrives as a literal string |
+
+So it is a BARE tilde. Quote it and the guard lets through a path that does not
+exist; use `$HOME` and the guard refuses the command outright. Tilde expansion
+is not subject to word splitting, so a home directory containing a space
+survives — verified end to end: the CLI received
+`C:/Users/<owner>/Documents/...` as one argument.
+
+**THIS SECTION USED TO DOCUMENT A COMMAND NO GUARDED SESSION COULD RUN** — a
+leading `VAR=$(cat ...)` assignment, which the rail refuses twice over, for the
+assignment and for the substitution. That is what `--token-file` was built to
+replace, and the instructions kept describing the thing it replaced. Fifth
+instance in two days of guidance aimed at exactly the people it does not work
+for; see rules 20 and 21 and the note on `git clone`.
+
+And it used to carry the owner's literal home directory, which is published with
+this repository. The path is recorded here; the identity and the value are not.
 
 **Unset, registration degrades to local-only AND STILL EXITS 0:**
 
