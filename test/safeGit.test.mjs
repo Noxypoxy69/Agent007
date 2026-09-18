@@ -116,7 +116,38 @@ function sourceFiles() {
  * fast signal that fails at lint time instead of in somebody's worktree. It is a
  * second layer, not the boundary, and it is named for what it does.
  */
-const GIT_CALL = /\b([A-Za-z_$][A-Za-z0-9_$.]*)\s*\(\s*['"](git(?:\.exe)?)['"]\s*,/gi;
+/*
+ * TWO SHAPES, BECAUSE GIT IS SPAWNED TWO WAYS -- AND THE QUOTE CLASS IS THREE
+ * CHARACTERS, NOT TWO.
+ *
+ * The previous pattern was /\b([A-Za-z_$][\w$.]*)\s*\(\s*['"](git…)['"]\s*,/gi
+ * and the commit that shipped it said it "matches any call whose first argument
+ * is that literal, wrapper or not". A blind audit falsified that sentence twice:
+ *
+ *   execFileSync(`git`, ['status'])       a BACKTICK. Not a variable, not
+ *                                         computed -- the literal itself, in the
+ *                                         one quoting style the class omitted.
+ *                                         Unhardened git ran; gate stayed green.
+ *   execSync('git status --porcelain')    SHELL form. The name heads a command
+ *                                         string instead of being its own
+ *                                         argument, so there is no comma to
+ *                                         match. Worse than the wrapper case
+ *                                         this scan was written for, because it
+ *                                         spawns through a shell.
+ *
+ * Neither reaches refuseGit either -- both go straight to child_process -- so
+ * both layers were bypassed at once. A codebase that writes template literals
+ * constantly makes the backtick the likeliest ACCIDENTAL spelling in it.
+ *
+ * THE CALLEE IS NO LONGER PART OF THE MATCH. It was an identifier class, so
+ * `runners['go']('git', …)` slipped past on the shape of the callee rather than
+ * anything about git. The property is the ARGUMENT, so that is all these match;
+ * the callee is recovered afterwards for the report only. Rule 8: fix the
+ * matcher, not the strings the prober happened to try.
+ */
+const QUOTE = "['\"`]";
+const GIT_ARGV = new RegExp(`\\(\\s*(${QUOTE})(git(?:\\.exe)?)\\1\\s*,`, 'gi');
+const GIT_SHELL = new RegExp(`\\(\\s*(${QUOTE})(git\\s+[^'"\`]*)\\1`, 'gi');
 
 /*
  * SIXTEEN CALL SITES THAT ARE NOT FIXED, LISTED RATHER THAN EXCLUDED.
@@ -146,26 +177,184 @@ const GIT_CALL = /\b([A-Za-z_$][A-Za-z0-9_$.]*)\s*\(\s*['"](git(?:\.exe)?)['"]\s
  */
 const KNOWN_UNROUTED = Object.freeze({ 'bin/agentbridge.mjs': 18 });
 
+/*
+ * BLANKING COMMENTS WITH A REGEX WAS DEFEATED BY A STRING, AND LOST 140 LINES.
+ *
+ * Both found by blind audit of the previous commit, both demonstrated running
+ * real unhardened git while this file reported 9 of 9 green.
+ *
+ * ONE: `/\/\*[\s\S]*?\*\//g` has no idea what a string is. A file containing
+ *   export const CENSOR_TOKEN = '/*';
+ * opens a "comment" that runs to the next closer ANYWHERE in the file -- the
+ * next JSDoc will do -- so every line between them vanished from the scanner's
+ * view, including a genuine execFileSync('git', ...). The file still parses.
+ * That is the fourth rediscovery of rule 13 in this repository.
+ *
+ * TWO: the line-comment pattern anchored with caret-backslash-s-star (spelled
+ * out because writing it literally here would close this very comment, which is
+ * how the first draft of this paragraph broke the file) matches NEWLINES under
+ * /m, because backslash-s includes them. A line
+ * comment preceded by a blank line swallowed that blank line and replaced it
+ * with a space, so the blanked text had fewer lines than the file. Measured
+ * tree-wide: 140 lines lost, worst offenders -34 in src/attemptPipeline.mjs and
+ * -34 in scripts/claude-stop-gate.mjs. Every line number this scan reported was
+ * wrong, by 2 to 27, while a comment directly above the code claimed "every
+ * surviving line number still matches the real file".
+ *
+ * So this is a SCANNER, not a pattern. Knowing whether `/*` opens a comment
+ * requires knowing whether you are inside a string, and that is not a thing a
+ * regex can know. It preserves byte positions exactly -- comment characters
+ * become spaces, newlines stay newlines -- so offsets and line numbers are the
+ * file's own.
+ */
+function blankComments(src) {
+  const out = Array.from(src);
+  const n = src.length;
+  let i = 0;
+  let state = 'code'; // code | line | block | single | double | template
+  const blank = (at) => { if (out[at] !== '\n') out[at] = ' '; };
+
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (state === 'code') {
+      if (c === '/' && d === '/') { state = 'line'; blank(i); blank(i + 1); i += 2; continue; }
+      if (c === '/' && d === '*') { state = 'block'; blank(i); blank(i + 1); i += 2; continue; }
+      if (c === "'") { state = 'single'; i += 1; continue; }
+      if (c === '"') { state = 'double'; i += 1; continue; }
+      if (c === '`') { state = 'template'; i += 1; continue; }
+      i += 1; continue;
+    }
+    if (state === 'line') {
+      if (c === '\n') { state = 'code'; i += 1; continue; }
+      blank(i); i += 1; continue;
+    }
+    if (state === 'block') {
+      if (c === '*' && d === '/') { state = 'code'; blank(i); blank(i + 1); i += 2; continue; }
+      blank(i); i += 1; continue;
+    }
+    if (c === '\\') { i += 2; continue; } // an escape inside a string
+    if ((state === 'single' && c === "'") || (state === 'double' && c === '"') || (state === 'template' && c === '`')) {
+      state = 'code'; i += 1; continue;
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
+/** Best-effort callee for the REPORT. The match never depends on it. */
+function calleeBefore(code, index) {
+  const head = code.slice(Math.max(0, index - 120), index);
+  const m = head.match(/([A-Za-z_$][A-Za-z0-9_$.]*(?:\[[^\]]*\])?)\s*$/);
+  return m ? m[1] : '(anonymous call)';
+}
+
 function gitCallSites() {
   const found = [];
   for (const file of sourceFiles()) {
     const rel = path.relative(REPO, file).split(path.sep).join('/');
     if (rel === 'src/safeGit.mjs') continue; // the one place allowed to spawn git directly
 
-    const raw = readFileSync(file, 'utf8');
-    // Blank comments out IN PLACE, so a comment mentioning the pattern is not a
-    // finding and every surviving line number still matches the real file.
-    const code = raw
-      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-      .replace(/^\s*\/\/.*$/gm, (m) => ' '.repeat(m.length));
+    const code = blankComments(readFileSync(file, 'utf8'));
 
-    for (const m of code.matchAll(GIT_CALL)) {
-      const line = code.slice(0, m.index).split('\n').length;
-      found.push({ id: `${rel}:${line}`, rel, line, callee: m[1], spelling: m[2] });
+    for (const [re, shape] of [[GIT_ARGV, 'argv'], [GIT_SHELL, 'shell']]) {
+      for (const m of code.matchAll(re)) {
+        const line = code.slice(0, m.index).split('\n').length;
+        found.push({
+          id: `${rel}:${line}`, rel, line, shape,
+          callee: calleeBefore(code, m.index), spelling: m[2],
+        });
+      }
     }
   }
-  return found;
+  return found.sort((a, b) => (a.rel === b.rel ? a.line - b.line : a.rel.localeCompare(b.rel)));
 }
+
+/*
+ * THE CANARY, WHICH IS WHAT THE "FLOOR" WAS TRYING AND FAILING TO BE.
+ *
+ * The floor asserted `sites.length >= declared`, comparing a TREE-WIDE total
+ * against the sum of the quarantine -- and every quarantined site lives in one
+ * file. A blind audit defeated it in one move: narrow the callee back to a name
+ * list, add a real violation in a clean file, and the total still clears the
+ * floor because bin/agentbridge.mjs alone satisfies it. Green, with unhardened
+ * git in the tree. A coverage claim satisfiable by one file's contents is a
+ * claim about that file.
+ *
+ * So the pattern is checked against FIXED SAMPLES that do not depend on what is
+ * in the repository today. If the matcher degrades, these fail immediately and
+ * name the spelling that stopped matching, whatever the tree happens to hold.
+ * Every entry below is a spelling that was PROVEN to run real unhardened git
+ * while this file reported success.
+ */
+const MUST_MATCH = Object.freeze([
+  ["a plain single-quoted spawn", "execFileSync('git', ['status'], {});"],
+  ['a double-quoted spawn', 'execFileSync("git", ["status"], {});'],
+  ['a BACKTICK spawn -- audit D1, ran unhardened git with the gate green', 'execFileSync(`git`, [`status`], {});'],
+  ['an uppercase name', "execFileSync('GIT', ['status'], {});"],
+  ['git.exe', "spawnSync('git.exe', ['status'], {});"],
+  ['a wrapper -- the case this scan was written for', "run('git', ['status'], {});"],
+  ['a wrapper nobody has listed', "someFutureRunner('git', ['status'], {});"],
+  ['a member callee', "deps.run('git', ['status'], {});"],
+  ['a computed callee -- audit D7', "runners['go']('git', ['status'], {});"],
+  ['SHELL form -- audit D6, spawns through a shell so it is worse', "execSync('git status --porcelain', {});"],
+  ['shell form, async', "exec('git rev-parse HEAD', {}, cb);"],
+  ['the first argument on the next line', "execFileSync(\n  'git',\n  ['status'],\n);"],
+]);
+
+const MUST_NOT_MATCH = Object.freeze([
+  ['a line comment mentioning it', "// execFileSync('git', ['status']);\nconst x = 1;"],
+  ['a block comment mentioning it', "/*\n * execFileSync('git', ['status']);\n */\nconst x = 1;"],
+  ['a different program', "execFileSync('node', ['--test'], {});"],
+  ['a program whose name starts with git', "execFileSync('github-cli', ['x'], {});"],
+  ['the word in prose', "const msg = 'git is a program';"],
+]);
+
+test('THE MATCHER STILL RECOGNISES EVERY SPELLING, independent of what the tree contains', () => {
+  for (const [label, sample] of MUST_MATCH) {
+    const hits = [];
+    const code = blankComments(sample);
+    for (const [re] of [[GIT_ARGV], [GIT_SHELL]]) for (const m of code.matchAll(re)) hits.push(m);
+    assert.ok(hits.length >= 1, `the matcher no longer catches ${label}: ${JSON.stringify(sample)}`);
+  }
+});
+
+test('AND IT DOES NOT MATCH THINGS THAT ARE NOT GIT INVOCATIONS', () => {
+  /*
+   * RULE 5. Without this, a matcher that matched EVERYTHING would satisfy the
+   * canary above perfectly, and the offender list would fill with noise until
+   * somebody deleted the test.
+   */
+  for (const [label, sample] of MUST_NOT_MATCH) {
+    const hits = [];
+    const code = blankComments(sample);
+    for (const [re] of [[GIT_ARGV], [GIT_SHELL]]) for (const m of code.matchAll(re)) hits.push(m);
+    assert.deepEqual(hits.map((m) => m[0]), [], `the matcher wrongly flags ${label}`);
+  }
+});
+
+test('COMMENT BLANKING PRESERVES BYTES AND LINES, which the regex version did not', () => {
+  /*
+   * Audit D5: the old blanker lost 140 lines tree-wide, so every reported line
+   * number was wrong by 2 to 27 while a comment above it claimed otherwise.
+   * Audit D2: an unbalanced comment opener inside a STRING blanked out real code
+   * and hid a genuine violation.
+   */
+  const withUnbalancedOpener = "export const CENSOR = '/*';\nexecFileSync('git', ['status'], {});\n/** doc */\n";
+  const blanked = blankComments(withUnbalancedOpener);
+  assert.equal(blanked.length, withUnbalancedOpener.length, 'byte positions must be preserved');
+  assert.equal(blanked.split('\n').length, withUnbalancedOpener.split('\n').length, 'line count must be preserved');
+  assert.match(blanked, /execFileSync\('git'/,
+    'a comment opener inside a STRING must not blank out the code after it -- audit D2 hid a real '
+    + 'violation this way while the gate reported nine of nine green');
+
+  const withBlankLineBeforeComment = "const a = 1;\n\n  // a comment\nrun('git', ['x']);\n";
+  const b2 = blankComments(withBlankLineBeforeComment);
+  assert.equal(b2.split('\n').length, withBlankLineBeforeComment.split('\n').length);
+  const first = [...b2.matchAll(GIT_ARGV)][0];
+  assert.equal(b2.slice(0, first.index).split('\n').length, 4,
+    'the call is on line 4 of the real file and must be reported there');
+});
 
 test('EVERY git invocation under src, bin and scripts goes through safeGit, wrapper or not', () => {
   const sites = gitCallSites();
