@@ -27,6 +27,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseImports, resolveSpecifier } from '../src/moduleGraph.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -36,12 +37,51 @@ function guardedRepo(t) {
   const home = mkdtempSync(path.join(tmpdir(), 'reset-home-'));
   t.after(() => { for (const d of [root, home]) rmSync(d, { recursive: true, force: true }); });
   for (const d of ['src', 'test', 'scripts', 'bin', '.claude']) mkdirSync(path.join(root, d), { recursive: true });
-  /* safeGit.mjs is copied because guardSession imports it: the gate's own git
-   * calls go through the hardened path. A fixture missing it makes the guard
-   * unloadable, which the positive control below catches rather than letting the
-   * refusal assertions pass for the wrong reason. */
-  for (const f of ['src/guardSession.mjs', 'src/claudeGuard.mjs', 'src/shellAllowlist.mjs', 'src/safeGit.mjs',
-    'scripts/claude-stop-gate.mjs', 'bin/agentbridge-claude-guard.mjs']) {
+  /*
+   * THE FILE LIST IS DERIVED, BECAUSE THE TYPED ONE KEPT GOING STALE.
+   *
+   * It used to be six literal paths, with a note explaining that safeGit.mjs had
+   * been added after guardSession started importing it. That note was the
+   * warning: the list tracks the guard's imports by hand, so it is wrong from
+   * the moment anybody adds one. Measured 2026-09-18 -- the Action Authority
+   * wiring added src/actionAuthority.mjs to claudeGuard and all four tests in
+   * this file broke at once with
+   *
+   *   agentbridge guard: NOT INITIALISED -- the guard could not be loaded
+   *   (ERR_MODULE_NOT_FOUND). No snapshot was written
+   *
+   * which is the positive control doing its job, and a list doing the opposite.
+   *
+   * So the fixture now asks the module graph what the guard actually needs.
+   * Same move as asking git what a pathspec covers: the importer owns the
+   * answer, and deriving it means the NEXT import needs no edit here.
+   * CLAUDE.md rule 19 -- a list of names fails in both directions.
+   */
+  const closureOf = (entries) => {
+    const seen = new Set();
+    const queue = [...entries];
+    while (queue.length) {
+      const rel = queue.shift();
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      let src;
+      try { src = readFileSync(path.join(repoRoot, rel), 'utf8'); } catch { continue; }
+      for (const spec of parseImports(src).specifiers) {
+        const target = resolveSpecifier(repoRoot, rel, spec);
+        if (!target) continue; // node: builtin or npm package
+        const t = target.split(path.sep).join('/');
+        if (!seen.has(t)) queue.push(t);
+      }
+    }
+    return [...seen];
+  };
+  const needed = closureOf(['bin/agentbridge-claude-guard.mjs', 'scripts/claude-stop-gate.mjs']);
+  assert.ok(needed.length >= 6,
+    `the guard closure resolved to ${needed.length} files, too few to be real -- `
+    + 'import parsing has stopped working, and a fixture built from nothing would make '
+    + 'every refusal below pass for the wrong reason');
+  for (const f of needed) {
+    mkdirSync(path.dirname(path.join(root, f)), { recursive: true });
     cpSync(path.join(repoRoot, f), path.join(root, f));
   }
   writeFileSync(path.join(root, '.claude', 'settings.json'), '{"hooks":{"disableAllHooks":false}}\n');
@@ -65,13 +105,45 @@ const sessionStart = (env, id) => hook(env, 'bin/agentbridge-claude-guard.mjs', 
 const stop = (env, id) => hook(env, 'scripts/claude-stop-gate.mjs', id);
 const damage = (env) => writeFileSync(path.join(env.root, '.claude', 'settings.json'), '{"hooks":{"disableAllHooks":true}}\n');
 
+/*
+ * APPROVED MEANS "NOT BLOCKED". IT DID NOT USED TO, AND THAT CONFLATION BROKE
+ * THESE TESTS FOR A REASON THAT HAD NOTHING TO DO WITH BASELINING.
+ *
+ * The control assertions were `deepEqual(stop(...), {})`, which asserts approved
+ * AND SILENT in one breath. The fixture then started copying src/auditLedger.mjs
+ * -- it is in the guard's import closure, and the file list is now derived
+ * rather than typed -- so the print-only audit-coverage reporter began running
+ * here and correctly observed that the fixture's single "base" commit touches
+ * control files with no audit recorded. An advisory message appeared, the
+ * session was still approved, and three tests failed anyway.
+ *
+ * These tests are about whether a damaged tree can be baselined. Asserting the
+ * whole return object makes every future advisory a failure in a file that does
+ * not care about advisories -- CLAUDE.md rule 4, do not assert on a proxy: the
+ * property is the DECISION, and `{}` was standing in for it.
+ *
+ * It stays strict in the directions that matter: a block fails, an unexpected
+ * field fails, and any systemMessage other than the known print-only reporter
+ * fails. Loosening it to "ignore everything" would be the other error.
+ */
+const assertApproved = (result, label) => {
+  assert.equal(result.decision, undefined,
+    `${label}: must not be blocked${result.reason ? ` -- ${result.reason}` : ''}`);
+  const unexpected = Object.keys(result).filter((k) => k !== 'systemMessage');
+  assert.deepEqual(unexpected, [], `${label}: unexpected field(s) in an approval: ${unexpected.join(', ')}`);
+  if (result.systemMessage !== undefined) {
+    assert.match(result.systemMessage, /\[agentbridge:audit-missing\]/,
+      `${label}: the only advisory expected on an approved turn is the print-only audit reporter`);
+  }
+};
+
 test('a NEW session cannot baseline a tree whose protected controls were already damaged', (t) => {
   const env = guardedRepo(t);
 
   /* THE POSITIVE FIRST: on a clean tree this all works, or the refusal below
    * proves only that the guard refuses everything. */
   assert.match(sessionStart(env, 'A').systemMessage ?? '', /initialised/, 'control: a clean tree baselines');
-  assert.deepEqual(stop(env, 'A'), {}, 'control: an undamaged session is approved');
+  assertApproved(stop(env, 'A'), 'control: an undamaged session is approved');
 
   damage(env);
   assert.equal(stop(env, 'A').decision, 'block', 'the damaged session is blocked');
@@ -100,7 +172,7 @@ test('the refusal lifts once the damage is repaired -- it is a gate, not a wall'
    * already paid for one: every terminal blocked at once on 2026-09-17.
    */
   assert.match(sessionStart(env, 'C').systemMessage ?? '', /initialised/, 'a repaired tree baselines again');
-  assert.deepEqual(stop(env, 'C'), {}, 'and the session proceeds normally');
+  assertApproved(stop(env, 'C'), 'and the session proceeds normally');
 });
 
 test('unknown is not clean: a tree git cannot describe does not get a baseline', (t) => {
@@ -173,7 +245,7 @@ test('RATCHET: a new session DOES baseline damage that arrived by forced checkou
   const git = (...a) => execFileSync('git', a, { cwd: env.root, stdio: 'ignore' });
 
   assert.match(sessionStart(env, 'A').systemMessage ?? '', /initialised/, 'control: a clean tree baselines');
-  assert.deepEqual(stop(env, 'A'), {}, 'control: an undamaged session is approved');
+  assertApproved(stop(env, 'A'), 'control: an undamaged session is approved');
 
   const base = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'],
     { cwd: env.root, encoding: 'utf8' }).trim();
@@ -195,7 +267,29 @@ test('RATCHET: a new session DOES baseline damage that arrived by forced checkou
   assert.match(sessionStart(env, 'B').systemMessage ?? '', /initialised/,
     'RATCHET: a new session still mints over forced-checkout damage. If this line fails, '
     + 'minting now refuses -- the residual is CLOSED and this test should be deleted.');
-  assert.deepEqual(stop(env, 'B'), {},
-    'RATCHET: and that session still reads clean. If this line fails, the Stop gate now '
-    + 'catches imported damage -- the residual is CLOSED and this test should be deleted.');
+  /*
+   * THE RESIDUAL IS STILL OPEN, BUT IT IS NARROWER THAN IT WAS, AND THE
+   * DIFFERENCE IS WORTH WRITING DOWN RATHER THAN ASSERTING AWAY.
+   *
+   * This asserted `deepEqual(stop(...), {})` -- approved AND silent. It now
+   * reports an advisory, because the fixture derives its file list and therefore
+   * carries src/auditLedger.mjs, and the print-only audit reporter NAMES the
+   * damaging commit:
+   *
+   *   [agentbridge:audit-missing] 2 commit(s) changed a control with no audit
+   *     59f7a130  weaken the controls on this branch
+   *               .claude/settings.json
+   *
+   * So the imported damage is no longer entirely invisible at Stop -- it is
+   * visible and UNENFORCED. That is not the residual closing: the gate still
+   * approves the turn, which is exactly the hole this test pins. Blocking is
+   * what would close it.
+   *
+   * Asserting on the DECISION says that precisely. The old form would have gone
+   * red for a change that made the hole more visible, which teaches the next
+   * reader to delete a test that is still describing a real gap.
+   */
+  assertApproved(stop(env, 'B'),
+    'RATCHET: and that session still reads clean. If the DECISION here ever becomes block, the '
+    + 'Stop gate now catches imported damage -- the residual is CLOSED and this test should be deleted.');
 });

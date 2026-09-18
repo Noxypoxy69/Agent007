@@ -33,6 +33,20 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/moduleGraph.mjs',
   'src/policy.mjs',
   'src/verifier.mjs',
+  /*
+   * THE GUARD'S OWN DEPENDENCIES. Kept identical to guardSession.mjs, which
+   * carries the full reasoning: a file the guard IMPORTS decides what the guard
+   * does, and the import closure had drifted past both of these hand-maintained
+   * lists. src/verifier.mjs reads THIS copy, so a path missing here is a real
+   * difference in what the verifier protects.
+   *
+   * test/protectedPathParity.test.mjs is what catches a one-sided edit -- and it
+   * caught this one: the three entries went into guardSession.mjs first and the
+   * suite went red on the next run.
+   */
+  'src/safeGit.mjs',
+  'src/auditLedger.mjs',
+  'src/actionAuthority.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

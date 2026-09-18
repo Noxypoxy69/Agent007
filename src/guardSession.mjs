@@ -58,6 +58,36 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/moduleGraph.mjs',
   'src/policy.mjs',
   'src/verifier.mjs',
+  /*
+   * THE GUARD'S OWN DEPENDENCIES, WHICH WERE NOT ON THIS LIST.
+   *
+   * Everything above was added because somebody noticed it. That is an
+   * enumeration, and the guard's import closure had drifted past it: computed
+   * 2026-09-18 from bin/agentbridge-claude-guard.mjs and
+   * scripts/claude-stop-gate.mjs, eight local files were reachable and THREE of
+   * them were unprotected --
+   *
+   *   src/safeGit.mjs         the guard calls runGit; a rewrite changes what the
+   *                           guard executes and how it reads the repository
+   *   src/auditLedger.mjs     the audit-coverage reporter, which is exactly the
+   *                           D5 finding an audit raised earlier the same day:
+   *                           one commit disables it and nothing notices
+   *   src/actionAuthority.mjs added by the Action Authority wiring hours before
+   *                           this line, by me, unprotected
+   *
+   * A file the guard IMPORTS decides what the guard does. Leaving it writable
+   * while protecting the importer is protecting the front door of a building
+   * with an open side entrance -- and the guard now FAILS TO LOAD AT ALL if one
+   * is missing, so deleting a single unprotected file took the whole control
+   * offline (ERR_MODULE_NOT_FOUND, measured).
+   *
+   * THE LIST IS NOT THE FIX. test/guardDependenciesProtected.test.mjs derives
+   * the closure and fails if any member is unprotected, so the next import does
+   * not depend on somebody remembering this paragraph.
+   */
+  'src/safeGit.mjs',
+  'src/auditLedger.mjs',
+  'src/actionAuthority.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
@@ -928,7 +958,31 @@ export function readOverride(repoRoot, now = Date.now()) {
     return null;
   }
   if (!parsed || typeof parsed !== 'object') return null;
-  if (!Array.isArray(parsed.paths) || parsed.paths.length === 0) return null;
+  /*
+   * A GRANT NAMES PATHS, ACTIONS, OR BOTH -- AND MUST NAME AT LEAST ONE.
+   *
+   * `paths` was the only kind of thing a grant could cover, because the only
+   * thing the guard refused was a write. Action Authority adds a second kind:
+   * deny-unless-approved for OWNER-level ACTIONS, which are tool names like
+   * mcp__claude_ai_Supabase__apply_migration and have no repo-relative path to
+   * name. Danny chose deny-unless-approved over deny-outright on 2026-09-18
+   * (d-owner-action-authority-gating-20260918), and that choice is what requires
+   * an approval channel to exist at all.
+   *
+   * ONE FILE, NOT TWO. A second store would mean a second expiry rule, a second
+   * shape check and a second thing to forge -- and the hard-won checks below
+   * (expires_at must be a STRING, must be finite, must be bounded by
+   * MAX_GRANT_MS) would have to be correct twice. They were not correct once
+   * until an audit found the coercion hole.
+   *
+   * AN EMPTY GRANT IS STILL NO GRANT. Requiring at least one of the two keeps
+   * the old behaviour for a file with `"paths": []` and refuses a file that
+   * names nothing at all, rather than returning a live grant covering nothing --
+   * which would announce itself on every permit while permitting none.
+   */
+  const hasPaths = Array.isArray(parsed.paths) && parsed.paths.length > 0;
+  const hasActions = Array.isArray(parsed.actions) && parsed.actions.length > 0;
+  if (!hasPaths && !hasActions) return null;
   if (typeof parsed.reason !== 'string' || parsed.reason.trim() === '') return null;
   /*
    * expires_at MUST BE A STRING, AND THE CHECK IS LOAD-BEARING RATHER THAN
@@ -974,11 +1028,35 @@ export function readOverride(repoRoot, now = Date.now()) {
    */
   if (expires - now > MAX_GRANT_MS) return null;
   return {
-    paths: parsed.paths.filter((p) => typeof p === 'string' && p !== ''),
+    paths: hasPaths ? parsed.paths.filter((p) => typeof p === 'string' && p !== '') : [],
+    actions: hasActions ? parsed.actions.filter((a) => typeof a === 'string' && a !== '') : [],
     reason: parsed.reason,
     granted_by: typeof parsed.granted_by === 'string' ? parsed.granted_by : '(unrecorded)',
     expires_at: new Date(expires).toISOString(),
   };
+}
+
+/**
+ * Does an active grant approve this ACTION? Exact tool names only, no globs.
+ *
+ * THE EXACTNESS IS THE WHOLE CONTROL, and it is the same argument the path side
+ * already makes. A prefix or a glob here is not a convenience, it is a different
+ * permission: `mcp__claude_ai_Supabase__*` reads as "approve the migration I am
+ * about to run" and means "approve every Supabase action for the life of the
+ * grant, including the ones nobody has thought of yet". The owner approves acts,
+ * not namespaces.
+ *
+ * WHY IT DOES NOT FALL BACK TO THE PATH LIST. A grant naming
+ * `.claude/settings.json` says the owner agreed to a FILE being repaired. It
+ * does not say they agreed to a production migration, and quietly letting one
+ * list satisfy the other is how a narrow permission becomes a broad one without
+ * anybody deciding. The two lists are separate because the two decisions are.
+ */
+export function actionApproved(repoRoot, toolName, now = Date.now()) {
+  if (typeof toolName !== 'string' || toolName === '') return null;
+  const grant = readOverride(repoRoot, now);
+  if (!grant || !grant.actions.includes(toolName)) return null;
+  return grant;
 }
 
 /** Does an active grant name this repo-relative path? Exact paths only, no globs. */

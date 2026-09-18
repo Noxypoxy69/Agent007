@@ -91,11 +91,23 @@ test('SENDING MAIL IS OWNER AUTHORITY — it is what a customer receives', () =>
   assert.equal(v.authority, OWNER);
 });
 
-test('DRIVING THE HOST IS COORDINATOR AUTHORITY, not unrestricted', () => {
+test('DRIVING THE HOST IS OWNER AUTHORITY, not coordinator and not unrestricted', () => {
+  /*
+   * THIS ASSERTED COORDINATOR UNTIL 2026-09-18. Danny moved it to OWNER, and the
+   * decision is recorded at d-owner-action-authority-gating-20260918 rather than
+   * living only here -- it arrived second-hand, was in no record, and was put
+   * back to him before anything was built on it.
+   *
+   * Why it is the right level: driving the host is not one consequence, it is
+   * the ability to produce ANY of the others. A browser that can click can
+   * deploy, spend and mail a customer, using whatever session is already logged
+   * in. Below OWNER, one coordinator approval buys everything the table reserves
+   * to the owner separately.
+   */
   for (const name of ['mcp__claude-in-chrome__computer', 'mcp__claude-in-chrome__javascript_tool']) {
     const v = classifyAction({ tool_name: name, tool_input: {} });
     assert.equal(v.consequence, HOST_CONTROL, name);
-    assert.equal(v.authority, COORDINATOR, name);
+    assert.equal(v.authority, OWNER, name);
   }
 });
 

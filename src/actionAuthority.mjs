@@ -126,7 +126,30 @@ const NAMED_ACTIONS = Object.freeze({
   CronDelete: FUTURE_EXECUTION,
   RemoteTrigger: FUTURE_EXECUTION,
   SendUserFile: REVERSIBLE_EXTERNAL,
-  PushNotification: IRREVERSIBLE_OUTBOUND,
+  /*
+   * A NOTIFICATION TO THE OWNER IS NOT "SOMETHING A CUSTOMER RECEIVES".
+   *
+   * This was IRREVERSIBLE_OUTBOUND, which became OWNER in the table below, which
+   * meant that once the classifier was WIRED into the guard, telling Danny
+   * something required Danny's approval first. Circular, and an immediate
+   * outage: it is the mechanism for reaching him when a session needs him.
+   * Measured 2026-09-18 -- test/claudeGuardToolDispatch.test.mjs already names
+   * PushNotification in its list of tools that "cannot touch the repo and must
+   * not be blocked", and the wiring broke that contract.
+   *
+   * The OWNER tier exists for production state, spending, and anything a
+   * CUSTOMER receives -- CLAUDE.md says so in those words. A push to the owner's
+   * own device is none of them. Its sibling SendUserFile, which also sends to
+   * the owner and equally cannot be unsent, is already REVERSIBLE_EXTERNAL, so
+   * this is the consistent classification rather than a new opinion.
+   *
+   * WHY THIS IS NOT JUST WEAKENING A CONTROL TO GO GREEN: the consequence was
+   * harmless while nothing consulted it, and wiring is what turned a debatable
+   * label into a refusal. An over-blocking guard gets switched off, which loses
+   * every layer at once (rule 19), and the first thing anyone would switch off
+   * is the one that stops them reporting a problem.
+   */
+  PushNotification: REVERSIBLE_EXTERNAL,
 });
 
 /**
@@ -135,12 +158,26 @@ const NAMED_ACTIONS = Object.freeze({
  * PRODUCTION_STATE, SPENDS_MONEY and IRREVERSIBLE_OUTBOUND are OWNER because
  * CLAUDE.md says so in as many words: production deploys, spending and anything
  * a customer receives are Danny's, and no coordinator may approve them for him.
+ *
+ * HOST_CONTROL IS OWNER, AND IT WAS COORDINATOR UNTIL 2026-09-18. Danny decided
+ * it, asked directly and answered directly, and it is recorded at
+ * d-owner-action-authority-gating-20260918 so nobody has to take an agent's word
+ * for it -- this ruling reached me second-hand and was in no record, which is
+ * why it was put back to him rather than acted on.
+ *
+ * The reasoning, so the entry is arguable rather than merely cited: driving the
+ * host is not one consequence, it is the ABILITY TO PRODUCE ANY OF THE OTHERS.
+ * A browser session that can click can deploy, spend, and send mail to a
+ * customer, and it does it wearing the authority of whoever is already logged
+ * in. Classifying the general capability below the specific acts it can perform
+ * lets a coordinator approve, in one call, everything this table reserves to the
+ * owner in six.
  */
 const AUTHORITY_FOR = Object.freeze({
   [NONE]: UNRESTRICTED,
   [REVERSIBLE_EXTERNAL]: COORDINATOR,
   [FUTURE_EXECUTION]: COORDINATOR,
-  [HOST_CONTROL]: COORDINATOR,
+  [HOST_CONTROL]: OWNER,
   [IRREVERSIBLE_OUTBOUND]: OWNER,
   [PRODUCTION_STATE]: OWNER,
   [SPENDS_MONEY]: OWNER,
@@ -171,17 +208,31 @@ const operationOf = (toolName, prefix) => toolName.slice(prefix.length);
  * { consequence, authority, observableAtStop, reason }
  */
 export function classifyAction({ tool_name: toolName, tool_input: input = {} } = {}) {
-  if (typeof toolName !== 'string' || toolName === '') {
+  if (typeof toolName !== 'string' || toolName.trim() === '') {
     /*
      * FAIL CLOSED ON A MALFORMED CALL. An unnameable action cannot be shown to be
      * harmless, and "cannot establish" is not "permitted" -- the same posture the
      * Stop gate takes on an absent snapshot.
+     *
+     * THE TEST WAS `toolName === ''` AND THAT IS ONE SPELLING OF EMPTY, NOT THE
+     * PROPERTY. Measured 2026-09-18 while wiring this module into the guard:
+     *
+     *   ""      -> production-state / owner     fails closed, correct
+     *   "   "   -> none / unrestricted          SAILS THROUGH
+     *   "\t"    -> none / unrestricted          SAILS THROUGH
+     *
+     * A whitespace name matches no namespace and no named action, so it fell out
+     * of the bottom as UNRESTRICTED -- the one verdict that means "nothing here
+     * needs approval". Exactly backwards for an input nobody can identify, and
+     * the same shape as the safeGit lint that named four function spellings
+     * instead of the property it was for. `.trim()` asks whether there is a
+     * usable name at all rather than comparing against one way of having none.
      */
     return Object.freeze({
       consequence: PRODUCTION_STATE,
       authority: OWNER,
       observableAtStop: false,
-      reason: 'the tool name is missing or not a string, so nothing about this action can be established',
+      reason: 'the tool name is missing, blank or not a string, so nothing about this action can be established',
     });
   }
 

@@ -1,6 +1,7 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath, isGateSelfConfig, repoRootOf } from './guardSession.mjs';
+import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath, isGateSelfConfig, repoRootOf, actionApproved } from './guardSession.mjs';
+import { classifyAction, OWNER } from './actionAuthority.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
 import { runGit } from './safeGit.mjs';
 
@@ -757,6 +758,80 @@ function judgeShell(command, cwd) {
 export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}, cwd = process.cwd(), session_id: sessionId = null } = {}) {
   if (typeof toolName !== 'string' || !input || typeof input !== 'object') {
     return deny('malformed-hook-input', 'Hook input is missing a tool name or tool input object');
+  }
+
+  /*
+   * ── ACTION AUTHORITY, AND IT IS FIRST ON PURPOSE ──────────────────────────
+   *
+   * WHAT THIS CLOSES. The comment further down used to end by naming a hole and
+   * declining to fix it: a production migration, a deploy, a sent email or a
+   * scheduled run writes no file in this repository, so protected-file drift at
+   * Stop has nothing to compare and reports nothing. For that class of action
+   * the fallback was not a weaker layer, it was no layer. `mcp__` tools then
+   * returned allowed unconditionally.
+   *
+   * WHY IT SITS ABOVE EVERY OTHER BRANCH. The read-only set, the Workflow
+   * refusal and the blanket `mcp__` allow all RETURN. A check placed after any
+   * of them is a check that never runs for the tools it exists to judge -- and
+   * that is not hypothetical here: the gate-self check in this same file was
+   * written after the grant branch and was reachable only when no grant existed,
+   * so it could not fail for the reason it was written for. Same file, same
+   * mistake, three hours earlier. Highest branch wins, so this one is highest.
+   *
+   * DENY-UNLESS-APPROVED, NOT DENY-OUTRIGHT. Danny's decision, 2026-09-18,
+   * recorded at d-owner-action-authority-gating-20260918. It reached this
+   * session second-hand and appeared in no owner record, so it was put back to
+   * him rather than built on; what is implemented is what he then said.
+   *
+   * WHY THIS IS NOT A DEFAULT-DENY OUTAGE, measured rather than asserted. The
+   * classifier answers `unrestricted` for Read, Write, Edit, Bash, Grep, Glob,
+   * TodoWrite, for tool names it has never heard of, and for named READS such as
+   * list_tables and search_threads. Only the consequential namespaces and named
+   * actions reach OWNER. An over-blocking guard gets switched off, which loses
+   * every layer at once -- CLAUDE.md rule 19 -- so the direction of this failure
+   * was checked before it was wired, not after.
+   *
+   * AND IT FAILS CLOSED. A null or empty tool name classifies as
+   * production-state/OWNER rather than sailing through as unrecognised.
+   */
+  const verdict = classifyAction({ tool_name: toolName, tool_input: input });
+  if (verdict.authority === OWNER) {
+    const approval = actionApproved(repoRootOf(cwd), toolName);
+    if (!approval) {
+      return deny(
+        'action-needs-owner',
+        `${toolName} is ${verdict.consequence}, which is Danny's to approve and nobody else's. `
+        + `${verdict.reason} `
+        + 'This is not detected at Stop: the action writes no file in this repository, so there is no '
+        + 'drift for the gate to compare and no second layer behind this refusal. '
+        + 'To permit it, the OWNER adds the exact tool name to the "actions" list of the grant file '
+        + '(node bin/agentbridge.mjs grant-path prints which file), with a reason and an expiry. '
+        + 'An agent that writes its own approval has forged it.',
+      );
+    }
+    /*
+     * ANNOUNCED, LIKE EVERY OTHER PERMIT -- AND THROUGH THE EXISTING CONTRACT
+     * RATHER THAN A NEW FIELD.
+     *
+     * The first version of this returned `{ allowed: true, note }`. hookDecision
+     * surfaces `{ overridden: true, notice }` and nothing else, so `note` would
+     * have been dropped on the floor and the approved permit would have been
+     * byte-identical to an ordinary allow on stdout. That is precisely the bug
+     * an audit found in the path side of this channel on 2026-09-18, whose
+     * post-mortem is in hookDecision two hundred lines below: the commit claimed
+     * the permit "ANNOUNCES itself", the unit test asserted the notice on THIS
+     * function's return value, never called hookDecision, and the permit shipped
+     * silent. Caught here only by reading that comment before trusting my own.
+     *
+     * A grant spent silently is a clean run, and "a forged grant does not vanish
+     * into a clean run" is the entire safety argument for this channel.
+     */
+    return {
+      allowed: true,
+      overridden: true,
+      notice: `[agentbridge:action-approved] ${toolName} (${verdict.consequence}) permitted by a grant `
+        + `from ${approval.granted_by} expiring ${approval.expires_at}: ${approval.reason}`,
+    };
   }
 
   /*

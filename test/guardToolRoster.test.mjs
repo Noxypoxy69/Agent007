@@ -19,6 +19,7 @@ process.env.AGENTBRIDGE_HOME = __iso(__isoPath.join(__tmp(), 'guard-test-home-')
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { classifyAction, OWNER } from '../src/actionAuthority.mjs';
 import { fileURLToPath } from 'node:url';
 
 import { evaluateClaudeTool } from '../src/claudeGuard.mjs';
@@ -295,12 +296,57 @@ test('THE FALLTHROUGH IS ALLOW AT THIS HEAD — unclassified-tool no longer exis
  */
 const KNOWN_OVER_BLOCKED = {};
 
+/*
+ * A DELIBERATE OWNER-GATE IS NOT AN OVER-BLOCK, AND THE DIFFERENCE HAS TO BE
+ * MADE HONESTLY OR THE EXCLUSION BECOMES THE SILENCER THIS FILE WARNS ABOUT.
+ *
+ * Action Authority landed 2026-09-18 (Danny's decision, recorded at
+ * d-owner-action-authority-gating-20260918): an OWNER-level action is refused
+ * unless a grant names it. Two roster entries are now refused BY DESIGN --
+ * mcp__claude_ai_Gmail__send_message, which is the whole point of the feature,
+ * and the empty tool name, which fails closed because an action nobody can name
+ * cannot be shown to be harmless.
+ *
+ * Neither is "ordinary work blocked". But dropping them into KNOWN_OVER_BLOCKED
+ * would file a working control as a defect in a list whose stated purpose is to
+ * SHRINK, and the header above is explicit that an entry outliving its defect is
+ * how a real over-block hides.
+ *
+ * So they are excluded by the REASON they were refused -- the guard's own
+ * `action-needs-owner` id -- and the exclusion is then checked against the
+ * classifier, so a refusal cannot smuggle itself out of this test by claiming an
+ * id it has not earned. Rule 5: the exemption needs its own positive.
+ */
 test('ORDINARY WORK IS NOT BLOCKED beyond the known over-blocks', () => {
-  const denied = results
-    .filter((r) => r.outcome === 'DENY' && !r.writes && !r.executes)
-    .map((r) => r.tool);
-  const unexpected = [...new Set(denied)].filter((t) => !(t in KNOWN_OVER_BLOCKED));
+  const denied = results.filter((r) => r.outcome === 'DENY' && !r.writes && !r.executes);
+
+  const ownerGated = denied.filter((r) => r.id === 'action-needs-owner');
+  for (const r of ownerGated) {
+    assert.equal(
+      classifyAction({ tool_name: r.tool, tool_input: {} }).authority, OWNER,
+      `${r.tool || '(empty tool name)'} was refused as action-needs-owner, so the classifier must `
+      + 'agree it is OWNER authority -- otherwise this exclusion is hiding an over-block',
+    );
+  }
+
+  const unexpected = [...new Set(denied.filter((r) => r.id !== 'action-needs-owner').map((r) => r.tool))]
+    .filter((t) => !(t in KNOWN_OVER_BLOCKED));
   assert.deepEqual(unexpected, [], 'a guard that blocks ordinary work gets switched off, which loses every layer at once');
+});
+
+test('THE OWNER-GATE IS REACHED FROM THE ROSTER AT ALL, so the exclusion above is not vacuous', () => {
+  /*
+   * Rule 6, and rule 5 again. If the roster stopped producing owner-gated
+   * refusals -- because the wiring regressed, or because evaluate() broke -- the
+   * exclusion above would quietly filter nothing and the test would still pass.
+   * "No owner-gated refusals" and "the gate is switched off" must not look alike.
+   */
+  const ownerGated = results.filter((r) => r.outcome === 'DENY' && r.id === 'action-needs-owner');
+  assert.ok(ownerGated.length >= 1,
+    'no roster entry was refused as action-needs-owner, so either the Action Authority wiring is '
+    + 'no longer reached from the shipped guard, or the roster no longer contains an OWNER-level action');
+  assert.ok(ownerGated.some((r) => r.tool === 'mcp__claude_ai_Gmail__send_message'),
+    'sending mail is the canonical irreversible-outbound action and must still be owner-gated');
 });
 
 test('the over-block list may only SHRINK — a stale entry is itself a finding', () => {
