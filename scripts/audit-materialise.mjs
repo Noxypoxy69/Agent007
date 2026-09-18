@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const [sha, ...names] = process.argv.slice(2);
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+const REPO = path.resolve(import.meta.dirname, '..');
 fs.mkdirSync(path.join(REPO, 'audit'), { recursive: true });
 fs.mkdirSync(path.join(REPO, 'audit', 'helpers'), { recursive: true });
 fs.mkdirSync(path.join(REPO, 'audit', 'fixtures'), { recursive: true });
