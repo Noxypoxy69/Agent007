@@ -76,11 +76,39 @@ export const jsonResult = (data) => ({
  * text and capability are then two readings of one fact, and disagreement is not
  * expressible rather than merely absent today.
  */
+/*
+ * THIS PARAGRAPH USED TO CLAIM MORE THAN THE SERVER DELIVERS, and the claim was
+ * the strongest kind: "Every field is observed from git plumbing and the process
+ * table on the developer machine, not reported by the agents themselves, so an
+ * agent cannot misreport its own state here."
+ *
+ * On the node collector that is true. On the hosted surface it is false for
+ * eight fields. index.ts projects agentId, lane, machineLabel, worktree,
+ * capacity, sessionId, repoId and git.head straight out of
+ * `session_registrations`, a table its own comment describes as "populated
+ * entirely from the POST /register body" and stamps `runtime-self-registration`.
+ * Those are exactly the fields an agent would want to lie about — which lane it
+ * is in, which worktree it holds, whether it has capacity.
+ *
+ * Telling a reader "an agent cannot misreport its own state here" while handing
+ * it self-reported state is worse than saying nothing, because it discourages
+ * the scepticism that would otherwise catch the lie. Found by blind audit.
+ *
+ * SO THE SENTENCE NOW SEPARATES THE TWO, rather than being narrowed to
+ * uselessness or forked per transport. A reader can weigh a field by where it
+ * came from, which is the thing the original sentence was reaching for and
+ * overshot. Nulling the four unmeasurable fields (10fcb31) made a different
+ * half of this paragraph true; this is the remaining half.
+ */
 const PREAMBLE =
-  'Live engineering state for multi-agent Git worktrees. Every field is observed from git ' +
-  'plumbing and the process table on the developer machine, not reported by the agents ' +
-  'themselves, so an agent cannot misreport its own state here. Fields that could not be ' +
-  'determined are null — treat null as unknown, never as zero.\n\n';
+  'Live engineering state for multi-agent Git worktrees. TWO KINDS OF FIELD, AND THE ' +
+  'DIFFERENCE MATTERS. Branches, HEADs, bases, dirty files, locks and running processes are ' +
+  'OBSERVED from git plumbing and the process table, so an agent cannot misreport them. ' +
+  'Identity and placement — agent id, session id, lane, repo, worktree, machine and declared ' +
+  'capacity — are SELF-REPORTED at registration and are only as honest as the agent that ' +
+  'registered. Weigh them accordingly: a lane or a capacity is a claim, a HEAD is a ' +
+  'measurement. Fields that could not be determined are null — treat null as unknown, never ' +
+  'as zero.\n\n';
 
 const AUTHORITY_READER =
   'THIS CONNECTION IS READ-ONLY, AND THAT IS A PROPERTY OF YOUR TOOL LIST RATHER THAN A ' +

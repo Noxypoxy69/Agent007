@@ -2526,11 +2526,24 @@ export const jsonResult = (data) => ({
  * list is literally what the client receives. Text and capability become two
  * readings of one fact.
  */
+/*
+ * SPLICED. This surface is the one the old sentence was FALSE on: index.ts
+ * projects agentId, lane, machineLabel, worktree, capacity, sessionId, repoId
+ * and git.head straight out of session_registrations, which its own comment
+ * describes as "populated entirely from the POST /register body". Promising a
+ * reader that an agent "cannot misreport its own state here" while serving
+ * self-reported identity discourages exactly the scepticism that would catch
+ * the lie. See mcp/toolDefs.mjs.
+ */
 const PREAMBLE =
-  'Live engineering state for multi-agent Git worktrees. Every field is observed from git ' +
-  'plumbing and the process table on the developer machine, not reported by the agents ' +
-  'themselves, so an agent cannot misreport its own state here. Fields that could not be ' +
-  'determined are null — treat null as unknown, never as zero.\n\n';
+  'Live engineering state for multi-agent Git worktrees. TWO KINDS OF FIELD, AND THE ' +
+  'DIFFERENCE MATTERS. Branches, HEADs, bases, dirty files, locks and running processes are ' +
+  'OBSERVED from git plumbing and the process table, so an agent cannot misreport them. ' +
+  'Identity and placement — agent id, session id, lane, repo, worktree, machine and declared ' +
+  'capacity — are SELF-REPORTED at registration and are only as honest as the agent that ' +
+  'registered. Weigh them accordingly: a lane or a capacity is a claim, a HEAD is a ' +
+  'measurement. Fields that could not be determined are null — treat null as unknown, never ' +
+  'as zero.\n\n';
 
 const AUTHORITY_READER =
   'THIS CONNECTION IS READ-ONLY, AND THAT IS A PROPERTY OF YOUR TOOL LIST RATHER THAN A ' +
