@@ -259,12 +259,32 @@ export function scopeMatches(decision, context = {}) {
   return want === have;
 }
 
-export function validateDecision(d) {
+/**
+ * WHO THE OWNER ACTUALLY IS. Spliced from src/ownerDecisions.mjs — see the long
+ * comment there for the measurement. Short version: requiring
+ * `created_by === owner_id` compares the record against itself, so a
+ * coordinator writing `{owner_id: "c8", created_by: "c8"}` minted whatever it
+ * typed. Two rows in the live ledger carry `owner_id: "main"` and one of them
+ * was ACTIVE. Aliases are included because `canonicalActor` resolves `owner`
+ * to `danny`.
+ */
+export const OWNER_IDS = Object.freeze(['danny', 'owner']);
+
+export function isOwnerId(value, owners = OWNER_IDS) {
+  if (!isNonEmptyString(value)) return false;
+  const want = value.trim().toLowerCase();
+  return owners.some((o) => isNonEmptyString(o) && o.trim().toLowerCase() === want);
+}
+
+export function validateDecision(d, { owners = OWNER_IDS } = {}) {
   const errors = [];
   if (!isPlainObject(d)) return { ok: false, errors: ['decision must be an object'] };
 
   if (!isNonEmptyString(d.decision_id)) errors.push('decision_id is required');
   if (!isNonEmptyString(d.owner_id)) errors.push('owner_id is required');
+  else if (!isOwnerId(d.owner_id, owners)) {
+    errors.push(`owner_id "${d.owner_id}" is not the owner: a decision can only be recorded in the owner's name, and naming somebody else does not make them one`);
+  }
   if (!isNonEmptyString(d.statement)) errors.push('statement is required — the builder\'s own words are the audit');
   if (!SCOPE_TYPES.includes(d.scope_type)) errors.push(`scope_type must be one of ${SCOPE_TYPES.join(', ')}`);
   if (!EFFECTS.includes(d.effect)) errors.push(`effect must be one of ${EFFECTS.join(', ')}`);
@@ -286,6 +306,12 @@ export function validateDecision(d) {
     errors.push('constraints must be an object when present');
   }
 
+  /*
+   * ON ITS OWN THIS CHECK STOPS NOTHING — both fields come off the same record
+   * from the same caller, so it only ever established that the writer was
+   * CONSISTENT. The `isOwnerId` call above is the half that anchors it to
+   * somebody outside the record.
+   */
   if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');
   else if (isNonEmptyString(d.owner_id) && d.created_by !== d.owner_id) {
     errors.push(`created_by "${d.created_by}" is not the owner "${d.owner_id}": a worker cannot record a decision on the owner's behalf`);
@@ -315,10 +341,10 @@ export function createDecision({
   };
 }
 
-export function activeDecisions(rows) {
+export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('activeDecisions requires an array');
 
-  const valid = rows.filter((d) => validateDecision(d).ok);
+  const valid = rows.filter((d) => validateDecision(d, { owners }).ok);
   const notRevoked = valid.filter((d) => !d.revoked_at);
 
   const superseded = new Set(
@@ -328,7 +354,7 @@ export function activeDecisions(rows) {
   return notRevoked.filter((d) => !superseded.has(d.decision_id));
 }
 
-export function resolveOwnerDecision(rows, action, context = {}) {
+export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNER_IDS } = {}) {
   if (!isNonEmptyString(action)) {
     return {
       outcome: 'owner_required', decision_id: null, matched_scope: null,
@@ -337,7 +363,7 @@ export function resolveOwnerDecision(rows, action, context = {}) {
     };
   }
 
-  const live = activeDecisions(rows);
+  const live = activeDecisions(rows, { owners });
   const matches = live.filter((d) =>
     scopeMatches(d, context) && d.capabilities.some((c) => capabilityMatches(c, action)));
 

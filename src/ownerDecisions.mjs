@@ -41,6 +41,53 @@ const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
 
 /**
+ * WHO THE OWNER ACTUALLY IS — the fact the authorship check was missing.
+ *
+ * `validateDecision` used to require `created_by === owner_id` and nothing
+ * more. Both fields arrive on the same record from the same caller, so that
+ * compares a claim against itself: a coordinator writing
+ * `{owner_id: "c8", created_by: "c8"}` satisfied it exactly as well as the
+ * owner did, and walked away with whatever capabilities it typed. Closing the
+ * forgery of the NAME `danny` -- which is what binding created_by to the
+ * authenticated token label achieved -- left minting under a DIFFERENT name
+ * completely open. An identity check that never leaves the record cannot
+ * anchor anything.
+ *
+ * MEASURED IN THE LIVE LEDGER, 2026-09-18, not hypothesised: of 33 decisions,
+ * two carry `owner_id: "main"` / `created_by: "main"`, and
+ * `d-review-ruling-t-wire-gate-scripts-corrected-20260917` was ACTIVE and
+ * granting `review.accept` at repo scope. Nobody called `main` is the owner.
+ * It validated because its two self-declared fields agreed.
+ *
+ * ALIASES ARE INCLUDED because `canonicalActor` resolves `owner` to `danny`,
+ * so a record saying `owner` means the same person and must not be voided by
+ * this check. What is refused is a name that is not the owner under ANY
+ * spelling.
+ *
+ * WHY A LOCAL CONSTANT RATHER THAN AN IMPORT. This module's header promises it
+ * is pure -- no filesystem, no network, no clock -- and `src/coordination.mjs`
+ * reaches `liveRegistry.mjs`. So the roster arrives as an argument, the way
+ * every timestamp in this file already does, and the default is declared here.
+ * The duplication that buys is held down by a gate rather than by memory:
+ * `test/ownerIdentityMatchesRoster.test.mjs` derives the owners from `ACTORS`
+ * on BOTH surfaces and fails if either list drifts.
+ */
+export const OWNER_IDS = Object.freeze(['danny', 'owner']);
+
+/**
+ * Is this name the owner, under any spelling the roster recognises?
+ *
+ * Case- and whitespace-insensitive, because `Danny` and ` danny ` are the same
+ * person and a validity check that turns on capitalisation is a trap, not a
+ * control.
+ */
+export function isOwnerId(value, owners = OWNER_IDS) {
+  if (!isNonEmptyString(value)) return false;
+  const want = value.trim().toLowerCase();
+  return owners.some((o) => isNonEmptyString(o) && o.trim().toLowerCase() === want);
+}
+
+/**
  * Does a declared capability cover a requested action?
  *
  * STRICT BY DESIGN, AND THIS IS THE WIDENING GUARD. Only three forms match:
@@ -94,12 +141,19 @@ export function scopeMatches(decision, context = {}) {
  * excluded from resolution entirely rather than being interpreted generously,
  * so a typo in a scope id can never read as a broader grant.
  */
-export function validateDecision(d) {
+export function validateDecision(d, { owners = OWNER_IDS } = {}) {
   const errors = [];
   if (!isPlainObject(d)) return { ok: false, errors: ['decision must be an object'] };
 
   if (!isNonEmptyString(d.decision_id)) errors.push('decision_id is required');
   if (!isNonEmptyString(d.owner_id)) errors.push('owner_id is required');
+  else if (!isOwnerId(d.owner_id, owners)) {
+    /*
+     * THE ANCHOR. Without this, every check below compares the record against
+     * itself and the ledger's authority is whatever the writer typed.
+     */
+    errors.push(`owner_id "${d.owner_id}" is not the owner: a decision can only be recorded in the owner's name, and naming somebody else does not make them one`);
+  }
   if (!isNonEmptyString(d.statement)) errors.push('statement is required — the builder\'s own words are the audit');
   if (!SCOPE_TYPES.includes(d.scope_type)) errors.push(`scope_type must be one of ${SCOPE_TYPES.join(', ')}`);
   if (!EFFECTS.includes(d.effect)) errors.push(`effect must be one of ${EFFECTS.join(', ')}`);
@@ -128,8 +182,17 @@ export function validateDecision(d) {
    *
    * created_by must BE the owner. A record authored by a worker session is not
    * a weaker decision, it is a forged one, and the whole ledger is worthless if
-   * an agent can write its own permission slip. The hosted surface is read-only
-   * for the same reason -- this is the second lock, not the only one.
+   * an agent can write its own permission slip.
+   *
+   * ON ITS OWN THIS CHECK STOPS NOTHING, and the comment that used to end here
+   * claimed otherwise for three days. Both fields come off the same record from
+   * the same caller, so this only ever established that the writer was
+   * CONSISTENT. `{owner_id: "c8", created_by: "c8"}` passed. The check became
+   * real the moment `owner_id` had to name the actual owner -- see the
+   * `isOwnerId` call above, which is the half that anchors it to somebody
+   * outside the record. Kept, because the two together are what make
+   * `created_by` mean "the owner wrote this" rather than "these two strings
+   * match".
    */
   if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');
   else if (isNonEmptyString(d.owner_id) && d.created_by !== d.owner_id) {
@@ -176,10 +239,10 @@ export function createDecision({
  * changed it; a ledger that can be edited into agreeing with the present is
  * not an audit trail.
  */
-export function activeDecisions(rows) {
+export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('activeDecisions requires an array');
 
-  const valid = rows.filter((d) => validateDecision(d).ok);
+  const valid = rows.filter((d) => validateDecision(d, { owners }).ok);
   const notRevoked = valid.filter((d) => !d.revoked_at);
 
   // Only a live decision can supersede. Otherwise revoking a replacement would
@@ -202,7 +265,7 @@ export function activeDecisions(rows) {
  *            reason: string, constraints: object, statement: string|null,
  *            candidates: string[]}}
  */
-export function resolveOwnerDecision(rows, action, context = {}) {
+export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNER_IDS } = {}) {
   if (!isNonEmptyString(action)) {
     // An unclassifiable action must not resolve to `allowed` by accident.
     return {
@@ -212,7 +275,7 @@ export function resolveOwnerDecision(rows, action, context = {}) {
     };
   }
 
-  const live = activeDecisions(rows);
+  const live = activeDecisions(rows, { owners });
   const matches = live.filter((d) =>
     scopeMatches(d, context) && d.capabilities.some((c) => capabilityMatches(c, action)));
 
