@@ -102,16 +102,51 @@ test('listSessions rebuilds the camelCase shape store.mjs returns', async () => 
 });
 
 test('an unreported process probe is not reported as a healthy one', async () => {
-  // process_probe_ok is null when the probe never ran. httpStore reads
-  // `!== false`, so null means "assume fine" -- matching the node store, which
-  // spreads an absent key as undefined. The view must NOT coalesce it to true
-  // on its own, or the two surfaces disagree about an unknown probe.
+  /*
+   * THE NAME WAS RIGHT AND THE BODY PINNED THE OPPOSITE, for as long as this
+   * test existed.
+   *
+   * `process_probe_ok` is NULL when the probe never ran. httpStore used to read
+   * `!== false`, which turned that into TRUE — "a probe ran and found nothing",
+   * the most confident thing the field can say, on exactly the row least
+   * entitled to it. This test asserted that behaviour while its own title
+   * called it out as wrong.
+   *
+   * 0a94bcb fixed the store to emit null and did not touch this file, leaving
+   * the gate red at the tip. Found by blind audit. Both halves were mine: the
+   * fix, and the failure to carry it here.
+   *
+   * The assertions now say what the title always said. `locks` and `processes`
+   * follow the same rule — an unmeasured list is unknown, not empty — and they
+   * never executed before, because the first assertion threw.
+   */
   const store = storeWith([['sessions_latest', SESSION_ROWS]]);
   const out = await store.listSessions();
-  assert.equal(out[1].processProbeOk, true);
+  assert.equal(out[1].processProbeOk, null,
+    'a NULL probe column was reported as a healthy probe — the row least entitled to confidence');
   assert.equal(out[1].git, null);
-  assert.deepEqual(out[1].locks, []);
-  assert.deepEqual(out[1].processes, []);
+  assert.equal(out[1].locks, null, 'an unmeasured lock list was reported as "no locks"');
+  assert.equal(out[1].processes, null, 'an unmeasured process list was reported as "nothing running"');
+});
+
+test('a MEASURED probe, lock list and process list still survive the projection', async () => {
+  /*
+   * Rule 5, and the direction the fix above could break. A store that mapped
+   * everything to null would satisfy every assertion in the previous test and
+   * would destroy the field's meaning in the other direction: a genuinely
+   * failed probe (`false`) and a genuinely empty list (`[]`) are measurements
+   * and must survive as themselves.
+   */
+  const store = storeWith([['sessions_latest', [{
+    agent_id: 'code-b', session_id: 'danny-win-b1', lane: 'agentbridge',
+    machine_label: null, worktree: null, git: null,
+    locks: [], processes: [], process_probe_ok: false,
+    last_seen_at: '2026-09-18T20:00:00.000Z',
+  }]]]);
+  const [s] = await store.listSessions();
+  assert.equal(s.processProbeOk, false, 'a measured probe FAILURE was flattened into unknown');
+  assert.deepEqual(s.locks, [], 'a measured empty lock list became unknown');
+  assert.deepEqual(s.processes, [], 'a measured empty process list became unknown');
 });
 
 test('getLanes returns name -> globs, and {} when the table is empty', async () => {

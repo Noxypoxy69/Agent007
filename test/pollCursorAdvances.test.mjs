@@ -27,7 +27,30 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { advanceCursor } from '../scripts/bridge-session-poll.mjs';
+import { advanceCursor, parseCursorInstant } from '../scripts/bridge-session-poll.mjs';
+import { eventsFor } from '../src/events.mjs';
+
+/**
+ * The SERVER's notion of time, reached through its only public door.
+ *
+ * `parse` is not exported from src/events.mjs, so this asks `eventsFor` the
+ * question instead: is B strictly after A? That is exactly the comparison the
+ * cursor depends on, and going through the real entry point means this cannot
+ * agree with a copy of the logic rather than the logic (hollow gate 2).
+ */
+const serverParse = (iso) => {
+  const at = Date.parse(iso);
+  const frac = /\.(\d+)/.exec(iso);
+  return at * 1000 + (frac ? Number(frac[1].slice(3, 6).padEnd(3, '0')) : 0);
+};
+
+/** Belt and braces: the real server must agree with the helper above. */
+const serverDelivers = (since, at) => eventsFor({
+  tasks: [],
+  messages: [{ message_id: 'm', to_agent: 'code-b', from_agent: 'x', type: 'answer', body: 'b', created_at: at, task_id: null }],
+  sessions: [{ agentId: 'code-b', sessionId: 's1', lane: 'l' }],
+  session_id: 's1', agent_id: 'code-b', since,
+}).length > 0;
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -239,6 +262,58 @@ test('THE CONTROL: the coupling would notice a changed line', () => {
     'a suffixed cursor line was accepted — then the control above cannot detect the suffix either');
   assert.equal(advanceCursor(T0, `  cursor: ${T1}\n`, now), T0,
     'a re-punctuated cursor line was accepted');
+});
+
+test('THE CLIENT AND THE SERVER MUST AGREE ABOUT TIME, OR THE CURSOR LIVELOCKS', () => {
+  /*
+   * THE REGRESSION THIS COMMIT FIXES, AND IT WAS MINE.
+   *
+   * b5851bc taught the SERVER that Postgres emits six fractional digits and
+   * that Date.parse keeps three, so two events inside one millisecond stopped
+   * collapsing and the later one began to be delivered. The CLIENT was left on
+   * Date.parse.
+   *
+   * The result is worse than the bug it fixed. The server correctly delivers
+   * m2@.123999; advanceCursor compares it against a cursor of .123456, finds
+   * them EQUAL after truncation, and its forward-only rule refuses to adopt it.
+   * The cursor sticks, the same event is delivered on every cycle forever, and
+   * classifyCycle calls each one `done` — the branch with no backoff. A rare
+   * silent DROP became a permanent RE-DELIVERY with an unthrottled re-spawn, on
+   * a script that runs at every SessionStart on this machine.
+   *
+   * So the two implementations are pinned against each other. The duplication
+   * is deliberate — the hook must run with no module graph behind it — and this
+   * is what stops it drifting a second time.
+   */
+  const pairs = [
+    ['2026-09-18T19:30:00.123456+00:00', '2026-09-18T19:30:00.123999+00:00'],
+    ['2026-09-18T19:30:00.000Z', '2026-09-18T19:30:00.000001Z'],
+    ['2026-09-18T19:30:00Z', '2026-09-18T19:30:00.000001Z'],
+  ];
+  for (const [a, b] of pairs) {
+    assert.ok(serverParse(b) > serverParse(a), `the server does not order ${a} before ${b}`);
+    assert.equal(serverDelivers(a, b), true,
+      `the REAL server does not deliver ${b} to a cursor at ${a} — this fixture is not the live case`);
+    assert.ok(parseCursorInstant(b) > parseCursorInstant(a),
+      `the client cannot advance from ${a} to ${b}, so an event the server keeps delivering is `
+      + 'never acknowledged: the cursor sticks and the poll re-spawns forever');
+  }
+
+  // And the two must agree about ordering everywhere, not merely on ties.
+  const corpus = [
+    '2026-09-18T19:30:00Z', '2026-09-18T19:30:00.1Z', '2026-09-18T19:30:00.123Z',
+    '2026-09-18T19:30:00.123456+00:00', '2026-09-18T19:30:00.123999+00:00',
+    '2026-09-18T19:30:01Z', '2026-09-18T14:30:00-05:00',
+  ];
+  for (const a of corpus) {
+    for (const b of corpus) {
+      assert.equal(
+        Math.sign(parseCursorInstant(a) - parseCursorInstant(b)),
+        Math.sign(serverParse(a) - serverParse(b)),
+        `client and server disagree about the order of ${a} and ${b}`,
+      );
+    }
+  }
 });
 
 test('THE CONTROL: this gate can actually fail', () => {

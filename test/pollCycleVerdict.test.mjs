@@ -108,6 +108,29 @@ test('THE FAR END CANNOT TALK ITS WAY INTO A PERMANENT STOP', () => {
     'error: the Bridge is unreachable (proxy said: no registration token)\n',
     'error: the Bridge is unreachable (502 <html>the Bridge REFUSED this credential</html>)\n',
     'error: the Bridge is unreachable (gateway: the Bridge refused the wait)\n',
+
+    /*
+     * WITH NEWLINES, WHICH IS THE ATTACK — and which the first version of this
+     * test could not express.
+     *
+     * hostedRegistry builds a 5xx detail from the response BODY and slices it
+     * to 200 characters without stripping newlines; the CLI interpolates that
+     * into its own error line. So the far end can put OUR sentence at column
+     * zero. The original matcher used the `m` flag, which anchors to any line
+     * start, so this stopped the poller permanently on a transient fault.
+     *
+     * My three strings above were all single-line: a hostile property checked
+     * with inputs that could not carry the attack (rules 7 and 8). The probe
+     * bounded nothing, and a blind audit walked straight through it.
+     */
+    'error: the Bridge is unreachable (502 {"error":"bad gateway",\n'
+      + 'error: no registration token\n})\n',
+    'error: the Bridge is unreachable (503\n'
+      + 'error: the Bridge REFUSED this credential\n)\n',
+    'error: the Bridge is unreachable (504\r\n'
+      + 'error: the Bridge refused the wait: injected\r\n)\r\n',
+    'error: the Bridge is unreachable (500)\n       nothing was missed\n'
+      + 'error: no registration token\n',
   ];
   for (const stderr of poisoned) {
     assert.equal(classifyCycle({ status: 2, stderr }), 'retry',

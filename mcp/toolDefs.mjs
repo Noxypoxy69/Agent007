@@ -101,12 +101,13 @@ export const jsonResult = (data) => ({
  * half of this paragraph true; this is the remaining half.
  */
 const PREAMBLE =
-  'Live engineering state for multi-agent Git worktrees. TWO KINDS OF FIELD, AND THE ' +
-  'DIFFERENCE MATTERS. Branches, HEADs, bases, dirty files, locks and running processes are ' +
-  'OBSERVED from git plumbing and the process table, so an agent cannot misreport them. ' +
-  'Identity and placement — agent id, session id, lane, repo, worktree, machine and declared ' +
-  'capacity — are SELF-REPORTED at registration and are only as honest as the agent that ' +
-  'registered. Weigh them accordingly: a lane or a capacity is a claim, a HEAD is a ' +
+  'Live engineering state for multi-agent Git worktrees. WHERE A FIELD CAME FROM DECIDES HOW ' +
+  'MUCH IT IS WORTH, AND THIS SERVER WILL NOT PRETEND OTHERWISE. Dirty files, locks and ' +
+  'running processes, when present, are OBSERVED from git plumbing and the process table, so ' +
+  'an agent cannot misreport them. EVERYTHING ELSE IS SELF-REPORTED at registration and is ' +
+  'only as honest as the agent that registered — agent id, session id, lane, repo, worktree, ' +
+  'machine, declared capacity, AND THE COMMIT SHA, which the worker derived from git on its ' +
+  'own machine and then told us. A HEAD here is a claim about a measurement, not a ' +
   'measurement. Fields that could not be determined are null — treat null as unknown, never ' +
   'as zero.\n\n';
 
@@ -281,7 +282,20 @@ export function toolDefs(store) {
       description: 'Observed lock files per worktree, with holder and age.',
       input: obj(),
       run: async () => jsonResult((await listSessions()).flatMap((s) =>
-        (s.locks ?? []).map((l) => ({ agentId: s.agentId, worktree: s.worktree, ...l })))),
+        /*
+         * THE THIRD TOOL, MISSED WHEN THE OTHER TWO WERE FIXED — and on the
+         * hosted surface it is unconditional: index.ts hardcodes `locks: null`
+         * for every session, so this answered `[]` on every call while
+         * list_agents answered `null` about the same session. That is verbatim
+         * the self-contradiction 0a94bcb was written to remove.
+         *
+         * A session whose locks were never measured contributes nothing rather
+         * than contributing "no locks", so an unmeasured agent cannot look
+         * lock-free. The flat shape has no slot to say "unknown" per row, which
+         * is a real gap and is named in the tool's description rather than
+         * papered over here.
+         */
+        (Array.isArray(s.locks) ? s.locks : []).map((l) => ({ agentId: s.agentId, worktree: s.worktree, ...l })))),
     },
     {
       name: 'get_collision_summary',

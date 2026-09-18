@@ -128,9 +128,41 @@ const readRecord = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'));
  * about reading details; matching `cursor` loosely anywhere in stdout is how a
  * check ends up agreeing with prose instead of data (rule 13).
  */
+/**
+ * A timestamp in MICROSECONDS, matching `parse` in src/events.mjs exactly.
+ *
+ * THIS MUST NOT DRIFT FROM THE SERVER'S COMPARISON, and it did, for four
+ * commits. b5851bc taught `eventsFor` that Postgres emits six fractional digits
+ * and that `Date.parse` truncates to three — so two events inside one
+ * millisecond stopped collapsing and the later one began to be delivered. The
+ * CLIENT was left on `Date.parse`.
+ *
+ * The result was worse than the bug it fixed. The server correctly delivers the
+ * second event; `advanceCursor` compares `.123999` against a cursor of
+ * `.123456`, finds them EQUAL after truncation, and its forward-only rule
+ * (`t <= bestMs` → skip) refuses to adopt it. The cursor sticks, the same event
+ * is delivered on every cycle forever, and `classifyCycle` calls each one
+ * `done` — which is the branch with no backoff. A rare silent drop became a
+ * permanent re-delivery loop with an unthrottled re-spawn, on a script that
+ * runs as a SessionStart hook on every session on this machine. Found by blind
+ * audit; I shipped the server half and called the class closed.
+ *
+ * Duplicated rather than imported because this script is a hook that must run
+ * with no module graph behind it. test/pollCursorAdvances.test.mjs pins the two
+ * implementations against each other so the duplication cannot drift again.
+ */
+export function parseCursorInstant(v) {
+  const ms = Date.parse(v);
+  if (Number.isNaN(ms)) return null;
+  const frac = /\.(\d+)/.exec(String(v ?? ''));
+  // Date.parse already consumed the first three fractional digits.
+  const sub = frac ? Number(frac[1].slice(3, 6).padEnd(3, '0')) : 0;
+  return ms * 1000 + (Number.isFinite(sub) ? sub : 0);
+}
+
 export function advanceCursor(prev, stdout, now = Date.now()) {
   const lines = String(stdout ?? '').split('\n');
-  const prevMs = Date.parse(prev);
+  const prevMs = parseCursorInstant(prev);
   let best = prev;
   let bestMs = Number.isFinite(prevMs) ? prevMs : -Infinity;
 
@@ -163,12 +195,12 @@ export function advanceCursor(prev, stdout, now = Date.now()) {
    * re-deliver mail forever — the spin this file exists to stop. Five minutes
    * is far beyond any real skew and still refuses every implausible value.
    */
-  const ceiling = now + CURSOR_SKEW_MS;
+  const ceiling = (now + CURSOR_SKEW_MS) * 1000;
 
   for (const line of lines) {
     const m = /^\s*cursor\s+(\S+)\s*$/.exec(line);
     if (!m) continue;
-    const t = Date.parse(m[1]);
+    const t = parseCursorInstant(m[1]);
     if (!Number.isFinite(t) || t <= bestMs) continue;
     if (t > ceiling) continue;
     best = m[1];
@@ -188,10 +220,33 @@ export function advanceCursor(prev, stdout, now = Date.now()) {
  * transient fault.
  */
 const PERMANENT_PATTERNS = Object.freeze([
-  /^error: no registration token\b/im,
-  /^error: the Bridge REFUSED this credential\b/im,
-  /^error: the Bridge refused the wait\b/im,
+  /^error: no registration token\b/i,
+  /^error: the Bridge REFUSED this credential\b/i,
+  /^error: the Bridge refused the wait\b/i,
 ]);
+
+/**
+ * The CLI's verdict is its FIRST line. Everything after it is detail.
+ *
+ * THE `m` FLAG WAS THE HOLE, AND MY OWN COMMENT CLAIMED THE OPPOSITE. I
+ * anchored these patterns to stop far-end text being read as our own
+ * conclusion, and then used `/m`, which anchors to ANY line start. The far end
+ * controls that: `src/hostedRegistry.mjs` builds a 5xx detail from the response
+ * BODY, slices it to 200 characters without stripping newlines, and
+ * `bin/agentbridge.mjs` interpolates it into `error: the Bridge is unreachable
+ * (...)`. So a newline inside a proxy or WAF body puts `error: no registration
+ * token` at column zero and permanently stops the poller on a TRANSIENT fault —
+ * exactly the outcome this script exists to prevent.
+ *
+ * My gate for it used three poisoned strings and none contained a newline: a
+ * hostile property checked with inputs that could not express the attack
+ * (rules 7 and 8). The probe bounded nothing.
+ *
+ * So the verdict is taken from the first line only. The CLI writes its
+ * conclusion first and its advice after, and nothing the far end says can
+ * become the first line of our own process's stderr.
+ */
+const firstLine = (text) => String(text ?? '').split('\n', 1)[0];
 
 /**
  * WHAT ONE POLL CYCLE MEANT. Pure, exported, and that is the point.
@@ -212,7 +267,7 @@ const PERMANENT_PATTERNS = Object.freeze([
  *   retry      anything else — report and back off
  */
 export function classifyCycle(r) {
-  const err = String(r?.stderr ?? '');
+  const err = firstLine(r?.stderr);
   if (PERMANENT_PATTERNS.some((re) => re.test(err))) return 'permanent';
 
   /*
