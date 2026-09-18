@@ -313,8 +313,15 @@ export function validateDecision(d, { owners = OWNER_IDS } = {}) {
    * somebody outside the record.
    */
   if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');
-  else if (isNonEmptyString(d.owner_id) && d.created_by !== d.owner_id) {
-    errors.push(`created_by "${d.created_by}" is not the owner "${d.owner_id}": a worker cannot record a decision on the owner's behalf`);
+  else if (!isOwnerId(d.created_by, owners)) {
+    /*
+     * ASKS THE SAME QUESTION OF THE AUTHOR rather than comparing the two fields
+     * to each other. Strict equality meant the alias and case folding could not
+     * be used, and on THIS surface created_by is not caller-supplied -- it is
+     * the authenticated coordinator_tokens.label -- so any spelling difference
+     * between the label and the payload's owner_id voided a real decision.
+     */
+    errors.push(`created_by "${d.created_by}" is not the owner: a worker cannot record a decision on the owner's behalf`);
   }
 
   if (!isNonEmptyString(d.created_at)) errors.push('created_at is required');
@@ -344,14 +351,23 @@ export function createDecision({
 export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('activeDecisions requires an array');
 
-  const valid = rows.filter((d) => validateDecision(d, { owners }).ok);
-  const notRevoked = valid.filter((d) => !d.revoked_at);
+  const present = rows.filter((d) => isPlainObject(d) && !d.revoked_at);
 
+  /*
+   * SUPERSESSION IS COMPUTED FROM EVERY SURVIVING ROW, VALID OR NOT. Filtering
+   * for validity first meant refusing a row also UN-SUPERSEDED whatever it had
+   * replaced: a standing DENY under a non-owner name, superseding an older
+   * bridge-wide ALLOW, went from `denied` to `allowed` the moment the identity
+   * anchor started refusing it. A refusal handed back a permission. So an
+   * invalid row neither grants nor revives. See src/ownerDecisions.mjs.
+   */
   const superseded = new Set(
-    notRevoked.map((d) => d.supersedes).filter(isNonEmptyString),
+    present.map((d) => d.supersedes).filter(isNonEmptyString),
   );
 
-  return notRevoked.filter((d) => !superseded.has(d.decision_id));
+  const valid = present.filter((d) => validateDecision(d, { owners }).ok);
+
+  return valid.filter((d) => !superseded.has(d.decision_id));
 }
 
 export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNER_IDS } = {}) {

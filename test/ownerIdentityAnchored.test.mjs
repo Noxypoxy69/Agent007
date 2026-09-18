@@ -103,13 +103,41 @@ test('THE ALIAS THE ROSTER RECOGNISES IS STILL THE OWNER', () => {
  * Includes each actor's aliases, because an alias is a spelling an attacker can
  * type just as easily as the canonical id.
  */
-const IMPOSTORS = ACTORS
+const ROSTER_IMPOSTORS = ACTORS
   .filter((a) => a.actor_type !== 'owner')
   .flatMap((a) => [a.actor_id, ...(a.aliases ?? [])]);
 
+/**
+ * NEAR-MISSES, DERIVED FROM THE OWNER NAMES THEMSELVES.
+ *
+ * WHY THE ROSTER ALONE IS NOT ENOUGH, and this is rule 7 applied properly
+ * rather than recited. A blind audit mutated `isOwnerId` from an exact match to
+ * a SUBSTRING match — `want.includes(o)` — and the gate stayed 9/9 green. Not
+ * one assertion fired, while `not-danny`, `danny-impostor`, `c8-danny`,
+ * `downer` and `chatgpt-owner` all became valid owners able to resolve
+ * `deploy.production` to `allowed`.
+ *
+ * The reason is structural: no name in ACTORS contains `danny` or `owner` as a
+ * substring, so a corpus generated from the roster can never reach a widening
+ * of the matcher. Generating from the real list extends coverage as SEATS are
+ * added; it says nothing about the matcher's SHAPE. `chatgpt-owner` is a
+ * perfectly plausible coordinator_tokens.label.
+ *
+ * So these are derived from OWNER_IDS instead — still generated, not typed, so
+ * adding an owner spelling extends them too.
+ */
+const NEAR_MISSES = [...OWNER_IDS].flatMap((o) => [
+  `not-${o}`, `${o}-impostor`, `x${o}`, `${o}x`, `c8-${o}`, `${o}.evil`,
+  `${o} `.repeat(2).trim(), `${o}${o}`,
+]);
+
+const IMPOSTORS = [...ROSTER_IMPOSTORS, ...NEAR_MISSES];
+
 test('NO NON-OWNER ACTOR CAN RECORD A DECISION IN ITS OWN NAME', () => {
-  assert.ok(IMPOSTORS.length >= 3,
-    `the roster yielded only ${IMPOSTORS.length} non-owner names; this gate is covering almost nothing`);
+  assert.ok(ROSTER_IMPOSTORS.length >= 3,
+    `the roster yielded only ${ROSTER_IMPOSTORS.length} non-owner names; this gate is covering almost nothing`);
+  assert.ok(NEAR_MISSES.length >= 8,
+    `only ${NEAR_MISSES.length} near-misses were derived; a substring match would go unnoticed`);
 
   for (const [name, validate] of SURFACES) {
     const accepted = [];

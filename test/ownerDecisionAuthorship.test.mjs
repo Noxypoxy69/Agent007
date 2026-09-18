@@ -80,8 +80,23 @@ test('THE CHECK THAT COULD NEVER FIRE: a recorder who is not the owner is refuse
     v.errors.some((e) => /cannot record a decision on the owner's behalf/.test(e)),
     `expected the authorship refusal, got: ${v.errors.join('; ')}`,
   );
-  // It NAMES both parties, so a refusal is actionable rather than a dead end.
-  assert.ok(v.errors.some((e) => e.includes('code-b') && e.includes('danny')));
+  /*
+   * IT NAMES THE AUTHOR, so a refusal is actionable rather than a dead end.
+   *
+   * This used to also require the owner's name in the same message, because the
+   * check was `created_by !== owner_id` and the message reported both sides of
+   * that comparison. It is no longer a comparison: `created_by` must simply BE
+   * the owner, asked independently, so that the anchor's alias and case folding
+   * apply to it too -- on the hosted surface `created_by` is the authenticated
+   * token label rather than anything the caller typed, and strict equality
+   * against the payload's `owner_id` voided legitimate decisions over a
+   * spelling difference. Asserting the old wording here would be pinning a
+   * comparison that no longer exists.
+   */
+  assert.ok(
+    v.errors.some((e) => e.includes('code-b')),
+    `the refusal does not name who authored it: ${v.errors.join('; ')}`,
+  );
 });
 
 /* ── the call site, checked as text because it cannot be imported ───────── */

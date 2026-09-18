@@ -69,8 +69,16 @@ const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
  * reaches `liveRegistry.mjs`. So the roster arrives as an argument, the way
  * every timestamp in this file already does, and the default is declared here.
  * The duplication that buys is held down by a gate rather than by memory:
- * `test/ownerIdentityMatchesRoster.test.mjs` derives the owners from `ACTORS`
- * on BOTH surfaces and fails if either list drifts.
+ * `test/ownerIdentityAnchored.test.mjs` derives the owners from this file's
+ * `ACTORS` and fails if the two lists drift.
+ *
+ * WHAT THAT GATE DOES NOT COVER, stated because the first version of this
+ * comment named a file that did not exist and claimed a reach it did not have.
+ * It pins `src/coordination.mjs`'s `ACTORS` against `OWNER_IDS`, and it pins
+ * the hosted `OWNER_IDS` against this one. The hosted copy of `ACTORS` in
+ * `_shared.js` is NOT in that chain. In a repository whose first rule is that a
+ * check script beats a comment, a comment pointing the next reader at a
+ * nonexistent check is the failure itself.
  */
 export const OWNER_IDS = Object.freeze(['danny', 'owner']);
 
@@ -80,6 +88,16 @@ export const OWNER_IDS = Object.freeze(['danny', 'owner']);
  * Case- and whitespace-insensitive, because `Danny` and ` danny ` are the same
  * person and a validity check that turns on capitalisation is a trap, not a
  * control.
+ */
+/*
+ * THE `owners` PARAMETER IS FOR TESTS, AND IT IS NOT A SECOND DOOR.
+ *
+ * Passing a roster re-opens the anchor for whoever passes it --
+ * `validateDecision(rec, { owners: ['c8'] })` is valid by construction. No
+ * production call site threads one: `_shared.js`, `mcp/toolDefs.mjs`,
+ * `src/permissionRequest.mjs` and `index.ts` all take the default. Keep it that
+ * way. If a caller ever needs a different roster, that is a change to WHO THE
+ * OWNER IS and belongs in the roster, not in an argument at the call site.
  */
 export function isOwnerId(value, owners = OWNER_IDS) {
   if (!isNonEmptyString(value)) return false;
@@ -195,8 +213,24 @@ export function validateDecision(d, { owners = OWNER_IDS } = {}) {
    * match".
    */
   if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');
-  else if (isNonEmptyString(d.owner_id) && d.created_by !== d.owner_id) {
-    errors.push(`created_by "${d.created_by}" is not the owner "${d.owner_id}": a worker cannot record a decision on the owner's behalf`);
+  else if (!isOwnerId(d.created_by, owners)) {
+    /*
+     * ASKS THE SAME QUESTION OF THE AUTHOR, rather than comparing the two
+     * fields to each other.
+     *
+     * The old form was strict string equality, which meant the anchor's own
+     * alias and case folding could not be used: `owner_id: "DANNY"` with
+     * `created_by: "danny"` was REFUSED, as was `owner_id: "owner"` with
+     * `created_by: "danny"`. On the hosted surface that is not a corner case --
+     * `created_by` is not caller-supplied at all, it is the authenticated
+     * `coordinator_tokens.label`, so any spelling difference between the token
+     * label and the payload's owner_id voided a legitimate decision.
+     *
+     * Both fields now have to name the owner, which is the actual requirement.
+     * Two spellings of the owner are the same person, and a validity check that
+     * turns on which one was typed is a trap rather than a control.
+     */
+    errors.push(`created_by "${d.created_by}" is not the owner: a worker cannot record a decision on the owner's behalf`);
   }
 
   if (!isNonEmptyString(d.created_at)) errors.push('created_at is required');
@@ -242,17 +276,44 @@ export function createDecision({
 export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('activeDecisions requires an array');
 
-  const valid = rows.filter((d) => validateDecision(d, { owners }).ok);
-  const notRevoked = valid.filter((d) => !d.revoked_at);
-
   // Only a live decision can supersede. Otherwise revoking a replacement would
   // leave the thing it replaced dead too, and the builder would be governed by
   // nothing while the ledger showed two records.
+  const present = rows.filter((d) => isPlainObject(d) && !d.revoked_at);
+
+  /*
+   * SUPERSESSION IS COMPUTED FROM EVERY SURVIVING ROW, VALID OR NOT, AND THE
+   * ORDER OF THESE TWO STEPS IS THE WHOLE POINT.
+   *
+   * This used to filter for validity FIRST and derive the superseded set from
+   * the survivors. That was harmless while validateDecision only checked
+   * shape -- and became a live escalation the moment it started refusing rows
+   * on IDENTITY. Refusing a row then did two things instead of one: it stopped
+   * that row granting, and it un-superseded whatever the row had replaced.
+   *
+   * Measured: a standing owner DENY recorded under a non-owner name,
+   * superseding an older bridge-wide ALLOW, resolved `denied` before the
+   * identity anchor and `allowed` after it. A refusal handed back a permission.
+   * Found by blind audit; the commit that introduced it claimed the opposite in
+   * its own message.
+   *
+   * SO AN INVALID ROW NEITHER GRANTS NOR REVIVES. It is excluded from the
+   * result, and it still suppresses what it names, so the chain resolves to
+   * nothing and the action goes back to the owner.
+   *
+   * WHY THIS DIRECTION. The alternative lets a refused row restore an ALLOW,
+   * and this one lets a refused row retire one. Both are wrong answers about a
+   * forged record; only the first one GRANTS something. A control that fails
+   * towards "ask the owner" is recoverable, and one that fails towards
+   * "permitted" is the failure this whole file is written against.
+   */
   const superseded = new Set(
-    notRevoked.map((d) => d.supersedes).filter(isNonEmptyString),
+    present.map((d) => d.supersedes).filter(isNonEmptyString),
   );
 
-  return notRevoked.filter((d) => !superseded.has(d.decision_id));
+  const valid = present.filter((d) => validateDecision(d, { owners }).ok);
+
+  return valid.filter((d) => !superseded.has(d.decision_id));
 }
 
 /**
@@ -346,14 +407,29 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
  * statement, author and timestamp are never touched. The history array records
  * the revocation beside the creation.
  */
-export function revokeDecision(d, { at, by, reason = null }) {
+export function revokeDecision(d, { at, by, reason = null }, { owners = OWNER_IDS } = {}) {
   if (!isPlainObject(d)) return { ok: false, errors: ['no such decision'] };
   if (d.revoked_at) return { ok: false, errors: [`decision ${d.decision_id} was already revoked at ${d.revoked_at}`] };
   if (!isNonEmptyString(at) || !isNonEmptyString(by)) {
     return { ok: false, errors: ['revocation requires a timestamp and an author'] };
   }
-  if (isNonEmptyString(d.owner_id) && by !== d.owner_id) {
-    return { ok: false, errors: [`"${by}" is not the owner "${d.owner_id}": a worker cannot revoke the owner's decision`] };
+  /*
+   * ANCHORED, FOR THE SAME REASON validateDecision IS.
+   *
+   * This used to read `by !== d.owner_id` -- the identical
+   * compare-the-record-against-itself shape, five lines below the fix for it,
+   * left standing while the class was declared closed. It let
+   * `{owner_id: "main"}` be revoked by "main", and it was INCONSISTENT with
+   * the recording path once that path started folding aliases: `owner` could
+   * record a decision but not revoke one, and `danny` could not revoke a
+   * decision authored as `owner`.
+   *
+   * Low exploit value on its own -- the records it let a non-owner revoke are
+   * records that are now invalid anyway -- but a member of a class that was
+   * announced as fixed is exactly what this repository keeps being bitten by.
+   */
+  if (!isOwnerId(by, owners)) {
+    return { ok: false, errors: [`"${by}" is not the owner: a worker cannot revoke the owner's decision`] };
   }
   return {
     ok: true,
