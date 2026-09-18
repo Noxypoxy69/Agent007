@@ -174,9 +174,22 @@ export function toolDefs(store) {
         branch: s.git?.branch ?? null, head: s.git?.head ?? null,
         baseSha: s.git?.baseSha ?? null,
         unpushed: s.git?.unpushed ?? null,
-        dirtyFiles: (s.git?.dirty ?? []).length,
-        locksHeld: (s.locks ?? []).map((l) => l.resource),
-        running: (s.processes ?? []).map((p) => p.kind),
+        /*
+         * NULL IS UNKNOWN. `(s.git?.dirty ?? []).length` reports 0 for a
+         * session nobody measured, which is indistinguishable from a clean
+         * tree, and the same for locks and processes. The hosted surface was
+         * corrected for this; the node twin was not, so one connection could
+         * answer `running: []` from list_agents and `processes: null` from
+         * list_active_processes about the same session in the same breath.
+         *
+         * The parity gate compares DECLARATIONS -- descriptions and schemas --
+         * and says so itself, so it was green across this the whole time. Two
+         * tools contradicting each other about one fact is not something a
+         * declaration comparison can see.
+         */
+        dirtyFiles: Array.isArray(s.git?.dirty) ? s.git.dirty.length : null,
+        locksHeld: Array.isArray(s.locks) ? s.locks.map((l) => l.resource) : null,
+        running: Array.isArray(s.processes) ? s.processes.map((p) => p.kind) : null,
         lastSeenAt: s.lastSeenAt,
       }))),
     },

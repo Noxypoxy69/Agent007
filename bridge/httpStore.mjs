@@ -86,9 +86,30 @@ export function createHttpStore(env, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS
         machineLabel: r.machine_label ?? null,
         worktree: r.worktree ?? null,
         git: r.git ?? null,
-        locks: r.locks ?? [],
-        processes: r.processes ?? [],
-        processProbeOk: r.process_probe_ok !== false,
+        /*
+         * NULL IS UNKNOWN AND MUST SURVIVE THE STORE.
+         *
+         * These three used to erase it. `locks ?? []` and `processes ?? []`
+         * turn "nobody looked" into "looked and found none", and
+         * `process_probe_ok !== false` turns NULL into TRUE -- "a probe ran and
+         * found nothing" -- which is the single most confident thing this field
+         * can say and the one case where it is least entitled to.
+         *
+         * bridge/schema.sql derives process_probe_ok from
+         * (s.state ->> 'processProbeOk')::boolean, which is NULL whenever the
+         * key is absent, so this fired on exactly the rows the null contract
+         * exists to mark unknown. The tool contract every caller is handed says
+         * "fields that could not be determined are null, treat null as unknown,
+         * never as zero" -- and this store made that sentence false on the
+         * Cloudflare surface, where bridge/worker.mjs uses createHttpStore.
+         *
+         * The guard added downstream in mcp/toolDefs.mjs could never see a null
+         * because the store had already erased it. Four readers were checked
+         * when the hosted surface was fixed and this one was not among them.
+         */
+        locks: Array.isArray(r.locks) ? r.locks : null,
+        processes: Array.isArray(r.processes) ? r.processes : null,
+        processProbeOk: typeof r.process_probe_ok === 'boolean' ? r.process_probe_ok : null,
         lastSeenAt: r.last_seen_at ?? null,
       }));
     },
