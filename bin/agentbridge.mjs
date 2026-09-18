@@ -2228,7 +2228,7 @@ try {
       // was no non-throwing degrade to restore. (An earlier comment here claimed
       // otherwise; it confused this local run with exec.mjs's non-throwing run.)
       // So this wraps them, and degrades FAIL-SAFE: checkoutHead '' forces a
-      // sha-mismatch refusal, and sourceClean false forces a source-mutated
+      // sha-mismatch refusal, and sourceClean false forces a dirty-source
       // refusal -- matching the after-run re-measure below, which already fails
       // to false. An unreadable tree must not count as clean.
       let checkoutHead = '';
