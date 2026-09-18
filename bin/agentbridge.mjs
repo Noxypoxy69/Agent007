@@ -771,10 +771,13 @@ try {
     if (!files.length) {
       const head = args.head ?? d.head_sha;
       if (!head) { console.error('need --head <sha> or --files'); done(2); }
-      const { run } = await import('../src/exec.mjs');
-      const r = await run('git', ['diff', '--name-only', `${d.base_sha}..${head}`], { cwd: args.repo ?? process.cwd() });
-      if (!r.ok) { console.error(`cannot diff ${d.base_sha}..${head}: ${r.error}`); done(2); }
-      files = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      let diffOut = '';
+      try {
+        diffOut = runGit(['diff', '--name-only', `${d.base_sha}..${head}`], { cwd: args.repo ?? process.cwd() });
+      } catch (e) {
+        console.error(`cannot diff ${d.base_sha}..${head}: ${e?.stderr ?? e?.message ?? e}`); done(2);
+      }
+      files = diffOut.split('\n').map((s) => s.trim()).filter(Boolean);
     }
 
     const result = P.auditChangedPaths(d, files);
@@ -1614,7 +1617,6 @@ try {
     }
 
     const { resolveCommit } = await import('../src/git.mjs');
-    const { run: gitRun } = await import('../src/exec.mjs');
     const cwd = args.repo ?? process.cwd();
 
     const base = await resolveCommit(cwd, args.base);
@@ -1624,9 +1626,13 @@ try {
 
     // The files are COMPUTED from the diff, not listed by the author. A record
     // whose file list is typed is a record that can quietly omit a file.
-    const diff = await gitRun('git', ['diff', '--name-only', `${base.sha}..${head.sha}`], { cwd });
-    if (!diff.ok) { console.error(`error: cannot diff: ${diff.error}`); process.exit(2); }
-    const files = diff.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    let diffOut = '';
+    try {
+      diffOut = runGit(['diff', '--name-only', `${base.sha}..${head.sha}`], { cwd });
+    } catch (e) {
+      console.error(`error: cannot diff: ${e?.stderr ?? e?.message ?? e}`); process.exit(2);
+    }
+    const files = diffOut.split('\n').map((s) => s.trim()).filter(Boolean);
 
     const result = LW.appendLeadWork(rows, {
       work_id: args.id,
@@ -2365,9 +2371,6 @@ try {
      * two agents walking at the same files while describing the work
      * differently. src/completion.mjs owns the second one.
      */
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const run = promisify(execFile);
     const P = await import('../src/priorWork.mjs');
     const C = await import('../src/completion.mjs');
 
@@ -2429,7 +2432,7 @@ try {
     // inherits the lie -- which is precisely why the 65-minute duplication
     // happened. ls-remote cannot be stale.
     try {
-      const { stdout } = await run('git', ['ls-remote', '--heads', 'origin'], { cwd: repo, maxBuffer: 8e6 });
+      const stdout = runGit(['ls-remote', '--heads', 'origin'], { cwd: repo, maxBuffer: 8e6 });
       const heads = stdout.split('\n').map((l) => l.split(/\s+/)).filter((p) => p.length >= 2 && p[1])
         .map(([sha, ref]) => [ref.replace('refs/heads/', ''), sha]);
       /*
@@ -2457,13 +2460,13 @@ try {
       for (const [name, sha] of heads) {
         let subject = '', at = '', merged = false;
         let have = false;
-        try { await run('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: repo }); have = true; } catch { have = false; }
+        try { runGit(['cat-file', '-e', `${sha}^{commit}`], { cwd: repo }); have = true; } catch { have = false; }
         if (have) {
           try {
-            const { stdout: meta } = await run('git', ['log', '-1', '--format=%s%x00%cI', sha], { cwd: repo });
+            const meta = runGit(['log', '-1', '--format=%s%x00%cI', sha], { cwd: repo });
             [subject, at] = meta.split('\x00').map((x) => (x || '').trim());
           } catch (e) { errors.push(`branch ${name}: ${e?.message ?? e}`); }
-          try { await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: repo }); merged = true; }
+          try { runGit(['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: repo }); merged = true; }
           catch { merged = false; }
         }
         /*
@@ -2477,10 +2480,8 @@ try {
         let paths = null;
         if (have && !merged) {
           try {
-            const { stdout: base } = await run('git', ['merge-base', sha, 'HEAD'], { cwd: repo });
-            const { stdout: files } = await run(
-              'git', ['diff', '--name-only', base.trim(), sha], { cwd: repo, maxBuffer: 8e6 },
-            );
+            const base = runGit(['merge-base', sha, 'HEAD'], { cwd: repo });
+            const files = runGit(['diff', '--name-only', base.trim(), sha], { cwd: repo, maxBuffer: 8e6 });
             paths = files.split('\n').map((f) => f.trim()).filter((f) => f !== '');
           } catch (e) {
             pathErrors.push(`paths for ${name}: ${e?.message ?? e}`);
@@ -2493,7 +2494,7 @@ try {
     }
 
     try {
-      const { stdout } = await run('git', ['log', 'HEAD', `--since=${hours} hours ago`, '--format=%h%x00%s%x00%cI'],
+      const stdout = runGit(['log', 'HEAD', `--since=${hours} hours ago`, '--format=%h%x00%s%x00%cI'],
         { cwd: repo, maxBuffer: 32e6 });
       commits = stdout.split('\n').filter((l) => l.trim()).map((l) => {
         const [sha, subject, at] = l.split('\x00');
@@ -2527,10 +2528,11 @@ try {
        * overlap, was itself invisible to it on the run that shipped it.
        */
       try {
-        const [{ stdout: changed }, { stdout: untracked }] = await Promise.all([
-          run('git', ['diff', '--name-only', 'HEAD'], { cwd: repo, maxBuffer: 8e6 }),
-          run('git', ['ls-files', '--others', '--exclude-standard'], { cwd: repo, maxBuffer: 8e6 }),
-        ]);
+        // runGit is synchronous, so these run in sequence rather than the
+        // Promise.all the exec twin allowed. The pair is two cheap local reads;
+        // ordering them costs nothing and keeps every git call on the hardened path.
+        const changed = runGit(['diff', '--name-only', 'HEAD'], { cwd: repo, maxBuffer: 8e6 });
+        const untracked = runGit(['ls-files', '--others', '--exclude-standard'], { cwd: repo, maxBuffer: 8e6 });
         myPaths = [...new Set(
           `${changed}\n${untracked}`.split('\n').map((f) => f.trim()).filter((f) => f !== ''),
         )];
@@ -2664,9 +2666,6 @@ try {
      * This asks the repository instead, because a commit is a side effect and
      * cannot be forgotten the way a heartbeat can.
      */
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const run = promisify(execFile);
     const W = await import('../src/workEvidence.mjs');
 
     const repo = typeof args.repo === 'string' && args.repo.length ? args.repo : process.cwd();
@@ -2694,8 +2693,8 @@ try {
 
     let stdout;
     try {
-      ({ stdout } = await run('git', ['log', '--all', `--since=${hours} hours ago`, `--format=${W.LOG_FORMAT}`],
-        { cwd: repo, maxBuffer: 32 * 1024 * 1024 }));
+      stdout = runGit(['log', '--all', `--since=${hours} hours ago`, `--format=${W.LOG_FORMAT}`],
+        { cwd: repo, maxBuffer: 32 * 1024 * 1024 });
     } catch (e) {
       console.error(`cannot read git history in ${repo}: ${e?.message ?? e}`);
       process.exit(2);
