@@ -77,3 +77,28 @@ supabase/.temp/
 # absolute paths on this machine and encodes what THIS operator has approved.
 # Committing it would hand every clone somebody else@s allow-list.
 .claude/settings.local.json
+
+# ── agent worktree checkouts ────────────────────────────────────────────────
+# Claude Code's own EnterWorktree puts checkouts here. Each one holds a `.git`
+# FILE pointing back at .git/worktrees/<id>, so committing one is never right --
+# git would record it as a gitlink, not the tree.
+#
+# WITHOUT THIS LINE THE STOP GATE DEADLOCKS. `.claude/` is a PREFIX entry in
+# PROTECTED_PATHS (src/guardSession.mjs:47), so an untracked file under it
+# refuses baseline minting -- scripts/claude-stop-gate.mjs:228 names that trap
+# in a comment: "a stray untracked file there blocks minting forever, which is
+# its own outage". The gate offers three remedies, delete / commit / ignore.
+# Deleting is refused by our own shell rail (no route removes a directory from
+# a session) and committing is wrong per above, so ignoring is the only correct
+# one for this path class. Measured 2026-09-17: a stale worktree blocked every
+# turn of session 929bee91 until this landed.
+#
+# WHAT IT COSTS, stated so nobody rediscovers it the hard way: the gate can no
+# longer see untracked content anywhere under here, and a worktree checkout DOES
+# carry a .claude/settings.local.json of its own. The stale one that prompted
+# this held "allow": ["Bash(git push:*)"]. So a permission grant can now sit in
+# this tree unseen by the baseline check. Danny accepted that trade knowingly
+# on 2026-09-17, preferring it to a permanent gate outage. If worktree-carried
+# grants ever need watching, that is a job for a check that reads them, not for
+# un-ignoring this -- see CLAUDE.md, a check script beats a comment.
+.claude/worktrees/
