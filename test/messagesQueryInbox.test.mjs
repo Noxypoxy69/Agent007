@@ -144,13 +144,44 @@ test('AN UNDERSCORE IS A LITERAL, not an ilike wildcard', () => {
   assert.deepEqual(asked(messagesQuery({ to_agent: 'code_b' })), ['code_b'], 'and means that name');
 });
 
-test('no recipient means no clause, not a clause matching nothing', () => {
-  for (const blank of [undefined, null, '', '   ', 42, {}]) {
-    assert.equal(hasFilter(messagesQuery({ to_agent: blank })), false,
-      `${JSON.stringify(blank)} must emit no filter`);
+test('ABSENT means no filter; SUPPLIED-AND-UNUSABLE is refused', () => {
+  /*
+   * The distinction the first version of this missed. Omitting to_agent is a
+   * legitimate read -- the whole log is what a reader without an inbox wants --
+   * so undefined and null still pass through unfiltered.
+   *
+   * But a recipient that was SUPPLIED and cannot be parsed used to produce a
+   * query with no recipient clause at all, which means list_messages answered
+   * with the newest 50 messages on the bridge. Measured live: to_agent of three
+   * spaces returned other agents' mail. A caller polling its own inbox with a
+   * malformed id got a populated, plausible, WRONG answer.
+   */
+  for (const absent of [undefined, null]) {
+    assert.equal(hasFilter(messagesQuery({ to_agent: absent })), false,
+      `${JSON.stringify(absent)} means no inbox was asked for`);
+  }
+  for (const unusable of ['', '   ', 42, {}, [], true]) {
+    assert.throws(
+      () => messagesQuery({ to_agent: unusable }),
+      /not a usable recipient/,
+      `${JSON.stringify(unusable)} must be refused, not silently unfiltered`,
+    );
   }
   assert.match(messagesQuery({ from_agent: 'fixer' }), /from_agent=eq\.fixer/);
   assert.match(messagesQuery({ to_agent: 'code-b', type: 'blocker' }), /type=eq\.blocker/);
+});
+
+test('THE CONTROL: the refusal is about the RECIPIENT, not about blank filters generally', () => {
+  /*
+   * from_agent and task_id keep the old "blank means omit" behaviour, because
+   * omitting them is not dangerous: they narrow a read that is already scoped.
+   * Only to_agent carries the "this is MY mail" meaning that makes an unfiltered
+   * answer a wrong one rather than a broad one.
+   */
+  const q = messagesQuery({ from_agent: '', task_id: null, type: '' });
+  assert.ok(!q.includes('from_agent=eq.'), q);
+  assert.ok(!q.includes('task_id=eq.'), q);
+  assert.ok(!q.includes('type=eq.'), q);
 });
 
 test('the rest of the query is unchanged: select, order, limit and since', () => {

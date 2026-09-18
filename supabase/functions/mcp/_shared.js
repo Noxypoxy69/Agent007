@@ -2311,6 +2311,37 @@ export function messagesQuery({ to_agent, from_agent, task_id, type, since, limi
     : `to_agent.eq.${encodeURIComponent(String(v))}`);
 
   const inbox = inboxNames(to_agent);
+
+  /*
+   * A RECIPIENT THAT CANNOT BE PARSED IS A REFUSAL, NOT "NO FILTER".
+   *
+   * inboxNames returns [] for anything that is not a non-empty string, and the
+   * branches below only push a clause when it returned names. So a blank or
+   * non-string to_agent silently produced a query with NO recipient filter at
+   * all, and list_messages answered with the newest 50 messages on the bridge.
+   *
+   * Measured live 2026-09-18: list_messages with to_agent of three spaces
+   * returned other agents' mail. A caller polling its own inbox with a
+   * malformed id got a populated, plausible, WRONG answer -- the same confident
+   * shape as the alias bug, arriving from the opposite direction. There it
+   * returned nothing and meant "no mail"; here it returns everything and means
+   * "your mail".
+   *
+   * ABSENT IS STILL ABSENT. Omitting to_agent is a legitimate read -- the whole
+   * coordination log is what a reader without an inbox wants -- so undefined and
+   * null pass through unfiltered exactly as before. What is refused is a value
+   * that was SUPPLIED and cannot be used.
+   *
+   * This mirrors `since` twenty lines below, which throws on a timestamp it
+   * cannot parse for the same stated reason: silently dropping the filter
+   * "would return the whole recent log to a caller that asked for a slice".
+   * That argument was already written down here; it simply was not applied to
+   * the recipient.
+   */
+  if (to_agent !== undefined && to_agent !== null && inbox.length === 0) {
+    throw new Error(`to_agent is not a usable recipient: ${JSON.stringify(to_agent)}`);
+  }
+
   if (inbox.length === 1) {
     q.push(clause(inbox[0]).replace(/^to_agent\./, 'to_agent='));
   } else if (inbox.length > 1) {

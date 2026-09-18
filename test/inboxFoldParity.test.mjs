@@ -209,10 +209,13 @@ test('a seat name containing a dot survives the or group', () => {
   assert.ok(q.length > 0);
 });
 
-test('no recipient means no clause, not a clause matching nothing', () => {
-  for (const blank of [undefined, null, '', '   ', 42, {}]) {
-    assert.equal(hasFilter(messagesQuery({ to_agent: blank })), false,
-      `${JSON.stringify(blank)} must emit no filter`);
+test('absent means no filter; supplied-and-unusable is refused', () => {
+  for (const absent of [undefined, null]) {
+    assert.equal(hasFilter(messagesQuery({ to_agent: absent })), false,
+      `${JSON.stringify(absent)} means no inbox was asked for`);
+  }
+  for (const unusable of ['', '   ', 42, {}]) {
+    assert.throws(() => messagesQuery({ to_agent: unusable }), /not a usable recipient/);
   }
 });
 
