@@ -2,20 +2,26 @@
  * The PULL half: how the query is BUILT.
  *
  * Semantic parity between the push and pull paths lives in
- * test/inboxFoldParity.test.mjs, which is the gate that fails if the two ever
- * disagree again. This file owns the narrower question of whether the query
- * string itself is well formed and safe: escaping, separators, blanks, and the
- * other filters being left alone.
+ * test/inboxFoldParity.test.mjs, which fails if the two ever disagree. This file
+ * owns the narrower question of whether the query string itself is well formed
+ * and safe: the operator chosen, escaping, quoting, blanks, and the other
+ * filters being left alone.
  *
- * THE OPERATOR IS ilike, NOT eq, AND THE REASON IS THE WHOLE BUG. eq and in(...)
- * compare exactly, Postgres comparison is case-sensitive, and a message stored
- * as "B" was therefore delivered by the long poll and invisible here. Half a
- * contract landing green. See e30d0b8.
+ * TWO OPERATORS, CHOSEN BY THE SHAPE OF THE NAME. A real seat matches AGENT_ID
+ * and can carry no ilike metacharacter except `_`, which is escaped, so it is
+ * matched with ilike and folds case. Anything that cannot be a seat name is
+ * matched with eq, where no pattern language exists.
  *
- * WHY THIS IS A SEPARATE FILE FROM test/listMessages.test.mjs. That one already
- * covers messagesQuery and was present at session start, so it is a baseline
- * test the Stop gate hashes; editing it is drift. Its escaping assertion is
- * re-asserted here against the new operator, so the contract keeps a voice.
+ * That split exists because the first version escaped the characters I thought
+ * of -- backslash, percent, underscore -- and PostgREST also treats `*` as an
+ * alias for `%`. `to_agent=ilike.*` was the pattern `%` and matched every row.
+ * Escaping one more character would have been rule 8; routing on the shape is
+ * the repair.
+ *
+ * WHY THIS IS A SEPARATE FILE FROM test/listMessages.test.mjs. That one covers
+ * messagesQuery and was present at session start, so it is a baseline test the
+ * Stop gate hashes; editing it is drift. Its escaping assertion is re-asserted
+ * here against the current operator so the contract keeps a voice.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,90 +29,119 @@ import assert from 'node:assert/strict';
 import { messagesQuery } from '../supabase/functions/mcp/_shared.js';
 import { inboxNames } from '../src/coordination.mjs';
 
-/** Every ilike pattern the query asks for, raw (still percent-encoded). */
-function rawPatterns(q) {
+/**
+ * Each to_agent constraint as {op, raw}. Group values are quoted; the quotes are
+ * part of the wire format and are stripped here, not by the caller.
+ *
+ * IT REFUSES TO INVENT A CLAUSE. An earlier version let callers destructure an
+ * empty result and hand `undefined` to decodeURIComponent, which returns the
+ * STRING 'undefined' rather than throwing -- so a test asserting on an absent
+ * pattern failed on a regex mismatch instead of reporting the absence. Found by
+ * audit. Callers use `only()` when they mean "exactly one".
+ */
+function clausesOf(q) {
   const out = [];
-  const single = /(?:^|[?&])to_agent=ilike\.([^&]*)/.exec(q);
-  if (single) out.push(single[1]);
+  const single = /(?:^|[?&])to_agent=(eq|ilike)\.([^&]*)/.exec(q);
+  if (single) out.push({ op: single[1], raw: single[2] });
   const group = /(?:^|[?&])or=\(([^)]*)\)/.exec(q);
   if (group) {
     for (const part of group[1].split(',')) {
-      const m = /^to_agent\.ilike\.(.*)$/.exec(part);
-      if (m) out.push(m[1]);
+      const m = /^to_agent\.(eq|ilike)\."(.*)"$/.exec(part);
+      if (m) out.push({ op: m[1], raw: m[2] });
     }
   }
   return out;
 }
 
-const decoded = (q) => rawPatterns(q).map((p) => decodeURIComponent(p).replace(/\\([%_\\])/g, '$1'));
+function only(q) {
+  const cs = clausesOf(q);
+  assert.equal(cs.length, 1, `expected exactly one to_agent clause, got ${cs.length} in ${q}`);
+  return cs[0];
+}
 
-/** Is there any to_agent constraint at all? */
-const hasFilter = (q) => /(?:^|[?&])(to_agent=ilike\.|or=\()/.test(q);
+/** The names asked for, decoded and unescaped. */
+const asked = (q) => clausesOf(q).map((c) => decodeURIComponent(c.raw).replace(/\\_/g, '_'));
+
+const hasFilter = (q) => clausesOf(q).length > 0;
 
 test('THE FIX: a seat with more than one name asks for all of them', () => {
   assert.deepEqual(inboxNames('code-b'), ['code-b', 'b'], 'precondition: b is an alias of code-b');
-  assert.deepEqual(decoded(messagesQuery({ to_agent: 'code-b' })), ['code-b', 'b']);
+  assert.deepEqual(asked(messagesQuery({ to_agent: 'code-b' })), ['code-b', 'b']);
 });
 
 test('polling by the alias asks the same question as polling by the id', () => {
-  /*
-   * The symmetry that makes this a fix rather than a second mailbox. Either
-   * spelling must reach the whole seat, or the bug has only moved.
-   */
   assert.equal(messagesQuery({ to_agent: 'b' }), messagesQuery({ to_agent: 'code-b' }));
   assert.equal(messagesQuery({ to_agent: 'CODE-B' }), messagesQuery({ to_agent: 'code-b' }));
-  assert.deepEqual(decoded(messagesQuery({ to_agent: 'b6' })), ['code-a', 'a', 'b6']);
+  assert.deepEqual(asked(messagesQuery({ to_agent: 'b6' })), ['code-a', 'a', 'b6']);
 });
 
-test('THE SEPARATORS STAY LITERAL inside the or group', () => {
+test('THE SEPARATORS STAY LITERAL, and every group value is QUOTED', () => {
   /*
-   * Encoding the whole group would turn its separators into %2C, PostgREST would
-   * read one malformed predicate, and the query would silently match nothing --
-   * the same class of failure as the bug being fixed, arriving through the fix.
+   * Encoding the whole group would turn its separators into %2C and PostgREST
+   * would read one malformed predicate, matching nothing silently.
+   *
+   * The quoting is the other half: AGENT_ID permits `.`, and PostgREST needs a
+   * value containing a reserved character quoted inside an or group. The
+   * in.(...) branch this replaced did quote, so dropping it would have been a
+   * silent regression waiting for the first seat named code.b.
    */
   const q = messagesQuery({ to_agent: 'code-b' });
   const group = /(?:^|[?&])or=\(([^)]*)\)/.exec(q);
   assert.ok(group, 'a multi-name seat must use an or group');
   assert.ok(group[1].includes(','), 'the separator must survive as a literal comma');
   assert.ok(!group[1].includes('%2C'), 'an encoded comma would be part of one predicate');
-  assert.equal(rawPatterns(q).length, 2, 'both names must be asked for');
+  for (const part of group[1].split(',')) {
+    assert.match(part, /^to_agent\.(eq|ilike)\."[^"]*"$/, `group value must be quoted: ${part}`);
+  }
 });
 
-test('A SINGLE NAME USES ilike TOO, and an unknown recipient is one', () => {
+test('A LEGAL SEAT NAME USES ilike, so a single-session seat still folds case', () => {
   /*
-   * The single-name branch used eq, which is case-sensitive, so every unrostered
-   * seat -- fixer among them -- stayed divergent from the push path even after
-   * the multi-name case was folded. Both branches fold now.
+   * The single-name branch used eq at first, which is case-sensitive, so every
+   * unrostered seat -- fixer among them -- stayed divergent from the push path.
    */
   assert.deepEqual(inboxNames('fixer'), ['fixer']);
-  assert.match(messagesQuery({ to_agent: 'fixer' }), /to_agent=ilike\.fixer(&|$)/);
-  assert.deepEqual(decoded(messagesQuery({ to_agent: 'nobody' })), ['nobody']);
+  assert.equal(only(messagesQuery({ to_agent: 'fixer' })).op, 'ilike');
+  assert.deepEqual(asked(messagesQuery({ to_agent: 'nobody' })), ['nobody']);
 });
 
-test('THE ESCAPING CONTRACT SURVIVES THE OPERATOR CHANGE', () => {
+test('A NAME THAT CANNOT BE A SEAT USES eq, where there is no pattern language', () => {
+  /*
+   * The repair for the `*` wildcard. Rather than escaping one more character,
+   * anything outside AGENT_ID's charset is matched exactly. `*` therefore means
+   * the literal string `*`, which addresses nobody.
+   */
+  for (const hostile of ['*', 'C*', 'code-*', '%', 'a_b%c*', 'code-c&select=*&limit=99999']) {
+    const c = only(messagesQuery({ to_agent: hostile }));
+    assert.equal(c.op, 'eq', `${hostile} must not reach the pattern operator`);
+    assert.equal(decodeURIComponent(c.raw), hostile, `${hostile} must mean exactly itself`);
+  }
+});
+
+test('THE ESCAPING CONTRACT SURVIVES, whichever operator is chosen', () => {
   /*
    * Re-asserted from the baseline test rather than trusted, because the operator
-   * moved out from under it. The concern it protects is unchanged: a value
-   * carrying PostgREST operators must not smuggle in another filter.
+   * moved out from under it. The concern is unchanged: a value carrying
+   * PostgREST operators must not smuggle in another filter.
    */
   const q = messagesQuery({ to_agent: 'code-c&select=*&limit=99999' });
   assert.ok(!q.includes('select=*&limit=99999'), 'an injected operator survived');
-  assert.match(q, /to_agent=ilike\.code-c%26select%3D/, 'both & and = must be encoded');
+  assert.match(q, /to_agent=eq\.code-c%26select%3D/, 'both & and = must be encoded');
   assert.match(q, /limit=50/, 'the injected limit must not have replaced the real one');
 });
 
-test('ilike WILDCARDS ARE ESCAPED, so a name cannot widen into another seat', () => {
+test('AN UNDERSCORE IS A LITERAL, not an ilike wildcard', () => {
   /*
-   * The direction that is worse than an empty inbox. AGENT_ID permits _, and
-   * ilike reads _ as "any character", so an unescaped seat named code_b would
-   * also match code-b. A misrouted blocker reads as ordinary traffic.
+   * AGENT_ID permits `_`, so code_b IS a legal seat name and does take the
+   * pattern operator -- which is exactly why it must be escaped. ilike reads an
+   * unescaped `_` as "any character", so it would also match code-b and codeXb.
+   * That is the widening direction: a misrouted blocker reads as ordinary
+   * traffic, while an empty inbox is visibly wrong.
    */
-  const q = messagesQuery({ to_agent: 'a_b%c' });
-  const [raw] = rawPatterns(q);
-  const pattern = decodeURIComponent(raw);
-  assert.match(pattern, /\\_/, 'the underscore must be escaped');
-  assert.match(pattern, /\\%/, 'the percent must be escaped');
-  assert.deepEqual(decoded(q), ['a_b%c'], 'and it still means exactly that name');
+  const c = only(messagesQuery({ to_agent: 'code_b' }));
+  assert.equal(c.op, 'ilike', 'a legal seat name still folds case');
+  assert.match(decodeURIComponent(c.raw), /\\_/, 'the underscore must be escaped');
+  assert.deepEqual(asked(messagesQuery({ to_agent: 'code_b' })), ['code_b'], 'and means that name');
 });
 
 test('no recipient means no clause, not a clause matching nothing', () => {
