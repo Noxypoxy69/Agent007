@@ -66,6 +66,16 @@ const DEFAULT_TOKEN_FILE = path.join(
 const POLL_SECONDS = 600;
 const STALE_WINDOW_SECONDS = 600;
 
+/**
+ * How far ahead of our own clock a cursor may be before it is refused.
+ *
+ * Generous on purpose: the comparison is between the SERVER's clock and this
+ * machine's, and refusing a legitimate cursor re-delivers mail forever, which
+ * is the spin this file exists to stop. Five minutes is far beyond any real
+ * skew and still refuses every implausible value.
+ */
+const CURSOR_SKEW_MS = 5 * 60 * 1000;
+
 const say = (message) => process.stdout.write(`${JSON.stringify({ systemMessage: message })}\n`);
 
 async function readPayload() {
@@ -118,17 +128,49 @@ const readRecord = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'));
  * about reading details; matching `cursor` loosely anywhere in stdout is how a
  * check ends up agreeing with prose instead of data (rule 13).
  */
-export function advanceCursor(prev, stdout) {
+export function advanceCursor(prev, stdout, now = Date.now()) {
   const lines = String(stdout ?? '').split('\n');
   const prevMs = Date.parse(prev);
   let best = prev;
   let bestMs = Number.isFinite(prevMs) ? prevMs : -Infinity;
+
+  /*
+   * A CURSOR IN THE FUTURE IS NEVER LEGITIMATE, AND ACCEPTING ONE IS
+   * UNRECOVERABLE.
+   *
+   * The server's cursor is an event's own created_at, so it is always in the
+   * past. A future value can only arrive by accident or by injection — and
+   * because this function is FORWARD-ONLY by design, once adopted nothing can
+   * ever move past it. The session then polls for events after the year 9999,
+   * finds none, exits 0 quietly, and looks perfectly healthy while receiving
+   * nothing for the rest of its life. There is no recovery short of restarting
+   * the session, and nothing anywhere says what happened.
+   *
+   * THE INJECTION IS REAL, not theoretical. The CLI interpolates event fields
+   * into the lines this function reads. `from` and `type` are closed sets, but
+   * a newline inside a field that is only checked for non-emptiness — task_id
+   * or lane_id — manufactures a genuine `  cursor  <value>` line at column
+   * zero, which is exactly what the anchoring above was built to trust. Found
+   * by blind audit.
+   *
+   * ANCHORING WAS THE WRONG LAYER TO FIX IT AT. It stops prose being mistaken
+   * for data; it cannot stop data being shaped like data. So this adds the
+   * bound that does not depend on where the line came from: a cursor may not be
+   * meaningfully ahead of our own clock.
+   *
+   * THE SKEW ALLOWANCE IS DELIBERATELY GENEROUS. The comparison is between the
+   * SERVER's clock and this machine's, and refusing a legitimate cursor would
+   * re-deliver mail forever — the spin this file exists to stop. Five minutes
+   * is far beyond any real skew and still refuses every implausible value.
+   */
+  const ceiling = now + CURSOR_SKEW_MS;
 
   for (const line of lines) {
     const m = /^\s*cursor\s+(\S+)\s*$/.exec(line);
     if (!m) continue;
     const t = Date.parse(m[1]);
     if (!Number.isFinite(t) || t <= bestMs) continue;
+    if (t > ceiling) continue;
     best = m[1];
     bestMs = t;
   }

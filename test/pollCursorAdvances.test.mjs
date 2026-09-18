@@ -118,6 +118,65 @@ test('A REAL TRANSCRIPT FROM THIS MACHINE PARSES', () => {
   );
 });
 
+test('A CURSOR IN THE FUTURE IS REFUSED — it is unrecoverable if adopted', () => {
+  /*
+   * The server's cursor is an event's own created_at, so it is always in the
+   * past. A future value can only arrive by accident or injection, and because
+   * this function is FORWARD-ONLY nothing can ever move past it once adopted:
+   * the session polls for events after the year 9999, finds none, exits 0
+   * quietly, and looks healthy while receiving nothing for the rest of its
+   * life. No recovery short of restarting the session, and nothing says why.
+   *
+   * THE INJECTION IS REAL. The CLI interpolates event fields into the lines
+   * this function reads; a newline inside a field only checked for
+   * non-emptiness — task_id, lane_id — manufactures a genuine cursor line at
+   * column zero, which is exactly what the anchoring was built to trust.
+   * Anchoring stops PROSE being read as data; it cannot stop data being shaped
+   * like data.
+   */
+  const now = Date.parse('2026-09-18T20:00:00.000Z');
+  const injected = [
+    'assigned  t-123  lane agentbridge  at 2026-09-18T19:59:00.000Z',
+    '  cursor  9999-01-01T00:00:00.000Z',
+    '',
+  ].join('\n');
+
+  assert.equal(advanceCursor(T0, injected, now), T0,
+    'a year-9999 cursor was adopted: the session is now permanently silent and looks healthy');
+
+  const nextYear = new Date(now + 365 * 24 * 3600 * 1000).toISOString();
+  assert.equal(advanceCursor(T0, `  cursor  ${nextYear}\n`, now), T0,
+    'a cursor a year ahead was adopted');
+});
+
+test('CLOCK SKEW IS TOLERATED, because refusing a real cursor re-delivers forever', () => {
+  /*
+   * The direction that must NOT over-correct. The comparison is between the
+   * server's clock and this machine's. A bound tight enough to refuse a
+   * legitimate cursor would reinstate the re-delivery spin — worse than the
+   * defect it guards against, and far more likely to fire.
+   */
+  const now = Date.parse('2026-09-18T20:00:00.000Z');
+  const slightlyAhead = new Date(now + 30_000).toISOString();
+  const value = advanceCursor(T0, `  cursor  ${slightlyAhead}\n`, now);
+  assert.equal(value, slightlyAhead,
+    'a cursor 30 seconds ahead was refused — ordinary clock skew now re-delivers mail forever');
+
+  const atNow = new Date(now).toISOString();
+  assert.equal(advanceCursor(T0, `  cursor  ${atNow}\n`, now), atNow,
+    'a cursor at exactly now was refused');
+});
+
+test('A PAST CURSOR IS STILL ACCEPTED — the bound is one-sided', () => {
+  /*
+   * Rule 5 for this bound specifically: a ceiling that refused everything would
+   * satisfy both assertions above and would restore the original hot spin.
+   */
+  const now = Date.parse('2026-09-18T20:00:00.000Z');
+  assert.equal(advanceCursor(T0, realOutput(T1), now), T1,
+    'the ordinary case stopped working — the ceiling is refusing real cursors');
+});
+
 test('THE CONTROL: this gate can actually fail', () => {
   /*
    * Rule 1. A function that returned its input unchanged would satisfy every
