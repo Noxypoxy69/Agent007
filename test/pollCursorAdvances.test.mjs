@@ -23,7 +23,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { advanceCursor } from '../scripts/bridge-session-poll.mjs';
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const T0 = '2026-09-18T19:00:00.000Z';
 const T1 = '2026-09-18T19:05:00.000Z';
@@ -175,6 +181,64 @@ test('A PAST CURSOR IS STILL ACCEPTED — the bound is one-sided', () => {
   const now = Date.parse('2026-09-18T20:00:00.000Z');
   assert.equal(advanceCursor(T0, realOutput(T1), now), T1,
     'the ordinary case stopped working — the ceiling is refusing real cursors');
+});
+
+/* ── the coupling: what the CLI PRINTS must be what this PARSES ──────────── */
+
+/**
+ * The cursor line's template, taken from `bin/agentbridge.mjs` itself.
+ *
+ * COMMENT-BLANKED FIRST (rule 13). That file explains this line in prose right
+ * beside it, and a check that matched raw source would read its own
+ * documentation as the contract and pass while the code printed something else.
+ */
+function cursorTemplateFromCli() {
+  const src = fs.readFileSync(path.join(REPO, 'bin/agentbridge.mjs'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p) => p + m.slice(p.length).replace(/./g, ' '));
+
+  const m = /console\.log\(\s*`([^`]*\bcursor\b[^`]*)`\s*\)/.exec(src);
+  return m ? m[1] : null;
+}
+
+test('THE CLI\'S OWN CURSOR LINE IS ONE THIS PARSER ACCEPTS', () => {
+  /*
+   * THE HALF OF THE CONTRACT NOBODY PINNED.
+   *
+   * test/waitForWorkCli pins that the CLI prints `cursor` followed by two
+   * spaces. advanceCursor additionally requires the VALUE TO END THE LINE —
+   * an extra requirement that lived only in this regex. A blind audit measured
+   * the cost: appending `  (server)` to the CLI's line was an UNCAUGHT
+   * mutation. advanceCursor silently stops matching, the suite stays green, the
+   * cursor never advances, and the hot spin returns — the exact defect this
+   * whole mechanism was built to fix, reintroduced by a harmless-looking edit
+   * to a log line in a different file.
+   *
+   * So this asserts the coupling directly: render the CLI's real template and
+   * feed it to the real parser. Neither end can move without the other.
+   */
+  const template = cursorTemplateFromCli();
+  assert.ok(template, 'no cursor line found in bin/agentbridge.mjs — this gate is measuring nothing');
+  assert.match(template, /\$\{\s*cursor\s*\}/,
+    `the cursor line no longer interpolates \`cursor\`: ${JSON.stringify(template)}`);
+
+  const rendered = template.replace(/\$\{\s*cursor\s*\}/g, T1);
+  assert.equal(advanceCursor(T0, `${rendered}\n`, Date.parse(T2)), T1,
+    `the CLI prints ${JSON.stringify(rendered)} and advanceCursor does not accept it: the cursor `
+    + 'never advances, and the poll returns to re-asking for every message it has already received');
+});
+
+test('THE CONTROL: the coupling would notice a changed line', () => {
+  /*
+   * Rule 1 for the coupling specifically. If the extraction or the comparison
+   * were inert, the assertion above would pass for any template at all. These
+   * are the two edits the audit found uncaught.
+   */
+  const now = Date.parse(T2);
+  assert.equal(advanceCursor(T0, `  cursor  ${T1}  (server)\n`, now), T0,
+    'a suffixed cursor line was accepted — then the control above cannot detect the suffix either');
+  assert.equal(advanceCursor(T0, `  cursor: ${T1}\n`, now), T0,
+    'a re-punctuated cursor line was accepted');
 });
 
 test('THE CONTROL: this gate can actually fail', () => {
