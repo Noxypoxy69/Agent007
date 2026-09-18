@@ -26,7 +26,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
+import {
+  readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, realpathSync,
+} from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -140,13 +142,63 @@ export function isProtectedRelPath(rel) {
  */
 export function protectedFilesIn(repoRoot) {
   const out = new Set();
+  /*
+   * TERMINATION, AND IT IS NOT OPTIONAL NOW THAT THE WALK DESCENDS WORKTREES.
+   *
+   * The walk used to prune at an exempt directory and never enter a second
+   * checkout, which made it structurally immune to whatever lived in there.
+   * Consulting the matcher removed that immunity, and a directory junction is
+   * ordinary on Windows -- no elevation needed, and pnpm and `npm link` create
+   * them routinely. Measured on a fixture: ONE junction under the worktrees
+   * directory walked 255 entries to depth 191 and stopped only because Windows
+   * raised ELOOP at its reparse limit, which is the operating system halting it
+   * rather than this code. TWO sibling junctions gave branching factor two to
+   * that depth and did not terminate at all -- killed at 60s, then at 600s.
+   *
+   * buildSnapshot and protectedDrift both call this, so that is every
+   * SessionStart and every Stop hanging, on a gate whose whole budget is 420s.
+   * A guard that hangs is a guard somebody switches off, which loses every
+   * layer at once -- rule 19, arrived at the expensive way.
+   *
+   * The visited set is keyed on REALPATH, so a cycle closes the first time it
+   * revisits a real directory. That gives provable termination rather than a
+   * bound somebody guessed: the set of real directories is finite and each is
+   * entered at most once. A depth cap was the obvious alternative and is worse,
+   * because a cap silently truncates coverage and looks identical to a clean
+   * sweep -- the shape this whole file exists to avoid.
+   *
+   * ONE ACCEPTED CONSEQUENCE, stated rather than discovered later: if a real
+   * directory is reachable by two protected spellings, only the first is
+   * recorded. The bytes are identical either way, so nothing goes unhashed;
+   * what is lost is the second NAME for it.
+   */
+  const seenDirs = new Set();
   for (const entry of PROTECTED_PATHS) {
     if (!entry.endsWith('/')) { out.add(entry); continue; }
     const base = path.join(repoRoot, entry);
     const visit = (dir) => {
+      /*
+       * Resolved BEFORE the read, so a junction pointing at an ancestor is
+       * caught on entry rather than after it has already listed the directory.
+       * An unresolvable path is not walked: unknown is not clean, and it cannot
+       * be proven acyclic.
+       */
+      let real;
+      try { real = realpathSync(dir); } catch { return; }
+      if (seenDirs.has(real)) return;
+      seenDirs.add(real);
       let entries = [];
       try { entries = readdirSync(dir); } catch { return; }
       for (const e of entries.sort()) {
+        /*
+         * PRUNED BY NAME, which is the remedy the previous comment named for
+         * slowness and which is now load-bearing for cost rather than for
+         * correctness -- the visited set is what guarantees termination. No
+         * entry in PROTECTED_PATHS lives under either of these, so pruning them
+         * cannot lose coverage; that is asserted by the LOST=0 check rather
+         * than assumed.
+         */
+        if (e === 'node_modules' || e === '.git') continue;
         const abs = path.join(dir, e);
         let st;
         try { st = statSync(abs); } catch { continue; }
