@@ -22,7 +22,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -114,4 +114,81 @@ test('unknown is not clean: a tree git cannot describe does not get a baseline',
   assert.doesNotMatch(r.systemMessage ?? '', /initialised/, 'no baseline from an undescribable tree');
   assert.match(r.systemMessage ?? '', /NOT replaced/);
   assert.equal(stop(env, 'A').decision, 'block', 'and Stop refuses rather than approving the unknown');
+});
+
+/* ============================================================================
+ * THE SAME BYPASS, ARRIVING CLEAN. a24d499 closed the DIRTY route and not this.
+ *
+ * The test above damages the tree by writing the file, so the tree is dirty
+ * against HEAD and the new session's baseline check refuses. Damage that arrives
+ * by FORCED CHECKOUT is committed on the branch it came from, so the tree is
+ * CLEAN against HEAD and that check sees nothing to refuse.
+ *
+ * RUN FOR REAL, 2026-09-18, in a throwaway clone at 1489931 with an isolated
+ * AGENTBRIDGE_HOME -- the shipped hook binary, not a reconstruction:
+ *
+ *   session A --session-start        baseline minted, guard sha 26b7c207
+ *   git checkout --force weak        guard sha 2f3c6169, TREE CLEAN, 0 entries
+ *   session A protectedDrift         1 drift: src/claudeGuard.mjs   (sees it)
+ *   session B --session-start        DID NOT REFUSE. Baseline minted.
+ *   session B protectedDrift         0. Clean, and clean permanently after.
+ *   rm src/claudeGuard.mjs           allowed by the guard B adopted
+ *
+ * This is the residual already named at guardSession.mjs 176-200, not a new
+ * hole, and it must not be reported as one. What the real run adds is that the
+ * stated mitigation -- that reviewing the commit catches it -- assumes the
+ * commit was authored here and passed under someone's eyes. A forced checkout
+ * imports another branch's commit wholesale. There is no review event in the
+ * session that adopts it, so the mitigation and the delivery route never meet.
+ *
+ * The rail now refuses all three forced-checkout spellings, which closes the
+ * DELIVERY half only. shellAllowlist.mjs's own header says it is a rail and not
+ * a boundary: a forced checkout from a terminal, an IDE or any non-Bash path
+ * still lands, and the minting below still adopts it. The fix belongs in
+ * --session-start, which is why this test demands it there.
+ *
+ * EXPECTED RED until that lands. It asserts what the guard SHOULD do. Inverting
+ * it to match current behaviour would be asserting that a vulnerability is
+ * correct, which is the one move CLAUDE.md names as never acceptable.
+ * ==========================================================================*/
+
+test('DEMAND (expected red): a new session must not baseline damage that arrived by forced checkout', (t) => {
+  const env = guardedRepo(t);
+  const git = (...a) => execFileSync('git', a, { cwd: env.root, stdio: 'ignore' });
+
+  /* POSITIVE CONTROL FIRST, so a refusal below cannot pass for the wrong reason. */
+  assert.match(sessionStart(env, 'A').systemMessage ?? '', /initialised/, 'control: a clean tree baselines');
+  assert.deepEqual(stop(env, 'A'), {}, 'control: an undamaged session is approved');
+
+  /* The damage is COMMITTED on another branch, exactly as a real one would be. */
+  const base = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'],
+    { cwd: env.root, encoding: 'utf8' }).trim();
+  git('checkout', '-q', '-b', 'weak');
+  writeFileSync(path.join(env.root, '.claude', 'settings.json'), '{"hooks":{"disableAllHooks":true}}\n');
+  git('add', '-A'); git('commit', '-qm', 'weaken the controls on this branch');
+  git('checkout', '-q', base);
+
+  /* THE DELIVERY ROUTE: a forced checkout, which is how the damage arrives
+   * without ever being dirty. */
+  git('checkout', '--force', 'weak');
+
+  const settings = readFileSync(path.join(env.root, '.claude', 'settings.json'), 'utf8');
+  assert.match(settings, /disableAllHooks":true/, 'precondition: the controls really are damaged now');
+  assert.equal(
+    execFileSync('git', ['status', '--porcelain'], { cwd: env.root, encoding: 'utf8' }).trim(),
+    '',
+    'precondition: and the tree is CLEAN, which is the whole point -- the dirty check cannot see this',
+  );
+
+  /* Session A still catches it. The baseline it holds predates the swap. */
+  assert.equal(stop(env, 'A').decision, 'block', 'the session that was already open still blocks');
+
+  /* THE DEMAND. Measured behaviour today: mints, and Stop returns {}. */
+  const fresh = sessionStart(env, 'B');
+  assert.doesNotMatch(fresh.systemMessage ?? '', /initialised/,
+    'a new session must not mint a baseline over controls that arrived damaged by forced checkout');
+
+  const verdict = stop(env, 'B');
+  assert.equal(verdict.decision, 'block',
+    'and the new session must not be approved either -- otherwise the tree reads clean permanently');
 });
