@@ -671,56 +671,55 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * nothing -- every remaining non-flag token still goes through mayExecute,
      * which is also what removes the option-value laundering below.
      */
-    const isFlag = (t) => t.startsWith('-');
-    const operands = tokens.slice(1).filter((t) => !isFlag(t));
     /*
-     * A SUBCOMMAND IS NOT A SCRIPT, AND JUDGING EVERY OPERAND BROKE THE CLI.
+     * AN ALLOWLIST OF FLAGS, BECAUSE ENUMERATING THE BAD ONES LOST THREE TIMES.
      *
-     * `node bin/agentbridge.mjs status` carries two operands. The second is an
-     * argument to the program, not something node executes, and refusing it
-     * killed every command in this repository -- status, check-first,
-     * register-session, observe-sha. That is the outage I said twice I would not
-     * ship, caught here by writing the expectation row down and finding my own
-     * row was wrong.
+     * Round 1: `node <anything>` was allowed outright.
+     * Round 2: I exempted the line when `--test` appeared anywhere, and the
+     *          exemption became the bypass -- `node helper.mjs --test`.
+     * Round 3: I judged operands, and `--import=./pwn.mjs` walked past because
+     *          it starts with a dash, so my own isFlag stripped it out before
+     *          anything looked at it. The header I wrote said "EVERY NON-FLAG
+     *          TOKEN IS JUDGED. NOTHING IS EXEMPT" while every payload-bearing
+     *          flag token was exempt. Also live: --eval=, --require=,
+     *          --experimental-loader=, and -r= -- and --eval= needs no script
+     *          argument at all.
      *
-     * So the classification is by SHAPE ON DISK, not by position:
-     *   'inherited'      the repository shipped it; node may run it
-     *   'untracked-file' a real file this session could have written; never
-     *   anything else    not a file at all -- a subcommand, a topic string, a
-     *                    number -- which node cannot execute and which is none
-     *                    of this gate's business
+     * That is the same loop this file's header opens with: "Every round closed
+     * the reported instances and the next round produced new ones in minutes."
+     * node's flag surface is open-ended and grows every release, so a denylist
+     * of dangerous flags cannot be finished. A FOURTH enumeration would be the
+     * same mistake with a longer regex.
      *
-     * The first operand must be inherited, because that is the program. No LATER
-     * operand may be an untracked file, because that is how an option value
-     * launders the real script past the first check:
-     * `node --title bin/agentbridge.mjs helper.mjs` puts a tracked path first
-     * and the payload second. `status` is not a file and passes; `helper.mjs`
-     * is one and does not.
+     * So the question becomes what shape is KNOWN safe. Exactly one flag is
+     * permitted and it carries no value; every other flag is refused, including
+     * ones that do not exist yet. An unknown flag is not assumed harmless --
+     * that assumption is what each of the three rounds above was made of.
+     *
+     * WITH NO VALUE-TAKING FLAG PERMITTED, operands[0] is unambiguously the
+     * program. That also retires the "no later operand may be an untracked
+     * file" rule, which was there only to stop an option value laundering the
+     * script -- and which refused ordinary work: passing a file you just created
+     * to a repository tool, `node bin/agentbridge.mjs check-first notes.txt`,
+     * was denied even though node never executes it. Arguments are arguments.
      */
-    /*
-     * ALL OPERANDS, NOT THE FIRST ONE. Taking the first non-flag token let an
-     * option VALUE stand in for the program: node options that take a separate
-     * value put that value first, so `node --title bin/agentbridge.mjs helper.mjs`
-     * judged the tracked path and ran the untracked script behind it. Measured.
-     * Judging every operand costs a false refusal on an option value that is not
-     * a path, which is the safe direction and is visible when it happens.
-     */
-    const program = operands[0];
+    const NODE_PERMITTED_FLAG = /^--test$/;
+    const rejectedFlag = tokens.slice(1).find((t) => t.startsWith('-') && !NODE_PERMITTED_FLAG.test(t));
+    if (rejectedFlag) {
+      return {
+        allowed: false,
+        reason: `"${rejectedFlag}" is not an approved node flag. node flags can carry code or a file `
+          + '(--eval=, --import=, --require=, --experimental-loader=), so this accepts one known shape '
+          + 'rather than trying to list the dangerous ones -- an unknown flag is refused, not assumed safe',
+      };
+    }
+    const program = tokens.slice(1).find((t) => !t.startsWith('-'));
     if (program && mayExecute(program) !== 'inherited') {
       return {
         allowed: false,
         reason: `"${program}" is not part of the repository this session inherited, so running it would `
           + 'execute code this session wrote -- which is how a guard gets disarmed in two calls. '
           + 'Commit it first, or run it outside the repository',
-      };
-    }
-    const smuggled = operands.slice(1).find((t) => mayExecute(t) === 'untracked-file');
-    if (smuggled) {
-      return {
-        allowed: false,
-        reason: `"${smuggled}" is a file this session could have written, passed where an option value `
-          + 'or argument would sit. node options that take a separate value can push the real script '
-          + 'past a check that only reads the first operand, so no argument may be an untracked file',
       };
     }
     return { allowed: true };

@@ -422,6 +422,42 @@ test('--test DOES NOT EXEMPT THE LINE, which is how the first fix was bypassed',
   assert.equal(nodeVerdict('node -r ./helper.mjs --test'), false);
 });
 
+test('A FLAG THAT CARRIES CODE OR A FILE IS REFUSED, INCLUDING ONES THAT DO NOT EXIST YET', () => {
+  /*
+   * Round three of the same bypass. `--import=./pwn.mjs` starts with a dash, so
+   * the operand filter stripped it out before anything judged it -- while the
+   * comment above that filter claimed nothing was exempt. --eval= needs no
+   * script argument at all. Measured executing a payload end to end.
+   *
+   * The repair is an ALLOWLIST of flags rather than a fourth attempt at listing
+   * the dangerous ones, because node's flag surface grows every release. These
+   * assertions are examples of a closed class, not the class itself: an unknown
+   * flag is refused, which is what makes the list finite.
+   */
+  for (const cmd of [
+    'node --import=./pwn.mjs bin/agentbridge.mjs status',
+    'node --eval=1+1',
+    'node --require=./helper.cjs bin/agentbridge.mjs',
+    'node --experimental-loader=./pwn.mjs bin/agentbridge.mjs',
+    'node -r=./helper.cjs bin/agentbridge.mjs',
+    'node --watch bin/agentbridge.mjs',
+    'node --a-flag-invented-after-this-was-written bin/agentbridge.mjs',
+  ]) {
+    assert.equal(nodeVerdict(cmd), false, `ALLOWED: ${cmd}`);
+  }
+});
+
+test('ARGUMENTS ARE ARGUMENTS: an untracked file passed to a repo tool is not execution', () => {
+  /*
+   * The previous fix refused any untracked file in a later operand, to stop an
+   * option value laundering the script. With no value-taking flag permitted the
+   * program is unambiguous, so that rule was retired -- it had been refusing
+   * ordinary work: handing a file you just created to a repository tool.
+   */
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs check-first notes.txt'), true);
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs observe-sha README.md'), true);
+});
+
 test('an option VALUE cannot launder the real script past the check', () => {
   /*
    * node options taking a separate value put that value first, so reading only
