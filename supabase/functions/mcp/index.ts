@@ -6,7 +6,8 @@ import {
   // are simply no longer how this file writes those two transitions.
   toolDefs, INSTRUCTIONS, canAssign, validateMessage, negotiateProtocol,
   messagesQuery, canReturn, canAccept, acceptRecord, canCancel, cancelRecord,
-  eventsFor, nextCursor, proposeWork, canConfirm, reconcileProposals, supervisoryReport,
+  eventsFor, nextCursor, proposeWork, canConfirm, reconcileProposals, decideOpenReadTruncation,
+  supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
@@ -73,6 +74,28 @@ const restHeaders = (extra = {}) => ({
   accept: 'application/json',
   ...extra,
 });
+
+/*
+ * THE COUNTED READ. `get` throws the response away and returns only rows, which
+ * is why the open-set read had to guess at truncation from row count. This keeps
+ * the total PostgREST reports in Content-Range for `Prefer: count=exact`.
+ *
+ * A missing or unparseable header yields total null, and null is treated as
+ * UNSAFE by decideOpenReadTruncation rather than as complete.
+ */
+async function getCounted(pathAndQuery) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+    headers: restHeaders({ prefer: 'count=exact' }),
+  });
+  if (!res.ok) throw new Error(`supabase-read-failed:${res.status}`);
+  const rows = await res.json();
+  if (!Array.isArray(rows)) throw new Error('supabase-read-failed:not-an-array');
+  // Content-Range is `0-999/5000`, or `*/0` for an empty set. Anything else is null.
+  const raw = res.headers.get('content-range') ?? '';
+  const after = raw.split('/')[1] ?? '';
+  const total = /^\d+$/.test(after) ? Number.parseInt(after, 10) : null;
+  return { rows, total };
+}
 
 async function get(pathAndQuery) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, { headers: restHeaders() });
@@ -1825,14 +1848,23 @@ Deno.serve(async (request) => {
      * through `replaceAll`.
      */
     const OPEN_READ_LIMIT = 1000;
-    const openNow = await get(
+    const { rows: openNow, total: openTotal } = await getCounted(
       `proposals?select=*&state=eq.open&order=prepared_at.asc&limit=${OPEN_READ_LIMIT}`,
     );
+    /*
+     * THE DECISION IS MADE IN src/dispatch.mjs, WHICH THE SUITE CAN IMPORT.
+     * It was made here, as `openNow.length >= OPEN_READ_LIMIT`, and that is
+     * wrong whenever the server caps below the limit asked for -- PostgREST
+     * returns min(limit, db-max-rows). This half keeps only the observation.
+     */
+    const truncation = decideOpenReadTruncation({
+      returned: openNow.length, total: openTotal, limit: OPEN_READ_LIMIT,
+    });
     const plan = reconcileProposals({
       open: openNow,
       fresh: proposals,
       now,
-      openTruncated: openNow.length >= OPEN_READ_LIMIT,
+      openTruncated: truncation.truncated,
     });
 
     /*

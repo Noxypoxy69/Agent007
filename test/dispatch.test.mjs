@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  proposeWork, canConfirm, supervisoryReport, reconcileProposals, proposalsMatch,
+  proposeWork, canConfirm, supervisoryReport, reconcileProposals, decideOpenReadTruncation, proposalsMatch,
   PROPOSAL_STALE_AFTER_MS, PROPOSAL_KINDS,
 } from '../src/dispatch.mjs';
 
@@ -456,4 +456,75 @@ test('THE COMPLETE-READ PLAN SAYS SO, SO THE CALLER CANNOT CONFUSE THE TWO', () 
   const plan = reconcileProposals({ open: [openRow()], fresh: [freshRow()], now: NOW });
   assert.equal(plan.replaceAll, false, 'a complete read did not state that it was complete');
   assert.deepEqual(plan.reaffirm, ['p-1']);
+});
+
+/* ============================================================================
+ * TRUNCATION IS DECIDED FROM A COUNT THE SERVER REPORTS, NOT FROM ROW COUNT.
+ *
+ * reconcileProposals correctly refuses to reconcile a partial set. It was fed by
+ * a guess made in supabase/functions/mcp/index.ts -- `rows.length >= limit` --
+ * in a file the suite cannot import, so the one line deciding whether the guard
+ * ever engages had no coverage at all. These tests give it some.
+ *
+ * db-max-rows measured on this project 2026-09-18: absent from every role
+ * config and from pg_settings, so the platform default applies.
+ * ==========================================================================*/
+
+test('THE BUG: a server capping below the requested limit reads as complete under row-count', () => {
+  /*
+   * PostgREST returns min(limit, db-max-rows). Cap of 200, limit of 1000: 200
+   * rows come back out of 5000. The old test, `returned >= limit`, is 200 >= 1000
+   * -- false -- so a partial set reconciles believing itself whole, which is the
+   * precise bug reconcileProposals exists to prevent.
+   */
+  assert.equal(200 >= 1000, false, 'the old heuristic calls this complete');
+  const d = decideOpenReadTruncation({ returned: 200, total: 5000, limit: 1000 });
+  assert.equal(d.truncated, true, 'and the count says otherwise');
+  assert.match(d.reason, /5000 rows and the read returned 200/);
+});
+
+test('THE OBVIOUS REPAIR IS ALSO WRONG, at exactly the default configuration', () => {
+  /*
+   * "Ask for limit+1 and treat length > limit as truncated" fails when the cap
+   * equals the limit: asking 1001 against a cap of 1000 returns 1000, and
+   * 1000 > 1000 is false. A 1000-row slice of a 5000-row set reads as complete.
+   * Recorded as a test so nobody re-proposes it.
+   */
+  assert.equal(1000 > 1000, false, 'the limit+1 repair calls this complete');
+  assert.equal(
+    decideOpenReadTruncation({ returned: 1000, total: 5000, limit: 1000 }).truncated,
+    true,
+    'reading the count is not fooled by the cap coinciding with the limit',
+  );
+});
+
+test('a full page that is genuinely the whole set is NOT truncated', () => {
+  /*
+   * The old heuristic said truncated here and degraded to replacing the set --
+   * a false positive that brought back the churn this branch removes, every
+   * time the open set happened to be exactly the limit.
+   */
+  assert.equal(1000 >= 1000, true, 'the old heuristic calls this truncated');
+  assert.equal(decideOpenReadTruncation({ returned: 1000, total: 1000, limit: 1000 }).truncated, false);
+});
+
+test('an unknown count is UNSAFE, not assumed complete', () => {
+  /*
+   * With no count there is no way to tell a whole set from one the server
+   * capped. Fail closed: degrade to replacing the set, which is noisy, visible,
+   * and was the behaviour before this branch.
+   */
+  const d = decideOpenReadTruncation({ returned: 200, total: null, limit: 1000 });
+  assert.equal(d.truncated, true);
+  assert.match(d.reason, /no row count/);
+});
+
+test('an empty open set is complete, not truncated', () => {
+  assert.equal(decideOpenReadTruncation({ returned: 0, total: 0, limit: 1000 }).truncated, false);
+});
+
+test('unusable inputs throw rather than defaulting to a verdict', () => {
+  assert.throws(() => decideOpenReadTruncation({ returned: -1, total: 0, limit: 10 }), TypeError);
+  assert.throws(() => decideOpenReadTruncation({ returned: 1, total: 0, limit: 0 }), TypeError);
+  assert.throws(() => decideOpenReadTruncation({ returned: 1, total: 'lots', limit: 10 }), TypeError);
 });

@@ -1996,6 +1996,63 @@ export function proposalsMatch(a, b) {
  * spared; its clock is reset, and a test asserts the reset rather than trusting
  * the caller to remember.
  */
+/*
+ * WHETHER THE OPEN READ WAS TRUNCATED IS A DECISION, SO IT LIVES HERE.
+ *
+ * reconcileProposals already refuses to reconcile a partial set. The refusal was
+ * sound and it was fed by a guess: the caller computed truncation as
+ * `rows.length >= limit`, in a file the suite cannot import, so nothing could
+ * test the one line that decides whether the guard ever engages.
+ *
+ * THE GUESS IS WRONG WHENEVER THE SERVER CAPS BELOW THE LIMIT WE ASKED FOR.
+ * PostgREST returns min(limit, db-max-rows). With db-max-rows below the
+ * requested limit the response is capped there, `length >= limit` is never true,
+ * and a partial set reconciles while believing itself complete -- the exact bug
+ * reconcileProposals exists to prevent.
+ *
+ * Measured on this project 2026-09-18: db-max-rows is set in no role config and
+ * appears in no pg_settings row, so it is the platform default, documented as
+ * 1000, which happens to equal the limit the caller requests. The current code
+ * is therefore correct BY COINCIDENCE and stops being correct the moment anyone
+ * lowers Max rows in the dashboard -- silently, with no test and no error.
+ *
+ * AND THE OBVIOUS REPAIR IS WORSE THAN THE BUG. "Request limit+1 and treat
+ * length > limit as truncated" fails at exactly the default: asking for 1001
+ * against a cap of 1000 returns 1000, `1000 > 1000` is false, and a 1000-row
+ * slice of a 5000-row set reads as complete. It introduces the bug it repairs.
+ *
+ * So the total is READ rather than inferred, from the Content-Range header
+ * PostgREST returns for `Prefer: count=exact`, and an unknown total is UNSAFE
+ * rather than assumed complete -- with no count there is no way to tell a whole
+ * set from one the server capped. Fail closed: degrade to replacing the set,
+ * which is noisy and visible and was the behaviour a week ago.
+ */
+export function decideOpenReadTruncation({ returned, total = null, limit } = {}) {
+  if (!Number.isInteger(returned) || returned < 0) {
+    throw new TypeError('decideOpenReadTruncation requires the number of rows returned');
+  }
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new TypeError('decideOpenReadTruncation requires the limit that was requested');
+  }
+  if (total === null || total === undefined) {
+    return {
+      truncated: true,
+      reason: 'the server returned no row count, so a complete read cannot be told apart from '
+        + `one capped below the requested limit of ${limit}; treating ${returned} rows as possibly partial`,
+    };
+  }
+  if (!Number.isInteger(total) || total < 0) {
+    throw new TypeError(`decideOpenReadTruncation got an unusable total: ${String(total)}`);
+  }
+  if (total > returned) {
+    return {
+      truncated: true,
+      reason: `the open set holds ${total} rows and the read returned ${returned}`,
+    };
+  }
+  return { truncated: false, reason: null };
+}
+
 export function reconcileProposals({ open = [], fresh = [], now, openTruncated = false } = {}) {
   if (!nonEmpty(now)) throw new TypeError('reconcileProposals requires a `now` timestamp');
 
