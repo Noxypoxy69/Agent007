@@ -123,17 +123,38 @@ test('THE CONTROL: both wiring gates can actually fail', () => {
 
 test('THE CONTROL: comment-blanking works, or the gate matches its own prose', () => {
   /*
-   * The fix explains itself by quoting the line it replaced, so the raw file
-   * DOES contain the defective spelling inside a comment. Without blanking, the
-   * wiring gate above would fail forever on a correct file.
+   * MEASURED ON A SYNTHETIC FIXTURE, NOT ON THE REAL FILE, and that separation
+   * is the point. An earlier version of this asserted that CODE does not contain
+   * the defective spelling -- which is word-for-word what the wiring gate above
+   * asserts. So when the defect was genuinely reintroduced, this "control"
+   * failed too, and could not distinguish "blanking is broken" from "the bug is
+   * back". Two assertions, one property, and the one that fires tells you the
+   * wrong thing: CLAUDE.md rule 14.
+   *
+   * The precondition below still reads the real file, because the hazard is real
+   * -- the fix explains itself by QUOTING the line it replaced, so index.ts DOES
+   * contain the defective spelling in prose. Without blanking, the wiring gate
+   * would fail forever on a correct file. But whether blanking WORKS is proven
+   * against strings this test owns.
    */
   assert.match(SOURCE, /created_by\s*:\s*d\.owner_id/,
-    'precondition: the explanation in index.ts still quotes the old line');
-  assert.ok(!/created_by\s*:\s*d\.owner_id/.test(CODE),
-    'comment-blanking failed: the gate is reading prose as code');
+    'precondition: the explanation in index.ts still quotes the old line, '
+    + 'so blanking is load-bearing rather than decorative');
+
+  const commentOnly = codeOnly('/* it used to read created_by: d.owner_id here */');
+  assert.ok(!/created_by\s*:\s*d\.owner_id/.test(commentOnly),
+    'comment-blanking failed: prose is being read as code');
+
+  const lineComment = codeOnly('// created_by: d.owner_id\n');
+  assert.ok(!/created_by\s*:\s*d\.owner_id/.test(lineComment),
+    'line comments must be blanked too');
 
   // And blanking must not eat real code that merely follows a comment.
   const mixed = codeOnly('/* created_by: d.owner_id */\nconst x = { created_by: label };');
-  assert.match(mixed, /created_by\s*:\s*label\b/);
+  assert.match(mixed, /created_by\s*:\s*label\b/, 'blanking ate real code');
   assert.ok(!/created_by\s*:\s*d\.owner_id/.test(mixed));
+
+  // A URL is not a line comment; blanking must not swallow the rest of the line.
+  assert.match(codeOnly('const u = "https://x.test/a"; const y = { created_by: label };'),
+    /created_by\s*:\s*label\b/, 'a double slash inside a string was treated as a comment');
 });
