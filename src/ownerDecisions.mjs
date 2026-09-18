@@ -359,32 +359,21 @@ function orphanedDecisions(rows, action, context, owners) {
    * A REVOKED superseder does not suppress at all — revoked rows never enter
    * `present` — so revocation still restores what it replaced, unchanged.
    */
-  const live = new Set(
-    present
-      .filter((d) => validDecisionCached(d, owners))
-      .filter((d) => !new Set(present.map((x) => x.supersedes).filter(isNonEmptyString)).has(d.decision_id))
-      .map((d) => d.decision_id)
-      .filter(isNonEmptyString),
-  );
+  // MUTATION M3: the pre-b53581b predicate, "is the superseder INVALID?".
+  const validRows = [];
+  const invalidRows = [];
+  for (const d of present) (validDecisionCached(d, owners) ? validRows : invalidRows).push(d);
 
-  const supersededBy = new Map();
-  for (const d of present) {
-    if (!isNonEmptyString(d.supersedes)) continue;
-    if (!supersededBy.has(d.supersedes)) supersededBy.set(d.supersedes, []);
-    supersededBy.get(d.supersedes).push(d);
-  }
+  const supersededByValid = new Set(validRows.map((d) => d.supersedes).filter(isNonEmptyString));
+  const supersededByInvalid = new Set(invalidRows.map((d) => d.supersedes).filter(isNonEmptyString));
 
-  return present.filter((d) => {
-    if (!isNonEmptyString(d.decision_id)) return false;
-    if (!validDecisionCached(d, owners)) return false;
-    const replacements = supersededBy.get(d.decision_id);
-    if (!replacements || replacements.length === 0) return false;
-    // Replaced by something that is itself in force: an ordinary supersession.
-    if (replacements.some((r) => isNonEmptyString(r.decision_id) && live.has(r.decision_id))) return false;
-    return scopeMatches(d, context)
-      && Array.isArray(d.capabilities)
-      && d.capabilities.some((c) => capabilityMatches(c, action));
-  });
+  return validRows.filter((d) =>
+    isNonEmptyString(d.decision_id)
+    && supersededByInvalid.has(d.decision_id)
+    && !supersededByValid.has(d.decision_id)
+    && scopeMatches(d, context)
+    && Array.isArray(d.capabilities)
+    && d.capabilities.some((c) => capabilityMatches(c, action)));
 }
 
 const validDecisionCached = (d, owners) => validateDecision(d, { owners }).ok;
@@ -429,25 +418,23 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
    * result.
    */
   const orphaned = orphanedDecisions(rows, action, context, owners);
-  const orphanResult = () => ({
-    outcome: 'owner_required',
-    decision_id: null,
-    matched_scope: null,
-    reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but was `
-      + 'superseded by a record that is not itself in force — the ledger cannot say what the owner '
-      + 'decided, so this goes back to the owner rather than being treated as unregulated',
-    constraints: {},
-    statement: null,
-    candidates: orphaned.map((d) => d.decision_id),
-  });
+  if (orphaned.length > 0) {
+    return {
+      outcome: 'owner_required',
+      decision_id: null,
+      matched_scope: null,
+      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but was `
+        + 'superseded by a record that is not itself in force — the ledger cannot say what the owner '
+        + 'decided, so this goes back to the owner rather than being treated as unregulated',
+      constraints: {},
+      statement: null,
+      candidates: orphaned.map((d) => d.decision_id),
+    };
+  }
 
   const live = activeDecisions(rows, { owners });
   const matches = live.filter((d) =>
     scopeMatches(d, context) && d.capabilities.some((c) => capabilityMatches(c, action)));
-
-  // MUTATION M2: the escalation is consulted only when nothing else matched.
-  if (matches.length > 0 && orphaned.length > 0) { /* masked */ }
-  if (matches.length === 0 && orphaned.length > 0) return orphanResult();
 
   if (matches.length === 0) {
     return {
