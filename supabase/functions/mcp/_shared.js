@@ -2257,12 +2257,35 @@ export function messagesQuery({ to_agent, from_agent, task_id, type, since, limi
    * Encoding the whole list would turn the separators into %2C and PostgREST
    * would read one value containing commas, silently matching nothing.
    */
+  /*
+   * CASE IS FOLDED ON THE STORED VALUE, NOT ONLY ON THE READER'S INPUT.
+   *
+   * The first version of this used eq for one name and in.(...) for several.
+   * Both compare EXACTLY, and Postgres string comparison is case-sensitive, so a
+   * message stored as "B" was delivered by the long poll -- eventsFor folds case
+   * -- and was invisible here. Half a contract landing green: the push path and
+   * the pull path disagreed about the same seat, which is the divergence this
+   * whole change exists to remove.
+   *
+   * Found by a blind audit, and predicted in writing beforehand by fixer: derive
+   * the fold from what the send path already resolves with, and make a test fail
+   * if the two paths ever disagree. test/inboxFoldParity.test.mjs is that test.
+   *
+   * ilike RATHER THAN eq, AND THE WILDCARDS MUST BE ESCAPED. ilike treats % and
+   * _ as patterns, and AGENT_ID permits _ in a seat name, so an unescaped name
+   * like code_b would match code-b, codeXb and more -- delivering one agent's
+   * mail to another. That is the FAR worse direction: an empty inbox is visibly
+   * wrong, a misrouted blocker reads as ordinary traffic. Escaped here, and
+   * asserted in both directions.
+   */
+  const ilikePattern = (v) => encodeURIComponent(
+    String(v).replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_'),
+  );
   const inbox = inboxNames(to_agent);
   if (inbox.length === 1) {
-    eq('to_agent', inbox[0]);
+    q.push(`to_agent=ilike.${ilikePattern(inbox[0])}`);
   } else if (inbox.length > 1) {
-    const quoted = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-    q.push(`to_agent=in.(${inbox.map((v) => encodeURIComponent(quoted(v))).join(',')})`);
+    q.push(`or=(${inbox.map((v) => `to_agent.ilike.${ilikePattern(v)}`).join(',')})`);
   }
 
   eq('from_agent', from_agent);
