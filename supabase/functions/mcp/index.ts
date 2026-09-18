@@ -4,7 +4,7 @@ import {
   // and return_with_lease set every column those two built, and more, inside one
   // transaction. Both still exist in _shared.js and are still tested there; they
   // are simply no longer how this file writes those two transitions.
-  toolDefs, INSTRUCTIONS, canAssign, validateMessage, negotiateProtocol,
+  toolDefs, instructionsFor, canAssign, validateMessage, negotiateProtocol,
   messagesQuery, canReturn, canAccept, acceptRecord, canCancel, cancelRecord,
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
@@ -1375,7 +1375,14 @@ async function handleRpc(msg, defs) {
         protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'agentbridge', version: '0.2.0' },
-        instructions: INSTRUCTIONS,
+        /*
+         * Derived from the tool list this caller's TOKEN produced, so a reader
+         * is told it is read-only and a coordinator is not. The flat sentence
+         * this replaces was corrected here once and left standing in the node
+         * twin for two days, which is the drift instructionsFor makes
+         * inexpressible rather than merely fixed.
+         */
+        instructions: instructionsFor(defs),
       },
     });
   }

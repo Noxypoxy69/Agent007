@@ -2469,21 +2469,50 @@ export const jsonResult = (data) => ({
   content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
 });
 
-export const INSTRUCTIONS =
+/*
+ * THE AUTHORITY PARAGRAPH IS DERIVED FROM THE TOOL LIST, NOT WRITTEN BESIDE IT.
+ * Spliced from mcp/toolDefs.mjs, where the reasoning lives in full.
+ *
+ * The short version: this copy was corrected once already, and the node twin --
+ * which serves the same tool names over stdio and the Worker -- kept telling the
+ * old lie for two days, because nothing compared the two CONTRACTS. Copying this
+ * text across would have been wrong as well: the hosted surface decides scope by
+ * TOKEN and the twin decides by STORE SHAPE, so one fixed sentence is false
+ * somewhere whichever one is chosen.
+ *
+ * The predicate is the presence of assign_task IN THE BUILT LIST, because that
+ * list is literally what the client receives. Text and capability become two
+ * readings of one fact.
+ */
+const PREAMBLE =
   'Live engineering state for multi-agent Git worktrees. Every field is observed from git ' +
   'plumbing and the process table on the developer machine, not reported by the agents ' +
   'themselves, so an agent cannot misreport its own state here. Fields that could not be ' +
-  'determined are null — treat null as unknown, never as zero.\n\n' +
-  'WHAT THIS SERVER CAN DO DEPENDS ON YOUR TOKEN, AND THE TOOL LIST IS THE ANSWER. A reader ' +
-  'sees only read tools; a coordinator additionally sees assign_task, send_message and ' +
-  'record_owner_decision. If a tool is not in tools/list you do not have it — that is not a ' +
-  'temporary condition to retry or work around. This text said "this server is read-only" ' +
-  'for as long as that was true of every caller, and saying it to a coordinator that can in ' +
-  'fact assign work would be the server lying about its own authority.\n\n' +
-  'WHAT IS ABSENT AT EVERY SCOPE, INCLUDING COORDINATOR: shell, SQL, file writes, deploy, ' +
+  'determined are null — treat null as unknown, never as zero.\n\n';
+
+const AUTHORITY_READER =
+  'THIS CONNECTION IS READ-ONLY, AND THAT IS A PROPERTY OF YOUR TOOL LIST RATHER THAN A ' +
+  'PROMISE ABOUT THE SERVER. Nothing you can call assigns work, sends a message, or records a ' +
+  'decision: those tools are ABSENT from tools/list, not present and refusing. A caller with ' +
+  'more authority sees a longer list than yours. If you expected a tool and it is not listed, ' +
+  'you do not have it — that is not a temporary condition to retry or work around.\n\n';
+
+const AUTHORITY_WRITER =
+  'WHAT THIS SERVER CAN DO DEPENDS ON YOUR SCOPE, AND THE TOOL LIST IS THE ANSWER. This ' +
+  'connection carries write tools: assign_task, send_message and record_owner_decision are in ' +
+  'your list and they act. A read-only caller sees none of them. If a tool is not in ' +
+  'tools/list you do not have it — that is not a temporary condition to retry or work around. ' +
+  'This text said "this server is read-only" for as long as that was true of every caller, ' +
+  'and saying it to someone who can in fact assign work would be the server lying about its ' +
+  'own authority.\n\n';
+
+const ABSENT_AT_EVERY_SCOPE =
+  'WHAT IS ABSENT AT EVERY SCOPE, INCLUDING A WRITER: shell, SQL, file writes, deploy, ' +
   'merge, command execution. A message body is prose for a person or an agent to READ and is ' +
   'never executed by anything. There is no path from this server to a command on any ' +
-  'machine.\n\n' +
+  'machine.\n\n';
+
+const GUIDANCE =
   'QUERY THIS SERVER BEFORE ASKING A PERSON. Branches, HEADs, bases, worktrees, locks and ' +
   'running processes are all here and are authoritative. Do not ask the operator to paste a ' +
   'status brief or a file list; call the tool. A pasted summary is a stale copy of something ' +
@@ -2495,6 +2524,23 @@ export const INSTRUCTIONS =
   'results, contract violations, ambiguous provenance and unresolved risk are reported in full ' +
   'every time. Brevity applies to restating known state, never to the proof that something was ' +
   'actually checked. A short report that drops evidence is worse than a long one that carries it.';
+
+/**
+ * The contract for THIS connection, given the tools it will actually be handed.
+ *
+ * @param {Array<{name:string}>} defs  the built tool list, as returned by toolDefs()
+ */
+export function instructionsFor(defs = []) {
+  const writes = Array.isArray(defs) && defs.some((d) => d?.name === 'assign_task');
+  return PREAMBLE + (writes ? AUTHORITY_WRITER : AUTHORITY_READER) + ABSENT_AT_EVERY_SCOPE + GUIDANCE;
+}
+
+/**
+ * The read-only contract, kept as a named export because callers and tests
+ * import it. DERIVED rather than written out, so it cannot drift from the reader
+ * branch -- the same failure this change is about, one layer smaller.
+ */
+export const INSTRUCTIONS = instructionsFor([]);
 
 const OUTSTANDING = ['assigned', 'rejected'];
 const obj = (properties = {}, required = []) => ({ type: 'object', properties, required });

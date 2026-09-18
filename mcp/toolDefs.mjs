@@ -48,12 +48,62 @@ export const jsonResult = (data) => ({
  * Lives beside the tools rather than in a README because a rule nobody
  * connected to the server can read is not a rule.
  */
-export const INSTRUCTIONS =
+/**
+ * THE AUTHORITY PARAGRAPH IS DERIVED FROM THE TOOL LIST, NOT WRITTEN BESIDE IT.
+ *
+ * This file used to open with a flat "This server is read-only: it cannot assign
+ * tasks, send messages, or run commands" -- and defines assign_task,
+ * send_message and record_owner_decision further down, registered when the store
+ * provides the write methods. Both statements were true when written. The file
+ * changed underneath the sentence.
+ *
+ * The hosted copy in _shared.js was corrected for exactly this and explains
+ * itself: "saying 'this server is read-only' to a coordinator that can in fact
+ * assign work would be the server lying about its own authority." Somebody fixed
+ * the lie on one surface and the other kept telling it, which is how
+ * test/toolDefsParity.test.mjs found it -- nothing had ever compared the two
+ * contracts, only the tool descriptions.
+ *
+ * COPYING THE CORRECTED TEXT ACROSS WOULD HAVE BEEN WRONG TOO, and that is the
+ * part worth keeping. The hosted surface decides scope by TOKEN; this one
+ * decides by STORE SHAPE, and a deployment that injects a read-only store really
+ * does serve a read-only server. One fixed sentence would be false somewhere,
+ * whichever one we picked.
+ *
+ * So it is chosen by the same thing that decides whether the tool exists. The
+ * predicate is the presence of assign_task IN THE BUILT LIST rather than the
+ * shape of the store, because the list is literally what the client receives:
+ * text and capability are then two readings of one fact, and disagreement is not
+ * expressible rather than merely absent today.
+ */
+const PREAMBLE =
   'Live engineering state for multi-agent Git worktrees. Every field is observed from git ' +
   'plumbing and the process table on the developer machine, not reported by the agents ' +
   'themselves, so an agent cannot misreport its own state here. Fields that could not be ' +
-  'determined are null — treat null as unknown, never as zero. This server is read-only: ' +
-  'it cannot assign tasks, send messages, or run commands.\n\n' +
+  'determined are null — treat null as unknown, never as zero.\n\n';
+
+const AUTHORITY_READER =
+  'THIS CONNECTION IS READ-ONLY, AND THAT IS A PROPERTY OF YOUR TOOL LIST RATHER THAN A ' +
+  'PROMISE ABOUT THE SERVER. Nothing you can call assigns work, sends a message, or records a ' +
+  'decision: those tools are ABSENT from tools/list, not present and refusing. A caller with ' +
+  'more authority sees a longer list than yours. If you expected a tool and it is not listed, ' +
+  'you do not have it — that is not a temporary condition to retry or work around.\n\n';
+
+const AUTHORITY_WRITER =
+  'WHAT THIS SERVER CAN DO DEPENDS ON YOUR SCOPE, AND THE TOOL LIST IS THE ANSWER. This ' +
+  'connection carries write tools: assign_task, send_message and record_owner_decision are in ' +
+  'your list and they act. A read-only caller sees none of them. If a tool is not in ' +
+  'tools/list you do not have it — that is not a temporary condition to retry or work around. ' +
+  'This text said "this server is read-only" for as long as that was true of every caller, ' +
+  'and saying it to someone who can in fact assign work would be the server lying about its ' +
+  'own authority.\n\n';
+
+const ABSENT_AT_EVERY_SCOPE =
+  'WHAT IS ABSENT AT EVERY SCOPE, INCLUDING A WRITER: shell, SQL, file writes, deploy, merge, ' +
+  'command execution. A message body is prose for a person or an agent to READ and is never ' +
+  'executed by anything. There is no path from this server to a command on any machine.\n\n';
+
+const GUIDANCE =
   'QUERY THIS SERVER BEFORE ASKING A PERSON. Branches, HEADs, bases, worktrees, locks and ' +
   'running processes are all here and are authoritative. Do not ask the operator to paste a ' +
   'status brief or a file list; call the tool. A pasted summary is a stale copy of something ' +
@@ -65,6 +115,24 @@ export const INSTRUCTIONS =
   'results, contract violations, ambiguous provenance and unresolved risk are reported in full ' +
   'every time. Brevity applies to restating known state, never to the proof that something was ' +
   'actually checked. A short report that drops evidence is worse than a long one that carries it.';
+
+/**
+ * The contract for THIS connection, given the tools it will actually be handed.
+ *
+ * @param {Array<{name:string}>} defs  the built tool list, as returned by toolDefs()
+ */
+export function instructionsFor(defs = []) {
+  const writes = Array.isArray(defs) && defs.some((d) => d?.name === 'assign_task');
+  return PREAMBLE + (writes ? AUTHORITY_WRITER : AUTHORITY_READER) + ABSENT_AT_EVERY_SCOPE + GUIDANCE;
+}
+
+/**
+ * The read-only contract, kept as a named export because callers and tests
+ * import it. It is now DERIVED rather than written out, so it cannot drift from
+ * the reader branch of instructionsFor -- which is the failure this whole change
+ * is about, one layer smaller.
+ */
+export const INSTRUCTIONS = instructionsFor([]);
 
 const OUTSTANDING = ['assigned', 'rejected'];
 const obj = (properties = {}, required = []) => ({ type: 'object', properties, required });

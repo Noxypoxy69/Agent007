@@ -30,8 +30,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toolDefs as hostedDefs, INSTRUCTIONS as HOSTED_INSTRUCTIONS } from '../supabase/functions/mcp/_shared.js';
-import { toolDefs as twinDefs, INSTRUCTIONS as TWIN_INSTRUCTIONS } from '../mcp/toolDefs.mjs';
+import {
+  toolDefs as hostedDefs,
+  INSTRUCTIONS as HOSTED_INSTRUCTIONS,
+  instructionsFor as hostedInstructionsFor,
+} from '../supabase/functions/mcp/_shared.js';
+import {
+  toolDefs as twinDefs,
+  INSTRUCTIONS as TWIN_INSTRUCTIONS,
+  instructionsFor as twinInstructionsFor,
+} from '../mcp/toolDefs.mjs';
 
 /**
  * A store generous enough that both files build every tool they can.
@@ -154,6 +162,72 @@ test('THE SENTENCE THAT TRAVELLED: INSTRUCTIONS is identical on both surfaces', 
     'INSTRUCTIONS has forked between the two transports: the same tool names now '
     + 'promise different things depending on who serves them',
   );
+});
+
+/**
+ * A READ-ONLY store: everything the tool builders require, and no write method.
+ *
+ * Both files gate their write tools on store shape, so this is the shape that
+ * makes them absent -- which is the condition the reader contract describes.
+ */
+function readerStore() {
+  const nothing = async () => [];
+  return { listSessions: nothing, getLanes: async () => ({}), listDecisions: nothing, listMessages: nothing };
+}
+
+test('THE CONTRACT MATCHES THE CAPABILITY, IN BOTH DIRECTIONS AND ON BOTH SURFACES', () => {
+  /*
+   * THE ASSERTION THE FIRST VERSION OF THIS GATE COULD NOT MAKE.
+   *
+   * Comparing declarations found the two files byte-identical and passed, while
+   * one of them was telling every caller it was read-only and handing them
+   * assign_task. Text and capability were two separate facts and nothing tied
+   * them together.
+   *
+   * Now the authority paragraph is DERIVED from the built list, so this can ask
+   * the question that matters: does what the server SAYS about its authority
+   * agree with what it HANDS you? It fails for any wording, because it tests the
+   * pairing rather than the sentence.
+   */
+  for (const [name, defsFor, instructionsFor] of [
+    ['hosted', hostedDefs, hostedInstructionsFor],
+    ['twin', twinDefs, twinInstructionsFor],
+  ]) {
+    const readDefs = defsFor(readerStore());
+    const writeDefs = defsFor(fullStore());
+
+    const canAssign = (d) => d.some((x) => x.name === 'assign_task');
+    assert.equal(canAssign(readDefs), false, `${name}: a read-only store must not build assign_task`);
+    assert.equal(canAssign(writeDefs), true, `${name}: a full store must build assign_task`);
+
+    const readText = instructionsFor(readDefs);
+    const writeText = instructionsFor(writeDefs);
+
+    assert.match(readText, /READ-ONLY/,
+      `${name}: a caller with no write tools is not told the connection is read-only`);
+    assert.ok(!/carries write tools/.test(readText),
+      `${name}: a read-only caller is told it carries write tools`);
+
+    assert.match(writeText, /carries write tools/,
+      `${name}: a caller holding assign_task is not told it can write`);
+    assert.ok(!/THIS CONNECTION IS READ-ONLY/.test(writeText),
+      `${name}: a caller holding assign_task is told the connection is read-only — `
+      + 'the server lying about its own authority');
+
+    // The two scopes must actually differ, or the pairing above is vacuous.
+    assert.notEqual(readText, writeText, `${name}: both scopes are given the same contract`);
+  }
+});
+
+test('the two surfaces agree scope for scope, not merely at one scope', () => {
+  /*
+   * The original INSTRUCTIONS comparison only ever checked the default. A fork
+   * could hide in the writer branch and never be seen.
+   */
+  assert.equal(hostedInstructionsFor(hostedDefs(readerStore())), twinInstructionsFor(twinDefs(readerStore())),
+    'the read-only contract differs between transports');
+  assert.equal(hostedInstructionsFor(hostedDefs(fullStore())), twinInstructionsFor(twinDefs(fullStore())),
+    'the writer contract differs between transports');
 });
 
 test('THE CONTROL: the comparison can actually fail', () => {

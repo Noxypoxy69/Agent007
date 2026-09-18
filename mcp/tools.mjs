@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { toolDefs, INSTRUCTIONS } from './toolDefs.mjs';
+import { toolDefs, instructionsFor } from './toolDefs.mjs';
 
 /**
  * THE SDK ADAPTER. The tools themselves live in toolDefs.mjs.
@@ -70,7 +70,9 @@ export function buildMcpServer(store) {
 
   const server = new McpServer(
     { name: 'agentbridge', version: '0.1.0' },
-    { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
+    // Derived from the list this server is about to register, so the contract
+    // and the capability cannot disagree. See instructionsFor in toolDefs.mjs.
+    { capabilities: { tools: {} }, instructions: instructionsFor(defs) },
   );
 
   for (const def of defs) {

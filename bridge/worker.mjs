@@ -1,4 +1,4 @@
-import { toolDefs, INSTRUCTIONS } from '../mcp/toolDefs.mjs';
+import { toolDefs, instructionsFor } from '../mcp/toolDefs.mjs';
 import { detectCollisions } from './collisions.mjs';
 import { createHttpStore } from './httpStore.mjs';
 
@@ -61,7 +61,8 @@ async function handleRpc(msg, defs) {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: 'agentbridge', version: '0.1.0' },
-        instructions: INSTRUCTIONS,
+        // Derived from the tools this connection actually received.
+        instructions: instructionsFor(defs),
       },
     });
   }
