@@ -177,6 +177,113 @@ test('THE ROW THAT IS ACTUALLY IN THE PRODUCTION LEDGER IS REFUSED', () => {
   }
 });
 
+test('A DROPPED ROW MUST NOT RESURRECT WHAT IT SUPERSEDED', () => {
+  /*
+   * THE REGRESSION THIS FIX INTRODUCED, found by blind audit and reproduced
+   * here before being corrected.
+   *
+   * `activeDecisions` computed its superseded set from the rows that had
+   * already PASSED validation. So refusing a row did not merely stop it
+   * granting — it also un-superseded whatever that row had replaced. A standing
+   * owner DENY recorded under a non-owner name, superseding an older
+   * bridge-wide ALLOW, previously resolved `denied`. After the anchor landed it
+   * resolved ALLOWED, on both surfaces, and reached
+   * settleOpenRequestsAgainstPolicy.
+   *
+   * The commit that introduced it told the reader "it fails safe: a dropped
+   * allow leaves resolveOwnerDecision with nothing to match". That is true only
+   * when the dropped row supersedes nothing, which is the case the fixture
+   * happened to cover.
+   *
+   * THE RULE: an invalid row neither GRANTS nor REVIVES. It still suppresses
+   * what it names, so the chain resolves to nothing and the action goes back to
+   * the owner. Both directions fail closed — the alternative lets a refused row
+   * hand back an ALLOW, which is the one direction that must never happen.
+   */
+  const older = {
+    ...decisionBy('danny'),
+    decision_id: 'd-old',
+    effect: 'allow',
+    capabilities: ['deploy.*'],
+  };
+  const newer = {
+    ...decisionBy('main'),
+    decision_id: 'd-new',
+    effect: 'deny',
+    capabilities: ['deploy.*'],
+    supersedes: 'd-old',
+  };
+
+  for (const [name, , active, resolve] of SURFACES) {
+    const live = active([older, newer]);
+    assert.deepEqual(live.map((d) => d.decision_id), [],
+      `${name}: refusing d-new brought d-old back to life as ${live.map((d) => d.decision_id).join(', ')}`);
+
+    const r = resolve([older, newer], 'deploy.production');
+    assert.notEqual(r.outcome, 'allowed',
+      `${name}: a standing DENY was dropped and the ALLOW it replaced resurrected — `
+      + 'deploy.production is now permitted by a decision the owner had already superseded');
+  }
+});
+
+test('THE PRODUCTION ROW WITH ITS PREDECESSOR, which is how it really sits', () => {
+  /*
+   * Hollow gate 10, in the gate written one commit earlier. The fixture below
+   * carries `supersedes`, and the test that shipped with the fix asserted on
+   * that row ALONE in a one-element array — where `supersedes` is inert. The
+   * field that reaches the divergent branch was in the fixture and the fixture
+   * was too narrow to execute it.
+   *
+   * index.ts refuses a `supersedes` target that does not exist, so the
+   * predecessor provably exists in the live ledger. This is the shape the
+   * system actually produces (rule 9).
+   */
+  const predecessor = {
+    ...decisionBy('main'),
+    decision_id: 'd-review-ruling-t-wire-gate-scripts-20260917',
+    scope_type: 'repo',
+    scope_id: 'agentbridge',
+    capabilities: ['review.accept'],
+    supersedes: null,
+  };
+  const live = {
+    ...decisionBy('main'),
+    decision_id: 'd-review-ruling-t-wire-gate-scripts-corrected-20260917',
+    scope_type: 'repo',
+    scope_id: 'agentbridge',
+    capabilities: ['review.accept'],
+    supersedes: 'd-review-ruling-t-wire-gate-scripts-20260917',
+  };
+
+  for (const [name, , active, resolve] of SURFACES) {
+    assert.deepEqual(active([predecessor, live]).map((d) => d.decision_id), [],
+      `${name}: refusing the "main" row revived its "main" predecessor`);
+    assert.notEqual(
+      resolve([predecessor, live], 'review.accept', { repo: 'agentbridge' }).outcome, 'allowed',
+      `${name}: review.accept is still granted, by the predecessor instead of the row`,
+    );
+  }
+});
+
+test('A VALID SUPERSESSION STILL WORKS, so the fix above is not a blunt instrument', () => {
+  /*
+   * Rule 5 again. "Nothing is ever active" satisfies every assertion above.
+   * This is the positive that stops the supersession logic being disabled
+   * wholesale in the name of closing the resurrection.
+   */
+  const older = { ...decisionBy('danny'), decision_id: 'd-1', effect: 'deny', capabilities: ['deploy.*'] };
+  const newer = {
+    ...decisionBy('danny'), decision_id: 'd-2', effect: 'allow', capabilities: ['deploy.*'], supersedes: 'd-1',
+  };
+
+  for (const [name, , active, resolve] of SURFACES) {
+    assert.deepEqual(active([older, newer]).map((d) => d.decision_id), ['d-2'],
+      `${name}: a legitimate supersession stopped working`);
+    assert.equal(resolve([older, newer], 'deploy.production').outcome, 'allowed',
+      `${name}: the owner's own replacement decision does not apply`);
+  }
+});
+
 test('createDecision CANNOT LAUNDER IT EITHER', () => {
   /*
    * The builder is the path the CLI and the edge function both use. A record
