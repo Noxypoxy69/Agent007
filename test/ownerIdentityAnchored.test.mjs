@@ -388,6 +388,107 @@ test('AN UNVALIDATED ROW CANNOT DELETE AN OWNER DECISION', () => {
   }
 });
 
+test('A DELETED DENY IS NOT MASKED BY A SURVIVING ALLOW — the ordering property', () => {
+  /*
+   * THE HEADLINE CLAIM OF d8f6d2b, AND IT WAS COMPLETELY UNGATED.
+   *
+   * That commit says the escalation is "checked BEFORE the match handling on
+   * purpose — if a DENY was suppressed by junk while some other valid ALLOW
+   * still matches, answering `allowed` would be the same deletion wearing a
+   * result." An audit mutated the code to reinstate exactly that masking and
+   * the mutation survived the DEDICATED gate and the WHOLE SUITE: no fixture
+   * anywhere constructed the shape the claim is about.
+   *
+   * So here it is. A narrow DENY is deleted by junk; a broader ALLOW still
+   * matches the same action. If ordering regresses, resolution answers
+   * `allowed` and the owner's refusal is gone behind a result that looks
+   * legitimate.
+   */
+  const denyTask = {
+    ...decisionBy('danny'),
+    decision_id: 'd-task-deny',
+    scope_type: 'task', scope_id: 't-1',
+    effect: 'deny', capabilities: ['deploy.*'],
+  };
+  const allowBridge = {
+    ...decisionBy('danny'),
+    decision_id: 'd-bridge-allow',
+    scope_type: 'bridge', scope_id: null,
+    effect: 'allow', capabilities: ['deploy.*'],
+  };
+  const junk = { supersedes: 'd-task-deny' };
+
+  for (const [name, , , resolve] of SURFACES) {
+    assert.equal(resolve([denyTask, allowBridge], 'deploy.production', { task: 't-1' }).outcome, 'denied',
+      `${name}: the narrow DENY does not win on its own — the fixture cannot show masking`);
+
+    const r = resolve([denyTask, allowBridge, junk], 'deploy.production', { task: 't-1' });
+    assert.notEqual(r.outcome, 'allowed',
+      `${name}: a junk row deleted the owner's DENY and the broader ALLOW answered in its place — `
+      + 'the deletion is wearing a result');
+    assert.equal(r.outcome, 'owner_required', `${name}: expected owner_required, got ${r.outcome}`);
+  }
+});
+
+test('A VALID ROW THAT SUPERSEDES ITSELF CANNOT DELETE A DENY', () => {
+  /*
+   * Found by audit. Every row here VALIDATES, so the invalid-superseder check
+   * never fired: a decision naming its own id in `supersedes` removed itself
+   * and took the owner's ruling with it, and the permission layer routed the
+   * resulting silence to a coordinator.
+   */
+  const selfSuperseding = {
+    ...decisionBy('danny'),
+    decision_id: 'd-self',
+    effect: 'deny', capabilities: ['deploy.*'],
+    supersedes: 'd-self',
+  };
+  for (const [name, , active, resolve] of SURFACES) {
+    assert.deepEqual(active([selfSuperseding]), [], `${name}: a self-superseding row is somehow in force`);
+    const r = resolve([selfSuperseding], 'deploy.production');
+    assert.notEqual(r.outcome, 'allowed', `${name}: a self-superseding DENY resolved to allowed`);
+    assert.equal(r.outcome, 'owner_required',
+      `${name}: the owner's DENY vanished into ${r.outcome}, which routes reversible actions to a peer`);
+  }
+});
+
+test('A CYCLE OF VALID ROWS CANNOT DELETE A DENY EITHER', () => {
+  const a = {
+    ...decisionBy('danny'), decision_id: 'd-a', effect: 'deny',
+    capabilities: ['deploy.*'], supersedes: 'd-b',
+  };
+  const b = {
+    ...decisionBy('danny'), decision_id: 'd-b', effect: 'deny',
+    capabilities: ['deploy.*'], supersedes: 'd-a',
+  };
+  for (const [name, , active, resolve] of SURFACES) {
+    assert.deepEqual(active([a, b]), [], `${name}: a cycle left something in force`);
+    assert.equal(resolve([a, b], 'deploy.production').outcome, 'owner_required',
+      `${name}: two rows replacing each other deleted the owner's DENY silently`);
+  }
+});
+
+test('A REVOKED SUPERSEDER STILL RESTORES WHAT IT REPLACED', () => {
+  /*
+   * The direction that must NOT change. Revoking a replacement is how the owner
+   * takes back a change of mind, and it must bring the original back into force
+   * rather than escalate — otherwise every revocation becomes a prompt.
+   */
+  const original = {
+    ...decisionBy('danny'), decision_id: 'd-orig', effect: 'deny', capabilities: ['deploy.*'],
+  };
+  const replacement = {
+    ...decisionBy('danny'), decision_id: 'd-repl', effect: 'allow',
+    capabilities: ['deploy.*'], supersedes: 'd-orig', revoked_at: AT,
+  };
+  for (const [name, , active, resolve] of SURFACES) {
+    assert.deepEqual(active([original, replacement]).map((d) => d.decision_id), ['d-orig'],
+      `${name}: revoking a replacement did not restore the decision it replaced`);
+    assert.equal(resolve([original, replacement], 'deploy.production').outcome, 'denied',
+      `${name}: a revoked replacement turned a restored DENY into something else`);
+  }
+});
+
 test('A VALID SUPERSESSION STILL WORKS, so the fix above is not a blunt instrument', () => {
   /*
    * Rule 5 again. "Nothing is ever active" satisfies every assertion above.

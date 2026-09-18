@@ -325,24 +325,66 @@ export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
  * about what the owner decided — it is a gap in the ledger, and a gap is a
  * question rather than a licence.
  */
-function suppressedByInvalidOnly(rows, action, context, owners) {
+function orphanedDecisions(rows, action, context, owners) {
   if (!Array.isArray(rows)) return [];
   const present = rows.filter((d) => isPlainObject(d) && !d.revoked_at);
 
-  const validRows = [];
-  const invalidRows = [];
-  for (const d of present) (validDecisionCached(d, owners) ? validRows : invalidRows).push(d);
+  /*
+   * A DECISION IS ORPHANED WHEN IT WAS REPLACED BY SOMETHING THAT DOES NOT
+   * APPLY EITHER — and asking it that way closes three cases instead of one.
+   *
+   * The first version asked a narrower question: "is the superseder INVALID?"
+   * That caught the junk row and missed two shapes an audit then found, both
+   * built entirely from rows that VALIDATE:
+   *
+   *   self-supersession   a row whose `supersedes` is its own decision_id
+   *                       removes itself, taking the owner's ruling with it
+   *   a cycle             A supersedes B, B supersedes A; both are removed
+   *
+   * In each case a standing owner DENY vanished, resolution answered
+   * `no_decision`, and src/permissionRequest.mjs routed anything reversible to
+   * `decider: "coordinator"` — a peer agent approving what the owner refused.
+   * The exact outcome 54071ff and d8f6d2b were written about, reachable through
+   * the front door because I had asked about the superseder's VALIDITY rather
+   * than about whether a replacement actually took effect.
+   *
+   * So the question is now the one that matters: did anything LIVE take this
+   * decision's place? A normal supersession leaves the replacement active, so
+   * nothing is orphaned and ordinary resolution is untouched. An invalid
+   * superseder, a self-reference and a cycle all leave the chain pointing at
+   * something that is not in force, and the ledger can no longer say what the
+   * owner decided. That is a question for the owner, not silence a coordinator
+   * may fill.
+   *
+   * A REVOKED superseder does not suppress at all — revoked rows never enter
+   * `present` — so revocation still restores what it replaced, unchanged.
+   */
+  const live = new Set(
+    present
+      .filter((d) => validDecisionCached(d, owners))
+      .filter((d) => !new Set(present.map((x) => x.supersedes).filter(isNonEmptyString)).has(d.decision_id))
+      .map((d) => d.decision_id)
+      .filter(isNonEmptyString),
+  );
 
-  const supersededByValid = new Set(validRows.map((d) => d.supersedes).filter(isNonEmptyString));
-  const supersededByInvalid = new Set(invalidRows.map((d) => d.supersedes).filter(isNonEmptyString));
+  const supersededBy = new Map();
+  for (const d of present) {
+    if (!isNonEmptyString(d.supersedes)) continue;
+    if (!supersededBy.has(d.supersedes)) supersededBy.set(d.supersedes, []);
+    supersededBy.get(d.supersedes).push(d);
+  }
 
-  return validRows.filter((d) =>
-    isNonEmptyString(d.decision_id)
-    && supersededByInvalid.has(d.decision_id)
-    && !supersededByValid.has(d.decision_id)
-    && scopeMatches(d, context)
-    && Array.isArray(d.capabilities)
-    && d.capabilities.some((c) => capabilityMatches(c, action)));
+  return present.filter((d) => {
+    if (!isNonEmptyString(d.decision_id)) return false;
+    if (!validDecisionCached(d, owners)) return false;
+    const replacements = supersededBy.get(d.decision_id);
+    if (!replacements || replacements.length === 0) return false;
+    // Replaced by something that is itself in force: an ordinary supersession.
+    if (replacements.some((r) => isNonEmptyString(r.decision_id) && live.has(r.decision_id))) return false;
+    return scopeMatches(d, context)
+      && Array.isArray(d.capabilities)
+      && d.capabilities.some((c) => capabilityMatches(c, action));
+  });
 }
 
 const validDecisionCached = (d, owners) => validateDecision(d, { owners }).ok;
@@ -386,14 +428,14 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
    * still matches, answering `allowed` would be the same deletion wearing a
    * result.
    */
-  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);
+  const orphaned = orphanedDecisions(rows, action, context, owners);
   if (orphaned.length > 0) {
     return {
       outcome: 'owner_required',
       decision_id: null,
       matched_scope: null,
-      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but is `
-        + 'superseded by a record that is not a valid decision — the ledger cannot say what the owner '
+      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but was `
+        + 'superseded by a record that is not itself in force — the ledger cannot say what the owner '
         + 'decided, so this goes back to the owner rather than being treated as unregulated',
       constraints: {},
       statement: null,

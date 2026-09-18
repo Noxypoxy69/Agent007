@@ -208,6 +208,37 @@ test('httpStore: THE POSITIVE — a measured FALSE and a measured empty survive 
   assert.deepEqual(s.processes, [], 'a measured empty process list became unknown');
 });
 
+test('list_locks: THE THIRD TOOL THAT READS s.locks, and the one nothing watched', async () => {
+  /*
+   * THE GATE WAS POINTED AT TWO OF THREE TOOLS, and an audit proved it by
+   * mutation: reverting `list_agents.locksHeld` to `(s.locks ?? [])` is caught
+   * by two named assertions here, while the IDENTICAL flattening in
+   * `list_locks` sat uncaught in the same commit, same field, same store.
+   *
+   * On the hosted surface it is not a corner case: index.ts hardcodes
+   * `locks: null` for every session, so list_locks answered `[]` on every call
+   * while list_agents answered `null` about the same session — verbatim the
+   * self-contradiction this file was written to remove.
+   *
+   * A session whose locks were never measured contributes NOTHING to the flat
+   * list, rather than contributing "no locks". The flat shape has no per-row
+   * slot for unknown, so absence is the only honest answer available.
+   */
+  for (const [surface, defs] of [['hosted', hostedDefs], ['twin', twinDefs]]) {
+    const unmeasured = await call(defs, 'list_locks', storeOf([UNMEASURED]));
+    const measured = await call(defs, 'list_locks', storeOf([MEASURED_EMPTY]));
+    const holding = await call(defs, 'list_locks', storeOf([{ ...MEASURED_EMPTY, locks: [{ resource: 'voice_' }] }]));
+
+    assert.deepEqual(unmeasured, [],
+      `${surface}: a session nobody measured contributed rows to list_locks`);
+    assert.deepEqual(measured, [],
+      `${surface}: a measured empty lock list produced rows`);
+    assert.equal(holding.length, 1,
+      `${surface}: a genuinely held lock is missing — the fix suppressed real data`);
+    assert.equal(holding[0].resource, 'voice_', `${surface}: the lock lost its resource`);
+  }
+});
+
 test('THE CONTROL: these assertions can actually fail', () => {
   /*
    * Rule 1. Pins that the distinction under test is expressible at all — that

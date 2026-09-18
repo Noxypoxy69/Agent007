@@ -374,24 +374,46 @@ export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
  * Decisions that WOULD apply, suppressed only by rows that are not valid
  * decisions. Spliced from src/ownerDecisions.mjs — see the comment there.
  */
-function suppressedByInvalidOnly(rows, action, context, owners) {
+function orphanedDecisions(rows, action, context, owners) {
   if (!Array.isArray(rows)) return [];
   const present = rows.filter((d) => isPlainObject(d) && !d.revoked_at);
 
-  const validRows = [];
-  const invalidRows = [];
-  for (const d of present) (validateDecision(d, { owners }).ok ? validRows : invalidRows).push(d);
+  /*
+   * ORPHANED = REPLACED BY SOMETHING THAT DOES NOT APPLY EITHER. Spliced from
+   * src/ownerDecisions.mjs; see the comment there.
+   *
+   * Asking "is the superseder INVALID?" missed two shapes built entirely from
+   * rows that validate: a row superseding ITSELF, and a cycle. Both removed a
+   * standing owner DENY with nothing taking its place, and the permission layer
+   * then routed anything reversible to a COORDINATOR. This is the deployed
+   * copy — resolve_owner_decision and settleOpenRequestsAgainstPolicy run here.
+   */
+  const supersededIds = new Set(present.map((x) => x.supersedes).filter(isNonEmptyString));
+  const live = new Set(
+    present
+      .filter((d) => validateDecision(d, { owners }).ok)
+      .filter((d) => !supersededIds.has(d.decision_id))
+      .map((d) => d.decision_id)
+      .filter(isNonEmptyString),
+  );
 
-  const supersededByValid = new Set(validRows.map((d) => d.supersedes).filter(isNonEmptyString));
-  const supersededByInvalid = new Set(invalidRows.map((d) => d.supersedes).filter(isNonEmptyString));
+  const supersededBy = new Map();
+  for (const d of present) {
+    if (!isNonEmptyString(d.supersedes)) continue;
+    if (!supersededBy.has(d.supersedes)) supersededBy.set(d.supersedes, []);
+    supersededBy.get(d.supersedes).push(d);
+  }
 
-  return validRows.filter((d) =>
-    isNonEmptyString(d.decision_id)
-    && supersededByInvalid.has(d.decision_id)
-    && !supersededByValid.has(d.decision_id)
-    && scopeMatches(d, context)
-    && Array.isArray(d.capabilities)
-    && d.capabilities.some((c) => capabilityMatches(c, action)));
+  return present.filter((d) => {
+    if (!isNonEmptyString(d.decision_id)) return false;
+    if (!validateDecision(d, { owners }).ok) return false;
+    const replacements = supersededBy.get(d.decision_id);
+    if (!replacements || replacements.length === 0) return false;
+    if (replacements.some((r) => isNonEmptyString(r.decision_id) && live.has(r.decision_id))) return false;
+    return scopeMatches(d, context)
+      && Array.isArray(d.capabilities)
+      && d.capabilities.some((c) => capabilityMatches(c, action));
+  });
 }
 
 export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNER_IDS } = {}) {
@@ -410,14 +432,14 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
    * the permission layer then routed the resulting no_decision to a COORDINATOR
    * for anything reversible. See src/ownerDecisions.mjs.
    */
-  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);
+  const orphaned = orphanedDecisions(rows, action, context, owners);
   if (orphaned.length > 0) {
     return {
       outcome: 'owner_required',
       decision_id: null,
       matched_scope: null,
-      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but is `
-        + 'superseded by a record that is not a valid decision — the ledger cannot say what the owner '
+      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but was `
+        + 'superseded by a record that is not itself in force — the ledger cannot say what the owner '
         + 'decided, so this goes back to the owner rather than being treated as unregulated',
       constraints: {},
       statement: null,
