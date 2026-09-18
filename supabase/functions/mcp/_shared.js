@@ -2220,6 +2220,119 @@ export const negotiateProtocol = (asked) =>
  * one could smuggle extra PostgREST operators into the request and widen the
  * read past what was asked for.
  */
+/**
+ * ONE REGISTRATION ROW, AS THE READ SURFACE SHOULD DESCRIBE IT.
+ *
+ * LIFTED OUT OF index.ts BECAUSE index.ts CANNOT BE IMPORTED BY THE SUITE.
+ * Rule 10: anything left there is untested by construction, and this projection
+ * is what every reader of this bridge actually sees.
+ *
+ * WHAT IT WAS DOING, AND WHY IT IS THE HOLLOW-GATE SHAPE IN A READ SURFACE.
+ * The projection hardcoded four values:
+ *
+ *   git:            { ok: true, ... }   ok meant "the column had a value"
+ *   locks:          []                  never read from anywhere
+ *   processes:      []                  never read from anywhere
+ *   processProbeOk: true                a LITERAL. Never false, ever.
+ *
+ * The server instructions tell every client "every field is observed from git
+ * plumbing and the process table on the developer machine, so an agent cannot
+ * misreport its own state here", and separately "fields that could not be
+ * determined are null -- treat null as unknown, never as zero". The hosted
+ * projection did the opposite of both: it reported UNKNOWNS AS CONFIDENT ZEROS.
+ *
+ * list_active_processes documents that a false probe flag makes an empty list
+ * inconclusive -- which implies a true one is conclusive. It was never false, so
+ * `processes: []` read as "nothing is running" for sessions that were running.
+ * Measured 2026-09-18: every agent on the roster, including two live ones.
+ *
+ * NULL IS THE HONEST ANSWER and the instructions already tell readers how to
+ * treat it. A hosted registration carries no process table and no lock list --
+ * the worker never sends them -- so the only true statement about them is that
+ * this surface does not know.
+ *
+ * head_sha IS KEPT, because the worker really did derive it from git at publish
+ * time. What is dropped is the `ok: true` beside it, which asserted a successful
+ * read that nobody performed here, and which stayed true while the value went
+ * hours stale. The staleness is visible in heartbeat_at; the false confidence
+ * was not visible anywhere.
+ */
+export function sessionProjection(row, { now } = {}) {
+  const r = row ?? {};
+  return {
+    agentId: r.agent_id,
+    lane: r.lane_id ?? null,
+    machineLabel: r.machine_id ?? null,
+    worktree: r.worktree_id ?? null,
+    /*
+     * Reported as PUBLISHED rather than as observed. `at` says when the worker
+     * read it, so a reader can see for itself how old the sha is instead of
+     * being told a read succeeded.
+     */
+    git: r.head_sha ? { head: r.head_sha, publishedAt: r.heartbeat_at ?? null } : null,
+    locks: null,
+    processes: null,
+    processProbeOk: false,
+    lastSeenAt: r.heartbeat_at ?? null,
+    sessionId: r.session_id,
+    repoId: r.repo_id ?? null,
+    capacity: observedCapacity(r, { now: now ?? new Date().toISOString() }),
+  };
+}
+
+/**
+ * WHICH SESSION IS THIS AGENT, RIGHT NOW.
+ *
+ * get_agent_state did `sessions.find((x) => x.agentId === agentId)` -- FIRST
+ * MATCH on an exact string. Two defects in one line, both measured 2026-09-18:
+ *
+ *   ALIAS-BLIND. get_agent_state('b') answered "no such agent" while code-b was
+ *   live and b is a registered alias of it. The tool a reader reaches for to ask
+ *   "is this agent alive" could not find a live agent by the name people
+ *   actually address it with.
+ *
+ *   FIRST-MATCH AMBIGUITY. code-b held four rows; the call returned a dead
+ *   throwaway seat from 40 minutes earlier, capacity offline, carrying a head
+ *   that had since been reverted -- while the live session sat further down the
+ *   list. b/session-credentials already rejects first-match for identity in as
+ *   many words: "a digest matching two rows resolves NEITHER -- first-match
+ *   would have silently handed over the first identity it found." That reasoning
+ *   was never carried to this reader.
+ *
+ * SO AMBIGUITY IS REPORTED RATHER THAN RESOLVED BY POSITION, and a dead answer
+ * is LABELLED rather than handed over looking current. The three outcomes a
+ * reader must be able to tell apart -- unknown, nobody home, and more than one
+ * candidate -- are the same three resolveLiveAgent already distinguishes.
+ */
+export function selectAgentSession(sessions, agentId, { canonical = canonicalActor } = {}) {
+  const want = canonical(agentId);
+  if (!want) return { ok: false, reason: 'no-agent-named' };
+
+  const mine = arr(sessions).filter((s) => canonical(s?.agentId) === want);
+  if (mine.length === 0) return { ok: false, reason: 'unknown-agent', agentId, canonical: want };
+
+  const live = mine.filter((s) => s?.capacity !== 'offline');
+  if (live.length === 1) return { ok: true, session: live[0], canonical: want };
+  if (live.length > 1) {
+    return {
+      ok: false,
+      reason: 'ambiguous-session',
+      canonical: want,
+      candidates: live.map((s) => s.sessionId),
+    };
+  }
+
+  /*
+   * NOBODY IS HOME, and the most recent registration is still worth returning --
+   * but it is returned SAYING SO. Handing a stale row back unlabelled is how a
+   * reader concludes an agent is at a commit it left hours ago.
+   */
+  const freshest = mine.slice().sort(
+    (a, b) => Date.parse(b?.lastSeenAt ?? 0) - Date.parse(a?.lastSeenAt ?? 0),
+  )[0];
+  return { ok: false, reason: 'no-live-session', canonical: want, stale: freshest };
+}
+
 export function messagesQuery({ to_agent, from_agent, task_id, type, since, limit } = {}) {
   const n = Math.min(Math.max(Number.parseInt(limit ?? 50, 10) || 50, 1), 200);
   const q = ['select=*', 'order=created_at.desc', `limit=${n}`];
@@ -2531,8 +2644,23 @@ export function toolDefs(store) {
       description: 'Full snapshot for one agent: git state, locks, processes, file lists.',
       input: obj({ agentId: { type: 'string', description: 'e.g. "code-c"' } }, ['agentId']),
       run: async ({ agentId }) => {
-        const s = (await listSessions()).find((x) => x.agentId === agentId);
-        return jsonResult(s ?? { error: 'no such agent', agentId });
+        /*
+         * The selection is in selectAgentSession, where a test can reach it.
+         * What was here -- a first-match find on an exact string -- was both
+         * alias-blind and position-dependent; see that function's header.
+         */
+        const r = selectAgentSession(await listSessions(), agentId);
+        if (r.ok) return jsonResult(r.session);
+        if (r.reason === 'no-live-session') {
+          return jsonResult({
+            ...r.stale,
+            note: 'NO LIVE SESSION for this agent. This is its most recent registration '
+              + 'and it is offline; every field below describes when it was last published, '
+              + 'not now.',
+          });
+        }
+        return jsonResult({ error: r.reason, agentId, canonical: r.canonical ?? null,
+          candidates: r.candidates ?? null });
       },
     },
     {

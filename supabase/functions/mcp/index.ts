@@ -8,9 +8,9 @@ import {
   messagesQuery, canReturn, canAccept, acceptRecord, canCancel, cancelRecord,
   eventsFor, nextCursor, proposeWork, canConfirm, supervisoryReport,
   resolveLiveAgent, registryFromSessions, isLive, createDecision, validateDecision,
-  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
+  taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
-  ownTask, ownTasks, validateSessionId,
+  ownTask, ownTasks, validateSessionId, sessionProjection,
 } from './_shared.js';
 
 /**
@@ -340,29 +340,22 @@ async function tokenLabel(table, token) {
 
 const listSessions = async () => {
   const rows = await get('session_registrations?select=*');
-  return rows.map((r) => ({
-    agentId: r.agent_id,
-    lane: r.lane_id ?? null,
-    machineLabel: r.machine_id ?? null,
-    worktree: r.worktree_id ?? null,
-    git: r.head_sha ? { ok: true, head: r.head_sha } : null,
-    locks: [],
-    processes: [],
-    processProbeOk: true,
-    lastSeenAt: r.heartbeat_at ?? null,
-    sessionId: r.session_id,
-    repoId: r.repo_id ?? null,
-    /*
-     * DERIVED, NOT REPORTED. A worker that claimed "idle" and then died says
-     * "idle" in its last row forever -- code-b sat in this roster for fifteen
-     * hours as idle, 898 minutes stale, and it was the only real agent among
-     * the stale rows. The write paths already derived this through
-     * registryFromSessions; only the READ surface handed the stored column
-     * straight out, so the bug could never cause a bad assignment and could
-     * only ever misinform whoever was reading.
-     */
-    capacity: observedCapacity(r, { now: new Date().toISOString() }),
-  }));
+  /*
+   * THE PROJECTION LIVES IN _shared.js NOW, where the suite can reach it.
+   *
+   * It stayed here while it hardcoded `locks: []`, `processes: []` and
+   * `processProbeOk: true` -- a literal that was never false -- so every reader
+   * was told the process table had been checked and was empty, for sessions that
+   * were running. Untested by construction, in the one file rule 10 names.
+   *
+   * capacity is still DERIVED rather than reported, for the reason this comment
+   * originally recorded: a worker that claimed "idle" and then died says "idle"
+   * in its last row forever. code-b sat in this roster for fifteen hours as
+   * idle, 898 minutes stale, and it was the only real agent among the stale
+   * rows. That derivation moved with the rest of the projection.
+   */
+  const now = new Date().toISOString();
+  return rows.map((r) => sessionProjection(r, { now }));
 };
 
 /** The READ store. No write method exists on it, so no write tool is built. */
