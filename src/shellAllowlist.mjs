@@ -182,6 +182,40 @@ const GIT_IMPORTS_HISTORY = new Set(['merge', 'rebase', 'stash', 'cherry-pick', 
  */
 const GIT_OVERWRITES_NAMED_PATH = new Set(['restore', 'checkout', 'switch']);
 
+/*
+ * WHICH FLAGS CONSUME THE NEXT TOKEN, PER VERB.
+ *
+ * Generated from `git <verb> -h`: a flag consumes the following token iff its
+ * help line ends in `<something>`. A bracketed `[=<...>]` is an OPTIONAL value,
+ * which git only accepts glued with `=`, so those consume NOTHING and are
+ * deliberately absent -- that is why -S (--gpg-sign) and -t (--track) are not
+ * here despite looking like they take values.
+ *
+ * test/gitFlagArity.test.mjs rebuilds this from the installed git and asserts
+ * equality in BOTH directions, so a git upgrade that adds or removes a value
+ * flag turns that test red rather than silently changing what this rail skips.
+ *
+ * `add` IS DELIBERATELY ABSENT. Its help text is formatted differently enough
+ * that the derivation yields noise ("--no-all)", a bare "-"), and a table that
+ * decides what the rail skips must not be built from a parse nobody can trust.
+ * An unlisted verb skips NOTHING, which over-blocks a flag value at worst and
+ * cannot swallow a pathspec -- so the honest answer is cheap here. If `add`
+ * ever needs entries, derive them and extend the test's verb list with it.
+ */
+export const GIT_FLAG_TAKES_VALUE = {
+  commit: new Set(['-C', '-F', '-U', '-c', '-m', '-t', '--author', '--cleanup',
+    '--date', '--file', '--fixup', '--inter-hunk-context', '--message',
+    '--pathspec-from-file', '--reedit-message', '--reuse-message', '--squash',
+    '--template', '--trailer', '--unified']),
+  restore: new Set(['-U', '-s', '--conflict', '--inter-hunk-context',
+    '--pathspec-from-file', '--source', '--unified']),
+  checkout: new Set(['-B', '-U', '-b', '--conflict', '--inter-hunk-context',
+    '--orphan', '--pathspec-from-file', '--unified']),
+  switch: new Set(['-C', '-c', '--conflict', '--create', '--force-create',
+    '--orphan']),
+};
+const EMPTY_FLAG_SET = new Set();
+
 {
   const classified = new Set([
     ...GIT_SWEEPS_TREE, ...GIT_REF_ONLY, ...GIT_JUDGED_ABOVE, ...GIT_IMPORTS_HISTORY,
@@ -550,7 +584,36 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * spellings. Reading the file to resolve it would mean trusting a file
        * the session can rewrite between the check and the command.
        */
-      const pathspecFromFile = tokens.find((t) => /^--pathspec-from-file(=|$)/.test(t) || t === '--pathspec-file-nul');
+      /*
+       * AND GIT ACCEPTS ANY UNAMBIGUOUS PREFIX OF A LONG OPTION, so matching the
+       * full spelling matched almost none of them. Measured against the shipped
+       * rail, 2026-09-18, every one of these was ALLOW and every one works:
+       *
+       *   git restore --pathspec-from=ps.txt        git add --pathspec-from=ps.txt
+       *   git restore --pathspec-fro=ps.txt         git restore --pathspec-file-nu
+       *
+       *   $ printf 'src/claudeGuard.mjs\n' > ps.txt
+       *   $ git restore --pathspec-from=ps.txt   -> exit 0, the edit is gone
+       *
+       * The commit that introduced the check called it "a closed set defined by
+       * git's semantics, not a guess at spellings". The SET of flags is closed;
+       * the set of SPELLINGS is open, and the check was written against the
+       * spellings. That is the enumeration mistake the same commit message
+       * claimed to be correcting, one paragraph earlier.
+       *
+       * So ask the rule instead of listing its outputs: git resolves a long
+       * option by prefix, therefore any token that is a prefix of one of these
+       * names IS one of these flags. An ambiguous prefix (--p) is refused too --
+       * git would reject it as ambiguous anyway, and refusing is the direction
+       * this check already fails in.
+       */
+      const PATHSPEC_FILE_FLAGS = ['--pathspec-from-file', '--pathspec-file-nul'];
+      const pathspecFromFile = tokens.find((t) => {
+        if (!t.startsWith('--')) return false;
+        const name = t.split('=')[0];
+        if (name === '--') return false;
+        return PATHSPEC_FILE_FLAGS.some((full) => full.startsWith(name));
+      });
       if (pathspecFromFile) {
         return {
           allowed: false,
@@ -566,10 +629,44 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * binary. Longer messages passed, so it bit exactly the shortest ones, and
        * the refusal text was unintelligible to whoever hit it.
        */
-      const VALUE_TAKING = /^(-m|--message|-F|--file|-C|--reuse-message|-c|--reedit-message|--author|--date|--source|-S|--gpg-sign|-b|-B|--orphan)$/;
+      /*
+       * A FLAG'S NAME DOES NOT DECIDE WHETHER IT TAKES A VALUE. THE VERB DOES.
+       *
+       * The first version of this was one flat regex containing -m, and it
+       * OPENED A HOLE bigger than the over-block it closed. `-m` takes a message
+       * for commit, but for restore, checkout and switch it is `--merge`, a
+       * BOOLEAN -- so skipping "the value after -m" skipped the PATHSPEC, and
+       * the named-path check below never saw it:
+       *
+       *   git restore -m src/claudeGuard.mjs      ALLOW   (was DENY before)
+       *   git checkout -m src/claudeGuard.mjs     ALLOW
+       *   git restore -m .claude/settings.json    ALLOW
+       *
+       * Confirmed against git, not just the parser: append a line to
+       * src/claudeGuard.mjs, run `git restore -m src/claudeGuard.mjs`, the edit
+       * is gone. That is precisely what the comment above says this check exists
+       * to prevent. Found by blind audit, 2026-09-18, one commit after shipping.
+       *
+       * `-S` was wrong the same way and in both directions: --staged on restore
+       * and --gpg-sign[=<key-id>] on commit, which takes an OPTIONAL value and so
+       * never consumes the next token either. It was consuming operands for both.
+       *
+       * THE TABLE IS DERIVED FROM GIT, NOT REMEMBERED. `git <verb> -h` prints
+       * `<...>` after exactly those flags that consume the next token, and
+       * test/gitFlagArity.test.mjs regenerates this table from that output and
+       * fails if the two disagree. So the rail stays pure and synchronous, and
+       * git is still the thing that answers -- which is the only version of this
+       * check that has ever survived an audit.
+       *
+       * AN UNLISTED VERB SKIPS NOTHING. Judging a flag value as a pathspec
+       * over-blocks; skipping a pathspec lets a protected file be overwritten.
+       * Those are not symmetric, so the default is the one that fails loudly.
+       */
+      const takesValue = GIT_FLAG_TAKES_VALUE[verb] ?? EMPTY_FLAG_SET;
       const operandTokens = [];
       for (let i = 2; i < tokens.length; i += 1) {
-        if (VALUE_TAKING.test(tokens[i])) { i += 1; continue; }
+        // A flag spelled --opt=value carries its value inline and consumes nothing.
+        if (takesValue.has(tokens[i])) { i += 1; continue; }
         operandTokens.push(tokens[i]);
       }
       const named = operandTokens

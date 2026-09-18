@@ -733,19 +733,59 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
  * matches `prototype` and `history`. Those go in the word list, matched only as
  * whole words after splitting on camelCase and punctuation.
  *
- * `source` is deliberately in NEITHER: it is genuinely ambiguous, and a mover
- * carrying `source` also carries `destination`, which is caught. Missing a lone
- * `source` is the direction a backstop is allowed to fail in; refusing every
- * notebook edit is not.
+ * TWO THINGS HERE WERE WRONG AND ARE FIXED, BOTH FOUND BY BLIND AUDIT ON THE
+ * COMMIT THAT INTRODUCED THEM (2026-09-18).
+ *
+ * ONE: the splitter could not see an ALL-CAPS key. `(?=[A-Z])` splits before
+ * EVERY capital, so 'SRC' became ['','S','R','C'] and matched no word. These all
+ * went DENY -> ALLOW, a straight regression from the regex this replaced:
+ *
+ *   {"SRC":"src/claudeGuard.mjs","DST":"tmp/x"}   {"TO":"CLAUDE.md"}
+ *   {"FROM":"src/guardSession.mjs"}
+ *
+ * The old `(^|_)` regex caught them because it matched whole tokens without
+ * caring about case. Splitting on camelCase without handling acronym runs is
+ * "one alias class, not the property" -- the exact mistake the commit was
+ * written to correct, repeated on identifier case inside the correction.
+ *
+ * TWO: `source` was put in NEITHER list, on the reasoning that "a mover carrying
+ * `source` also carries `destination`, which is caught". That reasoning is
+ * simply wrong. The check fires on the VALUE, not the key: a mover's
+ * destination VALUE is some scratch path, so nothing is caught and
+ * {"source":"src/claudeGuard.mjs"} sailed through.
+ *
+ * The real constraint was never `source`. It was `new_source`, NotebookEdit's
+ * CONTENT field, which must not be read as a path or every notebook edit is
+ * refused. That is one exact key, so it is excluded as one exact key rather than
+ * by dropping the whole word -- a carve-out the size of the actual exception.
  */
 const PATH_STEM = /(path|file|dir|folder|dest|target|location|url|uri)/i;
-const PATH_WORD = new Set(['to', 'from', 'dst', 'src']);
+const PATH_WORD = new Set(['to', 'from', 'dst', 'src', 'source']);
+
+/*
+ * Keys whose value is CONTENT, not a location. Matched on the whole key, lower
+ * cased, so `source` can stay in PATH_WORD above.
+ */
+const CONTENT_KEY = new Set(['new_source', 'old_source']);
+
+/*
+ * Split an identifier into lower-cased words, handling acronym runs:
+ *   'SRC' -> ['src']          'filePath'   -> ['file','path']
+ *   'TO'  -> ['to']           'HTTPSource' -> ['http','source']
+ *   'new_source' -> ['new','source']
+ */
+const identifierWords = (key) => key
+  .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+  .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+  .split(/[^A-Za-z0-9]+/)
+  .filter(Boolean)
+  .map((w) => w.toLowerCase());
+
 const isPathShapedKey = (key) => {
   if (typeof key !== 'string' || key === '') return false;
+  if (CONTENT_KEY.has(key.toLowerCase())) return false;
   if (PATH_STEM.test(key)) return true;
-  return key
-    .split(/[^A-Za-z0-9]+|(?=[A-Z])/)
-    .some((w) => PATH_WORD.has(w.toLowerCase()));
+  return identifierWords(key).some((w) => PATH_WORD.has(w));
 };
 
 function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }, inheritedKey = null) {
