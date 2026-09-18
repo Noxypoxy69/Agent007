@@ -71,20 +71,9 @@ export function parseInstant(v) {
 export const PROBE_DEFAULTS = Object.freeze({
   /** How long an ack is trusted before the agent must prove itself again. */
   ackWindowMs: 10 * 60 * 1000,
-  /**
-   * How long ONE outstanding probe waits before the next attempt goes out.
-   *
-   * SHORT, BECAUSE THE ATTEMPTS ARE A BURST. "5 attempts in a row, not all
-   * day." Spacing them at the healthy-probe interval would mean five failures
-   * take twenty-five minutes to conclude anything, and a roster that takes
-   * twenty-five minutes to notice a dead agent is one nobody trusts for
-   * dispatch. At thirty seconds the whole sequence resolves inside three
-   * minutes: long enough to ride out a slow model turn or a brief fault,
-   * short enough to be useful.
-   */
-  ackGraceMs: 30 * 1000,
-
-  /** Spacing between probes to a session that is ANSWERING. */
+  /** How long ONE outstanding probe may go unanswered before another is sent. */
+  ackGraceMs: 5 * 60 * 1000,
+  /** Minimum spacing between probes to one session. */
   probeIntervalMs: 5 * 60 * 1000,
 
   /**
@@ -289,15 +278,8 @@ export function probeDue(session, now, opts = {}) {
    */
   if (attempts >= maxAttempts) return at - sent >= recheckIntervalMs;
 
-  /*
-   * MID-SEQUENCE: THE NEXT ATTEMPT FOLLOWS THE GRACE, NOT THE HEALTHY INTERVAL.
-   *
-   * "5 attempts in a row, not all day." Spacing retries at probeIntervalMs
-   * would stretch the budget across twenty-five minutes, and a roster that
-   * takes that long to conclude anything is no better than the stale-window it
-   * replaces. The burst resolves in about `maxAttempts * ackGraceMs`.
-   */
-  return at - sent >= ackGraceMs;
+  // Mid-sequence: keep asking until the attempt budget is spent.
+  return at - sent >= Math.min(probeIntervalMs, ackGraceMs);
 }
 
 /**
