@@ -1,0 +1,57 @@
+{
+  "rev": "e59a431",
+  "restore": ["src/ownerDecisions.mjs", "supabase/functions/mcp/_shared.js", "mcp/toolDefs.mjs", "bridge/httpStore.mjs"],
+  "cases": [
+    {
+      "name": "F1 created_by anchor removed (back to comparing the record with itself)",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "  if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');\n  else if (!isOwnerId(d.created_by, owners)) {", "to": "  if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');\n  else if (d.created_by !== d.owner_id) {" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "  if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');\n  else if (!isOwnerId(d.created_by, owners)) {", "to": "  if (!isNonEmptyString(d.created_by)) errors.push('created_by is required');\n  else if (d.created_by !== d.owner_id) {" }
+      ]
+    },
+    {
+      "name": "F2 created_by check deleted entirely",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "  else if (!isOwnerId(d.created_by, owners)) {", "to": "  else if (false) {" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "  else if (!isOwnerId(d.created_by, owners)) {", "to": "  else if (false) {" }
+      ]
+    },
+    {
+      "name": "F3 httpStore: locks/processes flattened back to []",
+      "test": "atest/unknownSurvivesEverySurface.test.mjs",
+      "edits": [
+        { "file": "bridge/httpStore.mjs", "from": "        locks: Array.isArray(r.locks) ? r.locks : null,", "to": "        locks: r.locks ?? [],", "//": "" }
+      ]
+    },
+    {
+      "name": "F4 httpStore: processProbeOk back to !== false",
+      "test": "atest/unknownSurvivesEverySurface.test.mjs",
+      "edits": [
+        { "file": "bridge/httpStore.mjs", "from": "        processProbeOk: typeof r.process_probe_ok === 'boolean' ? r.process_probe_ok : null,", "to": "        processProbeOk: r.process_probe_ok !== false," }
+      ]
+    },
+    {
+      "name": "F5 THE OVER-FIX: map a measured [] and false to null as well",
+      "test": "atest/unknownSurvivesEverySurface.test.mjs",
+      "edits": [
+        { "file": "bridge/httpStore.mjs", "from": "        locks: Array.isArray(r.locks) ? r.locks : null,\n        processes: Array.isArray(r.processes) ? r.processes : null,\n        processProbeOk: typeof r.process_probe_ok === 'boolean' ? r.process_probe_ok : null,", "to": "        locks: null,\n        processes: null,\n        processProbeOk: null," }
+      ]
+    },
+    {
+      "name": "F6 toolDefs twin: dirtyFiles back to 0-for-unknown",
+      "test": "atest/unknownSurvivesEverySurface.test.mjs",
+      "edits": [
+        { "file": "mcp/toolDefs.mjs", "from": "        dirtyFiles: Array.isArray(s.git?.dirty) ? s.git.dirty.length : null,", "to": "        dirtyFiles: (s.git?.dirty ?? []).length," }
+      ]
+    },
+    {
+      "name": "F7 list_locks already flattens null -> [] : does any gate notice if list_agents does too?",
+      "test": "SUITE",
+      "edits": [
+        { "file": "mcp/toolDefs.mjs", "from": "        locksHeld: Array.isArray(s.locks) ? s.locks.map((l) => l.resource) : null,", "to": "        locksHeld: (s.locks ?? []).map((l) => l.resource)," }
+      ]
+    }
+  ]
+}
