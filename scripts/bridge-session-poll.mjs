@@ -380,7 +380,25 @@ const flag = (name) => {
   return i >= 0 ? argv[i + 1] : null;
 };
 
-try {
+/*
+ * ONLY WHEN RUN, NEVER WHEN IMPORTED.
+ *
+ * This dispatch used to be unconditional at the top level, so `import` executed
+ * it. test/pollCursorAdvances.test.mjs imports one pure function from this file
+ * and the import printed the usage line -- visible, harmless, and the wrong
+ * half of the problem.
+ *
+ * The real hazard is that the branch taken is decided by `process.argv` of
+ * WHOEVER IMPORTED IT. Under the test runner that is argv with no flags, which
+ * is why this was benign today. A runner, wrapper or future test invoked with
+ * `--session-start` anywhere in its argv would have registered a session
+ * against the operator's live bridge as a side effect of an import, and
+ * `--supervise` would have detached a poller that nothing recorded and nothing
+ * would ever stop. An import must not be able to do that.
+ */
+const RUN_DIRECTLY = !!process.argv[1] && path.resolve(process.argv[1]) === SELF;
+
+if (RUN_DIRECTLY) try {
   if (argv.includes('--supervise')) {
     const sessionId = flag('--session');
     const tokenFile = flag('--token-file');
