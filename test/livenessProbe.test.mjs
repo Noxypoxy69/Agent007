@@ -126,6 +126,30 @@ test('recordProbe COUNTS A SEQUENCE, and a fresh ack starts a new one', () => {
   assert.equal(recordProbe(null, { probeId: 'p', at: ago(1 * MIN) }), null, 'a probe was recorded on nothing');
 });
 
+test('THE FIVE ATTEMPTS ARE A BURST, NOT A DAY', () => {
+  /*
+   * "5 attempts in a row, not all day." Spacing retries at the healthy probe
+   * interval would stretch the budget over twenty-five minutes, and a roster
+   * that takes that long to conclude anything is no better than the stale
+   * window it replaces.
+   */
+  const { maxAttempts, ackGraceMs, probeIntervalMs } = PROBE_DEFAULTS;
+  const wholeSequenceMs = maxAttempts * ackGraceMs;
+
+  assert.ok(wholeSequenceMs <= 5 * MIN,
+    `five attempts would take ${Math.round(wholeSequenceMs / 1000)}s — that is not "in a row"`);
+  assert.ok(ackGraceMs < probeIntervalMs,
+    'the retry gap is not shorter than the healthy interval, so failures are spaced like successes');
+
+  // The next attempt is due as soon as the grace lapses, not a healthy interval later.
+  const midSequence = {
+    ...healthy(), lastAckAt: ago(10 * MIN), probeId: 'p',
+    probeSentAt: ago(ackGraceMs + SEC), probeAttempts: 2,
+  };
+  assert.equal(probeDue(midSequence, NOW), true,
+    'the next attempt in a failing sequence waits longer than the grace — the burst is not a burst');
+});
+
 test('SILENCE IS A VERDICT ABOUT NOW, NOT A PERMANENT LABEL', () => {
   /*
    * "Also it's hard for them to refresh." A session that recovers must rejoin
@@ -201,7 +225,10 @@ test('applyAck REFUSES BY DEFAULT rather than trusting the caller', () => {
    * Rule 6: assert preconditions, do not guard on them. A caller that forgets
    * to check ackMatches must not be able to mark a dead agent live.
    */
-  const s = { ...healthy(), lastAckAt: ago(40 * MIN), probeId: 'p-9', probeSentAt: ago(1 * MIN) };
+  const s = {
+    ...healthy(), lastAckAt: ago(40 * MIN), probeId: 'p-9',
+    probeSentAt: ago(1 * MIN), probeAttempts: PROBE_DEFAULTS.maxAttempts,
+  };
 
   const wrong = applyAck(s, { probeId: 'p-other', at: ago(1 * SEC) });
   assert.equal(wrong.lastAckAt, s.lastAckAt, 'a mismatched ack moved the liveness clock');
