@@ -116,7 +116,19 @@ const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
  * inside a worktree is protected again. That is the directory that decides
  * whether a guard runs, and pre-planting it is the whole attack.
  */
-const NESTED_CONTROL_DIR = /(^|\/)\.claude\//;
+/*
+ * CASE-INSENSITIVE, because the filesystem this runs on is. NTFS resolves
+ * `.Claude` and `.CLAUDE` to the same directory, so a junction named
+ * `.claude/worktrees/x/.Claude` reaches the same control an inner session boots
+ * from -- and without the `i` flag this regex did not match it, so the walk did
+ * not record it and PreToolUse did not refuse planting it: an unprivileged,
+ * undetected disarm. Found by audit. This is the match-not-enumerate fix (one
+ * flag covers every spelling), not a list of cased variants. NOTE the exempt
+ * PREFIX check and the PROTECTED_PATHS exact/prefix compares are still
+ * case-sensitive; a fully case-folded matcher is a separate, broader change
+ * tracked elsewhere and is not smuggled in here.
+ */
+const NESTED_CONTROL_DIR = /(^|\/)\.claude\//i;
 
 /** Is a repo-relative path protected? Exact match, or under a `/` prefix entry. */
 export function isProtectedRelPath(rel) {

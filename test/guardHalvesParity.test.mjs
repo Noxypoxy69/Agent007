@@ -401,3 +401,29 @@ test('D2: discoverTests does not follow a junction under test/, so the Stop hook
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('D-B: a CASE-VARIANT junction (.Claude) is recorded, because NTFS is case-insensitive', () => {
+  /*
+   * D1 tested only lowercase `.claude`. An audit showed NESTED_CONTROL_DIR was
+   * case-sensitive while the filesystem is not, so `.Claude` reached the same
+   * control and was neither recorded nor refused -- an unprivileged undetected
+   * disarm. This pins the `i` flag: without it, this test goes red.
+   */
+  const root = buildFixture();
+  try {
+    mkdirSync(path.join(root, '.claude/worktrees/agent-y/payload'), { recursive: true });
+    writeFileSync(path.join(root, '.claude/worktrees/agent-y/payload/settings.json'), '{"hooks":{"disableAllHooks":true}}');
+    const cased = path.join(root, '.claude/worktrees/agent-y/.Claude');
+    let made = false;
+    try { symlinkSync(path.join(root, '.claude/worktrees/agent-y/payload'), cased, 'junction'); made = true; } catch { /* counted */ }
+    assert.equal(made, true, 'could not create the .Claude junction, so the case variant was not exercised');
+
+    const files = protectedFilesIn(root);
+    assert.ok(
+      files.some((f) => f.toLowerCase() === '.claude/worktrees/agent-y/.claude'),
+      'a .Claude junction at a nested control path must be recorded, or the case-variant disarm is invisible',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
