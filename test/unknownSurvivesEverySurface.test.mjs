@@ -64,11 +64,22 @@ const storeOf = (sessions) => ({
   listMessages: async () => [],
 });
 
+/**
+ * Invoke a tool and unwrap the MCP envelope back to data.
+ *
+ * `run` returns `{content:[{type:'text', text:'<json>'}]}` — the shape a client
+ * actually receives. Parsing it rather than reaching past it means this test
+ * exercises the same bytes a caller gets, which is where the contradiction
+ * between two tools was visible in the first place.
+ */
 const call = async (defs, name, store, args = {}) => {
   const def = defs(store).find((d) => d.name === name);
   assert.ok(def, `${name} was not built — the fixture is too thin to test anything`);
-  const out = await def.handler(args);
-  return typeof out === 'string' ? JSON.parse(out) : out;
+  assert.equal(typeof def.run, 'function', `${name} has no run()`);
+  const out = await def.run(args);
+  const text = out?.content?.[0]?.text;
+  assert.equal(typeof text, 'string', `${name} did not return a text result: ${JSON.stringify(out).slice(0, 160)}`);
+  return JSON.parse(text);
 };
 
 const rowOf = async (defs, name, session) => {
@@ -130,7 +141,7 @@ test('ONE CONNECTION DOES NOT CONTRADICT ITSELF ABOUT ONE SESSION', async () => 
     const store = storeOf([UNMEASURED]);
     const agents = await call(defs, 'list_agents', store);
     const procs = await call(defs, 'list_active_processes', store);
-    const agentRow = (Array.isArray(agents) ? agents : agents.agents)[0];
+    const agentRow = (Array.isArray(agents) ? agents : agents.agents ?? agents.rows)[0];
     const procRow = (Array.isArray(procs) ? procs : procs.agents ?? procs.rows)[0];
 
     const agentSaysUnknown = agentRow.running === null;
