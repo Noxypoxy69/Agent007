@@ -73,7 +73,23 @@ export const PROTECTED_PATHS = Object.freeze([
  * produced this.
  */
 const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
-const NESTED_CONTROL_DIR = /(^|\/)\.claude\//;
+/*
+ * THE `i` IS LOAD-BEARING IN THE TWIN AND WAS MISSING HERE.
+ *
+ * guardSession.mjs carries the reasoning: NTFS resolves `.Claude` and `.CLAUDE`
+ * to the same directory, so without the flag a junction named
+ * `.claude/worktrees/x/.Claude` reaches the same control an inner session boots
+ * from, the walk does not record it, and PreToolUse does not refuse planting it
+ * -- "an unprivileged, undetected disarm. Found by audit."
+ *
+ * Harmless TODAY only because both call sites lowercase first, and an audit
+ * measured zero behavioural differences across fifteen paths. That is rule 11:
+ * untested because currently redundant is how a protection quietly stops being
+ * one. The masking `.toLowerCase()` is one edit away from being removed on one
+ * side, and protectedPathParity compares the ARRAYS plus a two-path corpus, so
+ * it would not notice.
+ */
+const NESTED_CONTROL_DIR = /(^|\/)\.claude\//i;
 
 /*
  * THE COMPARE IS CASE-FOLDED, BECAUSE THE FILESYSTEM IS.

@@ -103,6 +103,38 @@ const READ_OPERATIONS = Object.freeze(new Set([
   'd1_database_get', 'kv_namespace_get', 'r2_bucket_get', 'hyperdrive_config_get',
   'search_cloudflare_documentation', 'migrate_pages_to_workers_guide',
   'search_threads', 'get_message', 'get_thread', 'list_labels', 'list_drafts', 'get_draft',
+  /*
+   * ── SEVEN OVER-BLOCKS, FOUND BY AUDIT AGAINST THE REAL ROSTER ─────────────
+   *
+   * Each of these was refused as irreversible-outbound once the classifier was
+   * wired, and none of them sends anything:
+   *
+   *   slack_search_public_and_private  a READ. Its sibling slack_search_public
+   *                                    was already here; the private variant was
+   *                                    simply not listed. Enumeration failing in
+   *                                    the direction rule 19 warns about.
+   *   create_draft, update_draft       a draft is NOT SENT. list_drafts and
+   *                                    get_draft were already reads, so the
+   *                                    model already distinguished drafts --
+   *                                    and writing a draft for the OWNER to send
+   *                                    is the safe pattern this should
+   *                                    encourage, not gate.
+   *   create_label, label_message,     a label is filing, not outbound. Nothing
+   *   update_message_labels            leaves the account; unlabel_message
+   *                                    exists and undoes it.
+   *   slack_add_reaction               an emoji, removable, on a message that
+   *                                    was already posted.
+   *
+   * By this module's own rule-19 argument, an over-blocking guard gets switched
+   * off and that loses every layer at once. A draft and a label are exactly the
+   * ordinary work whose refusal makes somebody disable the hook.
+   *
+   * WHAT IS DELIBERATELY NOT ADDED: send_message, forward, reply,
+   * slack_send_message, slack_schedule_message, trash/spam operations. Those
+   * either reach a recipient or destroy mail, and both are the owner's call.
+   */
+  'create_draft', 'update_draft', 'create_label', 'label_message', 'update_message_labels',
+  'slack_add_reaction', 'slack_search_public_and_private',
   'slack_read_channel', 'slack_read_thread', 'slack_search_public', 'slack_search_channels',
   'slack_search_users', 'slack_read_user_profile', 'slack_read_canvas', 'slack_read_file',
   'slack_list_channel_members', 'slack_get_reactions', 'slack_search_emojis',

@@ -146,8 +146,34 @@ function sourceFiles() {
  * matcher, not the strings the prober happened to try.
  */
 const QUOTE = "['\"`]";
-const GIT_ARGV = new RegExp(`\\(\\s*(${QUOTE})(git(?:\\.exe)?)\\1\\s*,`, 'gi');
+/*
+ * THE NAME MAY CARRY A PATH AND A WINDOWS EXTENSION.
+ *
+ * `git(?:\.exe)?` alone missed an ABSOLUTE PATH to the same program --
+ * execFileSync('C:/Program Files/Git/cmd/git.exe', …) -- and `git.cmd`. An
+ * audit listed both among the spellings most likely to appear by accident
+ * rather than by evasion, which is the class this scan exists for.
+ */
+const GIT_NAME = `(?:[^'"\`]*[\\\\/])?git(?:\\.exe|\\.cmd)?`;
+
+/* argv form: the name is its own argument. A parenthesised ('git') counts. */
+const GIT_ARGV = new RegExp(`\\(\\s*\\(?\\s*(${QUOTE})(${GIT_NAME})\\1\\s*\\)?\\s*,`, 'gi');
+
+/* shell form: the name heads a command string. */
 const GIT_SHELL = new RegExp(`\\(\\s*(${QUOTE})(git\\s+[^'"\`]*)\\1`, 'gi');
+
+/*
+ * INDIRECT INVOCATION, where the name is the SECOND argument.
+ *
+ *   execFileSync.call(null, 'git', […])
+ *   execFileSync.apply(null, ['git', […]])
+ *
+ * Neither is exotic -- .call with an explicit receiver is ordinary JavaScript --
+ * and both were invisible, because every pattern above anchors the name to the
+ * FIRST argument position.
+ */
+const GIT_INDIRECT = new RegExp(
+  `\\.(?:call|apply)\\(\\s*[^,()]{0,40},\\s*\\[?\\s*(${QUOTE})(${GIT_NAME})\\1`, 'gi');
 
 /*
  * SIXTEEN CALL SITES THAT ARE NOT FIXED, LISTED RATHER THAN EXCLUDED.
@@ -253,8 +279,56 @@ function blankComments(src) {
   const out = Array.from(src);
   const n = src.length;
   let i = 0;
-  let state = 'code'; // code | line | block | single | double | template
+  let state = 'code'; // code | line | block | single | double | template | regex
+  let inClass = false; // inside [...] of a regex, where / is literal
+  let prev = '';       // last significant character, for the regex/division call
+  /*
+   * `${ ... }` INSIDE A TEMPLATE IS CODE, AND TREATING IT AS TEXT LEFT COMMENT
+   * PROSE UNBLANKED.
+   *
+   * bin/agentbridge-attempt.mjs writes a record through
+   * `${JSON.stringify({ ... })}` with a block comment inside the object. Staying
+   * in template state to the closing backtick meant that comment was never
+   * blanked -- which cannot HIDE a violation (template text is still scanned)
+   * but can invent one, and a lint that reports prose is a lint somebody
+   * deletes. That failure already happened once tonight with `errors.push`.
+   *
+   * So an interpolation pushes back into code and its closing brace pops out,
+   * which also means a nested template inside an interpolation works.
+   */
+  const stack = [];    // states to return to when an interpolation closes
+  let braceDepth = 0;
   const blank = (at) => { if (out[at] !== '\n') out[at] = ' '; };
+
+  /*
+   * A SLASH IS A REGEX OR A DIVISION, AND THE SCANNER HAD NO OPINION.
+   *
+   * Found by blind audit. This modelled strings and comments but not REGEX
+   * LITERALS, so a comment opener inside one ran away with the file:
+   *
+   *   const GLOB = /[/*]/;                     <- a regex containing an opener
+   *   export function a(u) { return execFileSync('git', ['push', u]); }
+   *
+   * Everything from the regex to end of file was blanked, the byte and line
+   * counts stayed perfect -- the property this function advertises -- and the
+   * scan reported a clean file while a real unhardened git call sat in it.
+   *
+   * AND IT WAS LIVE, not synthetic. Six real files desynchronised, the
+   * mechanism being src/shellAllowlist.mjs:61 --
+   *
+   *   const FORBIDDEN_CHARS = /[$`<>(){}\n\\]/;
+   *
+   * The BACKTICK inside that character class put the scanner into template
+   * state for the remainder of the file, in one of the guard's own protected
+   * dependencies. Today that only produced unblanked comment prose rather than
+   * a missed violation, but it is the same desync pointed the other way.
+   *
+   * Distinguishing the two uses of `/` needs the previous significant token,
+   * which is the standard heuristic and is what a real tokeniser does: after a
+   * value (identifier, number, closing bracket) a slash divides; anywhere else
+   * it opens a pattern.
+   */
+  const REGEX_CANNOT_FOLLOW = /[A-Za-z0-9_$)\]]/;
 
   while (i < n) {
     const c = src[i];
@@ -262,9 +336,27 @@ function blankComments(src) {
     if (state === 'code') {
       if (c === '/' && d === '/') { state = 'line'; blank(i); blank(i + 1); i += 2; continue; }
       if (c === '/' && d === '*') { state = 'block'; blank(i); blank(i + 1); i += 2; continue; }
-      if (c === "'") { state = 'single'; i += 1; continue; }
-      if (c === '"') { state = 'double'; i += 1; continue; }
-      if (c === '`') { state = 'template'; i += 1; continue; }
+      if (c === '/' && !REGEX_CANNOT_FOLLOW.test(prev)) {
+        state = 'regex'; inClass = false; i += 1; continue;
+      }
+      if (c === "'") { state = 'single'; i += 1; prev = c; continue; }
+      if (c === '"') { state = 'double'; i += 1; prev = c; continue; }
+      if (c === '`') { state = 'template'; i += 1; prev = c; continue; }
+      if (c === '{') { braceDepth += 1; prev = c; i += 1; continue; }
+      if (c === '}') {
+        if (braceDepth === 0 && stack.length) { state = stack.pop(); prev = c; i += 1; continue; }
+        if (braceDepth > 0) braceDepth -= 1;
+        prev = c; i += 1; continue;
+      }
+      if (!/\s/.test(c)) prev = c;
+      i += 1; continue;
+    }
+    if (state === 'regex') {
+      if (c === '\\') { i += 2; continue; }
+      if (c === '[') { inClass = true; i += 1; continue; }
+      if (c === ']') { inClass = false; i += 1; continue; }
+      if (c === '/' && !inClass) { state = 'code'; prev = '/'; i += 1; continue; }
+      if (c === '\n') { state = 'code'; prev = ''; i += 1; continue; } // unterminated: do not run away
       i += 1; continue;
     }
     if (state === 'line') {
@@ -276,8 +368,11 @@ function blankComments(src) {
       blank(i); i += 1; continue;
     }
     if (c === '\\') { i += 2; continue; } // an escape inside a string
+    if (state === 'template' && c === '$' && d === '{') {
+      stack.push('template'); state = 'code'; braceDepth = 0; prev = '{'; i += 2; continue;
+    }
     if ((state === 'single' && c === "'") || (state === 'double' && c === '"') || (state === 'template' && c === '`')) {
-      state = 'code'; i += 1; continue;
+      state = 'code'; prev = c; i += 1; continue;
     }
     i += 1;
   }
@@ -299,7 +394,7 @@ function gitCallSites() {
 
     const code = blankComments(readFileSync(file, 'utf8'));
 
-    for (const [re, shape] of [[GIT_ARGV, 'argv'], [GIT_SHELL, 'shell']]) {
+    for (const [re, shape] of [[GIT_ARGV, 'argv'], [GIT_SHELL, 'shell'], [GIT_INDIRECT, 'indirect']]) {
       for (const m of code.matchAll(re)) {
         const callee = calleeBefore(code, m.index);
         /*
@@ -377,6 +472,18 @@ const MUST_MATCH = Object.freeze([
   ['SHELL form -- audit D6, spawns through a shell so it is worse', "execSync('git status --porcelain', {});"],
   ['shell form, async', "exec('git rev-parse HEAD', {}, cb);"],
   ['the first argument on the next line', "execFileSync(\n  'git',\n  ['status'],\n);"],
+  /*
+   * Added after a blind audit proved ten spellings ran git with the gate green.
+   * The first four are the ones it judged likely to appear BY ACCIDENT rather
+   * than by evasion, which is what this scan is for.
+   */
+  ['audit D8: .call with an explicit receiver', "execFileSync.call(null, 'git', ['status']);"],
+  ['audit D8: .apply with an argument array', "execFileSync.apply(null, ['git', ['status']]);"],
+  ['audit D8: an absolute path to git.exe', "execFileSync('C:/Program Files/Git/cmd/git.exe', ['status']);"],
+  ['audit D8: git.cmd', "execFileSync('git.cmd', ['status']);"],
+  ['audit D8: a parenthesised name', "execFileSync(('git'), ['status']);"],
+  ['audit D5: a regex literal containing a comment opener does not hide the call',
+    "const GLOB = /[/*]/;\nexecFileSync('git', ['push']);"],
 ]);
 
 const MUST_NOT_MATCH = Object.freeze([
@@ -391,7 +498,7 @@ test('THE MATCHER STILL RECOGNISES EVERY SPELLING, independent of what the tree 
   for (const [label, sample] of MUST_MATCH) {
     const hits = [];
     const code = blankComments(sample);
-    for (const [re] of [[GIT_ARGV], [GIT_SHELL]]) for (const m of code.matchAll(re)) hits.push(m);
+    for (const [re] of [[GIT_ARGV], [GIT_SHELL], [GIT_INDIRECT]]) for (const m of code.matchAll(re)) hits.push(m);
     assert.ok(hits.length >= 1, `the matcher no longer catches ${label}: ${JSON.stringify(sample)}`);
   }
 });
@@ -405,7 +512,7 @@ test('AND IT DOES NOT MATCH THINGS THAT ARE NOT GIT INVOCATIONS', () => {
   for (const [label, sample] of MUST_NOT_MATCH) {
     const hits = [];
     const code = blankComments(sample);
-    for (const [re] of [[GIT_ARGV], [GIT_SHELL]]) for (const m of code.matchAll(re)) hits.push(m);
+    for (const [re] of [[GIT_ARGV], [GIT_SHELL], [GIT_INDIRECT]]) for (const m of code.matchAll(re)) hits.push(m);
     assert.deepEqual(hits.map((m) => m[0]), [], `the matcher wrongly flags ${label}`);
   }
 });
@@ -424,6 +531,27 @@ test('COMMENT BLANKING PRESERVES BYTES AND LINES, which the regex version did no
   assert.match(blanked, /execFileSync\('git'/,
     'a comment opener inside a STRING must not blank out the code after it -- audit D2 hid a real '
     + 'violation this way while the gate reported nine of nine green');
+
+  /*
+   * Audit D5: a regex literal containing a comment opener blanked to END OF
+   * FILE, hiding a real violation and every later one, with byte and line
+   * counts perfectly preserved.
+   */
+  const withRegexOpener = "const GLOB = /[/*]/;\nexport function a(u) { return execFileSync('git', ['push', u]); }\n";
+  const r1 = blankComments(withRegexOpener);
+  assert.equal(r1.length, withRegexOpener.length, 'a regex literal must not change byte positions');
+  assert.match(r1, /execFileSync\('git'/,
+    'a comment opener inside a REGEX must not blank the code after it -- this ran real unhardened '
+    + 'git while the scan reported a clean file');
+
+  /*
+   * And the live case: a BACKTICK inside a character class put the scanner into
+   * template state for the rest of the file. Six real files desynchronised on
+   * this, the mechanism being src/shellAllowlist.mjs.
+   */
+  const backtickInClass = "const FORBIDDEN = /[$`<>(){}\\n\\\\]/;\nrun('git', ['status']);\n";
+  assert.match(blankComments(backtickInClass), /run\('git'/,
+    'a backtick inside a regex character class must not open a template string');
 
   const withBlankLineBeforeComment = "const a = 1;\n\n  // a comment\nrun('git', ['x']);\n";
   const b2 = blankComments(withBlankLineBeforeComment);

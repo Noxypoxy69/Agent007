@@ -587,6 +587,13 @@ function isWorktreeNestedControl(rel) {
   return NESTED_CONTROL_DIR.test(rel.slice('.claude/worktrees/'.length));
 }
 
+/** The worktree directory a nested control belongs to, or null. */
+function worktreeDirOf(repoRoot, rel) {
+  const parts = rel.split('/');            // .claude worktrees <id> ...
+  if (parts.length < 4) return null;
+  return path.join(repoRoot, parts[0], parts[1], parts[2]);
+}
+
 /**
  * Does this settings file REDUCE hook enforcement? Fails closed on anything it
  * cannot read.
@@ -594,24 +601,106 @@ function isWorktreeNestedControl(rel) {
  * The threat is exact: a settings file that leaves an agent booting with no
  * guard. A file that keeps the guard armed is not that, whoever wrote it.
  */
-function weakensGuard(abs) {
+/*
+ * ── THE FIRST VERSION OF THIS DECIDED "ARMED" FROM A SUBSTRING ───────────────
+ *
+ * A blind audit broke it seven ways, every one measured through the drift
+ * function the Stop gate actually calls. It asked only whether two `=== true`
+ * comparisons were absent and whether two NAMES appeared anywhere in a command
+ * string. It never asked whether the hook would FIRE, FINISH, or be EXECUTED --
+ * or whether the file armed anything at all:
+ *
+ *   {}                                   no hooks key, so "benign" -- an agent
+ *                                        boots with NO guard. The no-hooks-key
+ *                                        rule was written for settings.local
+ *                                        .json and was applied to settings.json.
+ *   matcher that never fires             CLAUDE.md rule 17 IS this bug: the
+ *                                        guard was correctly named and never
+ *                                        consulted, and a session deleted
+ *                                        src/claudeGuard.mjs with no refusal.
+ *   "command": "echo x # ...guard..."    the name as a SUBSTRING of an echo.
+ *   timeout: 0                           an over-budget hook is cancelled, its
+ *                                        output discarded, and the turn
+ *                                        APPROVED -- a silent allow, which
+ *                                        protectedFilesIn's own header says.
+ *   type: not "command"                  named, present, never executed.
+ *   env: { AGENTBRIDGE_HOME: ... }       not a hook change, so it never drifted
+ *                                        -- and this file reads BOTH the
+ *                                        snapshot and the GRANT FILE from that
+ *                                        variable. An unlimited forged-grant
+ *                                        channel, silent at Stop.
+ *   permissions.defaultMode bypass       likewise invisible.
+ *
+ * So the question is no longer "does it weaken" -- a negative check over an
+ * open-ended document, which is unbounded by construction. It is "is this
+ * recognisably the propagated copy the exemption was written for", which is a
+ * positive check over a closed surface. Anything else drifts and the operator
+ * looks at it.
+ *
+ * THE RESIDUAL, STATED: this is an allowlist of KEYS, and a key Claude Code
+ * adds later will drift until somebody adds it here. That direction is an
+ * operator seeing a diff they did not expect, which is the safe one; the old
+ * direction was an agent booting unguarded in silence.
+ */
+function isPropagatedWorktreeControl(abs, rel) {
   let parsed;
-  try { parsed = JSON.parse(readFileSync(abs, 'utf8')); } catch { return true; }
-  if (!parsed || typeof parsed !== 'object') return true;
-  if (parsed.disableAllHooks === true) return true;
+  try { parsed = JSON.parse(readFileSync(abs, 'utf8').replace(/^﻿/, '')); } catch { return false; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
 
+  /*
+   * NOTHING OUTSIDE THIS SET IS EXEMPT. `env` above all: it redirects
+   * AGENTBRIDGE_HOME, which is where this module reads the grant file from.
+   */
+  const ALLOWED_KEYS = new Set(['hooks', 'disableAllHooks', 'permissions',
+    'enabledMcpjsonServers', 'enableAllProjectMcpServers']);
+  for (const key of Object.keys(parsed)) if (!ALLOWED_KEYS.has(key)) return false;
+
+  // Only an explicit false is acceptable; "true", 1 and absent-but-truthy are not.
+  if ('disableAllHooks' in parsed && parsed.disableAllHooks !== false) return false;
+
+  if (parsed.permissions !== undefined) {
+    const p = parsed.permissions;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+    if (p.defaultMode !== undefined && p.defaultMode !== 'default') return false;
+  }
+
+  const isLocal = /(^|\/)settings\.local\.json$/i.test(rel);
   const { hooks } = parsed;
-  if (hooks === undefined) return false;      // says nothing about hooks; settings.local.json
-  if (!hooks || typeof hooks !== 'object') return true;
-  if (hooks.disableAllHooks === true) return true;
 
-  const armed = (event, needle) => Array.isArray(hooks[event]) && hooks[event].some(
-    (group) => Array.isArray(group?.hooks) && group.hooks.some(
-      (h) => typeof h?.command === 'string' && h.command.includes(needle),
-    ),
+  if (hooks === undefined) {
+    /*
+     * A settings.local.json legitimately carries no hooks -- it never armed
+     * anything. A settings.json with no hooks is the DISARMED file, and
+     * treating the two alike is what let {} through.
+     */
+    return isLocal;
+  }
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return false;
+  if ('disableAllHooks' in hooks && hooks.disableAllHooks !== false) return false;
+
+  /** A hook entry that will actually run, not merely be mentioned. */
+  const entryRuns = (h, needle) => h
+    && h.type === 'command'
+    && typeof h.command === 'string'
+    && h.command.includes(needle)
+    && !/^\s*(echo|:|#|rem\b)/i.test(h.command)
+    && (h.timeout === undefined || (Number.isFinite(h.timeout) && h.timeout >= 5));
+
+  const armed = (event, needle, matchesAll) => Array.isArray(hooks[event]) && hooks[event].some(
+    (group) => group
+      && matchesAll(group.matcher)
+      && Array.isArray(group.hooks)
+      && group.hooks.some((h) => entryRuns(h, needle)),
   );
-  // It defines hooks, so it must still name the guard and the gate.
-  return !armed('PreToolUse', 'agentbridge-claude-guard') || !armed('Stop', 'claude-stop-gate');
+
+  // PreToolUse must cover EVERY tool. Rule 19: a narrower matcher is the bug
+  // that let a real session delete the guard's own source.
+  const allTools = (m) => m === '*';
+  // Stop takes no tool name; the shipped configuration uses the empty matcher.
+  const allStops = (m) => m === '' || m === '*' || m === undefined;
+
+  return armed('PreToolUse', 'agentbridge-claude-guard', allTools)
+    && armed('Stop', 'claude-stop-gate', allStops);
 }
 
 export function protectedDrift(repoRoot, snapshot) {
@@ -658,8 +747,23 @@ export function protectedDrift(repoRoot, snapshot) {
      * the session that spawned it.
      */
     if (isWorktreeNestedControl(rel)) {
-      if (state === 'deleted') continue;                       // the worktree went away
-      if (!weakensGuard(path.join(repoRoot, rel))) continue;   // it keeps the guard armed
+      /*
+       * DELETED IS EXEMPT ONLY WHEN THE WORKTREE ITSELF IS GONE.
+       *
+       * This read `if (state === 'deleted') continue;` with a comment saying
+       * "the worktree went away". The comment described a worktree; the code
+       * described ONE FILE. Measured by audit: delete only settings.json and
+       * leave the worktree running, and a live agent checkout stripped of its
+       * project settings produced ZERO drift. The shipped test could not see it
+       * because it only ever deleted the whole directory.
+       */
+      if (state === 'deleted') {
+        const wt = worktreeDirOf(repoRoot, rel);
+        if (wt && !existsSync(wt)) continue;   // the whole checkout is gone
+        drift.push({ file: rel, now: state });
+        continue;
+      }
+      if (isPropagatedWorktreeControl(path.join(repoRoot, rel), rel)) continue;
     }
 
     drift.push({ file: rel, now: state });

@@ -847,6 +847,7 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    * AND IT FAILS CLOSED. A null or empty tool name classifies as
    * production-state/OWNER rather than sailing through as unrecognised.
    */
+  let actionNotice = null;
   const verdict = classifyAction({ tool_name: toolName, tool_input: input });
   if (verdict.authority === OWNER) {
     const approval = actionApproved(repoRootOf(cwd), toolName);
@@ -879,12 +880,54 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
      * A grant spent silently is a clean run, and "a forged grant does not vanish
      * into a clean run" is the entire safety argument for this channel.
      */
-    return {
-      allowed: true,
-      overridden: true,
-      notice: `[agentbridge:action-approved] ${toolName} (${verdict.consequence}) permitted by a grant `
-        + `from ${approval.granted_by} expiring ${approval.expires_at}: ${approval.reason}`,
-    };
+    /*
+     * APPROVING AN ACTION MUST NOT ALSO APPROVE A PATH, AND RETURNING HERE DID
+     * EXACTLY THAT.
+     *
+     * This branch returned allowed, so every later check was skipped for an
+     * approved owner-gated tool -- including the protected-path rail. Measured
+     * by audit: with a grant naming only the ACTION, an owner-gated MCP tool
+     * carrying {file_path: '.claude/settings.json', content: '{"hooks":
+     * {"disableAllHooks":true}}'} was ALLOWED, while the same write from an
+     * ordinary tool under the same grant was refused with "An override cannot
+     * cover it". That is the one path the code says NO override may ever cover,
+     * and it contradicts this commit's own sentence: "a grant naming an ACTION
+     * covers no path".
+     *
+     * So approval is now a PERMISSION TO PROCEED TO THE OTHER CHECKS, not a
+     * verdict. The notice is carried and attached only if everything else also
+     * allows -- a grant cannot buy what it did not name.
+     *
+     * Note this branch is not where the mcp__ hole lives: `mcp__` tools already
+     * returned allowed unconditionally further down, so that path predates this
+     * work. Fixing it there is a wider change with its own blast radius; what is
+     * fixed here is the part this commit introduced and claimed otherwise about.
+     */
+    actionNotice = `[agentbridge:action-approved] ${toolName} (${verdict.consequence}) permitted by a grant `
+      + `from ${approval.granted_by} expiring ${approval.expires_at}: ${approval.reason}`;
+
+    /*
+     * AND THE PATH RAIL RUNS EVEN FOR AN APPROVED ACTION.
+     *
+     * Falling through is not enough on its own: an `mcp__` tool returns allowed
+     * a few branches below, before any path is judged, and that blanket allow
+     * predates this work. So the protected-path question is asked HERE, for the
+     * approved case specifically, which is the one this commit created.
+     *
+     * The grant said which ACTION the owner permitted. It said nothing about
+     * which FILES, and .claude/settings.json is the path the code refuses even
+     * to a path grant.
+     */
+    const mention = protectedMentionIn(input, cwd);
+    if (mention) {
+      return deny(
+        'action-grant-covers-no-path',
+        `${toolName} is approved by a grant, but this call names ${mention}, which is a protected `
+        + 'control. Approving an ACTION is not approving a WRITE: the grant names a tool, not a file, '
+        + 'and the two are separate decisions. Add the path to the grant if the owner meant that too '
+        + '-- except for the gate configuration, which no override may cover at all.',
+      );
+    }
   }
 
   /*
@@ -933,7 +976,10 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    * decision with its own blast radius, and smuggling it into this repair would
    * make a security change nobody reviewed for that.
    */
-  if (toolName.startsWith('mcp__')) return { allowed: true };
+  if (toolName.startsWith('mcp__')) {
+    // An approved owner action still announces itself; see the branch above.
+    return actionNotice ? { allowed: true, overridden: true, notice: actionNotice } : { allowed: true };
+  }
 
   /*
    * A TOOL CARRYING BOTH SHAPES IS JUDGED ON BOTH, AND THIS RETURNED ON THE

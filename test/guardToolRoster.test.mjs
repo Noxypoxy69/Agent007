@@ -194,6 +194,29 @@ const ROSTER = [
   { tool: 'mcp__claude-in-chrome__javascript_tool', input: { code: 'document.title' }, writes: false, executes: true, note: 'executes JS in the browser' },
   { tool: 'mcp__claude-in-chrome__computer', input: { action: 'screenshot' }, writes: false, executes: true, note: 'drives the desktop' },
   { tool: 'mcp__claude_ai_Claude_Docs__update', input: { ref: { object: 'node', id: 'n' }, payload: {} }, writes: false, executes: false, note: '' },
+  /*
+   * ── READS AND NON-OUTBOUND WRITES IN CONSEQUENTIAL NAMESPACES ─────────────
+   *
+   * This file's header says the roster is enumerated from the tool names the
+   * session actually exposes. An audit measured the gap: of the ten mcp entries
+   * above, not one was a READ-ONLY tool inside a namespace that can reach
+   * production or send mail -- so the roster structurally could not detect an
+   * over-block in exactly the place over-blocks were most likely.
+   *
+   * It found seven, all refused as irreversible-outbound and none of which
+   * sends anything. They are here now because a fixture that cannot construct
+   * the failing case cannot fail for it (hollow gate 9).
+   */
+  { tool: 'mcp__claude_ai_Supabase__list_tables', input: { project_id: 'p' }, writes: false, executes: false, note: 'read in a production namespace' },
+  { tool: 'mcp__claude_ai_Supabase__get_advisors', input: { project_id: 'p', type: 'security' }, writes: false, executes: false, note: 'read in a production namespace' },
+  { tool: 'mcp__claude_ai_Gmail__search_threads', input: { q: 'x' }, writes: false, executes: false, note: 'read in an outbound namespace' },
+  { tool: 'mcp__claude_ai_Gmail__create_draft', input: { to: ['x@y.z'], subject: 's', body: 'b' }, writes: false, executes: false, note: 'a draft is NOT sent' },
+  { tool: 'mcp__claude_ai_Gmail__update_draft', input: { draft_id: 'd', body: 'b' }, writes: false, executes: false, note: 'a draft is NOT sent' },
+  { tool: 'mcp__claude_ai_Gmail__label_message', input: { message_id: 'm', label_ids: ['l'] }, writes: false, executes: false, note: 'filing, not outbound' },
+  { tool: 'mcp__claude_ai_Gmail__create_label', input: { name: 'l' }, writes: false, executes: false, note: 'filing, not outbound' },
+  { tool: 'mcp__claude_ai_Slack__slack_search_public_and_private', input: { query: 'x' }, writes: false, executes: false, note: 'a READ; its public sibling was already allowed' },
+  { tool: 'mcp__claude_ai_Slack__slack_add_reaction', input: { channel: 'c', timestamp: 't', name: 'eyes' }, writes: false, executes: false, note: 'a removable emoji' },
+  { tool: 'mcp__claude-in-chrome__read_page', input: {}, writes: false, executes: false, note: 'read in a host-control namespace' },
 
   // ── malformed / hostile envelopes ──
   { tool: '', input: {}, writes: false, executes: false, note: 'empty tool name' },
@@ -320,14 +343,60 @@ const KNOWN_OVER_BLOCKED = {};
 test('ORDINARY WORK IS NOT BLOCKED beyond the known over-blocks', () => {
   const denied = results.filter((r) => r.outcome === 'DENY' && !r.writes && !r.executes);
 
-  const ownerGated = denied.filter((r) => r.id === 'action-needs-owner');
-  for (const r of ownerGated) {
-    assert.equal(
-      classifyAction({ tool_name: r.tool, tool_input: {} }).authority, OWNER,
-      `${r.tool || '(empty tool name)'} was refused as action-needs-owner, so the classifier must `
-      + 'agree it is OWNER authority -- otherwise this exclusion is hiding an over-block',
-    );
-  }
+  /*
+   * THE EXCLUSION IS CHECKED AGAINST A HUMAN-WRITTEN LIST, NOT AGAINST THE
+   * CLASSIFIER THAT PRODUCED IT.
+   *
+   * The first version asked classifyAction whether each excluded refusal was
+   * OWNER. That is the same component that decided to refuse it, so an
+   * OVER-classification confirmed its own exclusion and the test could never
+   * see one. Found by audit, which then measured seven real over-blocks this
+   * test was green through -- Gmail drafts and labels, a Slack reaction, and
+   * slack_search_public_and_private, which is a read whose public sibling was
+   * already allowed.
+   *
+   * So the set is DECLARED here and asserted EXACT. A newly over-blocked tool
+   * is not on the list and fails; a gate that stops firing leaves an entry
+   * unmatched and fails too. Rule 19 in both directions, and the list is short
+   * enough for a person to disagree with, which is the point.
+   */
+  const EXPECTED_OWNER_GATED = new Set([
+    'mcp__claude_ai_Supabase__apply_migration',
+    'mcp__claude_ai_Supabase__deploy_edge_function',
+    'mcp__claude_ai_Gmail__send_message',
+    'mcp__claude-in-chrome__javascript_tool',
+    'mcp__claude-in-chrome__computer',
+    /*
+     * NOT Google Drive create_file, and writing that down was my mistake before
+     * it was a test failure. It classifies reversible-external, so COORDINATOR
+     * -- a file written to Drive can be deleted again. The declared list is
+     * meant to be argued with, and the first thing it caught was me assuming a
+     * gate that does not exist.
+     */
+    '', // an unnameable action fails closed
+  ]);
+
+  /*
+   * FROM `results`, NOT FROM `denied`. `denied` is pre-filtered to tools that
+   * neither write nor execute -- the over-block question -- so a migration or a
+   * deploy never appears in it, and checking the declared set against it
+   * reported every legitimate gate as "no longer firing". Owner-gating is a
+   * question about ALL tools; over-blocking is the one that is only about the
+   * harmless ones.
+   */
+  const ownerGated = results
+    .filter((r) => r.outcome === 'DENY' && r.id === 'action-needs-owner')
+    .map((r) => r.tool);
+  const unexpectedlyGated = ownerGated.filter((t) => !EXPECTED_OWNER_GATED.has(t));
+  assert.deepEqual(unexpectedlyGated, [],
+    'these are refused as owner-gated and are NOT on the declared list. Either they are a real '
+    + 'over-block -- a draft is not sent, a label is not outbound, a search is a read -- or the list '
+    + `needs a deliberate addition somebody argued for:\n  ${unexpectedlyGated.join('\n  ')}`);
+
+  const noLongerGated = [...EXPECTED_OWNER_GATED].filter((t) => !ownerGated.includes(t));
+  assert.deepEqual(noLongerGated, [],
+    'these are declared owner-gated and were NOT refused. A gate that stopped firing is the more '
+    + `dangerous direction:\n  ${noLongerGated.join('\n  ')}`);
 
   const unexpected = [...new Set(denied.filter((r) => r.id !== 'action-needs-owner').map((r) => r.tool))]
     .filter((t) => !(t in KNOWN_OVER_BLOCKED));
