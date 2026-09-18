@@ -415,10 +415,49 @@ function judgeShell(command, cwd) {
    * back to the literal check; that direction is the lenient one, and it is the
    * same posture as before this existed rather than a new hole.
    */
+  /*
+   * A GIT-BASH ABSOLUTE PATH IS A REAL PATH THAT git.exe CANNOT PARSE.
+   *
+   * Git Bash rewrites /c/Users/... to C:/Users/... before git.exe is executed,
+   * but THIS guard runs git directly, so the rewrite never happens and git is
+   * handed a pathspec it resolves to nothing. Nothing matched means no protected
+   * hit, which means ALLOW -- while the shell the operator is actually typing
+   * into runs the command against the real file:
+   *
+   *   git restore /c/Users/.../src/claudeGuard.mjs    ALLOW, and git reverts it
+   *   git restore C:/Users/.../src/claudeGuard.mjs    correctly DENY
+   *
+   * Confirmed against real git: exit 0, the edit gone, porcelain empty. The
+   * Windows spelling was already caught, so this was one spelling of one path
+   * being invisible -- the same shape as the 8.3 aliases and the case variants,
+   * for the third time. Translate it before asking, so git is asked about the
+   * path the shell will actually use.
+   */
+  const MSYS_ABSOLUTE = /^\/\/?([A-Za-z])\/(.*)$/;
+  const asWindowsPath = (operand) => {
+    const m = MSYS_ABSOLUTE.exec(operand);
+    return m ? `${m[1]}:/${m[2]}` : operand;
+  };
+
   const pathspecCovers = (operand) => {
     if (!cwd || typeof operand !== 'string' || operand === '') return [];
+    /*
+     * --full-name IS LOAD-BEARING, NOT TIDINESS. git ls-files prints paths
+     * relative to the CURRENT DIRECTORY, and these results are filtered with
+     * isProtectedRelPath, which expects them relative to the REPOSITORY ROOT.
+     * From any subdirectory the two disagree and every protected file became
+     * invisible:
+     *
+     *   cwd=<repo>/test   git restore ../src/claudeGuard.mjs        ALLOW
+     *   cwd=<repo>/test   git restore ../.claude/settings.json      ALLOW
+     *
+     * Confirmed against real git from <repo>/test: exit 0, the edit gone. The
+     * guard was asking the right question and then measuring the answer against
+     * the wrong origin. --full-name makes git answer in repo-root terms, which
+     * is the only frame isProtectedRelPath has ever been written for.
+     */
     try {
-      const out = runGit(['ls-files', '-z', '--', operand], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const out = runGit(['ls-files', '-z', '--full-name', '--', asWindowsPath(operand)], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       return String(out)
         .split(String.fromCharCode(0))
         .filter((f) => f !== '')

@@ -195,16 +195,25 @@ const GIT_OVERWRITES_NAMED_PATH = new Set(['restore', 'checkout', 'switch']);
  * equality in BOTH directions, so a git upgrade that adds or removes a value
  * flag turns that test red rather than silently changing what this rail skips.
  *
- * `add` IS DELIBERATELY ABSENT. Its help text is formatted differently enough
- * that the derivation yields noise ("--no-all)", a bare "-"), and a table that
- * decides what the rail skips must not be built from a parse nobody can trust.
- * An unlisted verb skips NOTHING, which over-blocks a flag value at worst and
- * cannot swallow a pathspec -- so the honest answer is cheap here. If `add`
- * ever needs entries, derive them and extend the test's verb list with it.
+ * EVERY VERB THAT TAKES A -m IS LISTED, and that is not cosmetic. "An unlisted
+ * verb skips nothing" is the safe default against SWALLOWING a pathspec, but it
+ * over-blocks a flag VALUE -- and merge, tag and stash all take -m, so omitting
+ * them refused every short one-word message that happened to be a tracked path:
+ *
+ *   git merge -m test topic  ->  DENY: "git merge" names test/claudeGuard.test.mjs
+ *
+ * which is the exact defect this table was created to fix for commit, recreated
+ * on three other verbs by leaving them out. Found by blind audit on the commit
+ * that introduced it.
+ *
+ * `add` and `stash` are listed too, now that the derivation is trustworthy for
+ * them: the test reads a value only where git prints its own <placeholder>,
+ * which stopped it mistaking one-space-away DESCRIPTION prose ("keep index",
+ * "(same as --no-all)") for a value.
  */
 export const GIT_FLAG_TAKES_VALUE = {
   commit: new Set(['-C', '-F', '-U', '-c', '-m', '-t', '--author', '--cleanup',
-    '--date', '--file', '--fixup', '--inter-hunk-context', '--message',
+    '--date', '--file', '--inter-hunk-context', '--message',
     '--pathspec-from-file', '--reedit-message', '--reuse-message', '--squash',
     '--template', '--trailer', '--unified']),
   restore: new Set(['-U', '-s', '--conflict', '--inter-hunk-context',
@@ -213,6 +222,15 @@ export const GIT_FLAG_TAKES_VALUE = {
     '--orphan', '--pathspec-from-file', '--unified']),
   switch: new Set(['-C', '-c', '--conflict', '--create', '--force-create',
     '--orphan']),
+  merge: new Set(['-F', '-X', '-m', '-s', '--cleanup', '--file', '--into-name',
+    '--message', '--strategy', '--strategy-option']),
+  tag: new Set(['-F', '-m', '-u', '--cleanup', '--contains', '--file',
+    '--format', '--local-user', '--merged', '--message', '--no-contains',
+    '--no-merged', '--points-at', '--sort', '--trailer']),
+  stash: new Set(['-U', '-m', '--inter-hunk-context', '--message',
+    '--pathspec-from-file', '--unified']),
+  add: new Set(['-U', '--inter-hunk-context', '--pathspec-from-file',
+    '--unified']),
 };
 const EMPTY_FLAG_SET = new Set();
 
@@ -662,11 +680,35 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * over-blocks; skipping a pathspec lets a protected file be overwritten.
        * Those are not symmetric, so the default is the one that fails loudly.
        */
+      /*
+       * "--" ENDS THE FLAGS. EVERYTHING AFTER IT IS A PATHSPEC, INCLUDING
+       * SOMETHING SPELLED LIKE A FLAG -- that is the entire purpose of "--".
+       *
+       * The skip loop walked every token and never stopped, so a value-taking
+       * flag NAME appearing after "--" still consumed the token behind it, and
+       * the token behind it was a real path:
+       *
+       *   git restore -- -s src/claudeGuard.mjs         ALLOW
+       *   git restore -- --source src/claudeGuard.mjs   ALLOW
+       *   git restore -- --conflict src/claudeGuard.mjs ALLOW
+       *
+       * Confirmed against real git: with a tracked file named "-s" present,
+       * that first command exits 0 and reverts src/claudeGuard.mjs. And the
+       * guard ALLOWED the whole setup chain too -- writing ./-s, adding it,
+       * committing it -- so an attacker needs nothing it does not already have.
+       *
+       * The class predates the per-verb table (the old flat regex did the same
+       * thing with -m), but the commit that introduced the table was the one
+       * claiming to close "ask git what a flag means", and git's answer here is
+       * that after "--" nothing is a flag at all.
+       */
       const takesValue = GIT_FLAG_TAKES_VALUE[verb] ?? EMPTY_FLAG_SET;
       const operandTokens = [];
+      let flagsEnded = false;
       for (let i = 2; i < tokens.length; i += 1) {
+        if (tokens[i] === '--') { flagsEnded = true; continue; }
         // A flag spelled --opt=value carries its value inline and consumes nothing.
-        if (takesValue.has(tokens[i])) { i += 1; continue; }
+        if (!flagsEnded && takesValue.has(tokens[i])) { i += 1; continue; }
         operandTokens.push(tokens[i]);
       }
       const named = operandTokens

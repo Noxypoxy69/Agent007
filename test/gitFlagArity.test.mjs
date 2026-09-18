@@ -48,7 +48,28 @@ function parseOptionLine(line) {
 
   const tokens = optPart.split(/\s+/).filter(Boolean);
   const flagTokens = tokens.filter((t) => t.startsWith('-'));
-  const remainder = tokens.filter((t) => !t.startsWith('-'));
+  /*
+   * A REMAINDER IS A VALUE ONLY IF IT CARRIES GIT'S OWN <PLACEHOLDER>.
+   *
+   * "anything left over means a value" was too loose, because git's help is not
+   * column-aligned everywhere. Where the description sits ONE space from the
+   * flag, the options half swallows prose and the prose reads as a value:
+   *
+   *   -k, --[no-]keep-index keep index          -> "keep index" is the DESCRIPTION
+   *   --[no-]ignore-removal  (same as --no-all) -> yields a token "--no-all)"
+   *
+   * Both are booleans. Reading them as value-taking makes the rail skip the
+   * token after them, which is exactly how a pathspec gets swallowed -- the
+   * defect this whole file exists to prevent, arriving through the derivation
+   * instead of through a hand-typed list.
+   *
+   * "<" is git's placeholder syntax and it is unambiguous. The cost is
+   * --fixup, whose help spells its value as [(amend|reword):]commit with no
+   * angle brackets, so it is now read as a boolean. That is harmless here: its
+   * value is a commit-ish, and an operand that is not a tracked path resolves to
+   * no pathspec at all, so it cannot over-block.
+   */
+  const remainder = tokens.filter((t) => !t.startsWith('-') && t.includes('<'));
 
   const flags = [];
   for (const raw of flagTokens) {
@@ -69,10 +90,14 @@ function parseOptionLine(line) {
   return { flags, takesValue: remainder.length > 0 };
 }
 
+const HELP_ARGS = { stash: ['stash', 'push', '-h'] };
+
 function gitValueFlags(verb) {
   let help;
   try {
-    execFileSync('git', [verb, '-h'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    // stash's options live under its PUSH subcommand; 'git stash -h' lists
+    // subcommands only. The help command is per-verb, so it is looked up.
+    execFileSync('git', HELP_ARGS[verb] ?? [verb, '-h'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     help = '';
   } catch (e) {
     // `git <verb> -h` exits non-zero by design and prints usage on stderr.
@@ -101,8 +126,14 @@ test('the parser agrees with hand-read examples before it is trusted', () => {
     { flags: ['-S', '--gpg-sign'], takesValue: false });
   assert.deepEqual(parseOptionLine('    -b <branch>           create and checkout a new branch'),
     { flags: ['-b'], takesValue: true });
+  // --fixup DOES take a value, but git spells it without angle brackets, so the
+  // <placeholder> rule reads it as a boolean. Asserted as-is rather than
+  // special-cased: the rule is deliberately conservative and this is its cost.
   assert.deepEqual(parseOptionLine('    --[no-]fixup [(amend|reword):]commit'),
-    { flags: ['--fixup'], takesValue: true });
+    { flags: ['--fixup'], takesValue: false });
+  // The prose-one-space-away shapes that made the looser rule wrong:
+  assert.deepEqual(parseOptionLine('    -k, --[no-]keep-index keep index'),
+    { flags: ['-k', '--keep-index'], takesValue: false });
 });
 
 test('git says -m is a BOOLEAN for every verb that overwrites a named path', () => {
