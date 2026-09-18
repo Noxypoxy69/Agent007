@@ -78,6 +78,22 @@ test('THE POSITIVE FIRST: the self-reported projection is still there to find', 
  * comes from `r.` — the registration row itself. A key computed from anything
  * else is not self-reported and is deliberately excluded.
  */
+/**
+ * COLUMNS ON THE REGISTRATION ROW THAT THE AGENT DOES NOT SUPPLY.
+ *
+ * "Comes off `r.`" is a good proxy for self-reported and it is not a perfect
+ * one. `last_seen_at` lives on the same row but the agent never sends it: the
+ * server stamps it in `touchLiveness` on the /task, /return, /wait and /review
+ * routes. Calling it self-reported in the contract would be a NEW false
+ * statement in the paragraph this gate exists to keep true, so it is excluded
+ * here rather than described there.
+ *
+ * AN ENTRY HERE IS A CLAIM THAT NEEDS A REASON, not a way to silence a failure.
+ * The list may only shrink without argument; adding to it means asserting the
+ * server writes that column, which the next reader can go and check.
+ */
+const SERVER_STAMPED = Object.freeze(['lastSeenAt']);
+
 function selfReportedFields() {
   /*
    * ANCHORED ON THE PROJECTION, NOT ON THE TABLE NAME.
@@ -98,6 +114,7 @@ function selfReportedFields() {
   for (const hit of after.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*r\.[A-Za-z_][A-Za-z0-9_]*/g)) {
     out.add(hit[1]);
   }
+  for (const k of SERVER_STAMPED) out.delete(k);
   return [...out];
 }
 
@@ -178,6 +195,22 @@ test('THE CONTROL: the overclaim check can actually fail', () => {
   assert.ok(/every field is observed/i.test(OLD), 'the overclaim matcher is inert');
   assert.ok(/an agent cannot misreport its own state here/i.test(OLD), 'the promise matcher is inert');
   assert.ok(!/self-reported/i.test(OLD), 'the self-reported matcher would pass the old text');
+});
+
+test('EVERY SERVER-STAMPED EXCLUSION IS STILL A REAL COLUMN', () => {
+  /*
+   * A stale exclusion is worse than none: it silences a field nobody is
+   * checking any more and reads as coverage. Same rule toolDefsParity applies
+   * to its DECLARED list — it may only shrink.
+   */
+  for (const k of SERVER_STAMPED) {
+    const col = k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+    assert.ok(CODE.includes(`r.${col}`),
+      `${k} is excluded as server-stamped but index.ts no longer projects r.${col}; `
+      + 'drop the exclusion rather than leaving it to rot');
+  }
+  assert.ok(/touchLiveness/.test(CODE),
+    'touchLiveness is gone from index.ts — the reason lastSeenAt is excluded no longer holds');
 });
 
 test('THE CONTROL: comment-blanking really removed the explanation', () => {
