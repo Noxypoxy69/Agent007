@@ -464,6 +464,28 @@ export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repo
   const file = snapshotPath(repoRoot, sessionId);
 
   /*
+   * A SESSIONLESS MINT IS REFUSED, BECAUSE IT WOULD SEED THE SHARED KEY.
+   *
+   * snapshotPath folds a missing or empty session id to the literal
+   * 'no-session-id', so minting without one writes a baseline every other
+   * sessionless payload would then adopt. readSnapshot now refuses to READ that
+   * key; this refuses to WRITE it, so the two sides agree and the shared baseline
+   * cannot exist. Fail-closed: a real Claude Code payload always carries
+   * session_id, so this only bites the anomalous sessionless case, and the Stop
+   * gate's no-snapshot path already handles an ok:false mint by blocking the turn
+   * with a readable reason rather than approving it.
+   */
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+    return {
+      ok: false,
+      file,
+      cause: 'no-session',
+      drift: null,
+      reason: 'a baseline may not be minted for a request with no session id: a sessionless payload folds to a shared key, which is how one session adopts another session\'s baseline',
+    };
+  }
+
+  /*
    * NEVER MINT A BASELINE FROM A TREE THAT ALREADY DIFFERS. THIS CHECK LIVES
    * HERE, IN THE MINTING FUNCTION, AND NOT IN A CALLER.
    *
@@ -549,6 +571,21 @@ export function writeSnapshot(repoRoot, sessionId, snapshot = buildSnapshot(repo
 
 /** null when absent or unusable. The caller must treat null as REFUSE, never as clean. */
 export function readSnapshot(repoRoot, sessionId) {
+  /*
+   * A MISSING OR EMPTY session id FOLDS TO THE SHARED 'no-session-id' KEY in
+   * snapshotPath, so without this a sessionless payload reads whatever baseline
+   * was last minted at that shared key -- one session adopting another's, which
+   * is fail-open in the function whose whole job is refusing that. Refuse it
+   * outright; the caller treats null as REFUSE, never as clean.
+   *
+   * Proven by composing this clause over the shipped function: the four
+   * sessionless ids (undefined, null, '', whitespace) flip from snapshot to null,
+   * while a real id, a wrong id and the literal 'no-session-id' already returned
+   * null -- so it closes the hole without becoming a blanket deny. The matching
+   * mint-side refusal is in writeSnapshot, so a sessionless mint cannot re-seed
+   * the shared key either.
+   */
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') return null;
   const file = snapshotPath(repoRoot, sessionId);
   if (!existsSync(file)) return null;
   try {
