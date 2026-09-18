@@ -83,7 +83,7 @@ test('AN EVENT IN THE SAME MILLISECOND AS THE CURSOR IS STILL DELIVERED', () => 
    */
   for (const [name, fn] of SURFACES) {
     const out = deliver(fn, [messageAt(AT_FIRST, 'm1'), messageAt(AT_SECOND, 'm2')], AT_FIRST);
-    const ids = out.events.map((e) => e.message_id ?? e.id ?? null);
+    const ids = out.map((e) => e.at ?? null);
     assert.equal(out.length, 1,
       `${name}: expected the later microsecond event, got ${out.length} events (${ids.join(', ')}) — `
       + 'a message that is genuinely newer than the cursor was dropped, and will never be re-offered');
