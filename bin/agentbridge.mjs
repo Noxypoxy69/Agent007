@@ -5,6 +5,7 @@ import { collect } from '../src/collect.mjs';
 import { runDaemon } from '../src/daemon.mjs';
 import { publish } from '../src/client.mjs';
 import { resolveCommit } from '../src/git.mjs';
+import { envWithTokenFile } from '../src/tokenFile.mjs';
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -159,6 +160,19 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge doctor                    verify secret sealing and file permissions
   agentbridge daemon start
 
+GLOBAL
+
+  --token-file <path>                   read AGENTBRIDGE_REGISTRATION_TOKEN from
+                                        this file instead of the environment.
+                                        For sessions whose shell rail refuses
+                                        export, a leading VAR=value, and a
+                                        $(cat ...) substitution -- which is
+                                        every guarded one. The flag beats the
+                                        environment.
+                                        A named file that cannot be read is
+                                        FATAL: registering local-only while
+                                        exiting 0 is the bug, not the fallback.
+
 This layer is READ-ONLY. It observes and publishes state. It does not take
 instructions from the bridge, and cannot execute anything on its behalf.
 `;
@@ -192,6 +206,28 @@ async function loadLaneRegistry(explicitFile) {
 
 const cmd = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
+
+/*
+ * EVERY env BAG HANDED TO src/ COMES FROM HERE, NOT FROM process.env.
+ *
+ * --token-file exists because a guarded session cannot put anything in its own
+ * environment -- see src/tokenFile.mjs for the three refusals, all correct.
+ * Folding the token in ONCE, here, is what makes the flag mean the same thing
+ * in every command. Reading process.env directly at a call site would give a
+ * command that silently ignores the flag, which is worse than not having it:
+ * the operator sees it accepted on the command line and concludes it applied.
+ *
+ * test/tokenFileFlag.test.mjs asserts no env bag anywhere in this file comes
+ * from process.env, so a new call site cannot quietly opt out.
+ *
+ * Reading a specific variable (process.env.AGENTBRIDGE_VERIFY_CMD) is fine and
+ * deliberately still allowed -- the rule is about BAGS passed to src/.
+ */
+const { env: ENV, error: tokenFileError } = envWithTokenFile(process.env, args['token-file']);
+if (tokenFileError) {
+  console.error(`agentbridge: ${tokenFileError}`);
+  process.exit(2);
+}
 
 /*
  * A COMMAND THAT MUST NOT CALL process.exit().
@@ -533,7 +569,7 @@ try {
        * hosted project at all. Not-configured is fine and stays local-only.
        */
       const H = await import('../src/hostedRegistry.mjs');
-      const hosted = await H.fetchHostedRegistrations(process.env);
+      const hosted = await H.fetchHostedRegistrations(ENV);
       if (hosted.state === H.HOSTED.UNREACHABLE || hosted.state === H.HOSTED.MALFORMED) {
         console.error(`error: the hosted registry is configured but ${hosted.state}: ${hosted.detail ?? ''}`);
         console.error('       refusing rather than recording this target as unverified —');
@@ -833,7 +869,7 @@ try {
     const W = await import('../src/worker.mjs');
     const D = await import('../src/workerDeps.mjs');
 
-    const cfg = W.workerConfig(process.env);
+    const cfg = W.workerConfig(ENV);
     if (!cfg.ok) {
       // Every missing piece at once. Four restarts to learn four facts that
       // were all knowable on the first is not a diagnostic, it is a maze.
@@ -867,8 +903,8 @@ try {
 
     const deps = {
       now: () => new Date().toISOString(),
-      ...D.hostedDeps(process.env, { session_id: sessionId }),
-      ...D.heartbeatDeps(process.env, {
+      ...D.hostedDeps(ENV, { session_id: sessionId }),
+      ...D.heartbeatDeps(ENV, {
         session_id: sessionId,
         agent_id: agentId,
         // Without this every heartbeat is refused as invalid and the worker goes dark.
@@ -988,7 +1024,7 @@ try {
     let woke = false;
 
     for (;;) {
-      const res = await Hw.waitForEvents(process.env, {
+      const res = await Hw.waitForEvents(ENV, {
         session_id: args.session,
         since: cursor,
         timeout_ms: Math.round(seconds * 1000),
@@ -1102,7 +1138,7 @@ try {
     }
 
     const Hr = await import('../src/hostedRegistry.mjs');
-    const res = await Hr.returnWork(process.env, {
+    const res = await Hr.returnWork(ENV, {
       task_id: args.task,
       session_id: args.session,
       lease_token: args.lease,
@@ -1175,7 +1211,7 @@ try {
 
       if (mine) {
         const Hu = await import('../src/hostedRegistry.mjs');
-        const pub = await Hu.publishRegistration(process.env, { ...mine, capacity: 'offline' });
+        const pub = await Hu.publishRegistration(ENV, { ...mine, capacity: 'offline' });
         if (pub.state === Hu.HOSTED.OK) {
           console.log('  hosted   marked offline — other machines will stop seeing this session');
         } else if (pub.state === Hu.HOSTED.NOT_CONFIGURED) {
@@ -1343,7 +1379,7 @@ try {
         heartbeat_at: new Date().toISOString(),
       };
       await R.upsertRegistration(r);
-      const pub = await H.publishRegistration(process.env, r);
+      const pub = await H.publishRegistration(ENV, r);
       return pub;
     }
 
@@ -1451,7 +1487,7 @@ try {
         // addressed to nobody.
         try { await R.removeRegistration(row.session_id); } catch { /* best effort */ }
         try {
-          await H.publishRegistration(process.env, { ...row, capacity: 'offline' });
+          await H.publishRegistration(ENV, { ...row, capacity: 'offline' });
         } catch { /* best effort */ }
         console.log(`\nunregistered ${row.session_id}`);
         unpark();
@@ -2857,7 +2893,7 @@ try {
       try { local = await readRegistrations(); }
       catch (e) { console.error(`error: cannot read the registration store: ${e.message}`); process.exit(2); }
 
-      const hosted = await H.fetchHostedRegistrations(process.env);
+      const hosted = await H.fetchHostedRegistrations(ENV);
       if (hosted.state === H.HOSTED.UNREACHABLE || hosted.state === H.HOSTED.MALFORMED) {
         // "I cannot see the workers" and "there are no workers" must not print
         // the same. A half-roster is worse than a refusal here, because it is
