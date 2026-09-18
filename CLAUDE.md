@@ -467,6 +467,49 @@ caller nothing true about what happened.
 Heartbeat is the OLD daemon protocol. The bridge roster is built from
 `/register`, which is why every row on it carries a sessionId.
 
+## The override grant, and where it lives
+
+A guarded session that must write a protected control needs a grant. It is a
+JSON file **outside the repository**, and the owner writes it — an agent that
+writes its own permission file and fills in `granted_by` has forged it.
+
+**Ask where it goes rather than computing it:**
+
+```bash
+node bin/agentbridge.mjs grant-path            # this repo
+node bin/agentbridge.mjs grant-path --json     # machine-readable
+```
+
+It prints the exact file the guard will consult and whether a grant is live. It
+is READ-ONLY and creates nothing.
+
+**Why this command exists.** The file is named
+`sha256(canonical git-common-dir)[0:16].json`, and for a week nothing printed
+that and nothing wrote it down. The key was also the *directory* rather than the
+repository, so every worktree resolved somewhere different: measured across 17
+roots on one machine, exactly one had a grant and it was not the one any agent
+was working in. A grant at the wrong key fails **exactly like the guard being
+strict**, which is why it went unnoticed for hours and got re-diagnosed three
+times.
+
+**The shape:**
+
+```json
+{
+  "paths": ["src/guardSession.mjs", "CLAUDE.md"],
+  "reason": "why, in a sentence somebody can disagree with",
+  "granted_by": "danny",
+  "expires_at": "2026-09-21T08:00:00Z"
+}
+```
+
+**Exact repo-relative paths only** — no prefixes, no globs. `paths` are relative
+to the REPOSITORY ROOT, not to wherever the session is standing; a grant naming
+`.claude/settings.json` covers that one file and not the same relative path in
+every subdirectory. An expiry is required and bounded by `MAX_GRANT_MS`, a
+malformed grant is NO grant, and every permit announces itself with the path,
+the grantor and the expiry.
+
 ## Before you start: check that nobody already did it
 
 Run this. It takes two seconds and it is the whole checklist:

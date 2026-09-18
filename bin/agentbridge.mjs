@@ -157,6 +157,12 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge workers [--registry-file <f>] [--json]
                                         the worker pool: agents, their live
                                         sessions, where each is, and capacity
+  agentbridge grant-path [--repo <dir>] [--json]
+                                        where the guard looks for an override
+                                        grant for this repository, and whether
+                                        one is live. Prints a path; never writes
+                                        one -- an agent that writes its own
+                                        permission file has forged the grant.
   agentbridge doctor                    verify secret sealing and file permissions
   agentbridge daemon start
 
@@ -2818,6 +2824,63 @@ try {
     const warnings = results.reduce((n, r) => n + r.result.warnings, 0);
     if (!args.json) console.log(`\n${blocking} blocking, ${warnings} warning(s) across ${results.length} worktree(s)`);
     process.exit(blocking > 0 ? 1 : 0);
+  }
+
+  /*
+   * WHERE DOES A GRANT GO, AND IS ONE LIVE.
+   *
+   * The override file is named by sha(canonical git-common-dir).slice(0,16),
+   * which the owner was expected to compute by hand. Nothing printed it and
+   * nothing documented it, so every grant written this week landed at a key some
+   * session did not consult -- and the failure looks exactly like the guard
+   * being strict, which is how it went unnoticed for hours.
+   *
+   * READ-ONLY ON PURPOSE. This prints a PATH and reports whether a grant is
+   * live; it does not write one. An agent writing its own permission file and
+   * signing the owner's name to it is the thing the channel exists to prevent,
+   * and "granted_by" means nothing if the grantee fills it in.
+   */
+  if (cmd === 'grant-path') {
+    const { overridePath, readOverride, overrideKeySource } = await import('../src/guardSession.mjs');
+    const repo = args.repo ? String(args.repo) : process.cwd();
+    const file = overridePath(repo);
+    const grant = readOverride(repo);
+
+    if (args.json) {
+      console.log(JSON.stringify({
+        repo,
+        keySource: overrideKeySource(repo),
+        file,
+        live: Boolean(grant),
+        grant: grant ?? null,
+      }, null, 2));
+    } else {
+      console.log(`repo        : ${repo}`);
+      console.log(`key source  : ${overrideKeySource(repo)}`);
+      console.log(`grant file  : ${file}`);
+      if (grant) {
+        console.log(`live        : yes, granted by ${grant.granted_by}, expires ${grant.expires_at}`);
+        console.log(`reason      : ${grant.reason}`);
+        console.log(`paths (${grant.paths.length}) :`);
+        for (const path of grant.paths) console.log(`  ${path}`);
+      } else {
+        /*
+         * A FILE THAT EXISTS BUT DOES NOT APPLY IS THE CONFUSING CASE, so it is
+         * named separately from "no file at all". readOverride refuses on a
+         * dozen grounds -- expired, malformed, expires_at not a string, a
+         * horizon beyond MAX_GRANT_MS -- and every one of them looks identical
+         * from the outside.
+         */
+        const { existsSync } = await import('node:fs');
+        if (existsSync(file)) {
+          console.log('live        : NO — the file exists but the guard refuses it');
+          console.log('              (expired, malformed, or an expiry beyond the maximum)');
+        } else {
+          console.log('live        : no grant file at this key');
+        }
+      }
+    }
+    done(0);
   }
 
   if (cmd === 'doctor') {

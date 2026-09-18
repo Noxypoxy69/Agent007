@@ -19,7 +19,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -237,6 +239,44 @@ test('a grant covers ONE file, not the same relative path in every subdirectory'
     if (prev === undefined) delete process.env.AGENTBRIDGE_HOME;
     else process.env.AGENTBRIDGE_HOME = prev;
   }
+});
+
+test('grant-path tells the owner where a grant goes, and never writes one', async (t) => {
+  /*
+   * The override file is named by sha(canonical git-common-dir).slice(0,16).
+   * Nothing printed it and nothing documented it, so the owner was expected to
+   * compute it by hand -- and every grant written at the wrong key fails in a
+   * way that looks exactly like the guard being strict. Hours went to that.
+   *
+   * READ-ONLY IS THE POINT. An agent that writes its own permission file and
+   * signs the owner's name to it has forged the grant, so this command prints a
+   * path and reports whether one is live. It must not create anything.
+   */
+  const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentbridge.mjs');
+  const { main, trees } = await repoWithWorktrees(t, 1);
+  const home = await mkdtemp(join(tmpdir(), 'ab-grantpath-home-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  const run = (repo) => spawnSync(process.execPath, [CLI, 'grant-path', '--repo', repo, '--json'], {
+    encoding: 'utf8', env: { ...process.env, AGENTBRIDGE_HOME: home },
+  });
+
+  const atMain = run(main);
+  assert.equal(atMain.status, 0, `grant-path exited ${atMain.status}: ${atMain.stderr}`);
+  const mainOut = JSON.parse(atMain.stdout);
+
+  const atTree = run(trees[0]);
+  assert.equal(atTree.status, 0);
+  const treeOut = JSON.parse(atTree.stdout);
+
+  assert.equal(treeOut.file, mainOut.file,
+    'a worktree was told to look somewhere other than its repository');
+  assert.equal(mainOut.live, false, 'reported a live grant where none exists');
+
+  // AND IT WROTE NOTHING. The overrides directory must not have been created.
+  const { existsSync } = await import('node:fs');
+  assert.equal(existsSync(join(home, 'overrides')), false,
+    'grant-path created the overrides directory; it must only ever read');
 });
 
 test('the key is stable across repeated calls', async (t) => {
