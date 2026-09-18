@@ -352,13 +352,37 @@ test('the identity matcher fires on a real leak and stays quiet on prose', () =>
  * still not caught. The fix for that is a marker comment exempting control lines
  * so the scan can cover everything, and it is a bigger change than this one.
  */
+/*
+ * THE SCAN COVERED src/ AND docs/, AND THE LEAK WAS SOMEWHERE ELSE.
+ *
+ * A commit message claimed "scrubbed; leakRegression is green". True of the
+ * gate, false of the repository: an auditor ran git grep over the whole tree and
+ * found the operator's home directory AND the path to their registration-token
+ * file committed in CLAUDE.md, plus a hardcoded home path in a test fixture.
+ * Root-level markdown and test/ were never scanned, so the claim was about
+ * coverage the test does not have.
+ *
+ * This repository is on GitHub. A published home directory names the operator,
+ * and a published path to a secrets directory tells a reader exactly what to ask
+ * for. Neither line needed to be literal: the token's LOCATION is the useful
+ * fact and %USERPROFILE% carries it without the identity.
+ *
+ * WIDENED to root-level markdown and test/. Nothing is exempted -- an exception
+ * list here would be the stale-silencer shape this project has already deleted
+ * once, and the two real leaks were fixable rather than justifiable.
+ */
 function scannedFiles() {
   const files = [new URL('./fixtures/leakShapes.mjs', import.meta.url)];
-  for (const dir of ['src', 'docs']) {
+  for (const dir of ['src', 'docs', 'test', 'scripts', 'bin']) {
     const base = new URL(`../${dir}/`, import.meta.url);
     for (const name of fs.readdirSync(base, { recursive: true })) {
       if (/\.(mjs|js|md)$/.test(name)) files.push(new URL(name.split(/[\\/]/).join('/'), base));
     }
+  }
+  // Root-level markdown, where the two committed paths actually were.
+  const root = new URL('../', import.meta.url);
+  for (const name of fs.readdirSync(root)) {
+    if (/\.md$/i.test(name)) files.push(new URL(name, root));
   }
   return files;
 }

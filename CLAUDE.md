@@ -494,14 +494,14 @@ in this repo — the same defect the table above is about, one file lower down.
 
 **Where it is on the owner's machine, so nobody has to probe for it again:**
 
-    C:\Users\DANNY GARCIA\Documents\agentbridge-secrets\registration-token.txt
+    %USERPROFILE%\Documents\agentbridge-secrets\registration-token.txt
 
 That directory is OUTSIDE every worktree on purpose, so no `git add` can reach
 it. Read it at login, export it, and do not copy it into the repo, into a
 settings file, or into a shell history that gets committed:
 
 ```bash
-AGENTBRIDGE_REGISTRATION_TOKEN=$(cat "/c/Users/DANNY GARCIA/Documents/agentbridge-secrets/registration-token.txt") \
+AGENTBRIDGE_REGISTRATION_TOKEN=$(cat "$HOME/Documents/agentbridge-secrets/registration-token.txt") \
   node bin/agentbridge.mjs register-session --agent <id> --session <session> --lane <lane> --capacity idle
 ```
 

@@ -211,7 +211,7 @@ test('an ABSOLUTE MACHINE PATH in the metadata is a canonicalisation refusal', (
       runtime: 'node20',
       module_system: 'esm',
       platform_constraints: [],
-      compiler_options: { outDir: 'C:\\Users\\DANNY GARCIA\\Agent007\\build' },
+      compiler_options: { outDir: 'C:\\projects\\example\\build' },
       feature_flags: [],
     },
   });
