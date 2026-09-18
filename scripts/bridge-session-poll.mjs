@@ -135,6 +135,56 @@ export function advanceCursor(prev, stdout) {
   return best;
 }
 
+/**
+ * Anchored to the start of a line and to the fixed prefix the CLI itself
+ * writes, BEFORE any interpolated detail.
+ *
+ * `res.detail` from the far end is interpolated into the CLI's stderr, so an
+ * unanchored match reads a proxy or WAF body as if it were our own CLI's
+ * verdict — data mistaken for a conclusion (rule 4). A 5xx page containing the
+ * words "no registration token" would have stopped the poller permanently on a
+ * transient fault.
+ */
+const PERMANENT_PATTERNS = Object.freeze([
+  /^error: no registration token\b/im,
+  /^error: the Bridge REFUSED this credential\b/im,
+  /^error: the Bridge refused the wait\b/im,
+]);
+
+/**
+ * WHAT ONE POLL CYCLE MEANT. Pure, exported, and that is the point.
+ *
+ * This decision used to live inline in `supervise`, which cannot be imported
+ * and can only be driven through a real spawn. A blind audit measured the cost:
+ * removing the cursor carry, removing the credential abort, flipping the import
+ * guard and changing the null-status handling were ALL uncaught — four separate
+ * mutations, not one named assertion between them. The logic had tests; the
+ * wiring was a separate claim with none (rule 17), and the branch that carried
+ * the defects was the one an unreachable-host fixture can never reach.
+ *
+ * @param {{status: number|null, error?: Error, stderr?: string}} r a spawnSync result
+ * @returns {'permanent'|'quiet'|'done'|'retry'}
+ *   permanent  stop; asking again cannot change the answer
+ *   quiet      the child ran and waited out our timeout — re-arm immediately
+ *   done       a normal cycle: woken (0) or nothing came (3)
+ *   retry      anything else — report and back off
+ */
+export function classifyCycle(r) {
+  const err = String(r?.stderr ?? '');
+  if (PERMANENT_PATTERNS.some((re) => re.test(err))) return 'permanent';
+
+  /*
+   * A null status is the quiet case ONLY IF THE CHILD ACTUALLY RAN. spawnSync
+   * also returns null when the spawn itself failed, and that returns instantly:
+   * treating it as quiet is a hot spin at roughly 1500 iterations per second,
+   * silent, because this path writes nothing and the supervisor is detached.
+   * `r.error` is set on a spawn failure and absent on a timeout kill.
+   */
+  if (r?.status === null || r?.status === undefined) return r?.error ? 'retry' : 'quiet';
+
+  return (r.status === 0 || r.status === 3) ? 'done' : 'retry';
+}
+
 /* ── the supervisor: re-arm the poll until told to stop ──────────────────── */
 
 async function supervise({ sessionId, tokenFile }) {
@@ -185,34 +235,79 @@ async function supervise({ sessionId, tokenFile }) {
     const err = String(r.stderr ?? '');
 
     /*
-     * A REFUSED CREDENTIAL IS PERMANENT, AND RETRYING IT IS A BUSY LOOP AGAINST
-     * A CLOSED DOOR. 66065c7 established that at registration and this loop was
-     * left retrying it every 15 seconds for the life of the session. The token
-     * will not become valid because we asked again.
+     * PERMANENT MEANS STOP. RETRYING IT IS A BUSY LOOP AGAINST A CLOSED DOOR.
+     * 66065c7 established that at registration; this loop was left retrying
+     * every 15 seconds for the life of the session.
      *
      * Matched on the message rather than the status because `wait-for-work`
      * answers 2 for all four of NOT CONFIGURED, REFUSED, REJECTED and
-     * unreachable -- and unreachable is the one case that genuinely IS
-     * transient, so the exit code cannot be the discriminator.
+     * unreachable, and unreachable is the one case that genuinely IS transient,
+     * so the exit code cannot be the discriminator.
+     *
+     * TWO THINGS THE FIRST VERSION GOT WRONG, both found by blind audit.
+     *
+     * IT MISSED `REFUSED`, which its own comment listed. The pattern wanted
+     * "REFUSED this credential" and the CLI prints "refused the wait" for that
+     * case. index.ts answers 409 unknown-session for a session that is not in
+     * session_registrations, hostedRegistry maps 409 to REFUSED, and the
+     * supervisor then retried a permanently unknown session every 15 seconds
+     * forever. Reachable on any session whose registration hit a network blip,
+     * which is precisely the case sessionStart deliberately proceeds through.
+     *
+     * AND IT MATCHED FAR-END TEXT. `res.detail` is interpolated into the CLI's
+     * stderr, so a proxy or WAF body containing "no registration token" turned a
+     * transient fault into a permanent stop — the exact outcome this script
+     * exists to prevent. Data read as a verdict, rule 4.
+     *
+     * So the match is ANCHORED to the start of a line and to the fixed prefix
+     * the CLI itself writes, before any interpolated detail. What the far end
+     * says can no longer be mistaken for what our own CLI concluded.
      */
-    if (/REFUSED this credential|no registration token/i.test(err)) {
-      process.stderr.write(`[poll] stopping: ${err.split('\n')[0].slice(0, 200)}\n`);
+    const verdict = classifyCycle(r);
+
+    if (verdict === 'permanent') {
+      const line = err.split('\n').find((l) => /^error:/i.test(l)) ?? err.split('\n')[0];
+      process.stderr.write(`[poll] stopping, this will not fix itself: ${line.slice(0, 200)}\n`);
+      /*
+       * HONEST LIMIT: an unknown session is recoverable in principle — a fresh
+       * register-session would fix it — and this loop does not attempt that.
+       * supervise() only ever calls wait-for-work; registration happens once, in
+       * sessionStart. Stopping loudly is better than hammering a 409 forever,
+       * and it is NOT the same as solving it. Re-registration from the
+       * supervisor is a real change with its own failure modes and is not being
+       * smuggled in here.
+       */
       break;
     }
 
     /*
-     * r.status === null IS THE QUIET CASE, NOT A FAILURE, and reporting it as
-     * one was a false alarm every twelve minutes on a perfectly healthy session.
+     * A null STATUS IS THE QUIET CASE **ONLY IF THE CHILD ACTUALLY RAN**, and
+     * the first version of this did not check.
+     *
      * Without --once the CLI waits internally until something arrives, so on a
      * silent bridge it is still waiting when our own spawn timeout stops it.
-     * That is the poll working. Re-arm immediately and say nothing.
+     * That is the poll working, and reporting it was a false alarm every twelve
+     * minutes on a healthy session.
      *
-     * (The comment below used to claim exit 3 was the common case. It is not
-     * reachable as this supervisor invokes the CLI -- exit 3 is set only under
-     * --once, which is not passed. Left handled anyway, because it is the
-     * documented contract and a future caller may pass it.)
+     * BUT spawnSync ALSO RETURNS status null WHEN THE SPAWN ITSELF FAILED, and
+     * that returns INSTANTLY. `continue` on it is a tighter hot spin than the
+     * one this file was written to fix: measured at roughly 1500 iterations per
+     * second, and silent, because the supervisor is detached with stdio to a log
+     * file and this path wrote nothing. Reachable through EMFILE or EAGAIN under
+     * load, a moved process.execPath, or an AV/EDR product blocking the spawn.
+     * Before the cursor commit this fell into the backoff branch below; I moved
+     * it out and did not notice. Found by blind audit.
+     *
+     * `r.error` is set on a spawn failure and absent on a timeout kill, and it
+     * was sitting unread on the result object. So the quiet case is a null
+     * status WITHOUT an error; a null status WITH one falls through to the
+     * backoff, where it belongs and where it is at least audible.
+     *
+     * (Exit 3 is not reachable as this supervisor invokes the CLI -- it is set
+     * only under --once, which is not passed. Handled below anyway, because it
+     * is the documented contract and a future caller may pass it.)
      */
-    if (r.status === null) continue;
+    if (verdict === 'quiet') continue;
 
     /*
      * EXIT 0 means an event arrived -- the CLI has already printed it, and this
@@ -224,8 +319,11 @@ async function supervise({ sessionId, tokenFile }) {
      * the first transient failure would leave the session silently invisible,
      * which is the exact condition it exists to prevent.
      */
-    if (r.status !== 0 && r.status !== 3) {
-      process.stderr.write(`[poll] wait-for-work exited ${r.status}: ${err.slice(0, 200)}\n`);
+    if (verdict === 'retry') {
+      const why = r.error
+        ? `could not start: ${r.error.code ?? ''} ${r.error.message ?? r.error}`.trim()
+        : `exited ${r.status}: ${err.slice(0, 200)}`;
+      process.stderr.write(`[poll] wait-for-work ${why}\n`);
       if (stopping) break;
       // Back off briefly so a hard failure cannot spin.
       await new Promise((resolve) => { setTimeout(resolve, 15_000); });
