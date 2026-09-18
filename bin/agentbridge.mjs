@@ -2064,10 +2064,18 @@ try {
         effect: args.effect,
         capabilities: split(args.capabilities),
         constraints: args.constraints ? JSON.parse(args.constraints) : {},
-        // created_by defaults to the owner. validateDecision REFUSES a record
-        // where they differ, which is what stops a worker writing its own
-        // permission slip; --by exists so that forgery is expressible in a
-        // test rather than only in theory.
+        // created_by defaults to the owner, and --by exists so that forgery is
+        // expressible in a test rather than only in theory.
+        //
+        // THIS COMMENT USED TO CLAIM the differ-check "is what stops a worker
+        // writing its own permission slip". It was not. Both fields come off
+        // the same record from the same caller, so refusing a MISMATCH only
+        // established that the writer was consistent: --owner c8 --by c8 passed,
+        // and the local ledger that `agentbridge ask` consults took it. What
+        // stops it is validateDecision now requiring owner_id to NAME the owner
+        // (isOwnerId, anchored to the ACTORS roster). Found by blind audit
+        // 2026-09-18, after the same defect was confirmed live on the hosted
+        // surface with two "main"-owned rows in the production ledger.
         created_by: args.by ?? args.owner,
         created_at: new Date().toISOString(),
         supersedes: args.supersedes ?? null,
