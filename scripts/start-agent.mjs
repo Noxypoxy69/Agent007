@@ -99,14 +99,34 @@ if (dryRun) {
 }
 
 /*
- * stdio inherit, so this is a launcher and not a wrapper: claude owns the
- * terminal and this process just carries the environment into it.
+ * IT CANNOT LAUNCH CLAUDE FROM HERE, AND PRETENDING OTHERWISE WASTED THE
+ * OPERATOR'S TIME.
+ *
+ * The first version spawned claude with stdio inherit. Under `npm run` that
+ * fails immediately -- Danny hit it on the first try:
+ *
+ *   Input must be provided either through stdin or as a prompt argument
+ *
+ * npm runs a script with stdin PIPED, so claude sees no TTY and starts in
+ * headless print mode. Measured here: process.stdin.isTTY is false under
+ * `npm run`. A launcher that cannot hand over a terminal it never owned is not
+ * a launcher, and shipping one that errors on first use is worse than shipping
+ * nothing, because the operator now has to debug my helper instead of starting
+ * an agent.
+ *
+ * So this validates and PRINTS, and agent.cmd in the repository root does the
+ * actual launching -- a .cmd sets the variable in the caller's own shell and
+ * execs claude there, so the terminal is never passed through a pipe.
  */
-const child = spawn('claude', [], { cwd: REPO, env, stdio: 'inherit', shell: true });
-child.on('exit', (code) => process.exit(code ?? 0));
-child.on('error', (e) => {
-  console.error(`could not start claude: ${e.message}`);
-  console.error('If claude is not on PATH, start it yourself from this directory with');
-  console.error(`AGENTBRIDGE_AGENT_ID=${agentId} set in the environment.`);
-  process.exit(2);
-});
+console.log('This script validates and prints; it does not launch.');
+console.log('');
+console.log('  AGENTBRIDGE_AGENT_ID=' + agentId);
+if (lane) console.log('  AGENTBRIDGE_LANE=' + lane);
+console.log('');
+console.log('To start the session, from this directory:');
+console.log('');
+console.log(`    agent ${agentId}${lane ? ` ${lane}` : ''}`);
+console.log('');
+console.log('(agent.cmd sets the variable in your shell and starts claude there.');
+console.log(' npm run cannot: it pipes stdin, so claude comes up headless.)');
+void spawn; // kept out of the launch path deliberately; see the comment above
