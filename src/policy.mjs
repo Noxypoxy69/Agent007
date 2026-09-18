@@ -1,0 +1,137 @@
+/**
+ * THE CANONICAL POLICY ARTIFACT. ONE LIST, VERSIONED.
+ *
+ * The prototype declared EXTERNAL_PROTECTED_PATHS as a second copy of the list
+ * already living in src/guardSession.mjs. This repository has spent real hours
+ * on exactly that failure -- two lists of one thing drift the moment somebody
+ * edits one, and the guard layer and the Stop snapshot disagreed for days
+ * because of it.
+ *
+ * So this module is the artifact, not a convenience copy. It carries a version,
+ * and the version participates in candidate identity: an approval issued under
+ * one policy cannot be promoted under another, because the candidateId changes
+ * with it.
+ *
+ * INTENDED FINAL SHAPE: generated from, or validated against, the repository's
+ * own guardSession list at build time, so a divergence is a build failure rather
+ * than a silent disagreement. That generation step is not built yet, and this
+ * comment exists so nobody reads the current hand-maintained list as the
+ * finished design.
+ */
+import path from 'node:path';
+
+export const POLICY_VERSION = '2026-09-18-v2';
+
+export const PROTECTED_PATHS = Object.freeze([
+  '.claude/',
+  'CLAUDE.md',
+  'package.json',
+  'package-lock.json',
+  'src/claudeGuard.mjs',
+  'src/guardSession.mjs',
+  'src/shellAllowlist.mjs',
+  'src/moduleGraph.mjs',
+  'src/policy.mjs',
+  'src/verifier.mjs',
+  /*
+   * THE GUARD'S OWN DEPENDENCIES. Kept identical to guardSession.mjs, which
+   * carries the full reasoning: a file the guard IMPORTS decides what the guard
+   * does, and the import closure had drifted past both of these hand-maintained
+   * lists. src/verifier.mjs reads THIS copy, so a path missing here is a real
+   * difference in what the verifier protects.
+   *
+   * test/protectedPathParity.test.mjs is what catches a one-sided edit -- and it
+   * caught this one: the three entries went into guardSession.mjs first and the
+   * suite went red on the next run.
+   */
+  'src/safeGit.mjs',
+  'src/auditLedger.mjs',
+  'src/actionAuthority.mjs',
+  'bin/agentbridge-claude-guard.mjs',
+  'scripts/claude-stop-gate.mjs',
+  'test/claudeGuard.test.mjs',
+  'docs/CLAUDE_GUARD_PROVENANCE.md',
+  'docs/ROADMAP.md',
+  'docs/ORDER.md',
+  'THIRD_PARTY_CODE.md',
+]);
+
+/*
+ * MIRRORED FROM guardSession.mjs, AND THAT IS THE DEFECT, NOT THE FIX.
+ *
+ * guardSession.mjs carries a comment reading "THE ONE PROTECTED-PATH DEFINITION.
+ * Both layers import this", written after two lists of protected paths drifted
+ * and a write slipped between them. This file is a THIRD list, and it drifted
+ * immediately: the worktree exemption landed in guardSession.mjs and not here,
+ * so src/verifier.mjs -- which imports from this file -- kept the unexempted
+ * behaviour for as long as nobody looked. Found by review.
+ *
+ * The right repair is one definition with the other importing it. That is a
+ * structural change to guard code and is not being smuggled into a bug fix, so
+ * the two are kept identical here and test/protectedPathParity.test.mjs FAILS if
+ * they ever disagree again. A mirror without a parity check is the thing that
+ * produced this.
+ */
+const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
+/*
+ * THE `i` IS LOAD-BEARING IN THE TWIN AND WAS MISSING HERE.
+ *
+ * guardSession.mjs carries the reasoning: NTFS resolves `.Claude` and `.CLAUDE`
+ * to the same directory, so without the flag a junction named
+ * `.claude/worktrees/x/.Claude` reaches the same control an inner session boots
+ * from, the walk does not record it, and PreToolUse does not refuse planting it
+ * -- "an unprivileged, undetected disarm. Found by audit."
+ *
+ * Harmless TODAY only because both call sites lowercase first, and an audit
+ * measured zero behavioural differences across fifteen paths. That is rule 11:
+ * untested because currently redundant is how a protection quietly stops being
+ * one. The masking `.toLowerCase()` is one edit away from being removed on one
+ * side, and protectedPathParity compares the ARRAYS plus a two-path corpus, so
+ * it would not notice.
+ */
+const NESTED_CONTROL_DIR = /(^|\/)\.claude\//i;
+
+/*
+ * THE COMPARE IS CASE-FOLDED, BECAUSE THE FILESYSTEM IS.
+ *
+ * This was an exact string compare on a platform where .CLAUDE, .Claude and
+ * .claude are ONE directory. Measured through the shipped hook binary, all
+ * ALLOW while the canonical spelling was denied:
+ *
+ *   .CLAUDE/settings.json   .Claude/settings.json   SRC/claudeGuard.mjs
+ *   src/claudeGuard.MJS     CLAUDE.MD   claude.md   package.JSON
+ *
+ * These are not lookalikes. Writing .CLAUDE/settings.json modifies
+ * .claude/settings.json -- git reports the canonical path as modified -- so one
+ * permitted write carrying disableAllHooks removes PreToolUse AND the Stop
+ * hook, and the "detected at Stop" fallback that claudeGuard and shellAllowlist
+ * delegate to four times never runs. No grant, no metacharacter, one call.
+ * realpathSync does not canonicalise case on Windows, so normalizedCandidates
+ * produced the same wrong spelling twice and the second candidate never helped.
+ *
+ * Reported by THREE separate blind audits before it was fixed. code-a closed
+ * the nested-control half with a case-insensitive flag; this is the main
+ * comparator, which stayed exact.
+ *
+ * ON CASE-SENSITIVE FILESYSTEMS this over-protects: a genuinely distinct file
+ * named src/Policy.mjs becomes unwritable. That is the direction to fail in --
+ * refusing a file nobody has is a nuisance, permitting a write to the hook
+ * configuration is the end of every layer at once. Folding is not a lookalike
+ * list; a spelling nobody enumerated is covered because case folding is a
+ * property, not a set.
+ */
+export function isProtectedRelPath(rel) {
+  if (typeof rel !== 'string' || rel === '') return false;
+  const norm = rel.split(path.sep).join('/').replace(/^\.\//, '').toLowerCase();
+  const exempt = PROTECTION_EXEMPT_PREFIXES.find((p) => norm.startsWith(p.toLowerCase()));
+  if (exempt && !NESTED_CONTROL_DIR.test(norm.slice(exempt.length))) return false;
+  return PROTECTED_PATHS.some((e) => {
+    const entry = e.toLowerCase();
+    return entry.endsWith('/') ? norm.startsWith(entry) : norm === entry;
+  });
+}
+
+export function isBaselineTestPath(rel) {
+  const norm = String(rel ?? '').split(path.sep).join('/');
+  return /^test\/.+\.test\.mjs$/i.test(norm);
+}
