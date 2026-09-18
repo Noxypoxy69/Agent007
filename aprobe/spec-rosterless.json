@@ -1,0 +1,46 @@
+{
+  "rev": "e59a431",
+  "restore": ["src/ownerDecisions.mjs", "supabase/functions/mcp/_shared.js"],
+  "cases": [
+    {
+      "name": "R1 [rosterless corpus] M1 o.includes(want) — the widening the roster caught by accident",
+      "test": "atest2/ownerIdentityRosterless.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().includes(want)" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().includes(want)" }
+      ]
+    },
+    {
+      "name": "R2 [rosterless corpus] M3 o.startsWith(want)",
+      "test": "atest2/ownerIdentityRosterless.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().startsWith(want)" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().startsWith(want)" }
+      ]
+    },
+    {
+      "name": "R3 [rosterless corpus] M6 strip non-alphanumerics",
+      "test": "atest2/ownerIdentityRosterless.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().replace(/[^a-z0-9]/g,'') === want.replace(/[^a-z0-9]/g,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().replace(/[^a-z0-9]/g,'') === want.replace(/[^a-z0-9]/g,'')" }
+      ]
+    },
+    {
+      "name": "R4 [rosterless corpus] M2 want.includes(o) — the other direction",
+      "test": "atest2/ownerIdentityRosterless.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "want.includes(o.trim().toLowerCase())" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "want.includes(o.trim().toLowerCase())" }
+      ]
+    },
+    {
+      "name": "R5 [rosterless corpus] M7 NFKD unicode fold",
+      "test": "atest2/ownerIdentityRosterless.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" }
+      ]
+    }
+  ]
+}
