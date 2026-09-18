@@ -71,7 +71,7 @@ test('THE POSITIVE FIRST: both events are delivered when nothing has been read',
    */
   for (const [name, fn] of SURFACES) {
     const out = deliver(fn, [messageAt(AT_FIRST, 'm1'), messageAt(AT_SECOND, 'm2')], null);
-    assert.equal(out.events.length, 2, `${name}: expected both events, got ${out.events.length}`);
+    assert.equal(out.length, 2, `${name}: expected both events, got ${out.length}`);
   }
 });
 
@@ -84,8 +84,8 @@ test('AN EVENT IN THE SAME MILLISECOND AS THE CURSOR IS STILL DELIVERED', () => 
   for (const [name, fn] of SURFACES) {
     const out = deliver(fn, [messageAt(AT_FIRST, 'm1'), messageAt(AT_SECOND, 'm2')], AT_FIRST);
     const ids = out.events.map((e) => e.message_id ?? e.id ?? null);
-    assert.equal(out.events.length, 1,
-      `${name}: expected the later microsecond event, got ${out.events.length} events (${ids.join(', ')}) — `
+    assert.equal(out.length, 1,
+      `${name}: expected the later microsecond event, got ${out.length} events (${ids.join(', ')}) — `
       + 'a message that is genuinely newer than the cursor was dropped, and will never be re-offered');
   }
 });
@@ -99,7 +99,7 @@ test('THE CURSOR IS STILL EXCLUSIVE — the event that produced it does not repe
    */
   for (const [name, fn] of SURFACES) {
     const out = deliver(fn, [messageAt(AT_FIRST, 'm1')], AT_FIRST);
-    assert.equal(out.events.length, 0,
+    assert.equal(out.length, 0,
       `${name}: the event that produced the cursor came back — that is the re-delivery spin`);
   }
 });
@@ -115,13 +115,13 @@ test('MILLISECOND AND SECOND PRECISION STILL BEHAVE', () => {
     const later = '2026-09-18T19:30:00.401Z';
     const whole = '2026-09-18T19:30:01Z';
 
-    assert.equal(deliver(fn, [messageAt(later, 'm')], ms).events.length, 1,
+    assert.equal(deliver(fn, [messageAt(later, 'm')], ms).length, 1,
       `${name}: a millisecond-later event was dropped`);
-    assert.equal(deliver(fn, [messageAt(ms, 'm')], ms).events.length, 0,
+    assert.equal(deliver(fn, [messageAt(ms, 'm')], ms).length, 0,
       `${name}: a millisecond cursor stopped being exclusive`);
-    assert.equal(deliver(fn, [messageAt(whole, 'm')], ms).events.length, 1,
+    assert.equal(deliver(fn, [messageAt(whole, 'm')], ms).length, 1,
       `${name}: a whole-second timestamp was dropped`);
-    assert.equal(deliver(fn, [messageAt(ms, 'm')], whole).events.length, 0,
+    assert.equal(deliver(fn, [messageAt(ms, 'm')], whole).length, 0,
       `${name}: an older event was delivered`);
   }
 });
@@ -143,8 +143,8 @@ test('THE TWO SURFACES AGREE', () => {
   for (const since of cases) {
     const a = deliver(eventsFor, [messageAt(AT_FIRST, 'm1'), messageAt(AT_SECOND, 'm2')], since);
     const b = deliver(hostedEventsFor, [messageAt(AT_FIRST, 'm1'), messageAt(AT_SECOND, 'm2')], since);
-    assert.equal(a.events.length, b.events.length,
-      `the surfaces disagree for since=${since}: src ${a.events.length} vs hosted ${b.events.length}`);
+    assert.equal(a.length, b.length,
+      `the surfaces disagree for since=${since}: src ${a.length} vs hosted ${b.length}`);
   }
 });
 
