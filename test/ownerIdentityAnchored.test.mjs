@@ -489,6 +489,97 @@ test('A REVOKED SUPERSEDER STILL RESTORES WHAT IT REPLACED', () => {
   }
 });
 
+test('A REVISION HISTORY OF ANY LENGTH STILL ANSWERS — chains of 3, 4 and 5', () => {
+  /*
+   * THE REGRESSION b53581b SHIPPED, AND ITS COMMIT MESSAGE CLAIMED THE
+   * OPPOSITE: "A normal supersession leaves the replacement in force, so
+   * nothing is orphaned and ordinary resolution is untouched."
+   *
+   * True for a 2-chain. FALSE from three onwards. `live` meant "valid and not
+   * named in anyone's supersedes", so in A <- B <- C the middle row was not in
+   * force, A's only replacement was therefore not in force, and A was reported
+   * orphaned — escalating an action the owner had settled, forever, with a
+   * reason naming the OLDEST id in the chain.
+   *
+   * THE ONLY ORDINARY-SUPERSESSION POSITIVE IN THIS FILE WAS A 2-CHAIN, which
+   * is the single length where the broken predicate still gives the right
+   * answer. Hollow gate 10 exactly: the fixture could not reach the branch that
+   * diverged. These are the lengths that can.
+   */
+  const link = (id, supersedes, effect) => ({
+    ...decisionBy('danny'),
+    decision_id: id,
+    effect,
+    capabilities: ['deploy.*'],
+    supersedes,
+  });
+
+  for (const [name, , active, resolve] of SURFACES) {
+    for (const len of [3, 4, 5]) {
+      const rows = [];
+      for (let i = 0; i < len; i += 1) {
+        // Last link ALLOWs; every earlier one denied, so a regression is loud.
+        rows.push(link(`d-${i}`, i === 0 ? null : `d-${i - 1}`, i === len - 1 ? 'allow' : 'deny'));
+      }
+      const head = `d-${len - 1}`;
+
+      assert.deepEqual(active(rows).map((d) => d.decision_id), [head],
+        `${name}: a ${len}-step revision history left the wrong row in force`);
+
+      const r = resolve(rows, 'deploy.production');
+      assert.equal(r.outcome, 'allowed',
+        `${name}: a ${len}-step revision history resolved ${r.outcome} instead of obeying its head `
+        + `(${head}) — the owner settled this and is being asked again: ${r.reason}`);
+    }
+  }
+});
+
+test('A DIAMOND: replaced twice, one replacement in force', () => {
+  /*
+   * Two rows supersede the same victim; one is itself superseded and one
+   * stands. The victim IS properly replaced and must not escalate.
+   */
+  const victim = { ...decisionBy('danny'), decision_id: 'd-v', effect: 'deny', capabilities: ['deploy.*'] };
+  const deadBranch = {
+    ...decisionBy('danny'), decision_id: 'd-x', effect: 'allow',
+    capabilities: ['deploy.*'], supersedes: 'd-v',
+  };
+  const killsDeadBranch = {
+    ...decisionBy('danny'), decision_id: 'd-y', effect: 'allow',
+    capabilities: ['deploy.*'], supersedes: 'd-x',
+  };
+  const liveBranch = {
+    ...decisionBy('danny'), decision_id: 'd-z', effect: 'allow',
+    capabilities: ['deploy.*'], supersedes: 'd-v',
+  };
+
+  for (const [name, , , resolve] of SURFACES) {
+    const r = resolve([victim, deadBranch, killsDeadBranch, liveBranch], 'deploy.production');
+    assert.notEqual(r.outcome, 'owner_required',
+      `${name}: a decision replaced by something still in force was reported abandoned: ${r.reason}`);
+    assert.equal(r.outcome, 'allowed', `${name}: expected the surviving replacement to answer, got ${r.outcome}`);
+  }
+});
+
+test('A CHAIN THAT ENDS IN A DEAD ROW STILL ESCALATES', () => {
+  /*
+   * The direction the walk must NOT lose. If the head of the chain is junk, the
+   * ledger still cannot say what the owner decided, however many valid hops
+   * precede it.
+   */
+  const a = { ...decisionBy('danny'), decision_id: 'c-a', effect: 'deny', capabilities: ['deploy.*'] };
+  const b = {
+    ...decisionBy('danny'), decision_id: 'c-b', effect: 'deny',
+    capabilities: ['deploy.*'], supersedes: 'c-a',
+  };
+  const junkHead = { supersedes: 'c-b' };
+
+  for (const [name, , , resolve] of SURFACES) {
+    assert.equal(resolve([a, b, junkHead], 'deploy.production').outcome, 'owner_required',
+      `${name}: a chain whose head is not a valid decision answered anyway`);
+  }
+});
+
 test('A VALID SUPERSESSION STILL WORKS, so the fix above is not a blunt instrument', () => {
   /*
    * Rule 5 again. "Nothing is ever active" satisfies every assertion above.

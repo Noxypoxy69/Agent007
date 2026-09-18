@@ -388,14 +388,18 @@ function orphanedDecisions(rows, action, context, owners) {
    * then routed anything reversible to a COORDINATOR. This is the deployed
    * copy — resolve_owner_decision and settleOpenRequestsAgainstPolicy run here.
    */
+  /*
+   * FOLLOW THE CHAIN TO ITS HEAD. Asking whether the IMMEDIATE successor is in
+   * force broke every revision history three steps long: in A <- B <- C, B is
+   * superseded by C and therefore not in force, so A looked abandoned and the
+   * action escalated forever even though C plainly stands. The one-line repair
+   * — treat every valid row as in force — reopens self-supersession and cycles.
+   * So the question is reachability. See src/ownerDecisions.mjs.
+   */
   const supersededIds = new Set(present.map((x) => x.supersedes).filter(isNonEmptyString));
-  const live = new Set(
-    present
-      .filter((d) => validateDecision(d, { owners }).ok)
-      .filter((d) => !supersededIds.has(d.decision_id))
-      .map((d) => d.decision_id)
-      .filter(isNonEmptyString),
-  );
+  const inForce = (d) => validateDecision(d, { owners }).ok
+    && isNonEmptyString(d.decision_id)
+    && !supersededIds.has(d.decision_id);
 
   const supersededBy = new Map();
   for (const d of present) {
@@ -404,12 +408,27 @@ function orphanedDecisions(rows, action, context, owners) {
     supersededBy.get(d.supersedes).push(d);
   }
 
+  const replacedByLive = (id) => {
+    const seen = new Set();
+    const stack = [id];
+    while (stack.length) {
+      const current = stack.pop();
+      if (seen.has(current)) continue;
+      seen.add(current);
+      for (const r of supersededBy.get(current) ?? []) {
+        if (inForce(r)) return true;
+        if (isNonEmptyString(r.decision_id)) stack.push(r.decision_id);
+      }
+    }
+    return false;
+  };
+
   return present.filter((d) => {
     if (!isNonEmptyString(d.decision_id)) return false;
     if (!validateDecision(d, { owners }).ok) return false;
     const replacements = supersededBy.get(d.decision_id);
     if (!replacements || replacements.length === 0) return false;
-    if (replacements.some((r) => isNonEmptyString(r.decision_id) && live.has(r.decision_id))) return false;
+    if (replacedByLive(d.decision_id)) return false;
     return scopeMatches(d, context)
       && Array.isArray(d.capabilities)
       && d.capabilities.some((c) => capabilityMatches(c, action));

@@ -359,13 +359,35 @@ function orphanedDecisions(rows, action, context, owners) {
    * A REVOKED superseder does not suppress at all — revoked rows never enter
    * `present` — so revocation still restores what it replaced, unchanged.
    */
-  const live = new Set(
-    present
-      .filter((d) => validDecisionCached(d, owners))
-      .filter((d) => !new Set(present.map((x) => x.supersedes).filter(isNonEmptyString)).has(d.decision_id))
-      .map((d) => d.decision_id)
-      .filter(isNonEmptyString),
-  );
+  /*
+   * FOLLOW THE CHAIN TO ITS HEAD. "Was it replaced by something in force?" is a
+   * question about REACHABILITY, and asking it one hop deep was wrong.
+   *
+   * The first version treated a decision as replaced only if its IMMEDIATE
+   * successor was in force, where "in force" means valid and not itself
+   * superseded. In A <- B <- C that makes B not-in-force (C superseded it), so
+   * A looked abandoned and the whole action escalated — even though C is
+   * plainly in force and is exactly what the owner meant to stand. Measured by
+   * audit: ordinary revision histories of three or more steps answered
+   * `owner_required` forever, naming the OLDEST id in the chain. A module whose
+   * entire purpose is "tell your AI team once" started asking again every time
+   * the owner corrected themselves twice.
+   *
+   * AND THE ONE-LINE REPAIR IS WORSE, WHICH THE AUDIT ALSO PROVED. Treating
+   * every valid row as in force fixes the 3-chain and reopens both shapes this
+   * function exists for: a self-superseding row and a cycle become their own
+   * replacements. That mutation is caught by the cycle and self-supersession
+   * gates, which is how we know the walk is required rather than preferred.
+   *
+   * So: from each decision, walk forward through everything that supersedes it.
+   * Replaced iff any reachable successor is in force. A cycle terminates on the
+   * visited set and, having no head, is correctly orphaned — the same answer as
+   * before, arrived at for the right reason.
+   */
+  const supersededIds = new Set(present.map((x) => x.supersedes).filter(isNonEmptyString));
+  const inForce = (d) => validDecisionCached(d, owners)
+    && isNonEmptyString(d.decision_id)
+    && !supersededIds.has(d.decision_id);
 
   const supersededBy = new Map();
   for (const d of present) {
@@ -374,13 +396,28 @@ function orphanedDecisions(rows, action, context, owners) {
     supersededBy.get(d.supersedes).push(d);
   }
 
+  /** Is anything that (transitively) replaced `id` actually in force? */
+  const replacedByLive = (id) => {
+    const seen = new Set();
+    const stack = [id];
+    while (stack.length) {
+      const current = stack.pop();
+      if (seen.has(current)) continue;   // a cycle has no head; stop rather than spin
+      seen.add(current);
+      for (const r of supersededBy.get(current) ?? []) {
+        if (inForce(r)) return true;
+        if (isNonEmptyString(r.decision_id)) stack.push(r.decision_id);
+      }
+    }
+    return false;
+  };
+
   return present.filter((d) => {
     if (!isNonEmptyString(d.decision_id)) return false;
     if (!validDecisionCached(d, owners)) return false;
     const replacements = supersededBy.get(d.decision_id);
     if (!replacements || replacements.length === 0) return false;
-    // Replaced by something that is itself in force: an ordinary supersession.
-    if (replacements.some((r) => isNonEmptyString(r.decision_id) && live.has(r.decision_id))) return false;
+    if (replacedByLive(d.decision_id)) return false;
     return scopeMatches(d, context)
       && Array.isArray(d.capabilities)
       && d.capabilities.some((c) => capabilityMatches(c, action));
