@@ -595,18 +595,32 @@ export function createOAuthHandler(env) {
  * THE DISPATCHER TICK.
  *
  * The coordinator is awake at most once an hour, so every handoff used to wait
- * on a person to relay it. This runs on a cron and prepares what the
- * coordinator will confirm on its next pass.
+ * on a person to relay it. This runs on a cron and drives /dispatch.
  *
- * IT CARRIES A DISPATCHER TOKEN, WHICH OPENS EXACTLY ONE ENDPOINT. That is the
- * owner's ruling -- prepare, do not decide -- enforced by capability rather
- * than convention. If this held the coordinator token it COULD assign work, and
- * the only thing stopping it would be that it chooses not to.
+ * IT CARRIES A DISPATCHER TOKEN, WHICH OPENS EXACTLY ONE ENDPOINT, and that
+ * capability boundary is real: every MCP tool answers this token 401.
  *
- * A FAILED TICK IS LOUD AND HARMLESS. It writes proposals and nothing else, so
- * the worst case is that the coordinator's next pass sees a stale open set --
- * which confirm_proposal refuses as stale anyway. There is no partial state to
- * repair, so this neither retries nor alerts: the next tick is the retry.
+ * WHAT THAT ENDPOINT DOES IS NO LONGER "PREPARE ONLY", AND THIS COMMENT SAID
+ * OTHERWISE FOR TWO DAYS. Danny's ruling of 2026-09-16 -- "yes, autoconfirm" --
+ * is live on the data plane and ON by default, so /dispatch confirms its own
+ * assign proposals and thereby assigns work. The sentence that used to sit here,
+ * "if this held the coordinator token it COULD assign work, and the only thing
+ * stopping it would be that it chooses not to", now describes the opposite of
+ * what happens -- and it is the sentence a reader would take as the security
+ * argument. Superseded prose left beside corrected code is how somebody reverts
+ * the correction.
+ *
+ * WHAT ACTUALLY SEPARATES PREPARATION FROM ACTION IS THE GUARD, NOT THE PARTY.
+ * confirm_proposal re-runs canAssign against freshly fetched rows and refuses a
+ * proposal it prepared seconds earlier if the world moved. The second LOOK
+ * survives; the second PERSON does not.
+ *
+ * A FAILED TICK IS LOUD AND HARMLESS, WITH ONE FEWER GUARANTEE THAN BEFORE.
+ * When autoconfirm is off it writes proposals and nothing else, and the worst
+ * case is a stale open set that confirm_proposal refuses anyway. With it on, a
+ * tick can leave work ASSIGNED -- which is the intended behaviour and not a
+ * partial state, because the assignment is atomic in claim_task. This still
+ * neither retries nor alerts: the next tick is the retry.
  */
 export async function dispatchTick(env) {
   if (!env.BRIDGE_DISPATCHER_TOKEN || !env.DATA_PLANE_URL) {

@@ -24,10 +24,22 @@ import {
  *   coordinator_tokens   assign, accept, cancel, message, record owner
  *                        decisions, confirm proposals. NOT deploy, NOT shell,
  *                        NOT SQL.
- *   dispatcher_tokens    PREPARE PROPOSALS, via POST /dispatch. Nothing else.
- *                        It cannot assign what it proposes -- that is the
- *                        owner's "prepare, do not decide" ruling enforced by
- *                        capability rather than by good behaviour.
+ *   dispatcher_tokens    POST /dispatch, and nothing else. Every MCP tool
+ *                        answers it 401, so the capability boundary is one
+ *                        endpoint wide.
+ *                        WHAT THAT ENDPOINT DOES CHANGED. It prepares
+ *                        proposals and then, with DISPATCH_AUTOCONFIRM unset
+ *                        or not "off" -- the DEFAULT -- confirms the assign
+ *                        ones itself, which assigns work. Danny's ruling,
+ *                        2026-09-16: "yes, autoconfirm".
+ *                        The guard is not skipped: confirm_proposal re-runs
+ *                        canAssign against live state, so the second look
+ *                        survives even though the second PARTY does not.
+ *                        This block used to read "It cannot assign what it
+ *                        proposes" and was left standing for two days after
+ *                        that stopped being true, which is the stale-citation
+ *                        failure src/coordination.mjs warns about: a later
+ *                        reader trusts the prose and reverts a correct change.
  *
  * Separate tables rather than one with a scope column, because a scope column
  * is one typo away from promoting a reader to a coordinator, and a promotion
@@ -1768,12 +1780,25 @@ Deno.serve(async (request) => {
    * THE ONLY ENDPOINT A DISPATCHER TOKEN OPENS.
    *
    * The owner ruled that the dispatcher prepares an assignment and the
-   * coordinator confirms it. That ruling is enforced by CAPABILITY, not by
-   * convention: a dispatcher token is in neither coordinator_tokens nor
+   * coordinator confirms it. THAT RULING WAS SUPERSEDED, and this paragraph
+   * described the old one for two days after the code stopped implementing it.
+   *
+   * What still holds: a dispatcher token is in neither coordinator_tokens nor
    * reader_tokens, so every MCP tool is 401 to it and this path is all it has.
-   * If it held a coordinator token it could assign work, and the only thing
-   * stopping it would be that it chooses not to -- which is a habit, not a
-   * control.
+   * The capability boundary is real and it is one endpoint wide.
+   *
+   * What no longer holds: that the endpoint only prepares. Danny's ruling of
+   * 2026-09-16 -- "yes, autoconfirm" -- is implemented below, and it is ON by
+   * default, so this handler confirms its own assign proposals and thereby
+   * assigns work. The separation that survives is the GUARD, not the party:
+   * confirm_proposal re-runs canAssign against freshly fetched rows and can
+   * refuse a proposal it prepared seconds earlier.
+   *
+   * The old text is quoted rather than deleted because the failure was not the
+   * change, it was leaving the superseded justification standing where it reads
+   * as the current security argument. src/coordination.mjs names that shape: a
+   * corrected mechanism with the stale citation still beside it, so the next
+   * reader trusts the prose and reverts something correct.
    *
    * WHAT IT WRITES IS A NOTEBOOK, NOT A WARRANT. Proposals record what the
    * guard said at preparation time so a coordinator can read the reasoning.
