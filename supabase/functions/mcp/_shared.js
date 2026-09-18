@@ -2590,9 +2590,17 @@ export function toolDefs(store) {
         branch: s.git?.branch ?? null, head: s.git?.head ?? null,
         baseSha: s.git?.baseSha ?? null,
         unpushed: s.git?.unpushed ?? null,
-        dirtyFiles: (s.git?.dirty ?? []).length,
-        locksHeld: (s.locks ?? []).map((l) => l.resource),
-        running: (s.processes ?? []).map((p) => p.kind),
+        /*
+         * UNKNOWN SURVIVES THE READER. These three used to coerce with `?? []`,
+         * so a store that reported "I did not look" was rendered as a confident
+         * zero -- no dirty files, no locks, nothing running -- one layer after
+         * the projection had been careful to say null. Fixing the store alone
+         * would have been the partial fix: honest underneath, lying at the
+         * surface the caller actually reads.
+         */
+        dirtyFiles: Array.isArray(s.git?.dirty) ? s.git.dirty.length : null,
+        locksHeld: Array.isArray(s.locks) ? s.locks.map((l) => l.resource) : null,
+        running: Array.isArray(s.processes) ? s.processes.map((p) => p.kind) : null,
         lastSeenAt: s.lastSeenAt,
       }))),
     },
@@ -2631,11 +2639,23 @@ export function toolDefs(store) {
       title: 'List active processes',
       description:
         'Verify/test/lint/agent processes associated with each worktree. `confidence:"cwd"` is ' +
-        'an exact match; `"commandline"` is a substring match and can miss processes. If ' +
-        'processProbeOk is false, an empty list does NOT mean nothing is running.',
+        'an exact match; `"commandline"` is a substring match and can miss processes. ' +
+        'processProbeOk is TRUE only when a probe actually ran: false means it ran and failed, ' +
+        'null means this surface never looked. Unless it is true, an empty list does NOT mean ' +
+        'nothing is running.',
       input: obj(),
       run: async () => jsonResult((await listSessions()).map((s) => ({
-        agentId: s.agentId, processProbeOk: s.processProbeOk !== false, processes: s.processes ?? [],
+        /*
+         * `!== false` READ null AS true, which is the worst of the three
+         * possible answers: the tool's own description says a FALSE probe flag
+         * makes an empty list inconclusive, so an unknown rendered as true made
+         * that disclaimer unreachable and turned silence into "the probe ran and
+         * found nothing". null now passes through as null, and the description
+         * is honest for the first time.
+         */
+        agentId: s.agentId,
+        processProbeOk: typeof s.processProbeOk === 'boolean' ? s.processProbeOk : null,
+        processes: Array.isArray(s.processes) ? s.processes : null,
       }))),
     },
     {

@@ -147,11 +147,23 @@ export function toolDefs(store) {
       title: 'List active processes',
       description:
         'Verify/test/lint/agent processes associated with each worktree. `confidence:"cwd"` is ' +
-        'an exact match; `"commandline"` is a substring match and can miss processes. If ' +
-        'processProbeOk is false, an empty list does NOT mean nothing is running.',
+        'an exact match; `"commandline"` is a substring match and can miss processes. ' +
+        'processProbeOk is TRUE only when a probe actually ran: false means it ran and failed, ' +
+        'null means this surface never looked. Unless it is true, an empty list does NOT mean ' +
+        'nothing is running.',
       input: obj(),
       run: async () => jsonResult((await listSessions()).map((s) => ({
-        agentId: s.agentId, processProbeOk: s.processProbeOk !== false, processes: s.processes ?? [],
+        /*
+         * `!== false` COERCED AN UNKNOWN INTO A CLAIM. It read null as true,
+         * which is the one answer the description says a caller may rely on, so
+         * a store that never probed was reported as having probed and found
+         * nothing. Kept in step with the hosted copy on purpose: these two files
+         * serve the same tool names and test/toolDefsParity.test.mjs fails if
+         * they drift.
+         */
+        agentId: s.agentId,
+        processProbeOk: typeof s.processProbeOk === 'boolean' ? s.processProbeOk : null,
+        processes: Array.isArray(s.processes) ? s.processes : null,
       }))),
     },
     {

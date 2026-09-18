@@ -357,10 +357,51 @@ const listSessions = async () => {
     lane: r.lane_id ?? null,
     machineLabel: r.machine_id ?? null,
     worktree: r.worktree_id ?? null,
-    git: r.head_sha ? { ok: true, head: r.head_sha } : null,
-    locks: [],
-    processes: [],
-    processProbeOk: true,
+    /*
+     * WHAT THIS SURFACE CANNOT KNOW IS null, AND THE CONTRACT ALREADY SAID SO.
+     *
+     * INSTRUCTIONS tells every client two things: that every field is observed
+     * from git plumbing and the process table, and that "fields that could not
+     * be determined are null -- treat null as unknown, never as zero". This
+     * projection used to hardcode `locks: []`, `processes: []`,
+     * `processProbeOk: true` and `git.ok: true`, which breaks BOTH clauses --
+     * and the second one is not aspirational, it is the documented behaviour
+     * every reader has been told to expect. So the repair is to obey a clause
+     * that already exists rather than to reword the promise.
+     *
+     * NOTHING HERE OBSERVES ANYTHING. session_registrations is populated
+     * entirely from the POST /register body, and the row is stamped
+     * verification_state 'runtime-self-registration' -- the code already records
+     * that this data is self-reported while the instructions swore it could not
+     * be. null is that column saying so out loud.
+     *
+     * processProbeOk WAS THE SHARPEST, because list_active_processes documents
+     * that a FALSE probe flag makes an empty list inconclusive. A hardcoded true
+     * made that disclaimer unreachable and turned the tool into an affirmative
+     * claim that a probe ran and found nothing, for sessions that were running.
+     *
+     * AND null RATHER THAN false, deliberately. `false` would mean "the probe
+     * ran and failed", which is a different false claim -- and bridge/collisions
+     * raises a finding on `processProbeOk === false`, so every hosted row would
+     * have produced a permanent per-agent alert that can never clear. null is
+     * the only value that says "this surface did not look".
+     *
+     * head_sha IS KEPT: the worker really did derive it from git at publish
+     * time. What is dropped is the `ok: true` beside it, which asserted a
+     * successful read nobody performed here and stayed true while the value went
+     * hours stale. The age is visible in lastSeenAt.
+     *
+     * The honest observation path exists -- bridge/httpStore.mjs reads
+     * sessions_latest with real git, locks, processes and process_probe_ok
+     * columns, and src/collect.mjs sets the probe flag from an actual probe.
+     * Pointing the edge function at it needs a schema change, a migration and a
+     * deploy, and it changes what every existing reader sees. That is its own
+     * piece with its own audit. This one stops the lying.
+     */
+    git: r.head_sha ? { head: r.head_sha } : null,
+    locks: null,
+    processes: null,
+    processProbeOk: null,
     lastSeenAt: r.heartbeat_at ?? null,
     sessionId: r.session_id,
     repoId: r.repo_id ?? null,
