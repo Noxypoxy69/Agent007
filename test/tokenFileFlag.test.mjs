@@ -320,17 +320,59 @@ test('without the flag and without an env token, nothing is published', async (t
  * passed as an env BAG anywhere in the CLI except the single line that creates
  * ENV. Reading one variable (process.env.AGENTBRIDGE_VERIFY_CMD) is untouched.
  */
+/**
+ * Blank out comment BODIES, preserving length and newlines so offsets and line
+ * numbers stay correct.
+ *
+ * CLAUDE.md hollow gate 13: a check that greps for a token matches its own
+ * explanatory comment. Three independent rediscoveries in this repository, and
+ * this test made it a fourth -- the moment it was tightened to match the
+ * property, it flagged lines 216 and 221 of bin/agentbridge.mjs, which are the
+ * PROSE explaining why call sites must not read process.env.
+ *
+ * Known limitation, stated rather than hidden: a "//" inside a string literal
+ * (a URL) is treated as a line comment, so anything after it on that line is
+ * invisible to the scan. That direction under-reports, so it is worth knowing;
+ * a real parse would be better if this ever guards something subtler.
+ */
+function blankComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '));
+}
+
 test('no CLI call site passes process.env as an env bag', async () => {
-  const src = await readFile(CLI, 'utf8');
+  const raw = await readFile(CLI, 'utf8');
+  const src = blankComments(raw);
   const SANCTIONED = 'envWithTokenFile(process.env, ';
 
   const sanctioned = src.split(SANCTIONED).length - 1;
   assert.equal(sanctioned, 1,
     `expected exactly one place that reads process.env into ENV, found ${sanctioned}`);
 
+  /*
+   * MATCH THE PROPERTY, NOT ONE SPELLING. This scanned for "(process.env" and
+   * an auditor walked three plausible future call sites straight past it, each
+   * landed in the file and each leaving the suite at 18/18:
+   *
+   *   fetchHostedRegistrations({ ...process.env })
+   *   const RAWENV = process.env; ... fetchHostedRegistrations(RAWENV)
+   *   fetchHostedRegistrations(0 || process.env)
+   *
+   * It also could not see process.env in any argument position but the first.
+   * Every one of those accepts --token-file and silently ignores it, which is
+   * worse than not having the flag because the operator has been told it applied.
+   *
+   * The property is simpler than any of those spellings: the env BAG may not be
+   * referenced at all outside the one line that builds ENV. Reading a single
+   * variable -- process.env.AGENTBRIDGE_VERIFY_CMD -- is a different thing and
+   * stays allowed, so the test is "process.env NOT followed by a property
+   * access". That catches a spread, an alias, a boolean-or and any argument
+   * position, because none of them can avoid naming it.
+   */
   const offenders = [];
-  for (const m of src.matchAll(/\(process\.env[,)]/g)) {
-    const isSanctioned = src.startsWith(SANCTIONED, m.index - 'envWithTokenFile'.length);
+  for (const m of src.matchAll(/process\.env(?!\s*\.)/g)) {
+    const isSanctioned = src.startsWith(SANCTIONED, m.index - 'envWithTokenFile('.length);
     if (isSanctioned) continue;
     offenders.push(src.slice(0, m.index).split(LF).length);
   }

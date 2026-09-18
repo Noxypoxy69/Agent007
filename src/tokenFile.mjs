@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
 /*
  * A CREDENTIAL THAT CAN ONLY ARRIVE BY A ROUTE THE GUARD FORBIDS IS A
@@ -59,6 +59,27 @@ export const TOKEN_FILE_MAX_BYTES = 4096;
  * problem string is printed, and a printed credential is a leaked one.
  */
 export function readTokenFile(file) {
+  /*
+   * ASK THE FILESYSTEM FOR THE SIZE BEFORE READING IT.
+   *
+   * The cap is named in BYTES and was applied to raw.length, which counts
+   * UTF-16 code units of the DECODED string -- so 4096 three-byte characters
+   * (12 288 bytes on disk) passed a check that says "4096 bytes". And the whole
+   * file was decoded into memory before being rejected: a 256 MB file took 1.6 s
+   * and 290 MB of RSS to refuse. Both measured by blind audit.
+   *
+   * Fails closed either way, so this is cost and honesty rather than a hole --
+   * but a hook that can be made to allocate 290 MB is a hook that can be made to
+   * miss its deadline, and a limit that does not mean what it says is the kind
+   * of thing the next reader builds on.
+   */
+  try {
+    const { size } = statSync(file);
+    if (size > TOKEN_FILE_MAX_BYTES) {
+      return { token: '', problem: `is larger than ${TOKEN_FILE_MAX_BYTES} bytes, so it is not a token` };
+    }
+  } catch { /* absent or unstattable: the read below reports it properly */ }
+
   let raw;
   try {
     raw = readFileSync(file, 'utf8');
@@ -72,7 +93,7 @@ export function readTokenFile(file) {
     return { token: '', problem: `cannot be read (${code || 'unknown error'})` };
   }
 
-  if (raw.length > TOKEN_FILE_MAX_BYTES) {
+  if (Buffer.byteLength(raw, 'utf8') > TOKEN_FILE_MAX_BYTES) {
     return { token: '', problem: `is larger than ${TOKEN_FILE_MAX_BYTES} bytes, so it is not a token` };
   }
 
