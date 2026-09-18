@@ -555,7 +555,34 @@ function judgeOneSegment(segment, isOverridden = () => false) {
        * announcement named only the granted one, so no layer could report the
        * others.
        */
+      /*
+       * A GRANT PERMITS RECORDING THE FILE, NOT OVERWRITING IT.
+       *
+       * The two are different permissions and this did not distinguish them. A
+       * grant written so an agent could REPAIR src/guardSession.mjs also
+       * permitted `git checkout -- src/guardSession.mjs`, which discards the
+       * repair. Reported while another session had exactly that repair sitting
+       * uncommitted: its work was one allowed command from gone, under a grant
+       * issued to protect it.
+       *
+       * `add` and `commit` record what is already in the tree and cannot change
+       * a file's content. `restore`, `checkout` and `switch` replace it with
+       * whatever some other commit holds -- and for the guard's own source that
+       * disarms PreToolUse for the rest of the session, which is the reason this
+       * check exists at all. An override relaxes the first class and never the
+       * second; nobody grants permission to destroy the thing they are asking to
+       * have fixed.
+       */
       const ungranted = named.filter((t) => !isOverridden(t));
+      if (GIT_OVERWRITES_NAMED_PATH.has(verb) && named.length > 0) {
+        const first = named[0];
+        return {
+          allowed: false,
+          reason: `"git ${verb}" would OVERWRITE ${first}, which is a guard or completion control. `
+            + 'An override permits recording a protected path (add, commit); it does not permit '
+            + 'replacing one, which would discard the very repair a grant is issued for',
+        };
+      }
       if (named.length > 0 && ungranted.length === 0) {
         return { allowed: true, overriddenPath: named[0], overriddenPaths: [...named] };
       }
