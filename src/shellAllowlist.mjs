@@ -837,9 +837,42 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * operands are operands, so they get the same question the node branch
      * asks: a file this session could have written is not runnable.
      */
+    /*
+     * AND A FLAG CARRIES ITS VALUE AFTER AN `=`, WHERE THE FILTER COULD NOT SEE IT.
+     *
+     * The filter dropped every token starting with `-`, so the space form was
+     * judged and the equals form was invisible:
+     *
+     *   npm test -- --import ./test/untracked.test.mjs    DENY
+     *   npm test -- --import=./test/untracked.test.mjs    ALLOW
+     *   npm test -- --require=./x   --test-reporter=./x   --experimental-loader=./x
+     *
+     * Every one of those is a node flag whose value is a MODULE NODE LOADS, so
+     * the same execution the space form was hardened against went through in a
+     * spelling one character away. Found by blind audit.
+     *
+     * NOT AN EXPLOIT TODAY, and the audit said so: this repository's test script
+     * is `node --test "test/**\/*.test.mjs"`, and node treats everything after
+     * the glob as a test-name pattern, so the loader flags were never honoured.
+     * It is fixed anyway, because "harmless because of how the script happens to
+     * be written today" is a property of package.json, not of the guard, and the
+     * next person to edit that line will not know they were relying on it.
+     *
+     * THE RULE IS THE SHAPE, NOT A LIST OF FLAG NAMES. Enumerating --import,
+     * --require, --experimental-loader and --test-reporter is the mistake this
+     * file has lost to repeatedly; node adds loader flags. A flag that carries a
+     * value carries it after the first `=`, and that value may be a path, so it
+     * gets the same question every other operand gets.
+     */
     const sep = tokens.indexOf('--');
     if (sep !== -1) {
-      const forwarded = tokens.slice(sep + 1).filter((t) => !t.startsWith('-'));
+      const forwarded = tokens.slice(sep + 1).flatMap((t) => {
+        if (!t.startsWith('-')) return [t];
+        const eq = t.indexOf('=');
+        if (eq === -1) return [];
+        const value = t.slice(eq + 1).replace(/^['"]|['"]$/g, '');
+        return value === '' ? [] : [value];
+      });
       const smuggled = forwarded.find((t) => mayExecute(t) === 'untracked-file');
       if (smuggled) {
         return {

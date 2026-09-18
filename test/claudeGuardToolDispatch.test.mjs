@@ -709,6 +709,41 @@ test('npm forwards everything after -- to the script, so those operands are judg
   assert.equal(judgeShellCommand('npm test -- ./pwn.mjs', { mayExecute: classify }).allowed, false);
   assert.equal(judgeShellCommand('npm test -- test/a.test.mjs', { mayExecute: classify }).allowed, true);
   assert.equal(judgeShellCommand('npm test', { mayExecute: classify }).allowed, true);
+
+  /*
+   * AND A FLAG CARRIES ITS VALUE AFTER AN `=`, WHERE THE FILTER COULD NOT SEE IT.
+   *
+   * The forwarded list dropped every token starting with "-", so the space form
+   * was judged and the equals form was invisible. Every one of these is a node
+   * flag whose value is a MODULE NODE LOADS, so the execution this test was
+   * written to refuse went through in a spelling one character away:
+   *
+   *   npm test -- --import ./pwn.mjs     DENY
+   *   npm test -- --import=./pwn.mjs     ALLOW      <- found by blind audit
+   *
+   * Asserted as the SHAPE rather than a list of flag names: enumerating
+   * --import, --require, --experimental-loader and --test-reporter is the
+   * mistake this file has lost to repeatedly, and node keeps adding loader
+   * flags. Any flag value that names an uninherited file is refused, including
+   * spellings nobody has thought of.
+   */
+  for (const flag of ['--import', '--require', '--experimental-loader', '--test-reporter', '--totally-new-loader']) {
+    assert.equal(judgeShellCommand(`npm test -- ${flag}=./pwn.mjs`, { mayExecute: classify }).allowed, false,
+      `${flag}=./pwn.mjs forwards an uninherited module to node`);
+    assert.equal(judgeShellCommand(`npm test -- ${flag} ./pwn.mjs`, { mayExecute: classify }).allowed, false,
+      `${flag} ./pwn.mjs must stay refused too`);
+  }
+
+  /*
+   * THE NEGATIVES, and they are what keep this from becoming a refusal of every
+   * flag. An over-blocking rail gets switched off, which loses every layer.
+   */
+  for (const ok of ['--test-reporter=tap', '--test-name-pattern=something', '--test-concurrency=4', '--watch']) {
+    assert.equal(judgeShellCommand(`npm test -- ${ok}`, { mayExecute: classify }).allowed, true,
+      `${ok} names no file and must not be refused`);
+  }
+  assert.equal(judgeShellCommand('npm test -- --import=test/a.test.mjs', { mayExecute: classify }).allowed, true,
+    'a flag value that IS inherited is fine — the question is provenance, not the equals sign');
 });
 
 /* ============================================================================
