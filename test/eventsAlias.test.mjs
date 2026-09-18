@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 
 import { eventsFor } from '../src/events.mjs';
 import { inboxNames } from '../src/coordination.mjs';
+import { eventsFor as deployedEventsFor } from '../supabase/functions/mcp/_shared.js';
 
 const AT = '2026-09-18T07:46:23.327Z';
 
@@ -114,6 +115,48 @@ test('the roster is injectable, so this does not silently depend on the shipped 
   assert.deepEqual(kinds(run('seat-1', [msg('s1')], { actors })), ['m1']);
   assert.deepEqual(kinds(run('seat-1', [msg('one')], { actors })), ['m1'], 'alias case folded');
   assert.deepEqual(kinds(run('seat-1', [msg('s2')], { actors })), [], 'an unrelated name is refused');
+});
+
+test('THE DEPLOYED SPLICE AGREES ABOUT THE ALIAS BRANCH', () => {
+  /*
+   * HOLLOW GATE 10, WHICH THIS ALMOST WALKED INTO.
+   *
+   * test/sharedSpliceMatches.test.mjs passed the moment this change was made,
+   * and it proved nothing about it: its fixtures exercise detectCollisions,
+   * wentStale and supervisoryReport, and NONE of them reach eventsFor. The
+   * splice copy of this function could have been left at the strict inequality,
+   * or edited wrongly, and every test in the suite would have stayed green while
+   * production kept the bug. That file's own header says these comparisons must
+   * use "inputs that exercise the branches most recently changed"; this is that
+   * input for this change.
+   *
+   * The splice is compared BEHAVIOURALLY, not textually -- it legitimately
+   * differs, declaring fold inside the function rather than beside nonEmpty.
+   */
+  const cases = [
+    ['code-b', [msg('b')]],
+    ['code-b', [msg('code-b')]],
+    ['code-b', [msg('B')]],
+    ['code-b', [msg('b6')]],
+    ['code-a', [msg('b6')]],
+    ['fixer', [msg('fixer')]],
+    ['fixer', [msg('code-b')]],
+    ['code-b', [msg('code-a'), msg('a', 'x2'), msg('danny', 'x3')]],
+    ['', [msg('code-b')]],
+  ];
+
+  for (const [agent_id, messages] of cases) {
+    const mine = eventsFor({ tasks: [], messages, agent_id, session_id: 's', since: null });
+    const theirs = deployedEventsFor({ tasks: [], messages, agent_id, session_id: 's', since: null });
+    assert.deepEqual(theirs, mine, `splice disagrees for ${JSON.stringify(agent_id)} on ${messages.map((m) => m.to_agent)}`);
+  }
+
+  // The positive first, so the loop above is not agreeing by both returning [].
+  assert.deepEqual(
+    kinds(deployedEventsFor({ tasks: [], messages: [msg('b')], agent_id: 'code-b', session_id: 's', since: null })),
+    ['m1'],
+    'the deployed copy must actually deliver the alias, not merely agree about nothing',
+  );
 });
 
 test('since still filters alias-matched messages, so a wake-up is not replayed', () => {
