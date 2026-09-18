@@ -232,9 +232,15 @@ test('a grant covers ONE file, not the same relative path in every subdirectory'
         `the grant reached ${name}/.claude/settings.json, a different file the owner never named`);
     }
 
-    // And a worktree still works -- this is the thing the keying change was for.
-    const { trees } = await repoWithWorktrees(t, 0);
-    assert.equal(trees.length, 0);
+    /*
+     * A LINE THAT SAID "and a worktree still works" USED TO SIT HERE, building a
+     * brand-new unrelated repository with zero worktrees and asserting the
+     * helper returned zero worktrees. It touched neither the grant under test
+     * nor any worktree. Deleted rather than repaired: the property it claimed to
+     * cover is asserted properly by "a grant written for the main checkout is
+     * READ from a worktree" below, and a comment naming a property no assertion
+     * checks is worse than no comment.
+     */
   } finally {
     if (prev === undefined) delete process.env.AGENTBRIDGE_HOME;
     else process.env.AGENTBRIDGE_HOME = prev;

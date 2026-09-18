@@ -341,10 +341,43 @@ So the two honest options, neither of them free:
   fast-feedback rail, NOT a security boundary" — this is what that sentence
   costs, made concrete.
 
-Until somebody chooses, **the guard's execution gate should be understood as
-covering direct invocation only.** Anything reachable through an npm script is
-not gated, and `npm install`, `npm ci` and `npm run` are refused precisely
-because they run lifecycle code — `test` is the hole left in that fence.
+**THAT PARAGRAPH USED TO END WITH A SENTENCE THAT WAS SIMPLY FALSE**, and it is
+worth leaving the correction visible rather than quietly editing it. It said
+"`npm install`, `npm ci` and `npm run` are refused precisely because they run
+lifecycle code — `test` is the hole left in that fence". Measured through the
+shipped guard, every one of these is **ALLOW**:
+
+    npm install        npm ci          npm run build
+    npm install evil   npm install -g evil   npm run pwn
+
+`NPM_SHAPE` in `src/shellAllowlist.mjs` names `install`, `ci` and `run`
+explicitly. An auditor confirmed it against reality: with a `pwn` script in
+package.json, `npm run pwn` overwrote `src/claudeGuard.mjs`. `npm install <pkg>`
+needs no pre-existing script at all — it fetches and runs `postinstall`.
+
+**AND `npm test` IS NOT THE ONLY ROUTE EITHER.** Four calls, no npm:
+
+    Write pwn.cjs        ALLOW
+    git add pwn.cjs      ALLOW
+    git commit -m x      ALLOW
+    node pwn.cjs         ALLOW      <- and it really did overwrite the guard
+
+That last step is not a bypass of the node gate. It is the node gate **working
+as specified**: `mayExecute` permits a file that is tracked and unmodified, and
+committing makes it exactly that. The refusal even says so — "Commit it first" —
+and the test added in `f34aa51` verifies that following the advice works. Which
+means it verifies the route works, and calls that a fix.
+
+**SO STATE THE PROPERTY HONESTLY.** The execution gate does not prevent a session
+running code it wrote. It requires that code to be **in git history first**. That
+is an AUDITABILITY property — whatever ran is recoverable, attributable and
+diffable — and it is worth having. It is not containment, and nothing in this
+repository should be designed as though it were.
+
+What remains true from the original finding: the glob in `npm test` is expanded
+by node rather than judged by the rail, so an untracked file matching it runs
+without even the commit. That one is still worth closing, and the two options
+above still stand.
 
 **TWO SOURCE FILES ARE INVISIBLE TO `grep` AND `git grep`.**
 `src/deployGate.mjs` and `src/auditRange.mjs` contain literal NUL bytes — real

@@ -226,6 +226,78 @@ test('FOLLOWING the refusal, literally, works — for every spelling it quotes b
   }
 });
 
+test('FOLLOWING the PROTECTED-CONTROL refusal works too — the untested half', (t) => {
+  /*
+   * The round-trip test below covered the baseline-test refusal only. An auditor
+   * reverted JUST the protected-control refusal to quote the typed spelling and
+   * the ENTIRE SUITE stayed byte-identical: 2021 tests, 2012 pass, 4 fail. So the
+   * ratchet existed for the test rail and not for the rail that guards
+   * .claude/settings.json, CLAUDE.md, package.json and the guard's own source.
+   *
+   * Same shape, same assertion, the other branch.
+   */
+  const dir = scratchProject(t);
+  const home = withHome(t);
+  writeSnapshot(dir, SESSION);
+
+  // A protected path that is NOT one of the gate's own config files, which
+  // deliberately cannot be granted at all.
+  writeFileSync(path.join(dir, 'CLAUDE.md'), '# controls\n');
+
+  for (const spelling of ['CLAUDE.md', './CLAUDE.md', 'CLAUDE.MD']) {
+    grant(dir, home, ['nothing/at/all.txt']);
+
+    const refused = evaluateClaudeTool({
+      tool_name: 'Write', tool_input: { file_path: spelling, content: 'x' }, cwd: dir, session_id: SESSION,
+    });
+    assert.equal(refused.allowed, false, `${spelling}: precondition — refused before the grant`);
+    assert.equal(refused.id, 'protected-control');
+
+    const named = /override must name it as (\S+)/.exec(refused.reason);
+    assert.ok(named, `${spelling}: the refusal must name a path to grant. Got: ${refused.reason}`);
+
+    grant(dir, home, [named[1]]);
+    const after = evaluateClaudeTool({
+      tool_name: 'Write', tool_input: { file_path: spelling, content: 'x' }, cwd: dir, session_id: SESSION,
+    });
+    assert.equal(after.allowed, true,
+      `${spelling}: the refusal said to grant "${named[1]}", and that grant did not work`);
+  }
+});
+
+test('the refusal does NOT advise an override for the paths Stop refuses to honour one for', (t) => {
+  /*
+   * The Stop gate deliberately ignores a grant for its own hook configuration.
+   * Advising one produced the worst sequence, measured end to end by audit:
+   * PreToolUse permits, the write lands, and Stop blocks the turn on the change
+   * it just authorised. A permission that cannot be spent, which is worse than
+   * none because it looks like one.
+   */
+  const dir = scratchProject(t);
+  withHome(t);
+  writeSnapshot(dir, SESSION);
+  mkdirSync(path.join(dir, '.claude'), { recursive: true });
+  writeFileSync(path.join(dir, '.claude', 'settings.json'), '{}\n');
+
+  for (const f of ['.claude/settings.json', '.claude/settings.local.json']) {
+    const v = evaluateClaudeTool({
+      tool_name: 'Write', tool_input: { file_path: f, content: '{}' }, cwd: dir, session_id: SESSION,
+    });
+    assert.equal(v.allowed, false, `${f} must be refused`);
+    assert.ok(!/override must name/i.test(v.reason),
+      `${f}: the refusal advises a grant the Stop gate will not honour: ${v.reason}`);
+  }
+
+  // RULE 5: the positive. An ordinary protected path still gets the advice,
+  // or this would pass by the refusal advising nothing at all.
+  writeFileSync(path.join(dir, 'CLAUDE.md'), '# controls\n');
+  const ordinary = evaluateClaudeTool({
+    tool_name: 'Write', tool_input: { file_path: 'CLAUDE.md', content: 'x' }, cwd: dir, session_id: SESSION,
+  });
+  assert.match(ordinary.reason, /override must name/i,
+    'an ordinary protected path must still name the route that works');
+});
+
 test('the announcement names the file that is WRITTEN, not the one that was typed', (t) => {
   /*
    * grantFor returned rels[0] -- the lexical candidate, i.e. the caller's

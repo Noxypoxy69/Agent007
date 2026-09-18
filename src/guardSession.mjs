@@ -956,6 +956,32 @@ export function readOverride(repoRoot, now = Date.now()) {
 }
 
 /** Does an active grant name this repo-relative path? Exact paths only, no globs. */
+/*
+ * THE TWO PATHS A GRANT CANNOT COVER, AND WHY BOTH LAYERS MUST AGREE ON THEM.
+ *
+ * The Stop gate refuses to let an override suppress drift in its own hook
+ * configuration: an override is a decision to permit a REPAIR, and it cannot
+ * also be a decision to let the repaired file dictate how long the gate may
+ * look. That reasoning is sound and unchanged.
+ *
+ * It lived in scripts/claude-stop-gate.mjs alone, so PreToolUse did not know
+ * about it -- and the refusal for these paths told the operator to ask for an
+ * override, which PreToolUse then honoured and Stop then refused. The grant was
+ * spent, the file was modified, and the turn died: "a permission that cannot be
+ * spent, which is worse than no permission because it looks like one", quoting
+ * the gate's own source back at itself. Found by blind audit.
+ *
+ * Exported here so there is ONE list. Two lists of one thing drift the moment
+ * somebody edits one, which src/policy.mjs carries a header about.
+ */
+export const GATE_SELF_CONFIG = Object.freeze(['.claude/settings.json', '.claude/settings.local.json']);
+
+/** Is this repo-relative path one a grant can never cover? */
+export function isGateSelfConfig(rel) {
+  const norm = String(rel ?? '').split(path.sep).join('/').replace(/^\.\//, '').toLowerCase();
+  return GATE_SELF_CONFIG.some((p) => p.toLowerCase() === norm);
+}
+
 export function overrideCovers(repoRoot, rel, now = Date.now()) {
   const grant = readOverride(repoRoot, now);
   if (!grant) return null;

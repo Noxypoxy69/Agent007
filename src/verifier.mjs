@@ -50,7 +50,6 @@ function writeApprovedTree({ repoRoot, candidateWorkspace, treeSha, parentCommit
   const candGit = (args, opts = {}) => runGit(args, { cwd: candidateWorkspace, ...opts });
   const anchorCommit = candGit(['commit-tree', treeSha, '-m', `anchor ${treeSha}`], {
     env: {
-      ...process.env,
       GIT_AUTHOR_NAME: 'agentbridge-verifier', GIT_AUTHOR_EMAIL: 'verifier@agentbridge.local',
       GIT_COMMITTER_NAME: 'agentbridge-verifier', GIT_COMMITTER_EMAIL: 'verifier@agentbridge.local',
     },
@@ -59,7 +58,6 @@ function writeApprovedTree({ repoRoot, candidateWorkspace, treeSha, parentCommit
   git(['fetch', '--no-tags', '--quiet', candidateWorkspace, `+${anchorRef}:${anchorRef}`]);
   const commit = git(['commit-tree', treeSha, '-p', parentCommit, '-m', `promoted candidate ${candidateId}`], {
     env: {
-      ...process.env,
       GIT_AUTHOR_NAME: 'agentbridge-verifier', GIT_AUTHOR_EMAIL: 'verifier@agentbridge.local',
       GIT_COMMITTER_NAME: 'agentbridge-verifier', GIT_COMMITTER_EMAIL: 'verifier@agentbridge.local',
     },

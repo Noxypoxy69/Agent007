@@ -21,3 +21,16 @@
 {"commit":"d1430a7","auditor":"blind-subagent","at":"2026-09-18T10:05:00Z","found":9,"note":"--token-file and grant keying; GIT_DIR cross-repo grant leak and a NUL credential echo, fixed in aad3da1 and 21d1e6e"}
 {"commit":"ecd2270","auditor":"blind-subagent","at":"2026-09-18T10:05:00Z","found":9,"note":"audited jointly with d1430a7; same report"}
 {"commit":"3edb65b","auditor":"blind-subagent","at":"2026-09-18T11:20:00Z","found":7,"note":"baseline-test grants; refusal advised an unusable spelling and the permit announced the typed path, fixed in 1093c98"}
+{"commit":"519eff1","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"range ecd2270..3732c60 audited as one pass; CLAUDE.md claimed npm install/ci/run refused when all are ALLOW, and the protected-control refusal had no ratchet"}
+{"commit":"f2a0938","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; plural rule confirmed a property, but the commit added no test file"}
+{"commit":"46d69a3","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; both halves gated, mutation caught two tests"}
+{"commit":"aad3da1","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; GIT_DIR fix real but three sibling call paths bypassed it, fixed after"}
+{"commit":"21d1e6e","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; grant frame fixed, protection frame left in cwd, plus a vacuous assertion"}
+{"commit":"c171a27","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; byte cap sound, env-bag gate still matched one spelling"}
+{"commit":"791f1ce","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; grant-path verified read-only, writes nothing"}
+{"commit":"82411cf","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; this is the commit carrying the false npm claim"}
+{"commit":"f34aa51","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; replacement advice verified to work end to end"}
+{"commit":"ea0df13","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; git clone and git worktree refusals reproduced verbatim"}
+{"commit":"48e2632","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; order dependency confirmed gone under --test-name-pattern"}
+{"commit":"1093c98","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; D1 fix correct but tested on one of two rails, and it advised an override Stop refuses"}
+{"commit":"3732c60","auditor":"blind-subagent","at":"2026-09-18T12:40:00Z","found":10,"note":"same pass; both test fixes independently reproduced"}

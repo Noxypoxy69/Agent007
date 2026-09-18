@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot, overrideCovers,
+  isGateSelfConfig,
 } from '../src/guardSession.mjs';
 
 /*
@@ -304,14 +305,15 @@ if (!snapshot) {
  * These paths stay drift no matter what is granted; a genuine repair to them is
  * visible in the refusal and lands on the next session's clean baseline.
  */
-const GATE_SELF_CONFIG = new Set(['.claude/settings.json', '.claude/settings.local.json']);
+// Imported, not redeclared: PreToolUse must refuse to ADVISE an override for
+// exactly the paths this gate refuses to honour one for.
 const allDrift = protectedDrift(root, snapshot);
 // Partitioned from ONE read per entry, for the reason given at the test filter
 // below: two passes leave a window where an appearing grant puts an entry in
 // neither list, which is silent acceptance. Pre-existing here; closed with it.
 const driftDecisions = allDrift.map((d) => ({
   entry: d,
-  granted: !GATE_SELF_CONFIG.has(d.file) && Boolean(overrideCovers(root, d.file)),
+  granted: !isGateSelfConfig(d.file) && Boolean(overrideCovers(root, d.file)),
 }));
 const granted = driftDecisions.filter((x) => x.granted).map((x) => x.entry);
 const drift = driftDecisions.filter((x) => !x.granted).map((x) => x.entry);

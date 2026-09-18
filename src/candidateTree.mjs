@@ -51,7 +51,14 @@ export class IdentityError extends Error {
 
 function git(args, { cwd, env = {}, stage }) {
   try {
-    return runGit(args, { cwd, env: { ...process.env, ...env } });
+    /*
+     * ONLY THE OVERRIDES. This spread the whole inherited environment, which put
+     * GIT_DIR back above runGit's strip and redirected every answer this module
+     * gives -- resolveBaseline returned another repository's HEAD, and
+     * repoIdentity, which the verifier compares to refuse a swapped repository,
+     * changed value. runGit supplies PATH and the rest from a sanitised base.
+     */
+    return runGit(args, { cwd, env });
   } catch (e) {
     /*
      * THROWS. It does not return a sentinel. The prototype's "__DIFF_FAILED__"

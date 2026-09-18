@@ -88,6 +88,26 @@ function environmentWithoutGitRedirection() {
   return cleaned;
 }
 
+/*
+ * THE STRIP APPLIES WHETHER OR NOT A CALLER PASSES env.
+ *
+ * The first version only sanitised when the caller passed NO env, on the
+ * reasoning that an explicit env is a caller taking control on purpose. Every
+ * caller that passes one spreads process.env into it:
+ *
+ *   src/candidateTree.mjs:54   runGit(args, { cwd, env: { ...process.env, ...env } })
+ *   src/verifier.mjs:52, :61   env: { ...process.env, GIT_AUTHOR_NAME: ... }
+ *
+ * so the exemption swallowed the rule for exactly those modules. Measured by
+ * audit at module level: with GIT_DIR pointed at another repository,
+ * resolveBaseline(B) returned A's HEAD, and repoIdentity(B) changed value --
+ * and repoIdentity is what the verifier compares to refuse a job whose
+ * repository was swapped at the same path.
+ *
+ * So the BASE is always sanitised and the caller's keys are layered on top.
+ * A caller that genuinely wants GIT_INDEX_FILE still gets it, because it named
+ * it; what it no longer gets is whatever the environment happened to carry.
+ */
 export function runGit(args, options = {}) {
   const { env: callerEnv, ...rest } = options;
   return execFileSync('git', [...SAFE_GIT_CONFIG, ...args], {
@@ -96,7 +116,7 @@ export function runGit(args, options = {}) {
     windowsHide: true,
     maxBuffer: 256 * 1024 * 1024,
     ...rest,
-    env: callerEnv ?? environmentWithoutGitRedirection(),
+    env: { ...environmentWithoutGitRedirection(), ...(callerEnv ?? {}) },
   });
 }
 
@@ -108,5 +128,15 @@ export function runGit(args, options = {}) {
  * list came to exist in two places to begin with.
  */
 export function runGitAsync(args, options, callback) {
-  return execFile('git', [...SAFE_GIT_CONFIG, ...args], options, callback);
+  /*
+   * THE ASYNC TWIN STRIPPED NOTHING AT ALL, which made it the way around the
+   * synchronous one. Same rule, same reason: git resolves GIT_DIR and
+   * GIT_COMMON_DIR before -C, so an inherited variable answers for a different
+   * repository. Used by bin/agentbridge-precommit.mjs.
+   */
+  const { env: callerEnv, ...rest } = options ?? {};
+  return execFile('git', [...SAFE_GIT_CONFIG, ...args], {
+    ...rest,
+    env: { ...environmentWithoutGitRedirection(), ...(callerEnv ?? {}) },
+  }, callback);
 }

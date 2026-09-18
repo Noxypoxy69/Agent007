@@ -336,9 +336,30 @@ test('without the flag and without an env token, nothing is published', async (t
  * a real parse would be better if this ever guards something subtler.
  */
 function blankComments(text) {
+  /*
+   * BLANK THE BODY, KEEP THE LENGTH AND EVERY NEWLINE, so reported line
+   * numbers still point at the real file.
+   *
+   * STRING BODIES TOO, not just comments. The first version blanked only
+   * comments, and the word "process" inside an ordinary message string --
+   * "process probe failed", "another process may have written it" -- was
+   * reported as an env bag. Same regexes src/moduleGraph.mjs stripNonCode
+   * uses; length-preserving here because that one collapses to a single
+   * space and loses the line numbers this report prints.
+   *
+   * Known limitation, stated rather than hidden: a template literal is
+   * blanked whole, so code inside a ${...} interpolation is invisible to the
+   * scan. That under-reports, which is worth knowing; stripNonCode has the
+   * same gap and a real parse would be better if this ever guards something
+   * subtler.
+   */
+  const hollow = (m) => m.replace(/[^\n]/g, ' ');
   return text
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '));
+    .replace(/\/\*[\s\S]*?\*\//g, hollow)
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + hollow(m.slice(p1.length)))
+    .replace(/`(?:\\[\s\S]|[^\\`])*`/g, hollow)
+    .replace(/'(?:\\.|[^\\'])*'/g, hollow)
+    .replace(/"(?:\\.|[^\\"])*"/g, hollow);
 }
 
 test('no CLI call site passes process.env as an env bag', async () => {
@@ -370,10 +391,42 @@ test('no CLI call site passes process.env as an env bag', async () => {
    * access". That catches a spread, an alias, a boolean-or and any argument
    * position, because none of them can avoid naming it.
    */
+  /*
+   * WHITELIST THE ACCESS, DO NOT BLACKLIST THE SPELLING.
+   *
+   * This scanned for the literal text "process.env". That is the third version
+   * of this gate and the second time it matched one spelling of the thing rather
+   * than the thing. An auditor walked two more call sites past it, each landing
+   * in the file, each accepting --token-file and silently ignoring it, and each
+   * leaving the FULL SUITE byte-identical:
+   *
+   *   const { env: RAWENV } = process;  ...  fetchHostedRegistrations(RAWENV)
+   *   fetchHostedRegistrations(process['env'])
+   *
+   * The property is not "the characters process.env do not appear". It is that
+   * the env BAG is not reachable anywhere but the one line that builds ENV. So
+   * every mention of `process` is examined and only a known, harmless PROPERTY
+   * READ is allowed through. A bare `process`, a destructure, a computed access
+   * -- anything that could yield the bag -- is an offender by construction,
+   * including spellings nobody has thought of, which is the point.
+   */
+  const ALLOWED_PROCESS_USE = new Set([
+    'argv', 'exit', 'exitCode', 'stdin', 'stdout', 'stderr',
+    'execPath', 'platform', 'cwd', 'on', 'nextTick', 'hrtime', 'pid',
+  ]);
+
   const offenders = [];
-  for (const m of src.matchAll(/process\.env(?!\s*\.)/g)) {
-    const isSanctioned = src.startsWith(SANCTIONED, m.index - 'envWithTokenFile('.length);
-    if (isSanctioned) continue;
+  for (const m of src.matchAll(/\bprocess\b/g)) {
+    if (src.startsWith(SANCTIONED, m.index - 'envWithTokenFile('.length)) continue;
+
+    const after = src.slice(m.index + 'process'.length);
+    // process.env.NAME — reading ONE variable is a different thing and is fine.
+    const single = /^\s*\.\s*env\s*\.\s*[A-Za-z_$]/.exec(after);
+    if (single) continue;
+
+    const prop = /^\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(after);
+    if (prop && ALLOWED_PROCESS_USE.has(prop[1])) continue;
+
     offenders.push(src.slice(0, m.index).split(LF).length);
   }
   assert.deepEqual(offenders, [],

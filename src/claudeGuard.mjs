@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath } from './guardSession.mjs';
+import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canonicalGrantPath, isGateSelfConfig } from './guardSession.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
 import { runGit } from './safeGit.mjs';
 
@@ -378,7 +378,24 @@ function judgeWrite(filePath, input, cwd, sessionId) {
           + `permits it. Granted by ${grant.granted_by}, expires ${grant.expires_at}. Reason: ${grant.reason}`,
       };
     }
-    return deny('protected-control', `${filePath} is part of the guard or completion contract. An override must name it as ${canonicalGrantPath(cwd, filePath)}`);
+    /*
+     * DO NOT ADVISE AN OVERRIDE THE STOP GATE WILL NOT HONOUR.
+     *
+     * For the gate's own hook configuration a grant is deliberately ignored at
+     * Stop. Advising one here produced the worst possible sequence, measured end
+     * to end by audit: PreToolUse permits, the write lands, and Stop blocks the
+     * turn on the change it just authorised. The operator spends a grant, edits
+     * a control, and gets refused anyway.
+     *
+     * That is the class f34aa51 exists to remove -- a refusal must not advise
+     * something the same refusal would reject -- arriving one commit later
+     * through a path that crosses two layers instead of one.
+     */
+    const canonical = canonicalGrantPath(cwd, filePath);
+    if (isGateSelfConfig(canonical)) {
+      return deny('protected-control', `${filePath} configures the Stop gate itself. An override cannot cover it: PreToolUse would permit the write and Stop would still refuse the turn. Change it from outside the session`);
+    }
+    return deny('protected-control', `${filePath} is part of the guard or completion contract. An override must name it as ${canonical}`);
   }
   if (isSessionBaselineTest(filePath, cwd, sessionId)) {
     /*
