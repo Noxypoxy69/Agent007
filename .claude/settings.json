@@ -32,6 +32,23 @@
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs\" --session-start",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/bridge-session-poll.mjs\" --session-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/bridge-session-poll.mjs\" --session-end",
+            "timeout": 15
           }
         ]
       }
