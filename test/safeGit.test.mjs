@@ -175,7 +175,26 @@ const GIT_SHELL = new RegExp(`\\(\\s*(${QUOTE})(git\\s+[^'"\`]*)\\1`, 'gi');
  * for reasons that have nothing to do with git. A count is stable under edits
  * and still fails in both directions, which is the property that was wanted.
  */
-const KNOWN_UNROUTED = Object.freeze({ 'bin/agentbridge.mjs': 18 });
+/*
+ * 18 -> 11 at ff35297 (12 argv sites raw, 11 once commented-out code is blanked), where code-a routed the observe-sha clone block -- clone,
+ * checkout --detach, rev-parse, remote get-url, status. That was the sharpest of
+ * the eighteen: it clones a repository and checks out a CALLER-SUPPLIED sha, so
+ * a repository config that executes is at its most dangerous exactly there.
+ *
+ * THE AGENT DOING THE ROUTING CANNOT EDIT THIS NUMBER, WHICH IS A FLAW IN THE
+ * HANDSHAKE I DESIGNED, NOT IN THEIR WORK. This file is a baseline test, so a
+ * guarded session is refused any edit to it. I built a ratchet whose bookkeeping
+ * lives in a file its only user is structurally unable to touch, and then wrote
+ * a failure message instructing them to do it -- the same shape as the
+ * registration recipe no guarded session could run and the clone check rule 21
+ * told authors to perform inside a rail that forbids it. Third instance in two
+ * days, this one mine.
+ *
+ * So the pen is held here, in the guard lane, and the message below says so
+ * instead of issuing an instruction the reader cannot follow. The number still
+ * only moves with a measurement.
+ */
+const KNOWN_UNROUTED = Object.freeze({ 'bin/agentbridge.mjs': 11 });
 
 /*
  * BLANKING COMMENTS WITH A REGEX WAS DEFEATED BY A STRING, AND LOST 140 LINES.
@@ -259,11 +278,33 @@ function gitCallSites() {
 
     for (const [re, shape] of [[GIT_ARGV, 'argv'], [GIT_SHELL, 'shell']]) {
       for (const m of code.matchAll(re)) {
+        const callee = calleeBefore(code, m.index);
+        /*
+         * THE SHELL SHAPE NEEDS A SHELL-SPAWNING CALLEE, AND THAT IS A
+         * HEURISTIC -- SAID PLAINLY RATHER THAN DRESSED UP AS THE PROPERTY.
+         *
+         * "a string argument beginning with git" is not the same claim as "a git
+         * invocation": the first version of this flagged three error MESSAGES
+         * that happen to start with the word, including src/exec.mjs's own
+         * refusal text and two die() calls reading "git worktree add failed".
+         * An offender list full of prose is a list somebody deletes, and a
+         * deleted lint protects nothing -- that is the silencer failure this
+         * file already carries a warning about.
+         *
+         * So shell form additionally requires a callee that plausibly executes a
+         * command STRING. In node that is exec and execSync; the test is a
+         * substring so wrappers named around them are still caught, while die,
+         * Error and log are not.
+         *
+         * WHAT THAT COSTS, stated so nobody reads this as airtight: a wrapper
+         * called something else entirely -- sh('git status') -- is missed. The
+         * ARGV shape above needs no callee and remains the strict property; this
+         * one is a second net with a known hole, and refuseGit plus the
+         * repository's own review are what stand behind it.
+         */
+        if (shape === 'shell' && !/exec|spawn|shell|sh$/i.test(callee)) continue;
         const line = code.slice(0, m.index).split('\n').length;
-        found.push({
-          id: `${rel}:${line}`, rel, line, shape,
-          callee: calleeBefore(code, m.index), spelling: m[2],
-        });
+        found.push({ id: `${rel}:${line}`, rel, line, shape, callee, spelling: m[2] });
       }
     }
   }
@@ -393,7 +434,10 @@ test('the unrouted count is exact in both directions', () => {
     const got = actual[rel] ?? 0;
     if (got === expected) continue;
     wrong.push(got < expected
-      ? `${rel}: ${got} unrouted git calls, quarantine still declares ${expected} -- if these were routed through safeGit, lower or remove the entry`
+      ? `${rel}: ${got} unrouted git calls, quarantine still declares ${expected}. Routing happened and the `
+        + 'count has not caught up. THIS FILE IS A BASELINE TEST, so if you are the session that did the '
+        + 'routing you are refused the edit -- that is expected and is not your problem to solve. Say so to '
+        + 'the guard lane with your commit sha and the number becomes that; do not work around this test'
       : `${rel}: ${got} unrouted git calls, quarantine declares ${expected} -- ${got - expected} new one(s) went in outside safeGit`);
   }
   assert.deepEqual(wrong, [], wrong.join('\n  '));
