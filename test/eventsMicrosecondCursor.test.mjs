@@ -48,9 +48,20 @@ const state = (messages) => ({
   actors: undefined,
 });
 
-const deliver = (fn, messages, since) => fn({
-  ...state(messages), session_id: SESSION, agent_id: 'code-b', since,
-});
+/**
+ * `eventsFor` returns the event ARRAY itself, not an envelope around it.
+ *
+ * The first version of this harness assumed `{ events: [...] }` and every
+ * assertion died on `Cannot read properties of undefined (reading 'length')`.
+ * It failed loudly rather than passing over the assumption, which is the only
+ * reason it cost a minute — a helper that defaulted to `[]` on a shape
+ * mismatch would have made this whole file green and inert.
+ */
+const deliver = (fn, messages, since) => {
+  const out = fn({ ...state(messages), session_id: SESSION, agent_id: 'code-b', since });
+  assert.ok(Array.isArray(out), `eventsFor returned ${typeof out}, not an array`);
+  return out;
+};
 
 test('THE POSITIVE FIRST: both events are delivered when nothing has been read', () => {
   /*
