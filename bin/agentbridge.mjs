@@ -2162,8 +2162,25 @@ try {
     const { tmpdir } = await import('node:os');
     const path = (await import('node:path')).default;
     const run = promisify(execFile);
+    const { existsSync } = await import('node:fs');
     const V = await import('../src/verificationProof.mjs');
     const { positionals } = await import('../src/argv.mjs');
+
+    /*
+     * npm IS A .cmd SHIM ON WINDOWS, and node 24 refuses to spawn a .cmd without
+     * a shell (the CVE-2024-27980 mitigation): execFile('npm') is ENOENT and
+     * execFile('npm.cmd') is EINVAL. So this command NEVER completed on this
+     * machine -- every run reported deps-unavailable and suite-not-run and exited
+     * 1 NOT PROMOTABLE, which is a fact about npm on the host, not about the
+     * commit under test, and it was being read as evidence against the code.
+     *
+     * npm is run through its own JS entry point instead -- a plain file node can
+     * execute -- exactly as scripts/audit-workspace.mjs does. If that file is not
+     * beside node, the environment cannot install deps or run the suite, so it is
+     * a could-not-run (exit 2), never a refusal (exit 1) that reads as a verdict.
+     */
+    const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    const npmAvailable = existsSync(npmCli);
 
     const vWords = positionals(process.argv.slice(3));
     const want = vWords[0] ?? '';
@@ -2180,6 +2197,13 @@ try {
      * be --ignore-scripts, and turning it back on is an explicit, recorded act.
      */
     const allowScripts = args['allow-lifecycle-scripts'] === true;
+
+    if (!npmAvailable) {
+      console.error(`observe-sha: npm-cli.js was not found beside node at ${npmCli}.`);
+      console.error('  This host cannot install dependencies or run the suite, so there is nothing to observe.');
+      console.error('  Exiting 2 (could not run) -- a fact about the environment, not about the commit.');
+      handled = true; done(2);
+    }
 
     let tmp = null;
     try {
@@ -2241,7 +2265,7 @@ try {
       try {
         const ciArgs = ['ci', '--silent'];
         if (!allowScripts) ciArgs.push('--ignore-scripts');
-        await run('npm', ciArgs, { cwd: work, maxBuffer: 6.4e7, timeout: 9e5 });
+        await run(process.execPath, [npmCli, ...ciArgs], { cwd: work, maxBuffer: 6.4e7, timeout: 9e5 });
         depsInstalled = true;
       } catch (e) {
         depsInstalled = false;
@@ -2269,7 +2293,7 @@ try {
       let terminationSignal = null;
       let timedOut = false;
       try {
-        const r = await run('npm', ['test', '--silent'], { cwd: work, maxBuffer: 6.4e7, timeout: 1.8e6 });
+        const r = await run(process.execPath, [npmCli, 'test', '--silent'], { cwd: work, maxBuffer: 6.4e7, timeout: 1.8e6 });
         out = r.stdout; suiteExitCode = 0;
       } catch (e) {
         out = `${e?.stdout ?? ''}`;
