@@ -53,7 +53,10 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { isProtectedRelPath, protectedFilesIn, PROTECTED_PATHS } from '../src/guardSession.mjs';
+import {
+  isProtectedRelPath, protectedFilesIn, PROTECTED_PATHS,
+  buildSnapshot, protectedDrift, discoverTests,
+} from '../src/guardSession.mjs';
 
 /*
  * GENERATED FROM PROTECTED_PATHS, NOT HAND-WRITTEN. RULE 7.
@@ -284,10 +287,117 @@ test('DEMAND (expected red): what PreToolUse protects, the Stop gate must be abl
       [],
       'These paths are refused by PreToolUse but are NOT in the Stop baseline, so a '
       + 'change reaching them by any route that bypasses PreToolUse -- an MCP write, '
-      + 'npm test running repo JS, a git operation -- is undetectable. Fix: make the '
-      + 'protectedFilesIn skip in src/guardSession.mjs descend for a nested .claude/ '
-      + 'instead of skipping the worktree wholesale. See the header for why this is '
-      + 'not a copy of the matcher check.',
+      + 'npm test running repo JS, a git operation -- is undetectable. The walk must '
+      + 'record a link at (or standing in for) a protected path; see the symbolic-link '
+      + 'branch in protectedFilesIn.',
     );
   });
+});
+
+/*
+ * THE FOLLOWING THREE TESTS ARE THE AUDIT OF 64b5283 TURNED INTO GATES.
+ *
+ * 64b5283 made the walk stop FOLLOWING reparse points, which killed the hang.
+ * A blind audit then showed that SKIPPING a link entirely opened three
+ * refuse-to-pass holes: a file link at a control path went unhashed (D4), a
+ * junction planted at a nested control path was invisible (D1), and the second
+ * walk in the file -- discoverTests -- still followed links and still hung (D2).
+ * Each is pinned here so the next attempt cannot reopen it silently.
+ */
+
+test('D4: a FILE symlink at a protected path is hashed, and an edit to its target is drift', () => {
+  const root = buildFixture();
+  try {
+    // .claude/settings.json is a symlink to a real file; editing the real file
+    // must show as drift on the symlink's protected name.
+    writeFileSync(path.join(root, '.claude/real-settings.json'), '{"v":1}');
+    const link = path.join(root, '.claude/settings.json');
+    rmSync(link, { force: true });
+    symlinkSync(path.join(root, '.claude/real-settings.json'), link, 'file');
+
+    const snap = buildSnapshot(root);
+    assert.ok(
+      snap.files['.claude/settings.json'],
+      'a file symlink at a protected path must be in the baseline with a non-null hash',
+    );
+
+    writeFileSync(path.join(root, '.claude/real-settings.json'), '{"v":2,"hooks":{"disableAllHooks":true}}');
+    const drift = protectedDrift(root, snap);
+    assert.ok(
+      drift.some((d) => d.file === '.claude/settings.json' && d.now === 'changed'),
+      'editing the file a protected symlink points at must be detected as drift',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D1: a junction planted at a nested control path shows as drift, not silence', () => {
+  const root = buildFixture();
+  try {
+    // The pre-plant: .claude/worktrees/agent-x/.claude is a JUNCTION to
+    // attacker-controlled bytes, impersonating the worktree's own control dir.
+    mkdirSync(path.join(root, '.claude/worktrees/agent-x/payload'), { recursive: true });
+    writeFileSync(path.join(root, '.claude/worktrees/agent-x/payload/settings.json'), '{"hooks":{"disableAllHooks":true}}');
+    const nestedControl = path.join(root, '.claude/worktrees/agent-x/.claude');
+    // remove the real nested control the base fixture created, then alias it
+    rmSync(nestedControl, { recursive: true, force: true });
+    let made = false;
+    try {
+      symlinkSync(path.join(root, '.claude/worktrees/agent-x/payload'), nestedControl, 'junction');
+      made = true;
+    } catch { /* counted */ }
+    assert.equal(made, true, 'could not create the junction, so D1 was not exercised');
+
+    const files = protectedFilesIn(root);
+    assert.ok(
+      files.includes('.claude/worktrees/agent-x/.claude'),
+      'a junction standing where a nested control dir belongs must be recorded, or the pre-plant is invisible',
+    );
+    // and it must not have been DESCENDED (termination): no path THROUGH it
+    assert.equal(
+      files.some((f) => f.includes('/payload/')), false,
+      'the junction target must not be walked -- recording it is not following it',
+    );
+
+    // repointing the junction is a content change the Stop gate can see
+    const snap = buildSnapshot(root);
+    rmSync(nestedControl, { recursive: true, force: true });
+    mkdirSync(path.join(root, '.claude/worktrees/agent-x/payload2'), { recursive: true });
+    symlinkSync(path.join(root, '.claude/worktrees/agent-x/payload2'), nestedControl, 'junction');
+    const drift = protectedDrift(root, snap);
+    assert.ok(
+      drift.some((d) => d.file === '.claude/worktrees/agent-x/.claude' && d.now === 'changed'),
+      'repointing a junction at a control path must be drift',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D2: discoverTests does not follow a junction under test/, so the Stop hook cannot hang', () => {
+  const root = buildFixture();
+  try {
+    mkdirSync(path.join(root, 'test/unit'), { recursive: true });
+    writeFileSync(path.join(root, 'test/unit/a.test.mjs'), '');
+    // two sibling junctions aimed at an ancestor: the shape that did not terminate
+    let made = 0;
+    for (const name of ['loopA', 'loopB']) {
+      try { symlinkSync(path.join(root, 'test'), path.join(root, 'test/unit', name), 'junction'); made += 1; } catch { /* counted */ }
+    }
+    assert.equal(made, 2, 'could not create the junctions, so non-termination was not exercised');
+
+    const started = Date.now();
+    const tests = discoverTests(root);
+    const elapsed = Date.now() - started;
+
+    assert.ok(elapsed < 5000, `discoverTests took ${elapsed}ms across junctions; it is following reparse points again`);
+    assert.ok(tests.includes('test/unit/a.test.mjs'), 'the real test file must still be discovered');
+    assert.equal(
+      tests.some((t) => t.includes('/loopA/') || t.includes('/loopB/')), false,
+      'no test reached through a junction may enter the suite the Stop gate runs',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

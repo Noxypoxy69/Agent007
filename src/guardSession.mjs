@@ -27,7 +27,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, existsSync,
+  readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, readlinkSync, existsSync,
 } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -209,8 +209,50 @@ export function protectedFilesIn(repoRoot) {
          */
         let st;
         try { st = lstatSync(abs); } catch { continue; }
-        if (st.isSymbolicLink()) continue;
         const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
+        /*
+         * A LINK IS NEVER DESCENDED -- that is the termination guarantee, and it
+         * holds because NTFS forbids a directory HARDLINK, so every cycle needs a
+         * reparse point and no reparse point is ever entered.
+         *
+         * BUT SKIPPING THE LINK ENTIRELY WAS ITS OWN HOLE, found by audit. Two
+         * ways:
+         *   - a FILE symlink at a protected path (e.g. `.claude/settings.json` ->
+         *     `real.json`) was dropped from the baseline, so an edit to the file
+         *     it points at was undetectable. The guard's own switch, invisible.
+         *   - a DIRECTORY junction placed AT a protected path (e.g.
+         *     `.claude/worktrees/x/.claude` -> attacker-controlled bytes) aliased
+         *     the real control away, and nothing recorded that the alias existed.
+         *
+         * So a link at a protected path is RECORDED, never followed. hashFile is
+         * link-aware: for a file link it hashes the bytes it resolves to, for a
+         * directory link it hashes the TARGET STRING -- so planting or repointing
+         * a junction at a control path shows as drift, while a cycle still cannot
+         * be entered. What this does NOT catch is a junction that was ALREADY in
+         * place, with its payload already written, when the baseline was minted;
+         * that is the mint-over-a-damaged-tree problem, entangled with
+         * `.claude/worktrees/` being gitignored, and it is not this walk's to
+         * close.
+         */
+        if (st.isSymbolicLink()) {
+          /*
+           * TWO CHECKS, BECAUSE THE PRE-PLANT LINK SITS AT AN EXEMPT PATH.
+           *
+           * `isProtectedRelPath(rel)` catches a FILE link at a protected path
+           * (D4). It does NOT catch the D1 junction: it is named `.claude` and
+           * lives at `.claude/worktrees/x/.claude`, whose own path is EXEMPT --
+           * only its CHILDREN (`.../.claude/settings.json`) match the nested
+           * rule, and we cannot see children without descending a link we must
+           * not descend. So the second check asks the matcher the container
+           * question: would a path INSIDE this directory be a control? The
+           * trailing separator exercises NESTED_CONTROL_DIR for the directory
+           * itself, which is exactly the junction's disguise. This leans on the
+           * matcher's slash handling, and the D1 test below fails if that ever
+           * changes -- the reliance is pinned, not assumed.
+           */
+          if (isProtectedRelPath(rel) || isProtectedRelPath(`${rel}/`)) out.add(rel);
+          continue;
+        }
         /*
          * THE WALK CONSULTS THE MATCHER RATHER THAN CARRYING ITS OWN RULE.
          *
@@ -275,8 +317,22 @@ export function discoverTests(repoRoot) {
     try { entries = readdirSync(dir); } catch { return; }
     for (const e of entries.sort()) {
       const p = path.join(dir, e);
+      /*
+       * lstat AND SKIP LINKS, for the same reason protectedFilesIn does, and it
+       * is not cosmetic here: this list becomes the argv of the Stop gate's
+       * `spawnSync(node, ['--test', ...])`. With `statSync` a junction under
+       * `test/` was followed -- two sibling junctions aimed at an ancestor did
+       * not terminate (killed at 30s), which hangs the very hook that is
+       * supposed to time the suite, and a hook that is killed is a SILENT ALLOW.
+       * A junction pointing outside the repository additionally made the gate
+       * run outside files as this repository's own suite. `test/` is not a
+       * protected prefix, so nothing else refuses writing a link into it. Found
+       * by audit; the previous "do not follow reparse points" change fixed the
+       * walk and left this second walk thirty lines below it untouched.
+       */
       let st;
-      try { st = statSync(p); } catch { continue; }
+      try { st = lstatSync(p); } catch { continue; }
+      if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) visit(p);
       else if (/\.test\.mjs$/i.test(e)) out.push(path.relative(repoRoot, p).split(path.sep).join('/'));
     }
@@ -285,8 +341,32 @@ export function discoverTests(repoRoot) {
   return out.sort();
 }
 
+/*
+ * LINK-AWARE, because protectedFilesIn now records a link that sits at a
+ * protected path instead of dropping it.
+ *
+ * A plain file hashes its bytes, exactly as before -- the common case is
+ * untouched and pays one extra lstat.
+ *
+ * A link's content is BOTH where it points and, when it resolves to a file,
+ * that file's bytes. A directory link resolves to no bytes, so its target
+ * string is its whole identity -- which is what makes planting or repointing a
+ * junction at a control path a content change the Stop gate can see. The target
+ * is framed with NUL bytes ahead of the body so the two fields cannot be
+ * confused by a body that happens to contain the target text, the same framing
+ * discipline src/deployGate.mjs uses and for the same reason.
+ */
 function hashFile(abs) {
-  try { return sha(readFileSync(abs)); } catch { return null; }
+  try {
+    const st = lstatSync(abs);
+    if (st.isSymbolicLink()) {
+      const target = readlinkSync(abs);
+      let body = Buffer.alloc(0);
+      try { if (statSync(abs).isFile()) body = readFileSync(abs); } catch { /* dir link or dangling: no body */ }
+      return sha(Buffer.concat([Buffer.from(` link ${target} `, 'utf8'), body]));
+    }
+    return sha(readFileSync(abs));
+  } catch { return null; }
 }
 
 export function buildSnapshot(repoRoot) {
