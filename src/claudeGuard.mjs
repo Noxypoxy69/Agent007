@@ -351,9 +351,39 @@ function judgeShell(command, cwd) {
     }
   };
 
+  /*
+   * WHAT A GIT PATHSPEC ACTUALLY COVERS, ANSWERED BY GIT.
+   *
+   * The rail cannot know: a pathspec is recursive and has magic prefixes,
+   * negation and globs, so "src", ":/", "./", "*" and ":!nothing" all reach the
+   * guard's own source without naming it. Enumerating those spellings is the
+   * mistake this repository has now lost six times, so the grammar's owner is
+   * asked instead.
+   *
+   * Only PROTECTED hits are returned -- this is not a file listing, it is the
+   * question "does this operand reach a control". A pathspec git cannot parse,
+   * or a repository it cannot read, yields nothing here and the caller falls
+   * back to the literal check; that direction is the lenient one, and it is the
+   * same posture as before this existed rather than a new hole.
+   */
+  const pathspecCovers = (operand) => {
+    if (!cwd || typeof operand !== 'string' || operand === '') return [];
+    try {
+      const out = runGit(['ls-files', '-z', '--', operand], { cwd, encoding: 'utf8' });
+      return String(out)
+        .split(String.fromCharCode(0))
+        .filter((f) => f !== '')
+        .map((f) => f.split(String.fromCharCode(92)).join('/'))
+        .filter((f) => isProtectedRelPath(f));
+    } catch {
+      return [];
+    }
+  };
+
   const verdict = judgeShellCommand(command, {
     isOverridden: (rel) => Boolean(cwd && overrideCovers(cwd, rel)),
     mayExecute,
+    pathspecCovers,
   });
   /*
    * ANNOUNCE THE SHELL PERMIT TOO. The Edit announced itself and the commit that

@@ -583,3 +583,64 @@ test('THE BACKSTOP MUST NOT EAT ORDINARY WORK, which is why it reads only unjudg
     tool_name: 'Write', tool_input: { file_path: 'notes.md', content: 'x' }, cwd: repoRoot, session_id: 's',
   }).allowed, true);
 });
+
+/* ============================================================================
+ * A PATHSPEC IS NOT A FILENAME. ASK GIT WHAT IT COVERS.
+ *
+ * The everything-selector check compared each operand against the literal
+ * string "." and nothing else, so every other spelling of "everything" swept
+ * protected controls untouched. Measured against the shipped rail, all ALLOW:
+ *
+ *   git restore :/  ./  .//  "./"  *  src  src/  ..  :!nothing
+ *   git add     :/  *   src  ..          git commit :/ -m msg
+ *
+ * Adding those spellings to the literal-dot list is the enumeration that has
+ * lost here four times on the node branch and twice on this one. The grammar
+ * belongs to git, so git is asked -- the caller injects a resolver and an
+ * operand names every protected file git says it covers. A spelling nobody has
+ * thought of is answered correctly for free.
+ * ==========================================================================*/
+
+/** Stands in for git: these operands sweep the repo, those name one file. */
+const sweeps = new Set([':/', './', './/', '*', 'src', 'src/', ':!nothing', ':^nope', ':(top)']);
+const covers = (t) => (sweeps.has(t) ? ['src/claudeGuard.mjs', 'CLAUDE.md'] : []);
+const railVerdict = (cmd) => judgeShellCommand(cmd, { pathspecCovers: covers }).allowed;
+
+test('every spelling of "everything" is refused, not just the literal dot', () => {
+  for (const cmd of [
+    'git restore :/', 'git restore ./', 'git restore .//', 'git restore *',
+    'git restore src', 'git restore src/', 'git restore :!nothing', 'git restore :^nope',
+    'git add :/', 'git add *', 'git add src', 'git commit :/ -m msg',
+    'git checkout -- :/',
+  ]) {
+    assert.equal(railVerdict(cmd), false, `ALLOWED: ${cmd}`);
+  }
+});
+
+test('and a spelling this test never lists is refused too, because git answers it', () => {
+  /*
+   * The point of injecting the resolver rather than listing spellings: a
+   * pathspec form nobody anticipated is judged by what it COVERS. If this ever
+   * starts passing, the resolver has been replaced by an enumeration again.
+   */
+  const exotic = 'git restore :(glob,attr:!binary)**/*';
+  assert.equal(
+    judgeShellCommand(exotic, { pathspecCovers: () => ['src/claudeGuard.mjs'] }).allowed,
+    false,
+    'an operand the test does not know about must still be refused when git says it covers a control',
+  );
+});
+
+test('ORDINARY WORK SURVIVES: an operand covering nothing protected is allowed', () => {
+  for (const cmd of [
+    'git add src/collect.mjs', 'git add notes.md', 'git status',
+    'git commit -m msg', 'git diff --stat',
+  ]) {
+    assert.equal(railVerdict(cmd), true, `newly REFUSED: ${cmd}`);
+  }
+});
+
+test('with no resolver the behaviour is the old literal check, so other callers are unchanged', () => {
+  assert.equal(judgeShellCommand('git restore :/').allowed, true, 'no resolver: unchanged');
+  assert.equal(judgeShellCommand('git restore .').allowed, false, 'the literal dot still dies on its own');
+});

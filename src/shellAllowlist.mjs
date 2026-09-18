@@ -374,7 +374,7 @@ export const ALLOWED_FIRST_TOKENS = Object.freeze([
  * looking for an answer. With no predicate supplied the behaviour is exactly
  * what it was, which keeps every existing test and caller honest.
  */
-export function judgeShellCommand(command, { isOverridden = () => false, mayExecute = () => 'inherited' } = {}) {
+export function judgeShellCommand(command, { isOverridden = () => false, mayExecute = () => 'inherited', pathspecCovers = () => [] } = {}) {
   if (typeof command !== 'string' || command.trim() === '') {
     return { allowed: false, reason: 'no command string was supplied' };
   }
@@ -399,7 +399,7 @@ export function judgeShellCommand(command, { isOverridden = () => false, mayExec
    */
   const overriddenPaths = [];
   for (const part of parts) {
-    const verdict = judgeOneSegment(part, isOverridden, mayExecute);
+    const verdict = judgeOneSegment(part, isOverridden, mayExecute, pathspecCovers);
     if (!verdict.allowed) {
       return parts.length === 1
         ? verdict
@@ -412,7 +412,7 @@ export function judgeShellCommand(command, { isOverridden = () => false, mayExec
     : { allowed: true };
 }
 
-function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () => 'inherited') {
+function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () => 'inherited', pathspecCovers = () => []) {
   const command = String(segment).replace(FD_REDIRECTS, ' ').trim();
   if (command === '') {
     return { allowed: false, reason: 'no command string was supplied' };
@@ -535,9 +535,44 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
          * way: a baseline test that has asserted this for longer than this rail
          * has existed.
          */
-        .filter((t) => t !== '' && t !== '--'
-          && (isProtectedRelPath(t)
-            || (GIT_OVERWRITES_NAMED_PATH.has(verb) && /^test\/.+\.test\.mjs$/i.test(t))));
+        .filter((t) => t !== '' && t !== '--')
+        /*
+         * ASK GIT WHAT THE PATHSPEC COVERS. DO NOT ENUMERATE SPELLINGS.
+         *
+         * This compared each operand against the literal string "." and nothing
+         * else, so every other way of saying "everything" walked through. All of
+         * these were ALLOW and every one sweeps protected controls -- measured
+         * against the shipped rail:
+         *
+         *   git restore :/   ./   .//   "./"   *   src   src/   ..   :!nothing
+         *   git add     :/   *    src   ..           git commit :/ -m msg
+         *
+         * A git pathspec is RECURSIVE and has its own grammar -- magic prefixes,
+         * negation, globs, bare directories. `git restore src` reverts
+         * src/claudeGuard.mjs without naming it, and isProtectedRelPath('.claude')
+         * is false because the list entry carries a trailing slash. Adding these
+         * spellings to the literal-dot list is the enumeration that has already
+         * lost here four times on the node branch and twice on this one.
+         *
+         * So the question is handed to the thing that owns the grammar. The
+         * caller injects a resolver backed by git itself; an operand is treated
+         * as naming every protected file git says it covers. Measured on this
+         * repo: ":/" and "./" and "*" each cover 329 tracked files of which 17
+         * are protected, "src" covers 85 of which 6 are, and ":!nothing" and
+         * ":^nonexistent" cover all 329 because they exclude nothing. A spelling
+         * nobody has thought of is answered correctly for free, because git
+         * answers it.
+         *
+         * With no resolver the behaviour is the old literal check, so callers
+         * with no repository context are unchanged.
+         */
+        .flatMap((t) => {
+          const covered = pathspecCovers(t);
+          if (covered.length) return covered;
+          if (isProtectedRelPath(t)) return [t];
+          if (GIT_OVERWRITES_NAMED_PATH.has(verb) && /^test\/.+\.test\.mjs$/i.test(t)) return [t];
+          return [];
+        });
       /*
        * EVERY PROTECTED PATH IN THE COMMAND MUST BE GRANTED, NOT THE FIRST ONE.
        *
