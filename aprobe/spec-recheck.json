@@ -1,0 +1,38 @@
+{
+  "rev": "e59a431",
+  "restore": ["src/ownerDecisions.mjs", "supabase/functions/mcp/_shared.js"],
+  "cases": [
+    {
+      "name": "M7 unicode fold (re-check, counts printed below)",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" }
+      ]
+    },
+    {
+      "name": "M13 ordering (re-check)",
+      "test": "atest/ownerIdentityAnchored.test.mjs",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "    && !supersededByValid.has(d.decision_id)\n    && scopeMatches(d, context)", "to": "    && !supersededByValid.has(d.decision_id)\n    && resolveOwnerDecision(rows.filter((r) => r !== d), action, context, { owners }).outcome !== 'allowed'\n    && scopeMatches(d, context)" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "    && !supersededByValid.has(d.decision_id)\n    && scopeMatches(d, context)", "to": "    && !supersededByValid.has(d.decision_id)\n    && resolveOwnerDecision(rows.filter((r) => r !== d), action, context, { owners }).outcome !== 'allowed'\n    && scopeMatches(d, context)" }
+      ]
+    },
+    {
+      "name": "M13b ordering, WHOLE SUITE (any gate anywhere?)",
+      "test": "SUITE",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "    && !supersededByValid.has(d.decision_id)\n    && scopeMatches(d, context)", "to": "    && !supersededByValid.has(d.decision_id)\n    && resolveOwnerDecision(rows.filter((r) => r !== d), action, context, { owners }).outcome !== 'allowed'\n    && scopeMatches(d, context)" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "    && !supersededByValid.has(d.decision_id)\n    && scopeMatches(d, context)", "to": "    && !supersededByValid.has(d.decision_id)\n    && resolveOwnerDecision(rows.filter((r) => r !== d), action, context, { owners }).outcome !== 'allowed'\n    && scopeMatches(d, context)" }
+      ]
+    },
+    {
+      "name": "M7b unicode fold, WHOLE SUITE",
+      "test": "SUITE",
+      "edits": [
+        { "file": "src/ownerDecisions.mjs", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "o.trim().toLowerCase() === want", "to": "o.trim().toLowerCase().normalize('NFKD').replace(/\\p{M}/gu,'') === want.normalize('NFKD').replace(/\\p{M}/gu,'')" }
+      ]
+    }
+  ]
+}
