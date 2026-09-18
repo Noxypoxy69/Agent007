@@ -700,8 +700,27 @@ test('Workflow is NOT read-only, and the comment about it names the real control
 
 test('a path inside an agent worktree is not a protected control of the outer repo', () => {
   assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/README.md'), false);
-  assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/.claude/settings.json'), false,
-    "a worktree's own config is ITS session's to protect, relative to ITS root, not ours");
+  assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/src/claudeGuard.mjs'), false,
+    'a worktree is a checkout and legitimately differs from the outer tree');
+});
+
+test('but a worktree\'s OWN .claude/ stays protected, or it can be pre-planted', () => {
+  /*
+   * THIS ASSERTION WAS INVERTED, AND IT IS THE ONLY KIND OF TEST EDIT THAT
+   * MATTERS. The first version asserted this path was FREE, on the reasoning
+   * that a worktree's config is "ITS session's to protect, relative to ITS
+   * root". That is true once a session runs there and worthless before one
+   * does: an OUTER session can write disableAllHooks into a worktree's config
+   * BEFORE any agent starts in it, and that agent then boots with no guard at
+   * all. There is no later moment where the inner session's protection applies,
+   * because the guard it would have used is the file that was tampered with.
+   *
+   * So the test asserted that a vulnerability was correct behaviour. Inverted
+   * rather than deleted, so the next reader sees which way it used to point.
+   */
+  assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/.claude/settings.json'), true);
+  assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/nested/.claude/settings.json'), true,
+    'at any depth -- a worktree may contain worktrees');
 });
 
 test('and the carve-out reaches nothing else under .claude/', () => {

@@ -40,9 +40,30 @@ export const PROTECTED_PATHS = Object.freeze([
   'THIRD_PARTY_CODE.md',
 ]);
 
+/*
+ * MIRRORED FROM guardSession.mjs, AND THAT IS THE DEFECT, NOT THE FIX.
+ *
+ * guardSession.mjs carries a comment reading "THE ONE PROTECTED-PATH DEFINITION.
+ * Both layers import this", written after two lists of protected paths drifted
+ * and a write slipped between them. This file is a THIRD list, and it drifted
+ * immediately: the worktree exemption landed in guardSession.mjs and not here,
+ * so src/verifier.mjs -- which imports from this file -- kept the unexempted
+ * behaviour for as long as nobody looked. Found by review.
+ *
+ * The right repair is one definition with the other importing it. That is a
+ * structural change to guard code and is not being smuggled into a bug fix, so
+ * the two are kept identical here and test/protectedPathParity.test.mjs FAILS if
+ * they ever disagree again. A mirror without a parity check is the thing that
+ * produced this.
+ */
+const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
+const NESTED_CONTROL_DIR = /(^|\/)\.claude\//;
+
 export function isProtectedRelPath(rel) {
   if (typeof rel !== 'string' || rel === '') return false;
   const norm = rel.split(path.sep).join('/').replace(/^\.\//, '');
+  const exempt = PROTECTION_EXEMPT_PREFIXES.find((p) => norm.startsWith(p));
+  if (exempt && !NESTED_CONTROL_DIR.test(norm.slice(exempt.length))) return false;
   return PROTECTED_PATHS.some((entry) => (entry.endsWith('/') ? norm.startsWith(entry) : norm === entry));
 }
 

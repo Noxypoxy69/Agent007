@@ -91,11 +91,35 @@ export const PROTECTED_PATHS = Object.freeze([
  */
 const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
 
+/*
+ * AND THE EXEMPTION STOPS AT A NESTED `.claude/`, WHICH THE FIRST VERSION GOT
+ * WRONG AND ARGUED ITSELF OUT OF.
+ *
+ * That version said a worktree's own .claude/settings.json is "ITS session's to
+ * protect, relative to ITS root". True once a session is running there, and
+ * irrelevant before one is: an OUTER session can write
+ * `.claude/worktrees/<id>/.claude/settings.json` carrying
+ * {"hooks":{"disableAllHooks":true}} BEFORE any agent starts in that worktree,
+ * and the agent then boots with no guard at all. Nothing protects it in the
+ * meantime, so there is no later moment at which the inner session's own
+ * protection gets a chance to apply.
+ *
+ * The original safety argument covered the inner direction and the lookalike
+ * directories and did not cover this one. Found by review, not by me.
+ *
+ * So: worktree CONTENT stays exempt -- a checkout legitimately differs from the
+ * outer tree and that was the whole point -- but a `.claude/` directory ANYWHERE
+ * inside a worktree is protected again. That is the directory that decides
+ * whether a guard runs, and pre-planting it is the whole attack.
+ */
+const NESTED_CONTROL_DIR = /(^|\/)\.claude\//;
+
 /** Is a repo-relative path protected? Exact match, or under a `/` prefix entry. */
 export function isProtectedRelPath(rel) {
   if (typeof rel !== 'string' || rel === '') return false;
   const norm = rel.split(path.sep).join('/').replace(/^\.\//, '');
-  if (PROTECTION_EXEMPT_PREFIXES.some((p) => norm.startsWith(p))) return false;
+  const exempt = PROTECTION_EXEMPT_PREFIXES.find((p) => norm.startsWith(p));
+  if (exempt && !NESTED_CONTROL_DIR.test(norm.slice(exempt.length))) return false;
   return PROTECTED_PATHS.some((entry) => (entry.endsWith('/') ? norm.startsWith(entry) : norm === entry));
 }
 
