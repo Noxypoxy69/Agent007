@@ -574,6 +574,46 @@ export function readSnapshot(repoRoot, sessionId) {
  * Content, not git status, so committing the change does not hide it and a write
  * that bypassed PreToolUse entirely is still visible here.
  */
+/**
+ * Is this a control file belonging to an agent worktree rather than to us?
+ *
+ * `.claude/worktrees/<id>/.claude/...` -- the outer `.claude/worktrees/` prefix
+ * is exempt CONTENT, and the nested `.claude/` inside it is re-protected,
+ * because pre-planting a hook configuration before an agent boots is a real
+ * attack. Both of those remain true. This only identifies the shape.
+ */
+function isWorktreeNestedControl(rel) {
+  if (!rel.startsWith('.claude/worktrees/')) return false;
+  return NESTED_CONTROL_DIR.test(rel.slice('.claude/worktrees/'.length));
+}
+
+/**
+ * Does this settings file REDUCE hook enforcement? Fails closed on anything it
+ * cannot read.
+ *
+ * The threat is exact: a settings file that leaves an agent booting with no
+ * guard. A file that keeps the guard armed is not that, whoever wrote it.
+ */
+function weakensGuard(abs) {
+  let parsed;
+  try { parsed = JSON.parse(readFileSync(abs, 'utf8')); } catch { return true; }
+  if (!parsed || typeof parsed !== 'object') return true;
+  if (parsed.disableAllHooks === true) return true;
+
+  const { hooks } = parsed;
+  if (hooks === undefined) return false;      // says nothing about hooks; settings.local.json
+  if (!hooks || typeof hooks !== 'object') return true;
+  if (hooks.disableAllHooks === true) return true;
+
+  const armed = (event, needle) => Array.isArray(hooks[event]) && hooks[event].some(
+    (group) => Array.isArray(group?.hooks) && group.hooks.some(
+      (h) => typeof h?.command === 'string' && h.command.includes(needle),
+    ),
+  );
+  // It defines hooks, so it must still name the guard and the gate.
+  return !armed('PreToolUse', 'agentbridge-claude-guard') || !armed('Stop', 'claude-stop-gate');
+}
+
 export function protectedDrift(repoRoot, snapshot) {
   const drift = [];
   // The union of "was protected then" and "is protected now", so an ADDED file
@@ -582,12 +622,47 @@ export function protectedDrift(repoRoot, snapshot) {
   for (const rel of [...names].sort()) {
     const before = snapshot.files?.[rel] ?? null;
     const now = hashFile(path.join(repoRoot, rel));
-    if (before !== now) {
-      drift.push({
-        file: rel,
-        now: now === null ? 'deleted' : (before === null ? 'added' : 'changed'),
-      });
+    if (before === now) continue;
+    const state = now === null ? 'deleted' : (before === null ? 'added' : 'changed');
+
+    /*
+     * ── RULE 20 MANDATED A STEP THAT BLOCKED THE SESSION PERFORMING IT ──────
+     *
+     * Measured 2026-09-18. code-b was stop-blocked with 21 drift lines and
+     * ELEVEN were agent worktrees' own `.claude/` directories -- one of them
+     * belonging to its own blind audit agent, running at that moment. The
+     * harness mints those two files when it creates a worktree-isolated
+     * subagent; no agent writes them. So performing the audit the rules require
+     * tripped the gate, every turn, with no way back: the gate re-baselines only
+     * from a tree git calls clean, and `.claude/worktrees/` is gitignored, so
+     * those entries never make the tree dirty and never clear either.
+     *
+     * WHAT THEY ACTUALLY CONTAIN, read before this was written rather than
+     * assumed: a COPY of this repository's own settings.json -- PreToolUse
+     * matcher "*" calling the guard, Stop calling the stop gate, SessionStart
+     * calling the guard, `disableAllHooks: false` -- plus a copy of
+     * settings.local.json. They ARM the guard in the worktree. They are the
+     * opposite of the attack the nested-`.claude/` rule exists to stop.
+     *
+     * SO THE TEST IS WHAT THE FILE SAYS, NOT WHERE IT IS OR WHEN IT APPEARED.
+     * A proposal to exempt files "arriving with the directory at creation" was
+     * declined: an attacker creating a worktree with a planted settings file
+     * inside it is also a file arriving at creation. Timing correlates with the
+     * threat today; content IS the threat.
+     *
+     * AND THIS IS THE STOP GATE ONLY. `isProtectedRelPath` still refuses every
+     * WRITE to these paths, so no session can author one through a tool. The
+     * attack needs a file that disables hooks, and such a file still drifts
+     * here, still blocks the turn, and still cannot be written. What changed is
+     * that a worktree whose guard configuration matches ours no longer blocks
+     * the session that spawned it.
+     */
+    if (isWorktreeNestedControl(rel)) {
+      if (state === 'deleted') continue;                       // the worktree went away
+      if (!weakensGuard(path.join(repoRoot, rel))) continue;   // it keeps the guard armed
     }
+
+    drift.push({ file: rel, now: state });
   }
   return drift;
 }
