@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
-import { readSnapshot, isBaselineTest, isProtectedRelPath } from './guardSession.mjs';
+import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers } from './guardSession.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
 
 const SKIP_MARKER = /(?:\b(?:it|test|describe|context)\.skip\s*\(|\bx(?:it|test|describe|context)\s*\(|@pytest\.mark\.(?:skip|xfail)|@unittest\.skip|\bpytest\.skip\s*\(|@Disabled\b|@Ignore\b|\bt\.Skip(?:Now)?\s*\(|#\[ignore\]|\[Ignore\])/;
@@ -198,6 +198,36 @@ function firstStringField(input, fields) {
 
 function judgeWrite(filePath, input, cwd, sessionId) {
   if (isProtectedPath(filePath, cwd)) {
+    /*
+     * THE ONE WAY THROUGH, AND IT IS NARROW, EXPIRING AND LOUD.
+     *
+     * Before this, EVERY guarded session was refused on src/guardSession.mjs and
+     * src/shellAllowlist.mjs, so the guard could only be repaired by the
+     * operator's terminal or by a session where the hook had never loaded --
+     * and the second is a BUG being spent as a permission. Measured 2026-09-18:
+     * four guard commits landed that way in one night because nothing was
+     * watching the session that made them. A control that can only be fixed by
+     * evading it trains everybody to evade it, and that loses every layer.
+     *
+     * A grant names EXACT paths, carries a reason and an expiry, and lives
+     * outside the checkout beside the snapshots. It is not a trust boundary --
+     * see the note on readOverride -- it is a narrow, recorded, self-closing
+     * door in place of a wall people were already walking around.
+     *
+     * The permit is ANNOUNCED, never silent. A reader of the transcript sees
+     * which path, on whose authority and until when, so an override nobody
+     * granted is a question somebody can ask rather than a clean-looking run.
+     */
+    const rel = path.relative(path.resolve(cwd), path.resolve(cwd, filePath)).split(path.sep).join('/');
+    const grant = overrideCovers(cwd, rel);
+    if (grant) {
+      return {
+        allowed: true,
+        overridden: true,
+        notice: `[agentbridge:protected-control-overridden] ${rel} is protected; an active override `
+          + `permits it. Granted by ${grant.granted_by}, expires ${grant.expires_at}. Reason: ${grant.reason}`,
+      };
+    }
     return deny('protected-control', `${filePath} is part of the guard or completion contract`);
   }
   if (isSessionBaselineTest(filePath, cwd, sessionId)) {

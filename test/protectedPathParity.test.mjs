@@ -81,3 +81,24 @@ test('the worktree exemption is present in BOTH, not just the one that was patch
       `${name} would let an outer session pre-plant a hook config before the agent boots`);
   }
 });
+
+/* ============================================================================
+ * THE FILES THAT DECIDE WHAT "PROTECTED" MEANS WERE NOT PROTECTED.
+ *
+ * Measured 2026-09-18 against the shipped hook: an Edit to src/guardSession.mjs
+ * and src/shellAllowlist.mjs was DENIED, and an Edit to src/policy.mjs and
+ * src/verifier.mjs was ALLOWED. policy.mjs holds the isProtectedRelPath that
+ * verifier.mjs imports -- so a guarded session could rewrite the definition of
+ * "protected" without touching a protected file, and nothing would refuse it.
+ * The list named src/moduleGraph.mjs and not the two files that decide the
+ * answer.
+ * ==========================================================================*/
+
+test('the policy and verifier sources are themselves protected', () => {
+  for (const [name, fn] of [['guardSession.mjs', fromGuardSession], ['policy.mjs', fromPolicy]]) {
+    for (const f of ['src/policy.mjs', 'src/verifier.mjs']) {
+      assert.equal(fn(f), true,
+        `${name} leaves ${f} unprotected -- it decides what protected MEANS`);
+    }
+  }
+});

@@ -53,6 +53,8 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/guardSession.mjs',
   'src/shellAllowlist.mjs',
   'src/moduleGraph.mjs',
+  'src/policy.mjs',
+  'src/verifier.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
@@ -473,4 +475,77 @@ export function baselineTestDrift(repoRoot, snapshot) {
 export function isBaselineTest(relPath, snapshot) {
   if (!snapshot || typeof relPath !== 'string') return false;
   return Object.prototype.hasOwnProperty.call(snapshot.tests, relPath.split(path.sep).join('/'));
+}
+
+/*
+ * THE OVERRIDE CHANNEL, AND WHY IT HAD TO EXIST.
+ *
+ * Measured 2026-09-18: EVERY guarded session is refused on src/guardSession.mjs
+ * and src/shellAllowlist.mjs with protected-control. So the only parties that
+ * could repair the guard were the operator's own terminal and sessions where
+ * the hook had never loaded -- and the second of those is a BUG being used as a
+ * permission. Four guard commits landed that way tonight because nothing was
+ * watching the session that made them. A control that can only be fixed by
+ * evading it teaches everyone to evade it.
+ *
+ * THE GRANT LIVES OUTSIDE THE CHECKOUT, for the same reason the snapshot does:
+ * anything inside the worktree is writable by the thing being measured. It sits
+ * beside the snapshots under AGENTBRIDGE_HOME.
+ *
+ * WHAT THIS DOES NOT CLAIM. A session can write outside the repository -- paths
+ * outside the root are explicitly "not ours to judge" -- so an agent COULD forge
+ * one of these. That is exactly as true of the baseline snapshots this file
+ * already relies on, and the honest posture is the one the header takes: real
+ * containment is a disposable workspace, not a file permission. What the design
+ * buys is that an override is NARROW, EXPIRING and LOUD -- scoped to named
+ * paths, dead after its expiry, and reported on every decision it permits. A
+ * forged grant does not vanish into a clean run; it appears in the record as an
+ * override nobody granted, which is a question somebody can ask.
+ */
+export function overridePath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
+  const key = sha(path.resolve(repoRoot)).slice(0, 16);
+  return path.join(home, 'overrides', `${key}.json`);
+}
+
+/**
+ * The active override for this repo, or null. Never throws: an unreadable or
+ * malformed grant is NO grant, because a parse error must not open the gate.
+ */
+export function readOverride(repoRoot, now = Date.now()) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(overridePath(repoRoot), 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (!Array.isArray(parsed.paths) || parsed.paths.length === 0) return null;
+  if (typeof parsed.reason !== 'string' || parsed.reason.trim() === '') return null;
+  const expires = Date.parse(parsed.expires_at ?? '');
+  if (!Number.isFinite(expires)) return null;
+  /*
+   * NO EXPIRY IS NOT A LONG EXPIRY. A grant without a usable timestamp is
+   * refused rather than treated as permanent, which is the direction a
+   * forgotten override should fail in.
+   */
+  if (expires <= now) return null;
+  return {
+    paths: parsed.paths.filter((p) => typeof p === 'string' && p !== ''),
+    reason: parsed.reason,
+    granted_by: typeof parsed.granted_by === 'string' ? parsed.granted_by : '(unrecorded)',
+    expires_at: new Date(expires).toISOString(),
+  };
+}
+
+/** Does an active grant name this repo-relative path? Exact paths only, no globs. */
+export function overrideCovers(repoRoot, rel, now = Date.now()) {
+  const grant = readOverride(repoRoot, now);
+  if (!grant) return null;
+  const norm = String(rel ?? '').split(path.sep).join('/').replace(/^\.\//, '');
+  /*
+   * EXACT MATCH, NOT A PREFIX. A grant for `src/` would be a general off switch
+   * wearing a path, and the point of naming paths is that somebody had to name
+   * them. Listing four files is cheap; a wildcard is how this becomes permanent.
+   */
+  return grant.paths.includes(norm) ? grant : null;
 }

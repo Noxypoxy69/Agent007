@@ -31,6 +31,8 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/guardSession.mjs',
   'src/shellAllowlist.mjs',
   'src/moduleGraph.mjs',
+  'src/policy.mjs',
+  'src/verifier.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
