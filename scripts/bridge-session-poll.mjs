@@ -177,13 +177,44 @@ async function sessionStart() {
     ...(env.AGENTBRIDGE_LANE ? ['--lane', String(env.AGENTBRIDGE_LANE)] : []),
   ], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
 
+  /*
+   * THE THREE HOSTED OUTCOMES ARE NOT THE SAME, AND TREATING THEM ALIKE WAS A
+   * BUG MY OWN TEST CAUGHT.
+   *
+   * The first version aborted on any non-zero exit. register-session exits 1
+   * when the hosted endpoint is UNREACHABLE -- by design, because a one-shot
+   * that could not publish should not report success. But unreachable is
+   * TRANSIENT, and refusing to poll because of one network blip leaves the
+   * session invisible for the rest of its life, which is the exact failure this
+   * script exists to end. src/hostedRegistry.mjs makes the same distinction for
+   * --watch, and for the same reason: "surviving a network blip is the entire
+   * point of a watcher."
+   *
+   *   NOT CONFIGURED  no credential. Nothing to keep alive, and no amount of
+   *                   retrying invents one. Abort, loudly.
+   *   REJECTED        the credential is refused. Permanent until it changes, so
+   *                   retrying is a busy loop against a closed door. Abort.
+   *   UNREACHABLE     the network. PROCEED -- the supervisor retries, and the
+   *                   session becomes visible the moment it comes back.
+   *
+   * The local registration has already been written in every one of these
+   * cases, so proceeding costs nothing but a poll that fails until it does not.
+   */
   const out = `${reg.stdout ?? ''}${reg.stderr ?? ''}`;
   if (/NOT CONFIGURED/.test(out)) {
     say('agentbridge poll: NOT POLLING -- registration reported hosted NOT CONFIGURED, so this '
       + 'session is invisible to other machines and a poll would have nothing to keep alive.');
     return;
   }
-  if (reg.status !== 0) { say(`agentbridge poll: NOT POLLING -- register-session exited ${reg.status}`); return; }
+  if (/REJECTED/i.test(out)) {
+    say('agentbridge poll: NOT POLLING -- the registration token was REFUSED. That is permanent '
+      + 'until the credential changes, so retrying would be a busy loop against a closed door.');
+    return;
+  }
+  if (reg.status !== 0 && !/UNREACHABLE/i.test(out)) {
+    say(`agentbridge poll: NOT POLLING -- register-session exited ${reg.status}: ${out.trim().slice(0, 160)}`);
+    return;
+  }
 
   fs.mkdirSync(dir, { recursive: true });
   const log = fs.openSync(logFile, 'a');
