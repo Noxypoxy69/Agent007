@@ -393,6 +393,37 @@ if (testDrift.length) {
   out(`[agentbridge:baseline-test-changed] Tests present at session start differ from the snapshot:\n${testDrift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
 }
 
+/*
+ * REPORT UNAUDITED CONTROL CHANGES. PRINT ONLY -- THIS CANNOT REFUSE ANYTHING.
+ *
+ * Rule 20 was enforced by whether the author remembered, and on 2026-09-18 the
+ * author shipped twelve commits touching the guard, the rail, the grant channel
+ * and this gate without one audit, during a session spent insisting on rule 20
+ * to two other agents. The operator noticed; nothing in the repository did. That
+ * is rule 17 pointed at rule 20 -- a control never consulted is not a control --
+ * and CLAUDE.md ranks a check script above the file rule 20 lives in.
+ *
+ * DELIBERATELY NOT A BLOCK, and not yet. Twelve commits are outstanding as this
+ * lands; refusing on them would wedge every session immediately, and a gate that
+ * arrives already red teaches people to switch it off -- rule 16, a countdown
+ * rather than a ratchet. It reports. Making it refuse is the owner's decision,
+ * once the backlog is cleared.
+ *
+ * FAILS TO SILENCE, NOT TO BLOCK: any throw here is swallowed, because this
+ * script has no try/catch anywhere and an uncaught error exits 1 with empty
+ * stdout, which Claude Code reads as NON-BLOCKING. A reporter that could disarm
+ * the gate would be worse than no reporter. Measured cost: 0.31s for a 13-commit
+ * range, against a 420s budget.
+ */
+try {
+  const { auditCoverage, formatCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
+  let ledgerText = '';
+  try { ledgerText = readFileSync(path.join(root, 'docs', 'audit-ledger.jsonl'), 'utf8'); } catch { ledgerText = ''; }
+  const coverage = auditCoverage({ repoRoot: root, range: defaultAuditRange(root), ledgerText });
+  const note = formatCoverage(coverage);
+  if (note) carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
+} catch { /* a reporter must never take the gate down */ }
+
 /* RECURSIVE, matching `npm test`'s test/** glob. A flat readdir runs a different
  * suite from the one the project declares, and would approve a run that silently
  * skipped every nested test. */

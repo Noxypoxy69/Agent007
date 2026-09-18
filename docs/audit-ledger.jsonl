@@ -1,0 +1,23 @@
+# AUDIT LEDGER — one JSON object per line.
+#
+# A line records that a commit which touched a control was handed to an auditor
+# that did not write it (CLAUDE.md rule 20). Fields:
+#
+#   commit   full or abbreviated sha (>= 7 chars)
+#   auditor  what performed it — never the author of the commit
+#   at       ISO timestamp
+#   found    how many defects it returned, or 0
+#   note     one line a later reader can act on
+#
+# WHAT A LINE DOES NOT MEAN. This file cannot tell a real audit from a line
+# somebody typed, and it approves nothing. Exactly like `granted_by` in the
+# override channel, its value is that an ABSENCE is visible — not that a
+# presence is proof. Anybody reading it to decide whether the code is sound has
+# misread it; read the audit.
+#
+# Report coverage with:  node scripts/check-audit-coverage.mjs
+#
+{"commit":"effc379","auditor":"blind-subagent","at":"2026-09-18T09:52:00Z","found":7,"note":"rail flag arity and pathspec prefix; 2 CRITICAL, both fixed in 519eff1"}
+{"commit":"d1430a7","auditor":"blind-subagent","at":"2026-09-18T10:05:00Z","found":9,"note":"--token-file and grant keying; GIT_DIR cross-repo grant leak and a NUL credential echo, fixed in aad3da1 and 21d1e6e"}
+{"commit":"ecd2270","auditor":"blind-subagent","at":"2026-09-18T10:05:00Z","found":9,"note":"audited jointly with d1430a7; same report"}
+{"commit":"3edb65b","auditor":"blind-subagent","at":"2026-09-18T11:20:00Z","found":7,"note":"baseline-test grants; refusal advised an unusable spelling and the permit announced the typed path, fixed in 1093c98"}
