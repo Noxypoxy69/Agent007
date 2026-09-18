@@ -300,6 +300,52 @@ Two rules fall out, and the second is the cheap one nobody does:
 
 # The rest of the traps
 
+**`npm test` IS AN OPEN EXECUTION CHANNEL, AND THE NODE GATE DOES NOT SEE IT.**
+
+The node branch of the rail was hardened over five rounds to stop a session
+executing code it wrote itself. It works, directly:
+
+    node --test test/probe.test.mjs        DENY  "not part of the repository
+                                                  this session inherited"
+
+And it is bypassed completely by the npm script that runs the same thing:
+
+    npm test                               ALLOW
+
+`package.json` defines `test` as `node --test "test/**/*.test.mjs"`. The GLOB IS
+EXPANDED BY NODE, not by the rail, so an untracked file matching it is executed
+without ever being judged. Measured end to end in a disposable clone,
+2026-09-18: a file that `git status` reported as `?? test/zzprobe.test.mjs` ran
+and printed. Found by an auditor that was looking for a way to run anything at
+all, having found that node refuses every path outside the inherited snapshot
+INCLUDING the scratchpad, and that editing an existing test is refused as
+baseline-immutable. This was the only route it found, and it is enough: a test
+file is arbitrary node, so it can delete a control, rewrite a settings file, or
+read any credential the session can reach.
+
+**WHY IT IS NOT QUIETLY "FIXED" HERE.** The obvious repair is to resolve what an
+npm script actually runs — package.json owns that meaning, so asking it is the
+same move as asking git what a pathspec covers — and then judge the expansion.
+That works, and it would refuse `npm test` whenever ANY untracked test file
+exists. Which is every session that has just written a test, including every
+session that is complying with the rule that says to write one. The cost is
+real and it falls on exactly the behaviour this project wants.
+
+So the two honest options, neither of them free:
+
+- **Judge the expansion**, and accept that a new test cannot be run until it is
+  committed. Consistent with the direct-node refusal, and closes the hole.
+- **Accept it as the boundary of the model** and say so out loud: PreToolUse
+  judges TOOL CALLS, and any permitted command that executes project code can do
+  whatever the session could do. The rail's own header already says it is "a
+  fast-feedback rail, NOT a security boundary" — this is what that sentence
+  costs, made concrete.
+
+Until somebody chooses, **the guard's execution gate should be understood as
+covering direct invocation only.** Anything reachable through an npm script is
+not gated, and `npm install`, `npm ci` and `npm run` are refused precisely
+because they run lifecycle code — `test` is the hole left in that fence.
+
 **TWO SOURCE FILES ARE INVISIBLE TO `grep` AND `git grep`.**
 `src/deployGate.mjs` and `src/auditRange.mjs` contain literal NUL bytes — real
 `\x00` characters, not the escape — used deliberately as length framing in a
