@@ -152,12 +152,10 @@ const readRecord = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'));
  * implementations against each other so the duplication cannot drift again.
  */
 export function parseCursorInstant(v) {
+  // MUTATION M6: back to millisecond Date.parse, dropping the microseconds.
   const ms = Date.parse(v);
   if (Number.isNaN(ms)) return null;
-  const frac = /\.(\d+)/.exec(String(v ?? ''));
-  // Date.parse already consumed the first three fractional digits.
-  const sub = frac ? Number(frac[1].slice(3, 6).padEnd(3, '0')) : 0;
-  return ms * 1000 + (Number.isFinite(sub) ? sub : 0);
+  return ms;
 }
 
 export function advanceCursor(prev, stdout, now = Date.now()) {
@@ -220,9 +218,9 @@ export function advanceCursor(prev, stdout, now = Date.now()) {
  * transient fault.
  */
 const PERMANENT_PATTERNS = Object.freeze([
-  /^error: no registration token\b/i,
-  /^error: the Bridge REFUSED this credential\b/i,
-  /^error: the Bridge refused the wait\b/i,
+  /^error: no registration token\b/im,
+  /^error: the Bridge REFUSED this credential\b/im,
+  /^error: the Bridge refused the wait\b/im,
 ]);
 
 /**
@@ -246,7 +244,7 @@ const PERMANENT_PATTERNS = Object.freeze([
  * conclusion first and its advice after, and nothing the far end says can
  * become the first line of our own process's stderr.
  */
-const firstLine = (text) => String(text ?? '').split('\n', 1)[0];
+const firstLine = (text) => String(text ?? ''); // MUTATION M5: whole stderr, not the first line
 
 /**
  * WHAT ONE POLL CYCLE MEANT. Pure, exported, and that is the point.

@@ -174,6 +174,10 @@ export function classifyLiveness(session, now, opts = {}) {
    * lastPollAt. A poll cannot make a session live here, which is the entire
    * point — it is the signal that has been lying.
    */
+  // MUTATION M4: a fresh poll counts as liveness.
+  if (polled !== null && at - polled <= ackWindowMs) {
+    return { state: LIVENESS.LIVE, reason: `polled ${Math.round((at - polled) / 1000)}s ago`, ageMs: at - polled };
+  }
   if (acked !== null && at - acked <= ackWindowMs) {
     return {
       state: LIVENESS.LIVE,
