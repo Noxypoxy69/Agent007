@@ -11,6 +11,7 @@ import {
   taskWriteFilter, writeLanded, TASK_WRITE_EXPECTS, observedCapacity,
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
   ownTask, ownTasks, validateSessionId,
+  createTask, validateTask, pathsCollide,
 } from './_shared.js';
 
 /**
@@ -2215,6 +2216,106 @@ Deno.serve(async (request) => {
      * can take until the reaper frees it.
      */
     return json({ ok: true, tasks: ownTasks(rows, { session_id: me.session_id }) });
+  }
+
+  /*
+   * CREATE A TASK. The half of the assignment tool that did not exist.
+   *
+   * `assign_task` assigns an EXISTING task and refuses otherwise, the CLI has no
+   * create command, and `agentbridge.tasks` was written only by this function
+   * and by migrations — so the table CLAUDE.md names as the one mechanism that
+   * would have caught the sixty-five-minute and the nine-minute duplication held
+   * four rows because nobody could add a fifth.
+   *
+   * COORDINATOR SCOPE, matching assign_task. Creating work and handing it out
+   * are the same authority, and splitting them would let a reader fill the queue
+   * with work it could not assign.
+   *
+   * THE DECISION LOGIC IS NOT HERE. validateTask and createTask live in
+   * _shared.js, spliced from src/taskRecord.mjs, because this file is Deno-only
+   * and cannot be imported by the suite — anything left in it is untested by
+   * construction (rule 10). This route is transport: authenticate, call, answer.
+   */
+  if (path === '/task-create') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let creatorLabel = null;
+    try {
+      creatorLabel = await tokenLabel('coordinator_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!creatorLabel) return json({ error: 'unauthorized' }, 401);
+
+    let createBody;
+    try { createBody = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    /*
+     * created_by IS THE AUTHENTICATED LABEL, NEVER THE BODY. A caller-supplied
+     * author is a claim; this is a record. Same reason record_owner_decision
+     * binds created_by to the token label rather than accepting one.
+     */
+    const rec = createTask({
+      ...createBody,
+      created_at: new Date().toISOString(),
+      created_by: creatorLabel,
+    });
+
+    const v = validateTask(rec);
+    if (!v.ok) return json({ error: 'invalid_request', errors: v.errors }, 400);
+
+    /*
+     * APPEND-ONLY. A duplicate id is refused rather than overwritten: a task is
+     * a record of what was asked for, and silently replacing one loses the
+     * assignment history attached to it.
+     */
+    const already = await get(
+      `tasks?select=task_id&task_id=eq.${encodeURIComponent(rec.task_id)}&limit=1`,
+    );
+    if (already.length) {
+      return json({ error: 'exists', detail: `task "${rec.task_id}" already exists` }, 409);
+    }
+
+    /*
+     * COLLISION CHECKED AT CREATION, not hours later at assignment. assign_task
+     * refuses a path that collides with another assignment — by which time two
+     * tasks that were always going to fight are already written and somebody is
+     * waiting on one of them.
+     *
+     * Only against work that is still in play: a cancelled or accepted task's
+     * paths are nobody's any more.
+     */
+    const existingRows = await get('tasks?select=task_id,state,allowed_paths');
+    const inPlay = existingRows.filter((r) => r?.state === 'runnable'
+      || r?.state === 'returned' || r?.state === 'assigned');
+    const clashes = inPlay
+      .filter((r) => pathsCollide(rec.allowed_paths, r?.allowed_paths ?? []).length > 0)
+      .map((r) => r.task_id);
+    if (clashes.length) {
+      return json({
+        error: 'path-collision',
+        detail: `allowed_paths overlap tasks still in play: ${clashes.join(', ')}`,
+        tasks: clashes,
+      }, 409);
+    }
+
+    const [created] = await write('tasks', {
+      task_id: rec.task_id,
+      title: rec.title,
+      state: rec.state,
+      lane_id: rec.lane_id,
+      repo_id: rec.repo_id,
+      base_sha: rec.base_sha,
+      allowed_paths: rec.allowed_paths,
+      forbidden_paths: rec.forbidden_paths,
+      shared_paths: rec.shared_paths,
+      depends_on: rec.depends_on,
+      created_at: rec.created_at,
+      created_by: rec.created_by,
+    });
+
+    return json({ ok: true, task: created ?? rec });
   }
 
   if (path === '/wait') {
