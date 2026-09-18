@@ -62,10 +62,40 @@ export const PROTECTED_PATHS = Object.freeze([
   'THIRD_PARTY_CODE.md',
 ]);
 
+/*
+ * CARVED OUT OF `.claude/`, AND THE CARVE-OUT IS NARROW ON PURPOSE.
+ *
+ * Claude Code puts agent worktrees at `.claude/worktrees/<id>/`. That is a
+ * SEPARATE GIT CHECKOUT that happens to sit inside this one, and the `.claude/`
+ * prefix swallowed all of it: every file of every worktree read as a protected
+ * control of THIS repository. Two consequences, both measured 2026-09-18.
+ *
+ * Every audit trips the gate. Rule 20 requires an independent auditor working in
+ * its own checkout, so the guard was refusing the process the rules mandate --
+ * and a control that blocks the documented workflow is the outage shape rule 17
+ * is about.
+ *
+ * And protectedFilesIn walks prefixes, so a baseline would hash EVERY FILE OF
+ * EVERY WORKTREE on every session start: a whole second checkout, per snapshot,
+ * for files that are not this repository's controls at all.
+ *
+ * WHY THIS DOES NOT OPEN A HOLE. A worktree's own `.claude/settings.json` is not
+ * this session's hook configuration -- this session reads the one at ITS repo
+ * root, which stays protected. A session rooted INSIDE a worktree computes
+ * paths relative to its own root, where `.claude/settings.json` is protected
+ * again by the same rule. The exemption is for the path as seen from the OUTER
+ * repository, where those files genuinely are somebody else's checkout.
+ *
+ * It is a prefix, not a glob, and it names one directory. Anything else under
+ * `.claude/` remains protected.
+ */
+const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
+
 /** Is a repo-relative path protected? Exact match, or under a `/` prefix entry. */
 export function isProtectedRelPath(rel) {
   if (typeof rel !== 'string' || rel === '') return false;
   const norm = rel.split(path.sep).join('/').replace(/^\.\//, '');
+  if (PROTECTION_EXEMPT_PREFIXES.some((p) => norm.startsWith(p))) return false;
   return PROTECTED_PATHS.some((entry) => (entry.endsWith('/') ? norm.startsWith(entry) : norm === entry));
 }
 
@@ -94,8 +124,15 @@ export function protectedFilesIn(repoRoot) {
         const abs = path.join(dir, e);
         let st;
         try { st = statSync(abs); } catch { continue; }
+        const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
+        /*
+         * The walk must skip the exemption too, and skip it at the DIRECTORY so
+         * it never descends. Filtering only the files would still stat and
+         * recurse through an entire second checkout on every session start.
+         */
+        if (PROTECTION_EXEMPT_PREFIXES.some((p) => `${rel}/`.startsWith(p))) continue;
         if (st.isDirectory()) visit(abs);
-        else out.add(path.relative(repoRoot, abs).split(path.sep).join('/'));
+        else out.add(rel);
       }
     };
     visit(base);

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { evaluateClaudeTool, hookDecision, isProtectedPath } from '../src/claudeGuard.mjs';
-import { buildSnapshot, writeSnapshot, protectedDrift, discoverTests, snapshotPath } from '../src/guardSession.mjs';
+import { buildSnapshot, writeSnapshot, protectedDrift, discoverTests, snapshotPath, isProtectedRelPath } from '../src/guardSession.mjs';
 
 /*
  * A REAL GIT REPOSITORY, BECAUSE THE GUARD ONLY EVER RUNS IN ONE.
@@ -684,4 +684,39 @@ test('Workflow is NOT read-only, and the comment about it names the real control
   });
   assert.equal(r.allowed, false);
   assert.equal(r.id, 'workflow-exec-untrusted', 'and it is refused by its own rule, not by the shell rail');
+});
+
+
+/* ============================================================================
+ * AN AGENT WORKTREE IS SOMEBODY ELSE'S CHECKOUT, NOT THIS REPO'S CONTROLS.
+ *
+ * Claude Code puts worktrees at .claude/worktrees/<id>/, and the `.claude/`
+ * prefix swallowed every file in them. Measured 2026-09-18: a README inside a
+ * worktree read as a protected control of the outer repository. Two costs --
+ * every independent audit tripped the gate, which is the process rule 20
+ * REQUIRES, and protectedFilesIn would hash an entire second checkout on every
+ * session start.
+ * ==========================================================================*/
+
+test('a path inside an agent worktree is not a protected control of the outer repo', () => {
+  assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/README.md'), false);
+  assert.equal(isProtectedRelPath('.claude/worktrees/agent-x/.claude/settings.json'), false,
+    "a worktree's own config is ITS session's to protect, relative to ITS root, not ours");
+});
+
+test('and the carve-out reaches nothing else under .claude/', () => {
+  for (const p of ['.claude/settings.json', '.claude/settings.local.json', '.claude/hooks/x.mjs']) {
+    assert.equal(isProtectedRelPath(p), true, `${p} must stay protected`);
+  }
+});
+
+test('the carve-out is a path prefix, so a lookalike directory does not inherit it', () => {
+  /*
+   * `.claude/worktrees-evil/` starts with the same eleven characters. Without
+   * the trailing slash in the prefix it would be exempt, which is how a
+   * carve-out becomes a hole.
+   */
+  for (const p of ['.claude/worktrees-evil/settings.json', '.claude/worktreesx/settings.json']) {
+    assert.equal(isProtectedRelPath(p), true, `${p} must NOT inherit the exemption`);
+  }
 });
