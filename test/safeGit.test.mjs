@@ -194,7 +194,30 @@ const GIT_SHELL = new RegExp(`\\(\\s*(${QUOTE})(git\\s+[^'"\`]*)\\1`, 'gi');
  * instead of issuing an instruction the reader cannot follow. The number still
  * only moves with a measurement.
  */
-const KNOWN_UNROUTED = Object.freeze({ 'bin/agentbridge.mjs': 11 });
+/*
+ * EMPTY, AND THAT IS THE END STATE THIS WAS BUILT FOR.
+ *
+ * 18 -> 11 -> 0. code-a routed the observe-sha clone block at ff35297 and the
+ * remaining twelve at f4e90a0 -- check-first, the working-tree pair (rewritten
+ * as two sequential reads, since runGit is synchronous where the old runner
+ * returned promises), the who log, and the two sites that were DEAD rather than
+ * merely unhardened. Verified here rather than taken on report: the committed
+ * bin/agentbridge.mjs contains zero argv-form git calls and no longer imports
+ * the exec runner at all.
+ *
+ * THE ENTRY IS DELETED RATHER THAN SET TO ZERO. A zero would be a standing
+ * claim that this file is special, and it is not any more -- it is now held to
+ * the same rule as every other file, by the offender check above. An exemption
+ * that survives its reason is the silencer this file already carries a warning
+ * about.
+ *
+ * WHAT STILL GUARDS THE SCAN NOW THAT THE QUARANTINE IS EMPTY: the canaries.
+ * With nothing declared, the floor below is vacuously satisfied -- which is
+ * exactly why the floor was replaced by fixed samples that do not depend on
+ * what the tree contains. If the matcher degrades, the canaries fail whether or
+ * not anything is quarantined.
+ */
+const KNOWN_UNROUTED = Object.freeze({});
 
 /*
  * BLANKING COMMENTS WITH A REGEX WAS DEFEATED BY A STRING, AND LOST 140 LINES.
@@ -302,7 +325,20 @@ function gitCallSites() {
          * one is a second net with a known hole, and refuseGit plus the
          * repository's own review are what stand behind it.
          */
-        if (shape === 'shell' && !/exec|spawn|shell|sh$/i.test(callee)) continue;
+        /*
+         * `sh$` MATCHED `push`, AND THE SCAN FLAGGED AN ERROR MESSAGE.
+         *
+         * The first version of this filter was /exec|spawn|shell|sh$/i, meant to
+         * let a wrapper literally named sh() through. It also matched push,
+         * flush and anything else ending in those two letters, so
+         * errors.push(`git log: ${e}`) -- prose -- was reported as an unrouted
+         * git invocation. Caught by this test going red on code-a's commit,
+         * which is the right end for it to fail at, but it is the SAME mistake
+         * the shell filter was added to fix one commit earlier: a substring
+         * standing in for a name.
+         */
+        const shellCallee = /exec|spawn|shell/i.test(callee) || /(^|\.)sh$/i.test(callee);
+        if (shape === 'shell' && !shellCallee) continue;
         const line = code.slice(0, m.index).split('\n').length;
         found.push({ id: `${rel}:${line}`, rel, line, shape, callee, spelling: m[2] });
       }
