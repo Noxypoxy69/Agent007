@@ -28,6 +28,7 @@
 import { createHash } from 'node:crypto';
 import {
   readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, readlinkSync, existsSync,
+  realpathSync,
 } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -730,8 +731,64 @@ export function isBaselineTest(relPath, snapshot) {
  */
 const MAX_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
 
+/*
+ * A GRANT IS ABOUT A REPOSITORY, NOT A DIRECTORY.
+ *
+ * This keyed on sha(path.resolve(repoRoot)), and A WORKTREE IS A DIFFERENT
+ * ROOT. Measured on the operator's machine, 2026-09-18, across all 17 roots
+ * git knows about:
+ *
+ *   HAS GRANT  c6e20b3e89303f44  C:/Users/DANNY GARCIA/Agent007   (main)
+ *   NO GRANT   f9d997f2d8cd6ee6  C:/Users/DANNY GARCIA/Documents/wt-code-a
+ *   NO GRANT   ...15 more agent worktrees, each its own key
+ *
+ * So every grant the owner has ever written applied to exactly one directory --
+ * and it was not the directory the agents were working in. Each agent resolved
+ * to a key with no file behind it and ran with NO grant at all, which is why
+ * they kept hitting the Stop gate and routing it back to him. Nobody decided
+ * that; it is the key naming a directory when the thing being granted is a
+ * repository and a set of repo-RELATIVE paths.
+ *
+ * git rev-parse --git-common-dir is the identity that is actually shared: every
+ * worktree of one repository reports the same one. It prints a relative ".git"
+ * from the main checkout and an absolute path from a worktree, so it is
+ * resolved against the root either way.
+ *
+ * AND THE SPELLING IS CANONICALISED, because a hash makes every difference
+ * total. An 8.3 alias (DANNYG~1) and a case variant are the same directory and
+ * hashed to different keys -- the same class that let CLAUDE~1/settings.json
+ * past isProtectedPath until realpathSync.native was used there. A grant that
+ * silently does not apply because cwd was spelled differently is the failure
+ * this whole comment is about, arrived at a second way.
+ *
+ * FALLING BACK IS SAFE IN THE RIGHT DIRECTION. If git cannot answer -- not a
+ * repository, git missing, a timeout -- this returns the path for the directory
+ * itself. That resolves to a key with no grant file, which means NO GRANT,
+ * which is the direction every check in this module already fails in.
+ */
+function canonicalKeyPath(target) {
+  let out = target;
+  // realpathSync.native expands 8.3 short names; the non-native one does not.
+  try { out = realpathSync.native(out); } catch { /* may not exist yet: use the lexical form */ }
+  out = out.split('\\').join('/').replace(/\/+$/, '');
+  // NTFS and APFS are case-insensitive; a case variant must not be a new key.
+  return process.platform === 'win32' ? out.toLowerCase() : out;
+}
+
+export function overrideKeySource(repoRoot) {
+  const resolved = path.resolve(repoRoot);
+  try {
+    const out = String(runGit(['-C', resolved, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })).trim();
+    if (out) return canonicalKeyPath(path.resolve(resolved, out));
+  } catch { /* fall through to the directory itself, which grants nothing */ }
+  return canonicalKeyPath(resolved);
+}
+
 export function overridePath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
-  const key = sha(path.resolve(repoRoot)).slice(0, 16);
+  const key = sha(overrideKeySource(repoRoot)).slice(0, 16);
   return path.join(home, 'overrides', `${key}.json`);
 }
 
