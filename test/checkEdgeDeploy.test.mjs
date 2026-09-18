@@ -26,9 +26,50 @@ const SCRIPT = fileURLToPath(new URL('../scripts/check-edge-deploy.mjs', import.
 /** Run the real script as a real process, so the exit code is the shipped one. */
 const run = (a, b, ...flags) => new Promise((resolve) => {
   execFile(process.execPath, [SCRIPT, a, b, ...flags], (error, stdout, stderr) => {
-    resolve({ code: error?.code ?? 0, stdout, stderr });
+    /*
+     * A SPAWN FAILURE IS NOT A REFUSAL, AND CONFLATING THEM COST TWO AUDITS.
+     *
+     * Every test here starts a node subprocess. `error.code` is a NUMBER when
+     * the script ran and exited non-zero, and a STRING -- EAGAIN, ENOMEM,
+     * ENOENT -- when the process could not be started at all. Collapsing both
+     * into `code` meant a machine under load produced
+     *
+     *   AssertionError: refused a safe deploy
+     *
+     * which reads as a defect in the deploy gate and is nothing of the kind.
+     * These twelve tests were the only full-suite-only cluster in the suite,
+     * they were investigated by two separate blind audits, both correctly
+     * established "pre-existing, environment, not a code defect" and neither
+     * could name the mechanism -- because the assertion message actively
+     * pointed away from it. This machine took two low-memory kills the same
+     * night.
+     *
+     * "Could not measure" and "measured a refusal" are different answers and
+     * the harness now says which one it got.
+     */
+    const spawnFailed = error && typeof error.code !== 'number';
+    resolve({
+      code: spawnFailed ? null : (error?.code ?? 0),
+      stdout,
+      stderr,
+      spawnError: spawnFailed ? `${error.code ?? ''} ${error.message ?? ''}`.trim() : null,
+    });
   });
 });
+
+/**
+ * Assert the subprocess actually ran. Call before reading an exit code.
+ *
+ * Deliberately a hard failure rather than a skip: a suite that silently skips
+ * under load reports green while measuring nothing, which is this repository's
+ * signature bug. It fails, and it says the true reason.
+ */
+function ranAtAll(r) {
+  assert.equal(r.spawnError, null,
+    `the check script could not be STARTED (${r.spawnError}), so nothing below was measured. `
+    + 'This is the machine, not the deploy gate -- under a full-suite run these tests each spawn '
+    + 'a node process and resource exhaustion surfaces here first.');
+}
 
 async function dirs(t, deployed, incoming) {
   const root = await mkdtemp(path.join(tmpdir(), 'edgecheck-'));
@@ -48,6 +89,7 @@ test('A PURELY ADDITIVE DEPLOY PASSES, and that is the positive the rest need', 
     { 'index.ts': ENTRY, '_shared.js': SHARED },
     { 'index.ts': `${ENTRY}// a new route\n`, '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 0, `refused a safe deploy: ${r.stderr}`);
   assert.match(r.stdout, /index\.ts: \+1 -0/);
 });
@@ -57,6 +99,7 @@ test('A DEPLOY THAT REMOVES A LIVE LINE IS REFUSED', async (t) => {
     { 'index.ts': `${ENTRY}const theFix = true;\n`, '_shared.js': SHARED },
     { 'index.ts': ENTRY, '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 1, 'a deploy that reverts a line was allowed');
   assert.match(r.stderr, /removes 1 line\(s\)/);
   assert.match(r.stdout, /theFix/, 'the operator is not shown the line they would lose');
@@ -67,8 +110,10 @@ test('A DEPLOY THAT REMOVES A LIVE LINE IS REFUSED', async (t) => {
    * can only come from somebody who read the removals printed above.
    */
   const stated = await run(a, b, '--expect-removed', '1');
+  ranAtAll(stated);
   assert.equal(stated.code, 0, `a stated removal was still refused: ${stated.stderr}`);
   const wrong = await run(a, b, '--expect-removed', '4');
+  ranAtAll(wrong);
   assert.equal(wrong.code, 1, 'a wrong count was accepted');
   assert.match(wrong.stderr, /says 4/);
 });
@@ -80,6 +125,7 @@ test('A MODIFIED LINE IS A REMOVAL, which is the stronger claim', async (t) => {
     { 'index.ts': 'const timeout = 900;\n', '_shared.js': SHARED },
     { 'index.ts': 'const timeout = 30;\n', '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 1, 'a silently modified line passed as an addition');
   assert.match(r.stdout, /timeout = 900/, 'the modified line was not shown');
 });
@@ -89,6 +135,7 @@ test('A FILE DROPPED FROM THE BUNDLE IS REFUSED', async (t) => {
     { 'index.ts': ENTRY, '_shared.js': SHARED },
     { 'index.ts': ENTRY });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 1, 'shipping a bundle with a file missing was allowed');
   assert.match(r.stderr, /_shared\.js: deployed but missing/);
 });
@@ -111,6 +158,7 @@ test('A LINE-ENDING CHANGE IS NOT A REWRITE', async (t) => {
     { 'index.ts': crlf(ENTRY), '_shared.js': crlf(SHARED) },
     { 'index.ts': ENTRY, '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 0, `a CRLF-to-LF change was reported as a rewrite: ${r.stderr}`);
   assert.match(r.stdout, /index\.ts: \+0 -0/);
   assert.match(r.stdout, /_shared\.js: \+0 -0/);
@@ -123,6 +171,7 @@ test('AN ENTRYPOINT PAIRED WITH THE WRONG SHARED FILE IS REFUSED', async (t) => 
     { 'index.ts': ENTRY, '_shared.js': SHARED },
     { 'index.ts': "import { alpha, beta } from './_shared.js';\nalpha();beta();\n", '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 1, 'an entrypoint needing an export the shared file lacks was allowed');
   assert.match(r.stderr, /does not export: beta/);
 });
@@ -136,6 +185,7 @@ test('COMPARING NOTHING IS REFUSED, NOT PASSED', async (t) => {
    */
   const [a, b] = await dirs(t, {}, {});
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 1, 'the gate passed having compared no files at all');
   assert.match(r.stderr, /no file was compared/);
 });
@@ -143,6 +193,7 @@ test('COMPARING NOTHING IS REFUSED, NOT PASSED', async (t) => {
 test('IT NAMES verify_jwt EVERY TIME, because it cannot check it', async (t) => {
   const [a, b] = await dirs(t, { 'index.ts': ENTRY, '_shared.js': SHARED }, { 'index.ts': ENTRY, '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.match(r.stdout, /verify_jwt/);
   assert.match(r.stdout, /--no-verify-jwt/);
 });
@@ -199,6 +250,7 @@ test('A DEPLOY THAT CHANGES NOTHING SAYS SO', async (t) => {
   const files = { 'index.ts': ENTRY, '_shared.js': SHARED };
   const [a, b] = await dirs(t, files, files);
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 0, 'a no-op redeploy was refused; it is legitimate');
   assert.match(r.stdout, /NOTHING WOULD CHANGE/);
   assert.match(r.stdout, /wrong tree/);
@@ -211,6 +263,7 @@ test('and a real change does NOT claim nothing would change', async (t) => {
     { 'index.ts': ENTRY, '_shared.js': SHARED },
     { 'index.ts': `${ENTRY}// a new route\n`, '_shared.js': SHARED });
   const r = await run(a, b);
+  ranAtAll(r);
   assert.equal(r.code, 0);
   assert.doesNotMatch(r.stdout, /NOTHING WOULD CHANGE/,
     'a deploy carrying 1 added line was reported as changing nothing');
@@ -229,6 +282,7 @@ test('THE REMOVAL BUDGET IS A COUNT, AND IT REFUSES A LOW ONE TOO', async (t) =>
 
   // MORE removed than stated: the accident the budget exists for.
   const over = await run(a, b, '--expect-removed', '1');
+  ranAtAll(over);
   assert.equal(over.code, 1);
   assert.match(over.stderr, /a removal you did not intend/);
 
@@ -236,6 +290,7 @@ test('THE REMOVAL BUDGET IS A COUNT, AND IT REFUSES A LOW ONE TOO', async (t) =>
   // something and the change is not in the bundle -- which is v22 to v23, the
   // successful deploy that shipped nothing, caught from the other side.
   const under = await run(a, b, '--expect-removed', '3');
+  ranAtAll(under);
   assert.equal(under.code, 1);
   assert.match(under.stderr, /Fewer were removed than you expected/);
 });
