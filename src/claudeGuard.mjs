@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers } from './guardSession.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
+import { runGit } from './safeGit.mjs';
 
 const SKIP_MARKER = /(?:\b(?:it|test|describe|context)\.skip\s*\(|\bx(?:it|test|describe|context)\s*\(|@pytest\.mark\.(?:skip|xfail)|@unittest\.skip|\bpytest\.skip\s*\(|@Disabled\b|@Ignore\b|\bt\.Skip(?:Now)?\s*\(|#\[ignore\]|\[Ignore\])/;
 
@@ -272,8 +273,34 @@ function judgeShell(command, cwd) {
    * denylist of a programming language cannot win. So the question is now what
    * is KNOWN read-only, and everything else is refused.
    */
+  /*
+   * "INHERITED" IS ANSWERED BY GIT, BECAUSE THE SNAPSHOT CANNOT ANSWER IT.
+   *
+   * The session snapshot records PROTECTED files and baseline TESTS, not the
+   * whole tree, so it cannot say whether `helper.mjs` existed at session start.
+   * Tracked-in-HEAD is the available proxy and it separates the two cases that
+   * matter: bin/agentbridge.mjs is committed, a script the session wrote one
+   * tool call ago is not.
+   *
+   * FAILS CLOSED, consistent with the rest of this guard -- a tree git cannot
+   * describe does not get a baseline either. If git cannot answer, the answer is
+   * no, and `node <file>` is refused rather than assumed safe.
+   */
+  const mayExecute = (target) => {
+    if (!cwd) return false;
+    try {
+      const rel = path.relative(path.resolve(cwd), path.resolve(cwd, target)).split(path.sep).join('/');
+      if (rel === '' || rel.startsWith('..')) return false;   // outside the repo: not inherited from it
+      runGit(['cat-file', '-e', `HEAD:${rel}`], { cwd, stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const verdict = judgeShellCommand(command, {
     isOverridden: (rel) => Boolean(cwd && overrideCovers(cwd, rel)),
+    mayExecute,
   });
   /*
    * ANNOUNCE THE SHELL PERMIT TOO. The Edit announced itself and the commit that

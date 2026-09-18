@@ -374,7 +374,7 @@ export const ALLOWED_FIRST_TOKENS = Object.freeze([
  * looking for an answer. With no predicate supplied the behaviour is exactly
  * what it was, which keeps every existing test and caller honest.
  */
-export function judgeShellCommand(command, { isOverridden = () => false } = {}) {
+export function judgeShellCommand(command, { isOverridden = () => false, mayExecute = () => true } = {}) {
   if (typeof command !== 'string' || command.trim() === '') {
     return { allowed: false, reason: 'no command string was supplied' };
   }
@@ -399,7 +399,7 @@ export function judgeShellCommand(command, { isOverridden = () => false } = {}) 
    */
   const overriddenPaths = [];
   for (const part of parts) {
-    const verdict = judgeOneSegment(part, isOverridden);
+    const verdict = judgeOneSegment(part, isOverridden, mayExecute);
     if (!verdict.allowed) {
       return parts.length === 1
         ? verdict
@@ -412,7 +412,7 @@ export function judgeShellCommand(command, { isOverridden = () => false } = {}) 
     : { allowed: true };
 }
 
-function judgeOneSegment(segment, isOverridden = () => false) {
+function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () => true) {
   const command = String(segment).replace(FD_REDIRECTS, ' ').trim();
   if (command === '') {
     return { allowed: false, reason: 'no command string was supplied' };
@@ -604,9 +604,64 @@ function judgeOneSegment(segment, isOverridden = () => false) {
   }
 
   if (first === 'node') {
-    return NODE_EVAL.test(tokens[1] ?? '')
-      ? { allowed: false, reason: 'node -e composes its target at runtime and cannot be judged from the command string' }
-      : { allowed: true };
+    if (NODE_EVAL.test(tokens[1] ?? '')) {
+      return { allowed: false, reason: 'node -e composes its target at runtime and cannot be judged from the command string' };
+    }
+    /*
+     * A SCRIPT THIS SESSION JUST WROTE IS NOT A SCRIPT THE REPOSITORY SHIPS.
+     *
+     * This branch allowed `node <anything>`, which made the whole rail
+     * decorative -- disarming the guard took two ordinary calls with no grant,
+     * no metacharacter and nothing exotic:
+     *
+     *   Write helper.mjs  (an ordinary path -- allowed)
+     *   node helper.mjs   (allowed)      helper.mjs then rewrites claudeGuard.mjs
+     *                                    and .claude/settings.json
+     *
+     * Measured end to end through the shipped binary: afterwards the same hook
+     * answered {} to a Write of CLAUDE.md. The header's claim that "everything
+     * else is refused" was false for node, and the declared shape
+     * ['node', /^--test$/] was unreachable dead code sitting below this block.
+     *
+     * REFUSING `node <file>` OUTRIGHT WAS THE WRONG FIX AND I NEARLY SHIPPED IT.
+     * `node bin/agentbridge.mjs` is how every command in this repository runs --
+     * check-first, register-session, observe-sha, delegate. Refusing it is a
+     * bigger outage than the hole, and rule 17 is about exactly that.
+     *
+     * The line that actually separates them is the one isSessionBaselineTest
+     * already draws for tests: a file the session INHERITED versus a file the
+     * session WROTE. bin/agentbridge.mjs is the first. helper.mjs, written one
+     * tool call earlier, is the second, and it is the entire attack.
+     *
+     * WHAT THIS DOES NOT CLAIM. An agent can still write a script, commit it,
+     * and run it, because a committed file is inherited by the NEXT session.
+     * That is three calls and a commit that a reader can see, instead of two
+     * calls and nothing -- cost and visibility, not closure. Execution cannot be
+     * bounded from a command string; the boundary is still Stop, as the header
+     * says. This removes the free route, not the class.
+     *
+     * With no predicate supplied the behaviour is unchanged, so callers that
+     * have no session context are not broken by this.
+     */
+    /*
+     * `node --test` IS EXEMPT, DELIBERATELY. It is the declared shape for this
+     * binary and `npm test` runs the same repository JavaScript with no gate at
+     * all, so refusing it buys nothing and breaks test iteration -- which is the
+     * thing the header says gets the rail switched off. A test the session wrote
+     * is covered by baseline-test drift at Stop; a bare script is covered by
+     * nothing, and that asymmetry is the whole reason for the gate below.
+     */
+    if (tokens.includes('--test')) return { allowed: true };
+    const target = tokens.slice(1).find((t) => !t.startsWith('-'));
+    if (target && !mayExecute(target)) {
+      return {
+        allowed: false,
+        reason: `"${target}" is not part of the repository this session inherited, so running it would `
+          + 'execute code this session wrote -- which is how a guard gets disarmed in two calls. '
+          + 'Commit it first, or run it outside the repository',
+      };
+    }
+    return { allowed: true };
   }
 
   if (first.toLowerCase() === 'sed') {
