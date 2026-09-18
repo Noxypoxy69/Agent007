@@ -189,6 +189,20 @@ const SHELL_TOOL_NAMES = new Set(['Bash', 'PowerShell', 'Shell', 'Cmd', 'Termina
 const COMMAND_FIELDS = ['command', 'script', 'cmd'];
 const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
 
+/**
+ * EVERY matching field, not the first. firstStringField below takes one and
+ * discards the rest, which is how a decoy field stole a verdict from the field
+ * the real tool uses.
+ */
+function allStringFields(input, fields) {
+  const out = [];
+  for (const field of fields) {
+    const value = input[field];
+    if (typeof value === 'string' && value.length > 0) out.push({ field, value });
+  }
+  return out;
+}
+
 function firstStringField(input, fields) {
   for (const field of fields) {
     const value = input[field];
@@ -459,24 +473,83 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    * first refusal wins; a call that is somehow both a shell command and a write
    * has to satisfy the rules for both.
    */
-  const command = firstStringField(input, COMMAND_FIELDS);
-  const target = firstStringField(input, PATH_FIELDS);
+  /*
+   * EVERY FIELD OF EVERY SHAPE IS JUDGED, AND THE LEFTOVERS GO TO THE BACKSTOP.
+   *
+   * The previous repair judged a command AND a path, and then bet on field
+   * ORDERING one line lower -- firstStringField takes the first match and throws
+   * the rest away. PATH_FIELDS is scanned file_path, notebook_path, filePath,
+   * path, and NotebookEdit's real parameter is notebook_path, so a decoy
+   * file_path stole the verdict:
+   *
+   *   {"tool_name":"NotebookEdit","tool_input":{
+   *      "file_path":"scratch.txt",
+   *      "notebook_path":".claude/settings.json",
+   *      "new_source":"{\"disableAllHooks\":true}"}}      -> ALLOWED
+   *   the same call without the decoy                        -> deny protected-control
+   *
+   * That write removes the Stop hook as well, so prevention and detection went
+   * together in one permitted call. I had written "whether a harness forwards
+   * unmodelled fields is not something this layer should be betting on" in the
+   * commit that made the bet.
+   *
+   * AND THE BACKSTOP WAS UNREACHABLE BEHIND THE RETURNS. Its own comment offers
+   * "a hypothetical mover with source and destination" as the case it exists
+   * for, and adding one benign field switched it off:
+   *
+   *   {"source":"a.txt","destination":".claude/settings.json"}              -> deny
+   *   {"command":"ls","source":"a.txt","destination":".claude/settings.json"} -> ALLOWED
+   *
+   * So: judge every command field, judge every path field, then run the backstop
+   * over WHAT NOBODY JUDGED. Scanning the whole input instead would refuse
+   * `cat CLAUDE.md`, because a judged field legitimately names protected paths;
+   * the backstop is for fields this guard has no model of, which is exactly the
+   * set left over.
+   */
+  const commands = allStringFields(input, COMMAND_FIELDS);
+  const targets = allStringFields(input, PATH_FIELDS);
 
-  if (command && target) {
-    const shellVerdict = judgeShell(command.value, cwd);
-    if (!shellVerdict.allowed) return shellVerdict;
-    const writeVerdict = judgeWrite(target.value, input, cwd, sessionId);
-    if (!writeVerdict.allowed) return writeVerdict;
-    return shellVerdict.overridden ? shellVerdict : writeVerdict;
+  const notices = [];
+  for (const c of commands) {
+    const verdict = judgeShell(c.value, cwd);
+    if (!verdict.allowed) return verdict;
+    if (verdict.notice) notices.push(verdict.notice);
+  }
+  for (const t of targets) {
+    const verdict = judgeWrite(t.value, input, cwd, sessionId);
+    if (!verdict.allowed) return verdict;
+    if (verdict.notice) notices.push(verdict.notice);
   }
 
-  if (command) return judgeShell(command.value, cwd);
-
-  if (SHELL_TOOL_NAMES.has(toolName)) {
+  if (commands.length === 0 && SHELL_TOOL_NAMES.has(toolName)) {
     return deny('missing-command', `${toolName} did not provide a command string`);
   }
 
-  if (target) return judgeWrite(target.value, input, cwd, sessionId);
+  /*
+   * THE LEFTOVERS. Fields this guard has no model of still get the cheap last
+   * look, whether or not a modelled field was present alongside them.
+   */
+  const judged = new Set([...commands, ...targets].map((f) => f.field));
+  const unmodelled = Object.fromEntries(
+    Object.entries(input).filter(([k]) => !judged.has(k)),
+  );
+  const mention = protectedMentionIn(unmodelled, cwd);
+  if (mention) {
+    return deny('protected-control',
+      `${toolName} names ${mention}, which is part of the guard or completion contract`);
+  }
+
+  if (commands.length > 0 || targets.length > 0) {
+    /*
+     * EVERY granted path is announced. Returning one verdict discarded the
+     * other's notice, so a write to a protected file could be permitted while
+     * the message named a different file -- the misdirection this file already
+     * records twice.
+     */
+    return notices.length
+      ? { allowed: true, overridden: true, notice: notices.join(' | ') }
+      : { allowed: true };
+  }
 
   if (STRUCTURED_EDIT_TOOLS.has(toolName)) {
     return deny('missing-write-path', `${toolName} did not provide a path`);
@@ -495,17 +568,14 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    * see, so the honest verdict is the one the MCP tools already get: not blocked
    * here, detected at Stop by protected-file drift.
    *
-   * THE BACKSTOP BELOW IS NOT A BOUNDARY. It is a cheap last look for a
-   * protected path appearing in some field name nobody anticipated -- a
-   * hypothetical mover with `source` and `destination`. Detection loses in
-   * general, which is why it sits UNDER the shape routing rather than in place
-   * of it, and why it is documented as a backstop and not as the control.
+   * THE BACKSTOP IS NOT A BOUNDARY. It is a cheap last look for a protected path
+   * appearing in some field name nobody anticipated -- a hypothetical mover with
+   * `source` and `destination`. Detection loses in general, which is why it sits
+   * UNDER the shape routing rather than in place of it.
+   *
+   * It now runs above, over the fields no shape claimed, so a benign `command`
+   * or `path` alongside them no longer switches it off.
    */
-  const mention = protectedMentionIn(input, cwd);
-  if (mention) {
-    return deny('protected-control',
-      `${toolName} names ${mention}, which is part of the guard or completion contract`);
-  }
   return { allowed: true };
 }
 

@@ -531,3 +531,55 @@ test('MUTATION: deleting the gate must break these, or they prove nothing', () =
   assert.equal(nodeVerdict('node helper.mjs'), false,
     'with a classifier it bites -- if this flips, the gate is gone');
 });
+
+/* ============================================================================
+ * EVERY FIELD OF EVERY SHAPE, AND THE BACKSTOP OVER THE LEFTOVERS.
+ *
+ * The first repair for the decoy-field class judged a command AND a path and
+ * then bet on field ORDERING one line lower: firstStringField takes the first
+ * match and discards the rest. PATH_FIELDS is scanned file_path first, and
+ * NotebookEdit's real parameter is notebook_path -- so a decoy file_path stole
+ * the verdict and wrote disableAllHooks into .claude/settings.json, removing the
+ * Stop hook in the same permitted call. It shipped with no tests at all.
+ * ==========================================================================*/
+
+test('a decoy path field cannot steal the verdict from the one the tool uses', () => {
+  const judge = (input) => evaluateClaudeTool({
+    tool_name: 'NotebookEdit', tool_input: input, cwd: repoRoot, session_id: 's',
+  }).allowed;
+  assert.equal(judge({ notebook_path: '.claude/settings.json', new_source: 'x' }), false);
+  assert.equal(judge({ file_path: 'scratch.txt', notebook_path: '.claude/settings.json', new_source: 'x' }), false,
+    'the decoy must not win: notebook_path is the field NotebookEdit actually uses');
+});
+
+test('a benign field does not switch the backstop off', () => {
+  /*
+   * The backstop's own comment names "a hypothetical mover with source and
+   * destination" as its reason to exist, and one extra field disabled it,
+   * because the shape branches returned before it was reached.
+   */
+  const mover = (extra) => evaluateClaudeTool({
+    tool_name: 'MoveFile',
+    tool_input: { ...extra, source: 'a.txt', destination: '.claude/settings.json' },
+    cwd: repoRoot, session_id: 's',
+  }).allowed;
+  assert.equal(mover({}), false, 'control: the backstop fires with no decoy');
+  assert.equal(mover({ command: 'ls' }), false, 'a benign command must not disable it');
+  assert.equal(mover({ path: 'a.txt' }), false, 'nor a benign path');
+});
+
+test('THE BACKSTOP MUST NOT EAT ORDINARY WORK, which is why it reads only unjudged fields', () => {
+  /*
+   * Running it over the WHOLE input would refuse `cat CLAUDE.md` -- a judged
+   * field legitimately names protected paths. The leftovers are the set this
+   * guard has no model of, which is what the backstop was always for.
+   */
+  const bash = (command) => evaluateClaudeTool({
+    tool_name: 'Bash', tool_input: { command }, cwd: repoRoot, session_id: 's',
+  }).allowed;
+  assert.equal(bash('cat CLAUDE.md'), true);
+  assert.equal(bash('git status'), true);
+  assert.equal(evaluateClaudeTool({
+    tool_name: 'Write', tool_input: { file_path: 'notes.md', content: 'x' }, cwd: repoRoot, session_id: 's',
+  }).allowed, true);
+});
