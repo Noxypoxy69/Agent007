@@ -2214,8 +2214,17 @@ try {
       const dirtyOf = () =>
         runGit(['-C', work, 'status', '--porcelain', '--untracked-files=no'], { maxBuffer: 8e6 }).trim();
 
-      const checkoutHead = await headOf();
-      const sourceClean = (await dirtyOf()) === '';
+      // headOf/dirtyOf are synchronous and throw on a git failure. exec's run
+      // did not throw -- it resolved { stdout: '' }, so the old code degraded to
+      // checkoutHead '' and sourceClean true here. This preserves exactly that,
+      // rather than letting a throw escape the catch-less try as a stack trace.
+      // (These reads follow a successful clone+detached-checkout, so a failure
+      // is near-unreachable; the fail-OPEN direction of sourceClean is
+      // pre-existing and flagged separately, not changed here.)
+      let checkoutHead = '';
+      try { checkoutHead = headOf(); } catch { checkoutHead = ''; }
+      let sourceClean = true;
+      try { sourceClean = dirtyOf() === ''; } catch { sourceClean = true; }
 
       let depsInstalled = false;
       let depsError = null;
