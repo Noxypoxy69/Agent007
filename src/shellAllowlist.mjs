@@ -703,8 +703,43 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * to a repository tool, `node bin/agentbridge.mjs check-first notes.txt`,
      * was denied even though node never executes it. Arguments are arguments.
      */
+    /*
+     * NODE'S ARGUMENT GRAMMAR, WRITTEN DOWN, BECAUSE GUESSING IT FAILED FOUR
+     * TIMES IN A ROW AND EACH GUESS SHIPPED WITH A PROOF TABLE THAT MISSED THE
+     * SHAPE IT GOT WRONG.
+     *
+     *   node [node-flags] [program] [args-for-the-program]
+     *
+     * node stops interpreting its OWN flags at the first non-flag token. Tokens
+     * after that belong to the program and node never looks at them -- so
+     * refusing them refuses the repository's own CLI, which is what round 4 did:
+     * `node bin/agentbridge.mjs status --json`, the documented machine-readable
+     * form, was denied. Round 3 had allowed it.
+     *
+     * AND `--test` CHANGES THE GRAMMAR. In test-runner mode node executes EVERY
+     * path operand as a module, not just the first. So round 4's stated premise,
+     * "with no value-taking flag permitted, operands[0] is unambiguously the
+     * program", is false for the single flag round 4 permitted -- and on the
+     * strength of that premise it DELETED the check that caught it. Measured:
+     *
+     *   node --test test/actionAuthority.test.mjs pwn.mjs   ALLOWED, and pwn.mjs ran
+     *
+     * The parent denied that. Round 4 was a regression in both directions at
+     * once: it reopened the disarm it was written to close and refused ordinary
+     * work it had not measured.
+     *
+     * So the split is explicit rather than assumed. Flags BEFORE the program are
+     * node's and must be allowlisted; the program must be inherited; tokens
+     * AFTER the program are argv and are none of this gate's business. With
+     * --test present every path operand is a module, so every one is judged.
+     */
     const NODE_PERMITTED_FLAG = /^--test$/;
-    const rejectedFlag = tokens.slice(1).find((t) => t.startsWith('-') && !NODE_PERMITTED_FLAG.test(t));
+    const argv = tokens.slice(1);
+    const programIndex = argv.findIndex((t) => !t.startsWith('-'));
+    const nodeFlags = programIndex === -1 ? argv : argv.slice(0, programIndex);
+    const operands = programIndex === -1 ? [] : argv.slice(programIndex);
+
+    const rejectedFlag = nodeFlags.find((t) => !NODE_PERMITTED_FLAG.test(t));
     if (rejectedFlag) {
       return {
         allowed: false,
@@ -713,11 +748,17 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
           + 'rather than trying to list the dangerous ones -- an unknown flag is refused, not assumed safe',
       };
     }
-    const program = tokens.slice(1).find((t) => !t.startsWith('-'));
-    if (program && mayExecute(program) !== 'inherited') {
+
+    /*
+     * IN TEST MODE EVERY OPERAND IS EXECUTED, so every operand is judged. Outside
+     * it only the program is executed and the rest is the program's own argv.
+     */
+    const executed = nodeFlags.some((t) => t === '--test') ? operands : operands.slice(0, 1);
+    const notInherited = executed.find((t) => mayExecute(t) !== 'inherited');
+    if (notInherited) {
       return {
         allowed: false,
-        reason: `"${program}" is not part of the repository this session inherited, so running it would `
+        reason: `"${notInherited}" is not part of the repository this session inherited, so running it would `
           + 'execute code this session wrote -- which is how a guard gets disarmed in two calls. '
           + 'Commit it first, or run it outside the repository',
       };

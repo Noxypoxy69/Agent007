@@ -447,6 +447,41 @@ test('A FLAG THAT CARRIES CODE OR A FILE IS REFUSED, INCLUDING ONES THAT DO NOT 
   }
 });
 
+test('--test RUNS EVERY OPERAND, so every operand is judged', () => {
+  /*
+   * Round 4's premise was "with no value-taking flag permitted, operands[0] is
+   * unambiguously the program" -- false for the single flag it permitted. node
+   * --test executes every path operand as a module. On the strength of that
+   * premise round 4 deleted the check that caught it, and measured:
+   *
+   *   node --test test/real.test.mjs pwn.mjs   ALLOWED, and pwn.mjs ran
+   *
+   * which is the two-call disarm, reopened by the commit that claimed to close
+   * it. Order does not matter; both positions execute.
+   */
+  assert.equal(nodeVerdict('node --test test/a.test.mjs helper.mjs'), false);
+  assert.equal(nodeVerdict('node --test helper.mjs test/a.test.mjs'), false);
+  assert.equal(nodeVerdict('node --test test/a.test.mjs'), true, 'a single inherited test still runs');
+});
+
+test('FLAGS AFTER THE PROGRAM ARE ARGV, and refusing them refused the CLI', () => {
+  /*
+   * node stops interpreting its own flags at the first non-flag token; what
+   * follows belongs to the program. Round 4 rejected any dash-token anywhere,
+   * which denied `node bin/agentbridge.mjs status --json` -- the documented
+   * machine-readable form of this repository's own tool -- while its commit
+   * message congratulated itself on retiring a narrower over-block.
+   */
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs status --json'), true);
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs delegate --task foo'), true);
+  assert.equal(nodeVerdict('node bin/agentbridge.mjs check-first topic --repo .'), true);
+});
+
+test('but a node flag BEFORE the program is still judged', () => {
+  assert.equal(nodeVerdict('node --import=./helper.mjs bin/agentbridge.mjs status'), false);
+  assert.equal(nodeVerdict('node --watch bin/agentbridge.mjs'), false);
+});
+
 test('ARGUMENTS ARE ARGUMENTS: an untracked file passed to a repo tool is not execution', () => {
   /*
    * The previous fix refused any untracked file in a later operand, to stop an
