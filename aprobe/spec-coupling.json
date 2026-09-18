@@ -1,0 +1,67 @@
+{
+  "rev": "e59a431",
+  "restore": ["bin/agentbridge.mjs", "scripts/bridge-session-poll.mjs", "src/events.mjs", "supabase/functions/mcp/_shared.js"],
+  "cases": [
+    {
+      "name": "C1 CLI appends a suffix to the cursor line (the audit's uncaught edit)",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [{ "file": "bin/agentbridge.mjs", "from": "console.log(`  cursor  ${cursor}`);", "to": "console.log(`  cursor  ${cursor}  (server)`);" }]
+    },
+    {
+      "name": "C2 CLI re-punctuates: 'cursor: '",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [{ "file": "bin/agentbridge.mjs", "from": "console.log(`  cursor  ${cursor}`);", "to": "console.log(`  cursor: ${cursor}`);" }]
+    },
+    {
+      "name": "C3 CLI switches to string concatenation (no template literal)",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [{ "file": "bin/agentbridge.mjs", "from": "console.log(`  cursor  ${cursor}`);", "to": "console.log('  cursor  ' + cursor + '  (server)');" }]
+    },
+    {
+      "name": "C4 DECOY: an EARLIER console.log template containing 'cursor', real line broken",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [
+        { "file": "bin/agentbridge.mjs", "from": "    let cursor = typeof args.since === 'string'", "to": "    if (process.env.AB_DEBUG) console.log(`  cursor  ${args.since}`);\n    let cursor = typeof args.since === 'string'" },
+        { "file": "bin/agentbridge.mjs", "from": "        console.log(`  cursor  ${cursor}`);", "to": "        console.log(`  cursor  ${cursor}  (server)`);" }
+      ]
+    },
+    {
+      "name": "C5 the cursor line is DELETED from the CLI entirely",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [{ "file": "bin/agentbridge.mjs", "from": "        console.log(`  cursor  ${cursor}`);", "to": "        void cursor;" }]
+    },
+    {
+      "name": "C6 the future-cursor CEILING removed",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [{ "file": "scripts/bridge-session-poll.mjs", "from": "    if (t > ceiling) continue;", "to": "    if (false) continue;" }]
+    },
+    {
+      "name": "C7 the ceiling made TWO-SIDED (a past cursor refused too)",
+      "test": "atest/pollCursorAdvances.test.mjs",
+      "edits": [{ "file": "scripts/bridge-session-poll.mjs", "from": "    if (t > ceiling) continue;", "to": "    if (t > ceiling || t < now - CURSOR_SKEW_MS) continue;" }]
+    },
+    {
+      "name": "C8 the microsecond parse reverted in src/events.mjs ONLY",
+      "test": "atest/eventsMicrosecondCursor.test.mjs",
+      "edits": [{ "file": "src/events.mjs", "from": "  return ms * 1000 + (Number.isFinite(sub) ? sub : 0);", "to": "  return ms * 1000;" }]
+    },
+    {
+      "name": "C9 the microsecond parse reverted in _shared.js ONLY",
+      "test": "atest/eventsMicrosecondCursor.test.mjs",
+      "edits": [{ "file": "supabase/functions/mcp/_shared.js", "from": "  return ms * 1000 + (Number.isFinite(sub) ? sub : 0);", "to": "  return ms * 1000;" }]
+    },
+    {
+      "name": "C10 the cursor made INCLUSIVE (t >= after) in src/events.mjs",
+      "test": "atest/eventsMicrosecondCursor.test.mjs",
+      "edits": [{ "file": "src/events.mjs", "from": "    return after === null || t > after;", "to": "    return after === null || t >= after;" }]
+    },
+    {
+      "name": "C11 cursor INCLUSIVE, whole suite",
+      "test": "SUITE",
+      "edits": [
+        { "file": "src/events.mjs", "from": "    return after === null || t > after;", "to": "    return after === null || t >= after;" },
+        { "file": "supabase/functions/mcp/_shared.js", "from": "    return after === null || t > after;", "to": "    return after === null || t >= after;" }
+      ]
+    }
+  ]
+}
