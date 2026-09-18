@@ -34,9 +34,38 @@ const arr = (v) => (Array.isArray(v) ? v : []);
 /** Event kinds a worker can be woken for. */
 export const EVENT_KINDS = ['assigned', 'cancelled', 'message'];
 
+/**
+ * A timestamp as MICROSECONDS since the epoch, because milliseconds silently
+ * lose mail.
+ *
+ * THE DEFECT THIS EXISTS FOR. Postgres `timestamptz` is microsecond precision
+ * and PostgREST hands it over intact — `2026-09-18T19:30:00.123456+00:00`.
+ * `Date.parse` truncates to milliseconds, so `.123456` and `.123999` both
+ * became `…123`. The cursor is an event's own `at`, so after delivering the
+ * first of those the comparison below (`t > after`, strict on purpose) answered
+ * FALSE for the second — and since the cursor only moves forward, that event
+ * was never delivered again. A permanent mail drop, inside the mechanism whose
+ * entire job is delivering mail. Found by blind audit.
+ *
+ * It needed two events inside the same millisecond, split across batches, which
+ * is rare and is not a reason to leave it: a message that silently never
+ * arrives is the failure mode nobody diagnoses, and this system routes work
+ * through those events.
+ *
+ * MICROSECONDS FIT IN A SAFE INTEGER, so this stays plain arithmetic: epoch
+ * microseconds are ~1.79e15 against a MAX_SAFE_INTEGER of ~9.0e15. Nanoseconds
+ * would not, and Postgres does not produce them.
+ *
+ * DIGITS BEYOND SIX ARE DROPPED, deliberately. Postgres cannot emit them, and
+ * inventing precision the store does not have would be a different lie.
+ */
 const parse = (v) => {
-  const t = Date.parse(v);
-  return Number.isNaN(t) ? null : t;
+  const ms = Date.parse(v);
+  if (Number.isNaN(ms)) return null;
+  const frac = /\.(\d+)/.exec(String(v ?? ''));
+  // Date.parse already consumed the first three fractional digits.
+  const sub = frac ? Number(frac[1].slice(3, 6).padEnd(3, '0')) : 0;
+  return ms * 1000 + (Number.isFinite(sub) ? sub : 0);
 };
 
 /**

@@ -2130,9 +2130,23 @@ export function supervisoryReport({
 /** Event kinds a worker can be woken for. */
 export const EVENT_KINDS = ['assigned', 'cancelled', 'message'];
 
+/**
+ * MICROSECONDS, because milliseconds silently lose mail. Spliced from
+ * src/events.mjs — see the comment there.
+ *
+ * Postgres timestamptz is microsecond precision and Date.parse truncates to
+ * milliseconds, so two events inside one millisecond collapsed to the same
+ * value. The cursor is an event's own `at` and only moves forward, so the
+ * second was never delivered again: a permanent mail drop in the mail path.
+ * This is the deployed copy — /wait runs on it.
+ */
 const parse = (v) => {
-  const t = Date.parse(v);
-  return Number.isNaN(t) ? null : t;
+  const ms = Date.parse(v);
+  if (Number.isNaN(ms)) return null;
+  const frac = /\.(\d+)/.exec(String(v ?? ''));
+  // Date.parse already consumed the first three fractional digits.
+  const sub = frac ? Number(frac[1].slice(3, 6).padEnd(3, '0')) : 0;
+  return ms * 1000 + (Number.isFinite(sub) ? sub : 0);
 };
 
 /**
