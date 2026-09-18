@@ -47,29 +47,58 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync } from 'node:fs';
+import {
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync, symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { isProtectedRelPath, protectedFilesIn, PROTECTED_PATHS } from '../src/guardSession.mjs';
 
-/** Files planted in a throwaway fixture. NEVER the operator's repository. */
+/*
+ * GENERATED FROM PROTECTED_PATHS, NOT HAND-WRITTEN. RULE 7.
+ *
+ * THE PREVIOUS VERSION OF THIS LIST WAS ELEVEN PATHS I TYPED, AND IT MADE THIS
+ * WHOLE FILE WORTHLESS AS EVIDENCE. Measured by an independent auditor: the file
+ * returned 6 of 6 at efb7990 AND at its parent, including on three paths where
+ * the Stop gate flipped from refusing a tampered control to passing it. A gate
+ * that cannot distinguish the commit it was cited for is not a gate, and I cited
+ * it -- "parity gate 6 of 6" -- in that commit's own message.
+ *
+ * The specific miss: `.claude/` is a PREFIX entry, so `.claude/node_modules/**`
+ * and `.claude/worktrees/<w>/node_modules/.claude/**` are protected by the
+ * matcher. A walk that prunes directories named `node_modules` drops them, and
+ * no path I had typed went anywhere near one. Hollow gate 10 -- a fixture that
+ * cannot construct the case cannot fail for it.
+ *
+ * So the shapes are now derived from the real list and the real exemption. A
+ * protected prefix added to PROTECTED_PATHS extends this corpus without anybody
+ * remembering to, which is the property rule 7 actually asks for.
+ */
+const EXEMPT_PREFIX = '.claude/worktrees/';
+
+/** Shapes that have each been a real defect in this function, per protected prefix. */
+const SHAPES_UNDER_A_PREFIX = Object.freeze([
+  'settings.json',                                  // the control itself
+  'node_modules/settings.json',                     // prefix-protected, prune drops it
+  'node_modules/deep/hooks.json',
+  '.git/settings.json',                             // same, other pruned name
+  'worktrees/agent-x/README.md',                    // worktree CONTENT: exempt
+  'worktrees/agent-x/src/claudeGuard.mjs',          // exempt
+  'worktrees/agent-x/CLAUDE.md',                    // exempt
+  'worktrees/agent-x/.claude/settings.json',        // nested control: protected
+  'worktrees/agent-x/.claude/hooks/pre.mjs',        // the pre-plant target
+  'worktrees/agent-x/nested/deep/.claude/settings.json',
+  'worktrees/agent-x/node_modules/.claude/settings.json', // nested control behind a pruned name
+  'worktrees/agent-x/.git/.claude/settings.json',
+  'worktrees-evil/settings.json',                   // lookalike: must NOT inherit
+  'worktreesx/settings.json',
+]);
+
 const FIXTURE_FILES = Object.freeze([
-  // ordinary controls at the repo root -- the POSITIVE control (rule 5)
-  '.claude/settings.json',
-  'CLAUDE.md',
-  'src/claudeGuard.mjs',
-  'package.json',
-  // worktree CONTENT, legitimately exempt: a checkout differs from the outer tree
-  '.claude/worktrees/agent-x/README.md',
-  '.claude/worktrees/agent-x/src/claudeGuard.mjs',
-  '.claude/worktrees/agent-x/CLAUDE.md',
-  // a nested control directory inside a worktree -- the contested set
-  '.claude/worktrees/agent-x/.claude/settings.json',
-  '.claude/worktrees/agent-x/.claude/hooks/pre.mjs',
-  '.claude/worktrees/agent-x/nested/deep/.claude/settings.json',
-  // a lookalike directory: must NOT inherit the exemption
-  '.claude/worktrees-evil/settings.json',
+  ...PROTECTED_PATHS.filter((p) => !p.endsWith('/')),
+  ...PROTECTED_PATHS.filter((p) => p.endsWith('/'))
+    .flatMap((prefix) => SHAPES_UNDER_A_PREFIX.map((s) => prefix + s)),
 ]);
 
 function buildFixture() {
@@ -164,6 +193,61 @@ test('REACHABILITY: a walk that consults the matcher satisfies the demand', () =
     assert.ok(walked.has('.claude/worktrees/agent-x/.claude/hooks/pre.mjs'),
       'and it is achievable specifically for the nested control directory');
   });
+});
+
+/*
+ * TERMINATION, AS A TEST RATHER THAN AS A PROBE I RAN ONCE.
+ *
+ * This property was verified by a scratchpad script, which is the weakest place
+ * to put it: CLAUDE.md's own hierarchy puts a check script above a file above a
+ * comment, and a probe nobody runs again is below all three. It is also no
+ * longer runnable -- the guard now refuses to execute a script this session
+ * wrote and did not commit, because that is a two-call disarm.
+ *
+ * WHAT IT PINS. `protectedFilesIn` must not follow a reparse point. Two sibling
+ * junctions aimed at an ancestor previously did not terminate, killed at 60s and
+ * again at 600s; a single junction aimed at a large system directory cost 367s,
+ * which exceeds the SessionStart budget twelvefold. An over-budget hook is
+ * CANCELLED and its turn APPROVED, so this is a silent-allow property, not a
+ * performance one.
+ *
+ * The time assertion is deliberately loose. It is not a benchmark -- it is there
+ * so that following links again fails LOUDLY here instead of being discovered as
+ * a cancelled Stop hook on somebody's machine.
+ */
+test('TERMINATION: the walk does not follow a junction, so a cycle cannot cost the budget', () => {
+  const root = buildFixture();
+  try {
+    const target = path.join(root, '.claude');
+    let made = 0;
+    for (const name of ['p', 'q']) {
+      try {
+        symlinkSync(target, path.join(root, '.claude/worktrees/agent-x', name), 'junction');
+        made += 1;
+      } catch { /* counted below */ }
+    }
+    /*
+     * The positive first (rule 5): if the fixture could not be built, this test
+     * proves nothing and must SAY so rather than passing quietly.
+     */
+    assert.equal(made, 2, 'could not create the junctions, so termination was not exercised');
+
+    const started = Date.now();
+    const files = protectedFilesIn(root);
+    const elapsed = Date.now() - started;
+
+    assert.ok(elapsed < 5000, `the walk took ${elapsed}ms on two junctions; it is following reparse points again`);
+    assert.ok(
+      files.includes('.claude/worktrees/agent-x/.claude/settings.json'),
+      'termination must not have cost the nested-control coverage it exists beside',
+    );
+    assert.equal(
+      files.some((f) => f.includes('/p/') || f.includes('/q/')), false,
+      'nothing reached through a junction belongs in this repository\'s baseline',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('THE PREMISE, stated as an assertion rather than guarded on', () => {

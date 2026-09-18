@@ -27,7 +27,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, realpathSync,
+  readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync, existsSync,
 } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -143,65 +143,73 @@ export function isProtectedRelPath(rel) {
 export function protectedFilesIn(repoRoot) {
   const out = new Set();
   /*
-   * TERMINATION, AND IT IS NOT OPTIONAL NOW THAT THE WALK DESCENDS WORKTREES.
+   * THE WALK DOES NOT FOLLOW REPARSE POINTS, AND THAT IS THE WHOLE TERMINATION
+   * ARGUMENT. Two earlier attempts at this got it wrong; both are recorded here
+   * because the wrong answers are more instructive than the right one.
    *
-   * The walk used to prune at an exempt directory and never enter a second
-   * checkout, which made it structurally immune to whatever lived in there.
-   * Consulting the matcher removed that immunity, and a directory junction is
-   * ordinary on Windows -- no elevation needed, and pnpm and `npm link` create
-   * them routinely. Measured on a fixture: ONE junction under the worktrees
-   * directory walked 255 entries to depth 191 and stopped only because Windows
-   * raised ELOOP at its reparse limit, which is the operating system halting it
-   * rather than this code. TWO sibling junctions gave branching factor two to
-   * that depth and did not terminate at all -- killed at 60s, then at 600s.
+   * ATTEMPT ONE pruned at the exempt directory and never entered a worktree at
+   * all. Structurally immune to everything below, and it cost the nested
+   * `.claude/` coverage that 436b927 added the matcher half for.
    *
-   * buildSnapshot and protectedDrift both call this, so that is every
-   * SessionStart and every Stop hanging, on a gate whose whole budget is 420s.
-   * A guard that hangs is a guard somebody switches off, which loses every
-   * layer at once -- rule 19, arrived at the expensive way.
+   * ATTEMPT TWO descended and kept a visited set keyed on `realpathSync`,
+   * claiming "provable termination: each real directory entered at most once".
+   * That claim was FALSE on Windows, measured: realpath preserves the case of
+   * whatever spelling it is handed, INCLUDING the case stored inside a
+   * junction's target, so one real directory yields many keys. One directory was
+   * measured entered 17 times; 64 case-variant junctions cost 81.6s against a
+   * true answer of 18 files; a single junction aimed at a large system directory
+   * cost 367s, which is 87% of the Stop budget and twelve times the SessionStart
+   * budget. That matters more than it sounds: an over-budget hook is CANCELLED,
+   * its output discarded, and the turn approved -- so the cost was not an
+   * outage, it was a silent allow.
    *
-   * The visited set is keyed on REALPATH, so a cycle closes the first time it
-   * revisits a real directory. That gives provable termination rather than a
-   * bound somebody guessed: the set of real directories is finite and each is
-   * entered at most once. A depth cap was the obvious alternative and is worse,
-   * because a cap silently truncates coverage and looks identical to a clean
-   * sweep -- the shape this whole file exists to avoid.
+   * Attempt two also pruned directories named `node_modules` and `.git` for
+   * cost, before consulting the matcher. `.claude/` is a PREFIX entry, so
+   * `.claude/node_modules/**` IS protected, and the prune dropped five
+   * matcher-protected paths -- reopening the very parity gap the same commit
+   * claimed to close. Its justification reasoned about the literal array entries
+   * rather than the prefix expansion the function computes.
    *
-   * ONE ACCEPTED CONSEQUENCE, stated rather than discovered later: if a real
-   * directory is reachable by two protected spellings, only the first is
-   * recorded. The bytes are identical either way, so nothing goes unhashed;
-   * what is lost is the second NAME for it.
+   * SO: NO REALPATH, NO VISITED SET, NO NAME PRUNE. `lstatSync` reports a
+   * junction or symlink as a link rather than resolving it, and a link is
+   * skipped. The walk then covers only real directories of this checkout, which
+   * is finite and acyclic, so it terminates for the same reason any tree walk
+   * does -- not because of a bound somebody guessed.
+   *
+   * It closes four things at once: the junction cost, the cycles, the
+   * case-identity problem, and a dedup hole where an exempt alias sorting first
+   * won the race and a control was hashed under NO name.
+   *
+   * WHAT SKIPPING LINKS COSTS, stated rather than found later: a symlinked
+   * control is not hashed under the link's name. Its TARGET is still hashed
+   * under the target's own name if it lives inside the repository, so the bytes
+   * are covered; a link pointing OUTSIDE the repository is not this
+   * repository's control to hash, which is the same judgement `isProtectedPath`
+   * already makes about paths outside the root.
+   *
+   * KNOWN RESIDUAL, NOT FIXED HERE: with the prune gone, a worktree's
+   * `node_modules` is walked even though nothing in it is protected. That is
+   * cost, not correctness, and the honest remedy is a budget with a LOUD refusal
+   * -- which needs an error channel out of this function and therefore changes
+   * both callers. Bolting a silent cap on here would recreate exactly the
+   * truncation-that-reports-success shape this file exists to prevent.
    */
-  const seenDirs = new Set();
   for (const entry of PROTECTED_PATHS) {
     if (!entry.endsWith('/')) { out.add(entry); continue; }
     const base = path.join(repoRoot, entry);
     const visit = (dir) => {
-      /*
-       * Resolved BEFORE the read, so a junction pointing at an ancestor is
-       * caught on entry rather than after it has already listed the directory.
-       * An unresolvable path is not walked: unknown is not clean, and it cannot
-       * be proven acyclic.
-       */
-      let real;
-      try { real = realpathSync(dir); } catch { return; }
-      if (seenDirs.has(real)) return;
-      seenDirs.add(real);
       let entries = [];
       try { entries = readdirSync(dir); } catch { return; }
       for (const e of entries.sort()) {
-        /*
-         * PRUNED BY NAME, which is the remedy the previous comment named for
-         * slowness and which is now load-bearing for cost rather than for
-         * correctness -- the visited set is what guarantees termination. No
-         * entry in PROTECTED_PATHS lives under either of these, so pruning them
-         * cannot lose coverage; that is asserted by the LOST=0 check rather
-         * than assumed.
-         */
-        if (e === 'node_modules' || e === '.git') continue;
         const abs = path.join(dir, e);
+        /*
+         * lstat, NOT stat: stat resolves the link and hands back the target's
+         * type, which is how a junction got followed. A link is skipped whatever
+         * it points at, so no reparse point is ever entered.
+         */
         let st;
-        try { st = statSync(abs); } catch { continue; }
+        try { st = lstatSync(abs); } catch { continue; }
+        if (st.isSymbolicLink()) continue;
         const rel = path.relative(repoRoot, abs).split(path.sep).join('/');
         /*
          * THE WALK CONSULTS THE MATCHER RATHER THAN CARRYING ITS OWN RULE.
@@ -577,6 +585,27 @@ export function isBaselineTest(relPath, snapshot) {
  * forged grant does not vanish into a clean run; it appears in the record as an
  * override nobody granted, which is a question somebody can ask.
  */
+/*
+ * THE HORIZON THE readOverride COMMENT BELOW SPECIFIES.
+ *
+ * That comment was written, argued and left referring to a constant nobody
+ * defined, so readOverride threw a ReferenceError on EVERY call: no grant could
+ * be read, and because the hook binary converts a throw into a deny, every guard
+ * call on the machine was refused. The guard caught its own author mid-edit and
+ * failed closed, which is the behaviour de4c1ab added and is exactly right --
+ * but it froze both live sessions until somebody finished the line.
+ *
+ * AUTHORSHIP IS DISPUTED AND THE DEADLOCK WAS NOT. code-a believes this hunk is
+ * mine; I have no record of writing it. Neither of us could prove it, and each
+ * of us declined to touch the other's half-finished security edit -- correctly,
+ * in general, and here it meant nobody would fix a one-line break blocking
+ * everyone. Defining the constant the comment already names in words is
+ * completing a stated intent, not overriding a design decision. If the hunk's
+ * author wants a different horizon, change this number; the reasoning it belongs
+ * to is fifteen lines below.
+ */
+const MAX_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
+
 export function overridePath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
   const key = sha(path.resolve(repoRoot)).slice(0, 16);
   return path.join(home, 'overrides', `${key}.json`);
@@ -618,6 +647,27 @@ export function readOverride(repoRoot, now = Date.now()) {
    * forgotten override should fail in.
    */
   if (expires <= now) return null;
+  /*
+   * AND AN EXPIRY FAR ENOUGH AWAY IS NOT AN EXPIRY AT ALL.
+   *
+   * `expires <= now` was the only bound, so every well-formed future date
+   * passed. Measured 2026-09-18 against efb7990: a grant carrying
+   * `+275760-09-13T00:00:00.000Z` -- the largest date Date.parse accepts -- read
+   * as LIVE. That is a permanent write permit for the named controls wearing the
+   * word "expires", and it needs no exploit to produce: a typo in the year, or a
+   * grant written once and never revisited, arrives at the same place.
+   *
+   * The whole safety argument for this channel is that it is SELF-CLOSING --
+   * "narrow, expiring and loud". A bound that any date satisfies closes nothing,
+   * so the horizon is stated as a number rather than implied by the format.
+   *
+   * WHY 30 DAYS. Every grant this repository has actually issued was measured in
+   * hours. Thirty days is far beyond real use and still finite, so a forgotten
+   * grant dies on its own; refusing is the same direction the checks above
+   * already fail in. A repair that genuinely needs longer is a decision somebody
+   * should have to make again, which is the point.
+   */
+  if (expires - now > MAX_GRANT_MS) return null;
   return {
     paths: parsed.paths.filter((p) => typeof p === 'string' && p !== ''),
     reason: parsed.reason,
