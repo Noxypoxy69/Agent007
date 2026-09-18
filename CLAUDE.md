@@ -233,6 +233,42 @@ THE AUDIT IS NOT A VETO AND NOT AN APPROVAL. It produces evidence. Acting on
 it is still the owner's call, and an auditor that says "ship it" has not
 transferred that authority to itself.
 
+**21. A TEST MUST NOT ENCODE AN ACCIDENT OF THE MACHINE THAT WROTE IT — AND THE
+AUTHOR'S CHECKOUT IS THE LEAST REPRESENTATIVE MACHINE THERE IS.**
+
+Measured 2026-09-18. The one test covering the 8.3 short-name bypass asserted
+`bin/AG8836~1.MJS`. NTFS assigns 8.3 aliases **by creation order**, not from the
+filename, so that string is a fact about one directory's history. In a fresh
+`git clone` of the same repository the same file is `AGENTB~2.MJS`.
+
+So the test failed on every clone — **including the clone rule 20 requires an
+auditor to make.** The single test covering that attack was broken for exactly
+the reader whose job is to check it, and it failed in the direction that looks
+like the *code* is wrong, which spends an auditor's budget on a phantom.
+
+The fix is the same move as everywhere else in this file: **ask whatever owns
+the mapping.** `dir /x` owns the alias table, so the test asks it and rewrites
+each path component to whatever alias actually exists. The same instinct already
+put `realpathSync.native` in the resolver.
+
+This generalises past 8.3. Anything the author's machine supplies for free is
+suspect: absolute paths, home directories, drive letters, `readdir` order, case
+sensitivity, locale, clock, line endings, and **which files happen to be
+untracked in the shared worktree**. Two independent measurements were wrong
+tonight for the last reason alone — "10 pre-existing failures" was 7 in a clean
+tree, reported twice before somebody cloned.
+
+Two rules fall out, and the second is the cheap one nobody does:
+
+- **Derive it, do not type it.** If a value comes from the filesystem, the OS or
+  the environment, the test asks at run time. A literal is a claim that the value
+  is a property of the thing; usually it is a property of the machine.
+- **RUN IT IN A CLONE BEFORE YOU BELIEVE IT.** `git clone --no-hardlinks . <tmp>`
+  takes seconds and is the only cheap way to find out whether a green run is
+  about the code or about your directory. Rule 20 already sends the auditor to a
+  clone; the author should get there first, because a test that only passes at
+  home wastes the audit it was written for.
+
 ---
 
 # The rest of the traps
