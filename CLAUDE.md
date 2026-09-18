@@ -200,7 +200,42 @@ WHAT THE STEP IS, CONCRETELY:
   and separately lists the claims it checked and found TRUE — otherwise the
   reader cannot tell what was covered from what was skipped.
 
-WHEN IT RUNS: before a migration, a deploy, or a merge to a shared branch, and
+**OPEN A CLONE YOURSELF BEFORE YOU SUMMON ANYBODY.** Added 2026-09-18 on
+Danny's instruction, after a night in which agents spent close to a million
+tokens auditing each other on a three-agent machine:
+
+```bash
+npm run audit:workspace              # clone HEAD, install, run the suite isolated
+npm run audit:workspace -- <rev>     # any revision
+npm run audit:workspace -- <rev> --keep
+```
+
+That script makes the clone and the isolated `AGENTBRIDGE_HOME` **itself**, with
+`mkdtemp`, so it is the answer to the complaint two rules below: rule 20 demanded
+a clone the rail refuses and an environment assignment the rail refuses, which
+made the mandated step unexecutable for exactly the people mandated to perform
+it. It is not a substitute for an independent reader when one is warranted — it
+is the check you do FIRST, because most of what an auditor was being spawned for
+is "does this actually still pass in a clean checkout", and that costs seconds
+rather than 200k tokens.
+
+**WHAT ACTUALLY NEEDS A SEPARATE AUDITOR**, narrowed on the same instruction,
+because "every fix" is what produced the token spend:
+
+| change | what it needs |
+|---|---|
+| the guard, the Stop gate, the shell rail, the grant channel, action authority | a separate auditor — every hole found on 2026-09-18 was on this surface, twice in a fix for the same surface |
+| a migration, a deploy, a merge to a shared branch | a separate auditor |
+| everything else | a green suite in a clone, and one audit at merge |
+
+The reasoning has not changed and neither has rule 20's first paragraph: the
+party that wrote a fix cannot clear it, because the confident commit message and
+the green run come from the same reasoning that produced the bug. What changed is
+the SCOPE. On a machine with three generalists, applying that to every commit
+means they spend more tokens checking each other than building, which is a cost
+the rule never costed.
+
+WHEN A SEPARATE AUDITOR RUNS: before a migration, a deploy, or a merge to a shared branch, and
 whenever work is handed back as complete. An audit that runs on half-finished
 work is spent, so finish the class first — see 19 — and audit once.
 
@@ -225,9 +260,19 @@ regression the fix introduced. Only AFTERWARDS is it handed the old defect list
 to confirm closure. Give it the list first and you have bought a checklist walk,
 which is the thing the whole rule exists to avoid.
 
-AND AUDITS COST. The first one here ran 158k tokens and twenty-three minutes.
-Batch the fixes and audit once; one audit per patch spends the budget that the
-next real finding needs.
+AND AUDITS COST, WHICH THIS FILE UNDERSTATED UNTIL SOMEBODY ADDED THE BILL UP.
+The first one here ran 158k tokens and twenty-three minutes. Measured across
+2026-09-18: two audits in one lane alone were 153k and 265k tokens at 22 and 62
+minutes, five or six ran across three agents, and 38 of the day's 106 commits
+were the guard working on the guard. Batch the fixes and audit once; one audit
+per patch spends the budget that the next real finding needs.
+
+They also earned their keep on the surface they are now scoped to, which is why
+this was narrowed rather than dropped: unhardened git running through a gate
+reporting nine of nine green, in two different spellings; seven payloads walking
+through a worktree exemption, one of which redirected the grant store itself; an
+action grant silently becoming a path grant and reaching the one file no
+override may cover. Two of those were introduced BY A FIX for the same area.
 
 THE AUDIT IS NOT A VETO AND NOT AN APPROVAL. It produces evidence. Acting on
 it is still the owner's call, and an auditor that says "ship it" has not

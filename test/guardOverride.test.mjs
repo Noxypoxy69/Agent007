@@ -91,16 +91,45 @@ test('a grant for a different path does not cover this one', async (t) => {
   assert.equal(s.judge().allowed, false);
 });
 
-test('a PREFIX is not a grant -- naming paths is the whole point', async (t) => {
+test('a PREFIX is not a grant -- naming paths is still the point', async (t) => {
   const s = await sandbox(t);
   /*
    * `src/` would be a general off switch wearing a path. Somebody has to have
    * named the file, or the override becomes permanent by convenience.
+   *
+   * `['*']` USED TO BE IN THIS LIST AND IS NOW DELIBERATELY OUT OF IT. That is
+   * an owner decision, not a regression: a3e84bf, 2026-09-18. Danny asked for
+   * full access roughly ten times and kept being handed four-path grants,
+   * because under no-globs the only expressible full grant is an enumeration of
+   * twenty protected paths plus every test file, which nobody writes by hand.
+   * His words: "there's only 3 of you, I can't make 200 agents so they can all
+   * have small access." The rule was written for many narrow actors and this
+   * machine has three generalists, so it produced idle agents rather than least
+   * privilege.
+   *
+   * The distinction the test still enforces is the one that survived: the EXACT
+   * token is a wildcard, and nothing else is. `src/`, `src`, `''`, `src/*` and
+   * `*.mjs` remain nothing at all, so no reader ever has to work out what a
+   * pattern covers.
    */
-  for (const paths of [['src/'], ['src'], ['*'], ['']]) {
+  for (const paths of [['src/'], ['src'], [''], ['src/*'], ['*.mjs'], ['src/**'], ['.claude/*']]) {
     s.grant({ paths, reason: 'x', granted_by: 'd', expires_at: FUTURE() });
     assert.equal(s.judge().allowed, false, `${JSON.stringify(paths)} must not act as a wildcard`);
   }
+});
+
+test('the exact token "*" IS a wildcard, and that is deliberate', async (t) => {
+  /*
+   * RULE 5 for the test above. Without this, the list of things that are not
+   * wildcards would pass just as well if NOTHING were a wildcard -- including
+   * the case the owner actually asked for, which would then be silently broken
+   * while the suite stayed green.
+   */
+  const s = await sandbox(t);
+  s.grant({ paths: ['*'], reason: 'full access, directed by the owner', granted_by: 'danny', expires_at: FUTURE() });
+  assert.equal(s.judge().allowed, true,
+    'a3e84bf made the exact token a wildcard on the owner\'s instruction; if this fails, that '
+    + 'decision has been reverted and the operator is back to enumerating every path by hand');
 });
 
 test('a malformed or empty grant opens nothing', async (t) => {

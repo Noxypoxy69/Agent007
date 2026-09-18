@@ -37,7 +37,8 @@
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawnSync, execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { runGit } from '../src/safeGit.mjs';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -53,8 +54,8 @@ const rev = argv.find((a) => !a.startsWith('--')) ?? 'HEAD';
  */
 let sha;
 try {
-  sha = execFileSync('git', ['rev-parse', '--verify', `${rev}^{commit}`],
-    { cwd: REPO, encoding: 'utf8' }).trim();
+  sha = String(runGit(['rev-parse', '--verify', `${rev}^{commit}`],
+    { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim();
 } catch {
   console.error(`audit-workspace: ${rev} does not name a commit in this repository`);
   process.exit(2);
@@ -83,12 +84,30 @@ const step = (label, file, args, opts = {}) => {
  * --no-hardlinks so the clone cannot share objects with the source. An audit
  * that can reach back into the operator's object store is not isolated.
  */
-if (step('cloning', 'git', ['clone', '--no-hardlinks', '--quiet', REPO, work], { cwd: REPO }).code !== 0) {
-  process.exit(2);
-}
-if (step('checking out', 'git', ['checkout', '--quiet', '--detach', sha], { cwd: work }).code !== 0) {
-  process.exit(2);
-}
+/*
+ * THROUGH safeGit, BECAUSE THIS IS THE SHARPEST PLACE NOT TO BE. Cloning a
+ * repository and checking out a caller-named revision is precisely where a
+ * repository config that executes would matter, and my own lint caught this
+ * file using a bare execFileSync for exactly that.
+ *
+ * runGit throws rather than returning a status, so these adapt to the throw.
+ */
+const gitStep = (label, args, cwd) => {
+  process.stdout.write(`${label.padEnd(28)}`);
+  try {
+    runGit(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    console.log('ok');
+    return true;
+  } catch (e) {
+    console.log('FAILED');
+    const said = String(e?.stderr ?? e?.message ?? e).trim();
+    if (said) console.log(`  ${said.split('\n').slice(0, 4).join('\n  ')}`);
+    return false;
+  }
+};
+
+if (!gitStep('cloning', ['clone', '--no-hardlinks', '--quiet', REPO, work], REPO)) process.exit(2);
+if (!gitStep('checking out', ['checkout', '--quiet', '--detach', sha], work)) process.exit(2);
 
 /*
  * npm is a .cmd shim on Windows, and node 24 refuses to spawn a .cmd without a
