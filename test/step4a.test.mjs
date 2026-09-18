@@ -104,7 +104,61 @@ test('M3 identity neither reads nor writes the candidate index', (t) => {
   assert.equal(idOf(h.a, h.c).candidateTreeSha, unstaged, 'and the index must not change the answer');
 });
 
+/**
+ * Can this filesystem represent an executable bit that git will RECORD?
+ *
+ * MEASURED, NOT INFERRED FROM process.platform. Rule 21 says a test must not
+ * encode an accident of the machine that wrote it, and "assume Windows cannot"
+ * is the same mistake wearing the opposite sign -- it would skip on a Windows
+ * box with a POSIX-capable filesystem mounted, and it would run on a Linux box
+ * whose working tree happens to sit on an exFAT volume.
+ *
+ * So it asks: build a throwaway repo, chmod a file, and see whether the tree
+ * object actually moves. NTFS has no executable bit at all, so the answer there
+ * is no EVEN WITH core.fileMode=true -- measured 2026-09-18, both settings, the
+ * tree sha was byte-identical before and after.
+ */
+let MODE_BIT_VISIBLE = null;
+function modeChangesAreVisible() {
+  if (MODE_BIT_VISIBLE !== null) return MODE_BIT_VISIBLE;
+  const probe = mkdtempSync(path.join(tmpdir(), 'modebit-'));
+  try {
+    const git = (...a) => execFileSync('git', a, { cwd: probe, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    git('init', '-q', '.');
+    writeFileSync(path.join(probe, 'f.mjs'), 'x\n');
+    git('add', 'f.mjs');
+    const t1 = git('write-tree').trim();
+    chmodSync(path.join(probe, 'f.mjs'), 0o755);
+    git('add', 'f.mjs');
+    const t2 = git('write-tree').trim();
+    MODE_BIT_VISIBLE = t1 !== t2;
+  } catch {
+    // If the probe itself cannot run, treat the property as unobservable rather
+    // than claiming the identity is broken.
+    MODE_BIT_VISIBLE = false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+  return MODE_BIT_VISIBLE;
+}
+
 test('M4 identity includes executable-bit changes', (t) => {
+  /*
+   * RULE 6: ASSERT THE PRECONDITION, DO NOT GUARD ON IT SILENTLY. On a
+   * filesystem with no executable bit there is no mode change for the identity
+   * to include, so this test was asserting that git must notice something the
+   * filesystem cannot express -- red forever, over working code, in the suite
+   * every session's Stop gate compares against. That is the credibility burn
+   * rule 14 describes.
+   *
+   * It skips LOUDLY here rather than passing quietly, because "the bit is not
+   * representable" and "the identity ignores the bit" must not look alike.
+   */
+  if (!modeChangesAreVisible()) {
+    t.skip('this filesystem cannot represent an executable bit that git records, so there is no mode change to detect');
+    return;
+  }
+
   const h = harness(t);
   const before = idOf(h.a, h.c).candidateTreeSha;
   chmodSync(path.join(h.c, 'src', 'feature.mjs'), 0o755);

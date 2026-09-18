@@ -235,6 +235,61 @@ test('G the shipped controller binary opens a job the shipped verifier can actua
    */
   const NODE = process.execPath;
   const GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  /*
+   * AND THE SHELL ITSELF, WHICH WAS THE ONE INTERPRETER LEFT HARDCODED.
+   *
+   * argv[0] was the literal '/bin/sh'. Node spawns that path DIRECTLY -- it is
+   * not interpreted by a shell, unlike GIT and NODE above, which are pasted into
+   * a command string that sh expands. There is no /bin on Windows, so the spawn
+   * failed instantly: measured, ENOENT, 0 bytes of stdout, 0 bytes of stderr, no
+   * exit code, duration_ms 1. The pipeline correctly reported "outcome:crashed",
+   * and the test read that as the controller edge being broken.
+   *
+   * The comment directly above already says why absolute interpreter paths are
+   * needed here. It resolved two of the three and assumed the third.
+   *
+   * ASKED, NOT ASSUMED, and specifically not branched on process.platform: the
+   * question is "what path will THIS node accept for a POSIX shell", and the
+   * system is the thing that knows. cygpath is how Git for Windows answers it;
+   * where cygpath is absent the POSIX answer is already correct.
+   */
+  const shPosix = execFileSync('sh', ['-c', 'command -v sh'], { encoding: 'utf8' }).trim();
+  let SH = shPosix;
+  try {
+    const win = execFileSync('cygpath', ['-w', shPosix], { encoding: 'utf8' }).trim();
+    if (win) SH = win;
+  } catch { /* no cygpath: the POSIX path is the spawnable one */ }
+
+  /*
+   * AND EVERY INTERPRETER PASTED INTO THE COMMAND STRING MUST BE QUOTED.
+   *
+   * NODE is process.execPath -- on Windows that is
+   * C:\Program Files\nodejs\node.exe, with a SPACE and BACKSLASHES, and it was
+   * interpolated bare into an sh -c string. sh split it at the space and looked
+   * for a command called "C:Program": exit 127, tests never ran, and the
+   * verdict blamed the controller edge. Measured, all four forms:
+   *
+   *   C:\Program Files\...\node.exe      -> sh: C:Program: command not found
+   *   /c/Program Files/.../node.exe      -> sh: /c/Program: No such file
+   *   either one QUOTED                  -> works
+   *
+   * So it is a quoting bug, not a path-form bug. GIT escaped it only because
+   * /usr/bin/git happens to have no space on this machine -- rule 21, an
+   * accident of the authoring box -- so it is quoted too rather than left to
+   * luck.
+   *
+   * POSIX form inside single quotes: single quotes suppress every escape in sh,
+   * so no backslash question arises at all.
+   */
+  const asPosix = (winPath) => {
+    try {
+      const out = execFileSync('cygpath', ['-u', winPath], { encoding: 'utf8' }).trim();
+      return out || winPath;
+    } catch { return winPath; }
+  };
+  const shQuote = (v) => `'${String(v).split("'").join(`'"'"'`)}'`;
+  const NODE_SH = shQuote(asPosix(NODE));
+  const GIT_SH = shQuote(asPosix(GIT));
   const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
 
   const taskFile = path.join(root, 'task.json');
@@ -243,8 +298,8 @@ test('G the shipped controller binary opens a job the shipped verifier can actua
     base_sha: baseSha,
     /* The attempt must commit: the pipeline refuses to dispose of a dirty
      * workspace, and files_changed is read with `git diff --name-only`. */
-    argv: ['/bin/sh', '-c',
-      `printf 'export const v=2;\\n' > src/feature.mjs && ${GIT} add -A && ${GIT} commit -qm change && ${NODE} --test --test-reporter=tap test/baseline.test.mjs`],
+    argv: [SH, '-c',
+      `printf 'export const v=2;\\n' > src/feature.mjs && ${GIT_SH} add -A && ${GIT_SH} commit -qm change && ${NODE_SH} --test --test-reporter=tap test/baseline.test.mjs`],
     timeout_ms: 120000,
     allowed_paths: ['src/**', 'test/**'],
   }));
