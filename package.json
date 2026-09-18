@@ -15,6 +15,7 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
+    "audit:workspace": "node scripts/audit-workspace.mjs",
     "bridge": "node bridge/server.mjs",
     "mcp:stdio": "node mcp/stdio.mjs"
   },

@@ -19,6 +19,10 @@ import {
   readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot, overrideCovers,
   isGateSelfConfig,
 } from '../src/guardSession.mjs';
+// git is asked whether a drifted control is committed; see isCommittedWork.
+// Through safeGit, because this gate shells out inside a repository whose own
+// config it is trying to judge.
+import { runGit } from '../src/safeGit.mjs';
 
 /*
  * BEING KILLED IS A SILENT ALLOW, SO THE HOOK DEADLINE IS PART OF THIS GATE'S JOB.
@@ -311,12 +315,91 @@ const allDrift = protectedDrift(root, snapshot);
 // Partitioned from ONE read per entry, for the reason given at the test filter
 // below: two passes leave a window where an appearing grant puts an entry in
 // neither list, which is silent acceptance. Pre-existing here; closed with it.
-const driftDecisions = allDrift.map((d) => ({
-  entry: d,
-  granted: !isGateSelfConfig(d.file) && Boolean(overrideCovers(root, d.file)),
-}));
+/*
+ * ── A TEAMMATE'S LANDED COMMIT IS NOT THIS SESSION TAMPERING ────────────────
+ *
+ * The snapshot is minted once, at SessionStart, and never refreshed. In a
+ * SHARED worktree with three agents that is fatal: every control another agent
+ * legitimately commits drifts you, permanently, for the life of your session.
+ *
+ * Measured 2026-09-18. code-b was refused on every single turn with eleven
+ * lines, eight of them caused by MY commits landing after its snapshot was
+ * taken. It could not clear them: committing does not help (this gate says so
+ * in its own headline), and the gate re-mints only at SessionStart and only
+ * from a tree git calls clean. So it was blocked from ENDING A TURN, not from
+ * doing work, and every turn cost the operator a manual unblock. Danny, on the
+ * whole class: "they cant finish their work dude its a mess so many
+ * restrictions that its eating time".
+ *
+ * WHAT THIS GATE IS ACTUALLY FOR: stopping THIS session from quietly mutating a
+ * control and then reporting success. A change that is COMMITTED is not quiet.
+ * It is in git history -- attributable, diffable, revertible, and visible to
+ * every audit -- which is exactly the auditability property CLAUDE.md already
+ * credits the execution gate with: "It requires that code to be in git history
+ * first... That is an AUDITABILITY property, and it is worth having."
+ *
+ * So drift whose working file MATCHES HEAD is landed work. It is reported --
+ * loudly, every turn, naming each file -- and it does not block. Drift that is
+ * uncommitted still blocks, because that is the case this gate was built for:
+ * a live modification nobody has recorded.
+ *
+ * ASKED OF GIT, NOT OF THE FILESYSTEM. Comparing bytes against `git show
+ * HEAD:path` reports every file as drifted on a checkout with core.autocrlf
+ * true, which is the operator's -- the same trap baselineBlockingDriftFromGit
+ * documents. `git status --porcelain` applies the repository's own eol and
+ * attribute rules, so it answers the question actually being asked. If git
+ * cannot answer, the entry stays BLOCKING: unknown is not clean.
+ */
+function isCommittedWork(rel) {
+  try {
+    const out = runGit(['status', '--porcelain', '--untracked-files=all', '--', rel],
+      { cwd: root, encoding: 'utf8' });
+    return String(out).trim() === '';
+  } catch {
+    return false; // could not measure; keep blocking
+  }
+}
+
+const driftDecisions = allDrift.map((d) => {
+  const granted = !isGateSelfConfig(d.file) && Boolean(overrideCovers(root, d.file));
+  return {
+    entry: d,
+    granted,
+    /*
+     * THE GATE'S OWN CONFIGURATION IS EXCLUDED HERE TOO, and leaving it out was
+     * a hole this file's own test caught on the first run. isGateSelfConfig
+     * guarded only the GRANT branch, so "commit it" would have become a way to
+     * do what no override may: .claude/settings.json decides whether the guard
+     * runs at all, and a commit is not a stronger permission than a grant.
+     *
+     * DELETION IS EXCLUDED FOR A DIFFERENT REASON. A committed edit leaves
+     * something to read and revert; a committed DELETION of a control is the
+     * incident this repository was built around -- a real session deleted
+     * src/claudeGuard.mjs and nothing refused. Committing that must not buy
+     * silence.
+     */
+    landed: !granted
+      && !isGateSelfConfig(d.file)
+      && d.now !== 'deleted'
+      && isCommittedWork(d.file),
+  };
+});
 const granted = driftDecisions.filter((x) => x.granted).map((x) => x.entry);
-const drift = driftDecisions.filter((x) => !x.granted).map((x) => x.entry);
+const landed = driftDecisions.filter((x) => x.landed).map((x) => x.entry);
+const drift = driftDecisions.filter((x) => !x.granted && !x.landed).map((x) => x.entry);
+
+if (landed.length) {
+  /*
+   * REPORTED, NEVER SILENT. The whole argument for not blocking is that the
+   * change is on the record, so this line IS the record from the gate's side.
+   * Recorded rather than returned, like the grant notice below it.
+   */
+  carriedNotice = `${carriedNotice ? `${carriedNotice}\n` : ''}`
+    + '[agentbridge:protected-control-committed] Protected controls differ from this session\'s '
+    + 'snapshot because they were COMMITTED -- by this session or another agent sharing the '
+    + 'worktree. Not blocking: a committed change is attributable and diffable, which is what the '
+    + `snapshot exists to guarantee. Recorded:\n${landed.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`;
+}
 if (granted.length) {
   /*
    * RECORDED, NOT RETURNED. This must not call out() -- see its definition.
