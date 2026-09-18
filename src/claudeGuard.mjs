@@ -820,11 +820,33 @@ const identifierWords = (key) => key
   .filter(Boolean)
   .map((w) => w.toLowerCase());
 
+/*
+ * A PLURAL IS THE SAME WORD. `sources` is the natural name for a mover's input
+ * list and it is the sharpest miss here, given that the reasoning which removed
+ * `source` from this list in the first place was explicitly about movers. Also
+ * measured walking through: srcs, SRCS, froms, tos, and the array form
+ * {"sources":["src/claudeGuard.mjs"]}, which inherits its key from the parent.
+ *
+ * Handled as a PROPERTY of the word rather than by adding five more strings,
+ * which is the mistake this file has now made in three different places.
+ *
+ * DELIBERATELY NOT ADDED, and the restraint is the point: origin, input, output,
+ * name, entry, module, template, asset. Each was measured walking through, and
+ * each is a word whose value is USUALLY NOT A PATH -- `name` especially. This is
+ * a BACKSTOP for fields nobody anticipated, not the boundary; PATH_FIELDS and the
+ * shell rail are the boundary. Widening it until it matches every key that could
+ * ever hold a path converts it into a general refusal of unknown tools, which is
+ * failure mode 19 (a list of names fails in BOTH directions) arriving from the
+ * permissive side. If one of those words turns up carrying a control in a real
+ * payload, add it then, with the payload in the commit message.
+ */
 const isPathShapedKey = (key) => {
   if (typeof key !== 'string' || key === '') return false;
   if (CONTENT_KEY.has(key.toLowerCase())) return false;
   if (PATH_STEM.test(key)) return true;
-  return identifierWords(key).some((w) => PATH_WORD.has(w));
+  return identifierWords(key).some(
+    (w) => PATH_WORD.has(w) || (w.endsWith('s') && PATH_WORD.has(w.slice(0, -1))),
+  );
 };
 
 function protectedMentionIn(input, cwd, depth = 0, seen = { n: 0 }, inheritedKey = null) {
