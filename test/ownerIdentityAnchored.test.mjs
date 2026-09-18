@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 
 import {
   validateDecision, activeDecisions, resolveOwnerDecision, createDecision,
-  isOwnerId, OWNER_IDS,
+  isOwnerId, OWNER_IDS, revokeDecision,
 } from '../src/ownerDecisions.mjs';
 import {
   validateDecision as hostedValidate,
@@ -37,6 +37,7 @@ import {
   resolveOwnerDecision as hostedResolve,
   isOwnerId as hostedIsOwnerId,
   OWNER_IDS as HOSTED_OWNER_IDS,
+  revokeDecision as hostedRevoke,
 } from '../supabase/functions/mcp/_shared.js';
 import { ACTORS } from '../src/coordination.mjs';
 
@@ -355,6 +356,75 @@ test('A VALID SUPERSESSION STILL WORKS, so the fix above is not a blunt instrume
       `${name}: a legitimate supersession stopped working`);
     assert.equal(resolve([older, newer], 'deploy.production').outcome, 'allowed',
       `${name}: the owner's own replacement decision does not apply`);
+  }
+});
+
+test('REVOCATION IS ANCHORED TOO, ON BOTH SURFACES', () => {
+  /*
+   * UNGATED UNTIL AN AUDIT SAID SO, AND THE HOSTED HALF HAD NEVER LANDED.
+   *
+   * 62b3158 said revokeDecision was "Anchored." It was anchored in src and left
+   * untouched in _shared.js — the DEPLOYED copy — so the two surfaces disagreed
+   * in three directions at once. Nothing noticed because no test imported
+   * revokeDecision from either file, and sharedSpliceMatches covers only
+   * detectCollisions, wentStale and supervisoryReport.
+   *
+   * Reverting src to the old compare-against-itself form was measured as a
+   * MISSED mutation: every existing fixture sets `by === owner_id`, so the old
+   * and new forms agree on all of them. These are the cases where they do not.
+   */
+  const at = '2026-09-18T21:00:00.000Z';
+  const ownerRow = decisionBy('danny');
+  const mainRow = { ...decisionBy('main'), decision_id: 'd-main' };
+
+  for (const [name, revoke] of [['src', revokeDecision], ['hosted', hostedRevoke]]) {
+    assert.equal(revoke(ownerRow, { at, by: 'danny' }).ok, true,
+      `${name}: the owner cannot revoke their own decision`);
+    assert.equal(revoke(ownerRow, { at, by: 'owner' }).ok, true,
+      `${name}: the owner's alias cannot revoke — the anchor's folding is not applied here`);
+    assert.equal(revoke(ownerRow, { at, by: 'DANNY' }).ok, true,
+      `${name}: capitalisation blocked a legitimate revocation`);
+
+    assert.equal(revoke(mainRow, { at, by: 'main' }).ok, false,
+      `${name}: "main" revoked its own record — the compare-against-itself form is still here`);
+    assert.equal(revoke(ownerRow, { at, by: 'c8' }).ok, false,
+      `${name}: a coordinator revoked the owner's decision`);
+    assert.equal(revoke({ ...ownerRow, owner_id: undefined }, { at, by: 'c8' }).ok, false,
+      `${name}: a row with no owner_id was revocable by anyone`);
+  }
+});
+
+test('created_by IS ANCHORED INDEPENDENTLY, not compared to owner_id', () => {
+  /*
+   * ALSO MEASURED AS AN UNCAUGHT MUTATION. Reverting `created_by` to strict
+   * equality with owner_id changed nothing in the suite, because every fixture
+   * — decisionBy() included — sets the two fields to the SAME string, so both
+   * forms agree on all of them. The divergent pairs are the whole reason the
+   * change exists, and no test constructed one. That is hollow gate 10 again,
+   * in the commit that states the lesson.
+   *
+   * It matters on the hosted surface specifically: created_by is not
+   * caller-supplied there, it is the authenticated coordinator_tokens.label, so
+   * any spelling difference from the payload's owner_id voided a real decision.
+   */
+  const pairs = [
+    ['danny', 'danny', true],
+    ['DANNY', 'danny', true],
+    ['owner', 'danny', true],
+    ['danny', 'owner', true],
+    ['  danny  ', 'danny', true],
+    ['danny', 'code-b', false],
+    ['code-b', 'danny', false],
+    ['main', 'main', false],
+  ];
+
+  for (const [name, validate] of SURFACES.map((s) => [s[0], s[1]])) {
+    for (const [owner_id, created_by, want] of pairs) {
+      const v = validate({ ...decisionBy('danny'), owner_id, created_by });
+      assert.equal(v.ok, want,
+        `${name}: owner_id=${JSON.stringify(owner_id)} created_by=${JSON.stringify(created_by)} `
+        + `expected ok=${want}, got ${v.ok} — ${v.errors.join('; ')}`);
+    }
   }
 });
 

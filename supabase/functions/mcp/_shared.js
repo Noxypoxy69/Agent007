@@ -370,12 +370,58 @@ export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
   return valid.filter((d) => !superseded.has(d.decision_id));
 }
 
+/**
+ * Decisions that WOULD apply, suppressed only by rows that are not valid
+ * decisions. Spliced from src/ownerDecisions.mjs — see the comment there.
+ */
+function suppressedByInvalidOnly(rows, action, context, owners) {
+  if (!Array.isArray(rows)) return [];
+  const present = rows.filter((d) => isPlainObject(d) && !d.revoked_at);
+
+  const validRows = [];
+  const invalidRows = [];
+  for (const d of present) (validateDecision(d, { owners }).ok ? validRows : invalidRows).push(d);
+
+  const supersededByValid = new Set(validRows.map((d) => d.supersedes).filter(isNonEmptyString));
+  const supersededByInvalid = new Set(invalidRows.map((d) => d.supersedes).filter(isNonEmptyString));
+
+  return validRows.filter((d) =>
+    isNonEmptyString(d.decision_id)
+    && supersededByInvalid.has(d.decision_id)
+    && !supersededByValid.has(d.decision_id)
+    && scopeMatches(d, context)
+    && Array.isArray(d.capabilities)
+    && d.capabilities.some((c) => capabilityMatches(c, action)));
+}
+
 export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNER_IDS } = {}) {
   if (!isNonEmptyString(action)) {
     return {
       outcome: 'owner_required', decision_id: null, matched_scope: null,
       reason: 'the requested action was not classified, so no decision can be matched',
       constraints: {}, statement: null, candidates: [],
+    };
+  }
+
+  /*
+   * AN INVALID SUPERSEDER ESCALATES, IT DOES NOT DELETE. This is the deployed
+   * path: resolve_owner_decision and settleOpenRequestsAgainstPolicy both run
+   * on it. A bare { supersedes: <id> } object deleted a standing owner DENY and
+   * the permission layer then routed the resulting no_decision to a COORDINATOR
+   * for anything reversible. See src/ownerDecisions.mjs.
+   */
+  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);
+  if (orphaned.length > 0) {
+    return {
+      outcome: 'owner_required',
+      decision_id: null,
+      matched_scope: null,
+      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but is `
+        + 'superseded by a record that is not a valid decision — the ledger cannot say what the owner '
+        + 'decided, so this goes back to the owner rather than being treated as unregulated',
+      constraints: {},
+      statement: null,
+      candidates: orphaned.map((d) => d.decision_id),
     };
   }
 
@@ -426,14 +472,29 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
   };
 }
 
-export function revokeDecision(d, { at, by, reason = null }) {
+export function revokeDecision(d, { at, by, reason = null }, { owners = OWNER_IDS } = {}) {
   if (!isPlainObject(d)) return { ok: false, errors: ['no such decision'] };
   if (d.revoked_at) return { ok: false, errors: [`decision ${d.decision_id} was already revoked at ${d.revoked_at}`] };
   if (!isNonEmptyString(at) || !isNonEmptyString(by)) {
     return { ok: false, errors: ['revocation requires a timestamp and an author'] };
   }
-  if (isNonEmptyString(d.owner_id) && by !== d.owner_id) {
-    return { ok: false, errors: [`"${by}" is not the owner "${d.owner_id}": a worker cannot revoke the owner's decision`] };
+  /*
+   * ANCHORED. THIS IS THE HALF OF 62b3158 THAT NEVER LANDED HERE.
+   *
+   * That commit's message said revokeDecision was "Anchored." It was anchored
+   * in src/ownerDecisions.mjs and left untouched in this file — the deployed
+   * copy — so for three commits the two surfaces disagreed in three directions
+   * at once: `by: "main"` was refused in src and accepted here, the owner alias
+   * was accepted in src and refused here, and a row with no owner_id was
+   * refused in src and revocable by anyone here.
+   *
+   * Nothing caught it: ownerIdentityAnchored never imports revokeDecision from
+   * either surface, and sharedSpliceMatches covers only detectCollisions,
+   * wentStale and supervisoryReport. CLAUDE.md is explicit that every edit to a
+   * spliced module goes to both copies, and I claimed I had done it.
+   */
+  if (!isOwnerId(by, owners)) {
+    return { ok: false, errors: [`"${by}" is not the owner: a worker cannot revoke the owner's decision`] };
   }
   return {
     ok: true,

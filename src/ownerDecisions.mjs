@@ -317,6 +317,37 @@ export function activeDecisions(rows, { owners = OWNER_IDS } = {}) {
 }
 
 /**
+ * Decisions that WOULD apply, but are suppressed only by rows that are not
+ * valid decisions.
+ *
+ * A supersession by a VALID row is the owner changing their mind and is not
+ * reported here. A supersession by a row that fails validation says nothing
+ * about what the owner decided — it is a gap in the ledger, and a gap is a
+ * question rather than a licence.
+ */
+function suppressedByInvalidOnly(rows, action, context, owners) {
+  if (!Array.isArray(rows)) return [];
+  const present = rows.filter((d) => isPlainObject(d) && !d.revoked_at);
+
+  const validRows = [];
+  const invalidRows = [];
+  for (const d of present) (validDecisionCached(d, owners) ? validRows : invalidRows).push(d);
+
+  const supersededByValid = new Set(validRows.map((d) => d.supersedes).filter(isNonEmptyString));
+  const supersededByInvalid = new Set(invalidRows.map((d) => d.supersedes).filter(isNonEmptyString));
+
+  return validRows.filter((d) =>
+    isNonEmptyString(d.decision_id)
+    && supersededByInvalid.has(d.decision_id)
+    && !supersededByValid.has(d.decision_id)
+    && scopeMatches(d, context)
+    && Array.isArray(d.capabilities)
+    && d.capabilities.some((c) => capabilityMatches(c, action)));
+}
+
+const validDecisionCached = (d, owners) => validateDecision(d, { owners }).ok;
+
+/**
  * THE CALL EVERY WORKER MAKES BEFORE ASKING THE BUILDER ANYTHING.
  *
  * @param {Array}  rows     the whole ledger, including dead records
@@ -333,6 +364,40 @@ export function resolveOwnerDecision(rows, action, context = {}, { owners = OWNE
       outcome: 'owner_required', decision_id: null, matched_scope: null,
       reason: 'the requested action was not classified, so no decision can be matched',
       constraints: {}, statement: null, candidates: [],
+    };
+  }
+
+  /*
+   * AN INVALID SUPERSEDER ESCALATES. IT DOES NOT DELETE.
+   *
+   * activeDecisions suppresses on the strength of any surviving row, valid or
+   * not — which is what stops a refused row REVIVING what it replaced. The
+   * first version of that stopped there and called it fail-safe. It is not.
+   * A bare `{ supersedes: <id> }` object deleted a standing owner DENY, and
+   * `no_decision` is NOT the owner being asked: src/permissionRequest.mjs
+   * routes it by risk, so for anything elevated-but-reversible the decider
+   * becomes `coordinator` — a peer agent. An unappealable owner refusal became
+   * something another agent could approve. Found by blind audit; the commit
+   * that shipped it claimed the opposite in its own message.
+   *
+   * So a decision suppressed ONLY by rows that do not validate is not silently
+   * gone: it makes the question the owner's. Checked BEFORE the match handling
+   * on purpose — if a DENY was suppressed by junk while some other valid ALLOW
+   * still matches, answering `allowed` would be the same deletion wearing a
+   * result.
+   */
+  const orphaned = suppressedByInvalidOnly(rows, action, context, owners);
+  if (orphaned.length > 0) {
+    return {
+      outcome: 'owner_required',
+      decision_id: null,
+      matched_scope: null,
+      reason: `${orphaned.map((d) => `"${d.decision_id}"`).join(', ')} applies to "${action}" but is `
+        + 'superseded by a record that is not a valid decision — the ledger cannot say what the owner '
+        + 'decided, so this goes back to the owner rather than being treated as unregulated',
+      constraints: {},
+      statement: null,
+      candidates: orphaned.map((d) => d.decision_id),
     };
   }
 
