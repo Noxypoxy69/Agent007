@@ -265,6 +265,80 @@ test('FOLLOWING the PROTECTED-CONTROL refusal works too — the untested half', 
   }
 });
 
+test('A GRANT FOR THE GATE CONFIG IS REFUSED AT PreToolUse — with the grant actually present', (t) => {
+  /*
+   * THE PREVIOUS TEST FOR THIS WROTE NO GRANT, so it exercised the no-grant path
+   * and could not fail for the real reason. The check it was guarding sat AFTER
+   * the grant branch in judgeWrite, which made it reachable only when there was
+   * no grant -- i.e. never in the case it was written for. The whole sequence
+   * reproduced byte-identically after the "fix": PreToolUse permitted under the
+   * grant, the write landed, and Stop blocked the turn on the change it had just
+   * authorised. Found by the next audit.
+   *
+   * So this one writes the grant first. That is the difference between a test
+   * and a decoration here.
+   */
+  const dir = scratchProject(t);
+  const home = withHome(t);
+  writeSnapshot(dir, SESSION);
+  mkdirSync(path.join(dir, '.claude'), { recursive: true });
+  writeFileSync(path.join(dir, '.claude', 'settings.json'), '{}\n');
+  writeFileSync(path.join(dir, 'CLAUDE.md'), '# controls\n');
+
+  // A grant naming BOTH the gate configuration and an ordinary control.
+  grant(dir, home, ['.claude/settings.json', '.claude/settings.local.json', 'CLAUDE.md']);
+
+  for (const f of ['.claude/settings.json', '.claude/settings.local.json']) {
+    const v = evaluateClaudeTool({
+      tool_name: 'Write', tool_input: { file_path: f, content: '{}' }, cwd: dir, session_id: SESSION,
+    });
+    assert.equal(v.allowed, false,
+      `${f} is named by a live grant and must STILL be refused — the Stop gate will not honour it`);
+    assert.equal(v.id, 'protected-control');
+    assert.ok(!/override must name/i.test(v.reason),
+      `${f}: the refusal must not advise a grant that cannot work: ${v.reason}`);
+  }
+
+  /*
+   * RULE 5: the positive. The same grant must still work for an ordinary
+   * control, or this passes by refusing everything and proves nothing.
+   */
+  const ordinary = evaluateClaudeTool({
+    tool_name: 'Write', tool_input: { file_path: 'CLAUDE.md', content: 'x' }, cwd: dir, session_id: SESSION,
+  });
+  assert.equal(ordinary.allowed, true, 'the same grant must still permit an ordinary protected path');
+  assert.equal(ordinary.overridden, true);
+});
+
+test('AND THE STOP GATE REFUSES THE SAME GRANT — the half that had no ratchet', (t) => {
+  /*
+   * The Stop side of GATE_SELF_CONFIG was real but untested: an auditor mutated
+   * `granted: !isGateSelfConfig(d.file) && ...` to `!false && ...` -- which is
+   * the entire property the list exists for -- and 75 tests across six guard and
+   * stop-gate files stayed green.
+   *
+   * Both layers must refuse, or an operator spends a grant and loses the turn.
+   */
+  const dir = scratchRepoWithGuard(t);
+  const home = path.join(dir, 'home');
+  stop(dir);                                    // mints the baseline
+
+  writeFileSync(path.join(dir, '.claude', 'settings.json'), '{"hooks":{}}\n');
+  mkdirSync(path.join(home, 'overrides'), { recursive: true });
+  writeFileSync(overridePath(dir, home), JSON.stringify({
+    paths: ['.claude/settings.json'],
+    reason: 'try to suppress the gate config drift',
+    granted_by: 'danny',
+    expires_at: new Date(Date.now() + 3600e3).toISOString(),
+  }));
+
+  const after = stop(dir);
+  assert.match(after.reason, /protected-control-changed/,
+    'a grant must NOT suppress drift in the gate own hook configuration');
+  assert.match(after.reason, /settings\.json/,
+    'the block must name the file it is about');
+});
+
 test('the refusal does NOT advise an override for the paths Stop refuses to honour one for', (t) => {
   /*
    * The Stop gate deliberately ignores a grant for its own hook configuration.

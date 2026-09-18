@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync, existsSync, rmSync, readdirSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SAFE_GIT_CONFIG, runGit } from '../src/safeGit.mjs';
+import { SAFE_GIT_CONFIG, runGit, runGitAsync, redirectsRepository } from '../src/safeGit.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -113,5 +113,87 @@ test('the hardening list itself is frozen and names all three surfaces', () => {
   const joined = SAFE_GIT_CONFIG.join(' ');
   for (const surface of ['core.hooksPath', 'core.fsmonitor', 'protocol.ext.allow']) {
     assert.ok(joined.includes(surface), `${surface} is not refused`);
+  }
+});
+
+/*
+ * WHICH GIT_ VARIABLES ARE STRIPPED, AND THE ONE THAT MUST NOT BE.
+ *
+ * The strip started as /^GIT_/i and that was too wide by exactly one variable
+ * that matters. Git sets GIT_INDEX_FILE AS PROTOCOL when it invokes a hook for a
+ * partial commit -- `git commit -- <paths>`, `git commit -p` -- pointing the
+ * hook at a TEMPORARY index holding only what is being committed.
+ *
+ * bin/agentbridge-precommit.mjs passes no env of its own, so the blanket strip
+ * removed the variable git had just handed it. Measured by audit: the lane
+ * collision guard saw an EMPTY staged list and exited 0, waving through a commit
+ * it had blocked one commit earlier. A control turned fail-open by a commit
+ * whose subject was about closing a hole.
+ */
+test('the strip removes what redirects the REPOSITORY and keeps per-operation protocol', () => {
+  for (const key of [
+    'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_PREFIX', 'GIT_NAMESPACE',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+    'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_17',
+  ]) {
+    assert.equal(redirectsRepository(key), true, `${key} changes which repository or config git uses`);
+  }
+
+  /*
+   * THE COUNTEREXAMPLE THAT PROVED THE PREFIX RULE WRONG. These are
+   * per-operation protocol -- which index this commit uses, whose name it is
+   * made under -- not which repository git is looking at.
+   */
+  for (const key of [
+    'GIT_INDEX_FILE', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+    'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_EDITOR', 'GIT_ASKPASS',
+  ]) {
+    assert.equal(redirectsRepository(key), false, `${key} is protocol and must survive`);
+  }
+});
+
+test('a hook still reads the TEMPORARY INDEX git handed it, and still cannot be redirected', async (t) => {
+  /*
+   * The end-to-end shape of the regression, through runGitAsync, which is what
+   * the pre-commit hook actually calls.
+   */
+  const dir = mkdtempSync(path.join(tmpdir(), 'safegit-index-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const g = (...a) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
+  g('init', '-q');
+  g('config', 'user.email', 't@example.invalid');
+  g('config', 'user.name', 'T');
+  writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+  writeFileSync(path.join(dir, 'b.txt'), 'b\n');
+  g('add', '-A');
+  g('commit', '-qm', 'init');
+
+  // Exactly what git builds for `git commit -- a.txt`: a temporary index in
+  // which ONLY a.txt is staged, while both files differ in the worktree.
+  const tmpIndex = path.join(dir, 'next-index.lock');
+  writeFileSync(path.join(dir, 'a.txt'), 'a2\n');
+  writeFileSync(path.join(dir, 'b.txt'), 'b2\n');
+  const withIndex = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+  execFileSync('git', ['read-tree', 'HEAD'], { cwd: dir, env: withIndex, stdio: 'ignore' });
+  execFileSync('git', ['add', 'a.txt'], { cwd: dir, env: withIndex, stdio: 'ignore' });
+
+  const prevIndex = process.env.GIT_INDEX_FILE;
+  const prevDir = process.env.GIT_DIR;
+  process.env.GIT_INDEX_FILE = tmpIndex;
+  process.env.GIT_DIR = path.join(dir, 'NOT-A-REPO', '.git');   // must not take effect
+  try {
+    const staged = await new Promise((resolve) => {
+      runGitAsync(['diff', '--cached', '--name-only'], { cwd: dir, encoding: 'utf8' }, (err, out) => {
+        resolve(err ? `ERROR: ${err.message}` : String(out).trim().split('\n').filter(Boolean));
+      });
+    });
+    assert.deepEqual(staged, ['a.txt'],
+      'the hook must see the temporary index git handed it, not an empty one');
+  } finally {
+    if (prevIndex === undefined) delete process.env.GIT_INDEX_FILE; else process.env.GIT_INDEX_FILE = prevIndex;
+    if (prevDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = prevDir;
   }
 });

@@ -386,6 +386,26 @@ function judgeWrite(filePath, input, cwd, sessionId) {
      * is a decision about a named file, and a path that is two files is not the
      * file anybody named.
      */
+    /*
+     * THE GATE-SELF CHECK RUNS BEFORE THE GRANT, OR IT NEVER RUNS AT ALL.
+     *
+     * It was placed after the grant branch, so it was only reachable when there
+     * was NO grant -- which is never the case D3 was about. The whole sequence
+     * it was written to stop reproduced byte-identically after the "fix":
+     * PreToolUse permitted under the grant, the write landed, and Stop blocked
+     * the turn on the change it had just authorised. Found by the next audit,
+     * which also noted the accompanying test wrote no grant and so could not
+     * fail for the real reason.
+     *
+     * Ordering IS the fix. The Stop gate refuses a grant for these two paths
+     * unconditionally, so PreToolUse must refuse one unconditionally too, or the
+     * layers disagree and the operator spends a permission that cannot be spent.
+     */
+    const canonicalSelf = canonicalGrantPath(cwd, filePath);
+    if (isGateSelfConfig(canonicalSelf)) {
+      return deny('protected-control', `${filePath} configures the Stop gate itself. An override cannot cover it: the Stop gate refuses one for this path, so permitting the write here would spend a grant and still lose the turn. Change it from outside the session`);
+    }
+
     const covered = grantFor(filePath, cwd);
     if (covered) {
       const { grant, rel } = covered;
@@ -409,11 +429,7 @@ function judgeWrite(filePath, input, cwd, sessionId) {
      * something the same refusal would reject -- arriving one commit later
      * through a path that crosses two layers instead of one.
      */
-    const canonical = canonicalGrantPath(cwd, filePath);
-    if (isGateSelfConfig(canonical)) {
-      return deny('protected-control', `${filePath} configures the Stop gate itself. An override cannot cover it: PreToolUse would permit the write and Stop would still refuse the turn. Change it from outside the session`);
-    }
-    return deny('protected-control', `${filePath} is part of the guard or completion contract. An override must name it as ${canonical}`);
+    return deny('protected-control', `${filePath} is part of the guard or completion contract. An override must name it as ${canonicalSelf}`);
   }
   if (isSessionBaselineTest(filePath, cwd, sessionId)) {
     /*

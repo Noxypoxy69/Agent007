@@ -79,10 +79,51 @@ export const SAFE_GIT_CONFIG = Object.freeze([
  * is a caller taking control on purpose, not an ambient value leaking in, and
  * silently dropping it would break the thing it was added for.
  */
+/*
+ * WHICH VARIABLES REDIRECT THE REPOSITORY. NOT "EVERYTHING NAMED GIT_".
+ *
+ * The first version stripped /^GIT_/i, and that was too wide by exactly one
+ * variable that matters: GIT_INDEX_FILE. Git sets it AS PROTOCOL when it invokes
+ * a hook for a partial commit -- `git commit -- <paths>`, `git commit -p` -- to
+ * point the hook at a TEMPORARY index holding only what is being committed.
+ *
+ * bin/agentbridge-precommit.mjs passes no env of its own, so the blanket strip
+ * removed the variable git had just handed it. Measured by audit: the lane
+ * collision guard saw an EMPTY staged list and exited 0, waving through a commit
+ * that the same hook had blocked one commit earlier. That file's own header says
+ * "Unreadable git is 'cannot run', not 'nothing staged'. The difference matters:
+ * the second would wave every commit through." I created the second reading by
+ * another route, in a commit whose subject was about closing a hole.
+ *
+ * So the rule is the PROPERTY, and the property is narrower than the prefix:
+ * strip what changes WHICH REPOSITORY OR CONFIG git operates on. Leave what is
+ * per-operation protocol -- the index for this commit, the identity a commit is
+ * made under, the editor. GIT_INDEX_FILE is the counterexample that proves the
+ * prefix rule wrong, and it was in the tree the whole time.
+ *
+ * The prefixed families are matched as prefixes because git numbers them
+ * (GIT_CONFIG_KEY_0, GIT_CONFIG_VALUE_0, ...) and a numbered list cannot be
+ * enumerated.
+ */
+const REDIRECTS_REPOSITORY = new Set([
+  'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_PREFIX', 'GIT_NAMESPACE',
+  'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
+  'GIT_CONFIG_COUNT',
+]);
+const REDIRECTS_PREFIXES = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
+
+export function redirectsRepository(key) {
+  const k = String(key ?? '').toUpperCase();
+  if (REDIRECTS_REPOSITORY.has(k)) return true;
+  return REDIRECTS_PREFIXES.some((p) => k.startsWith(p));
+}
+
 function environmentWithoutGitRedirection() {
   const cleaned = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (/^GIT_/i.test(key)) continue;
+    if (redirectsRepository(key)) continue;
     cleaned[key] = value;
   }
   return cleaned;
