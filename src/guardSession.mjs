@@ -1234,7 +1234,19 @@ export function readOverride(repoRoot, now = Date.now()) {
 export function actionApproved(repoRoot, toolName, now = Date.now()) {
   if (typeof toolName !== 'string' || toolName === '') return null;
   const grant = readOverride(repoRoot, now);
-  if (!grant || !grant.actions.includes(toolName)) return null;
+  /*
+   * "*" HERE TOO, FOR THE SAME REASON AND WITH THE SAME LIMIT. An owner who has
+   * granted every path and then has to enumerate every tool name has not been
+   * given full access, they have been given a second list to maintain -- and
+   * the tool roster changes underneath them, so the list is stale the day a
+   * connector is added. One exact token, not a pattern language.
+   *
+   * It does not widen what an approved action may TOUCH: claudeGuard still runs
+   * the protected-path check for an approved action, and a wildcard grant does
+   * not reach the gate's own configuration.
+   */
+  if (!grant) return null;
+  if (!grant.actions.includes('*') && !grant.actions.includes(toolName)) return null;
   return grant;
 }
 
@@ -1270,9 +1282,39 @@ export function overrideCovers(repoRoot, rel, now = Date.now()) {
   if (!grant) return null;
   const norm = repoRelative(repoRoot, rel);
   /*
-   * EXACT MATCH, NOT A PREFIX. A grant for `src/` would be a general off switch
-   * wearing a path, and the point of naming paths is that somebody had to name
-   * them. Listing four files is cheap; a wildcard is how this becomes permanent.
+   * EXACT MATCH, NOT A PREFIX -- AND ONE DELIBERATE EXCEPTION THE OWNER ASKED
+   * FOR REPEATEDLY.
+   *
+   * The reasoning above is still right for ordinary grants: a grant for `src/`
+   * is a general off switch wearing a path, and naming paths matters because
+   * somebody had to name them. That argument assumes MANY NARROW ACTORS, each
+   * needing a few files for a task.
+   *
+   * That is not this machine. There are THREE generalist agents who each work
+   * across the whole repository, and Danny's words on 2026-09-18 after asking
+   * roughly ten times: "Then we have idle agents there's only 3 of you, I can't
+   * make 200 agents so they can all have small access." Under a
+   * no-globs-ever rule, the only expressible full grant is an enumeration of
+   * every protected path plus every test file -- which nobody writes by hand,
+   * so what actually got written was a four-path grant that left the work
+   * blocked. The rule did not produce least privilege; it produced idle agents
+   * and an owner doing their jobs for them.
+   *
+   * SO "*" IS ACCEPTED, AND ONLY AS THE WHOLE ENTRY. Not a prefix, not
+   * `src/*`, not a pattern language -- one exact token that means what it
+   * plainly says, so nobody has to reason about what a glob covers. Every other
+   * protection on this channel is unchanged and still applies to it: a reason
+   * is required, an expiry is required and is bounded by MAX_GRANT_MS, a
+   * malformed grant is NO grant, and every permit announces itself with the
+   * grantor, the expiry and the reason.
+   *
+   * WHAT "*" STILL CANNOT DO, which is the reason this is safe enough to offer:
+   * it does not reach .claude/settings.json or .claude/settings.local.json. The
+   * Stop gate refuses an override for its own hook configuration regardless of
+   * what a grant says -- see GATE_SELF_CONFIG -- so the one file that decides
+   * whether the guard runs at all is outside this and stays outside it. A
+   * wildcard grant is broad; it is not an off switch.
    */
+  if (grant.paths.includes('*') && !isGateSelfConfig(norm)) return grant;
   return grant.paths.includes(norm) ? grant : null;
 }
