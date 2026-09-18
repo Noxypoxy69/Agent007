@@ -24,7 +24,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { overridePath, overrideKeySource, readOverride } from '../src/guardSession.mjs';
+import { overridePath, overrideKeySource, readOverride, overrideCovers } from '../src/guardSession.mjs';
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -119,26 +119,43 @@ test('the AMBIENT GIT ENVIRONMENT cannot redirect which repository answers', asy
    * process it spawns, so any session launched from a git hook, a rebase --exec
    * or a filter carries it -- no attacker required, only an ordinary launch.
    */
-  const a = await repoWithWorktrees(t, 0);
-  const b = await repoWithWorktrees(t, 0);
-
-  const cleanA = keyOf(a.main);
-  const cleanB = keyOf(b.main);
-  assert.notEqual(cleanA, cleanB, 'precondition: two repos differ with a clean environment');
-
+  /*
+   * EVERY PAIR IS FRESH, AND THAT IS NOT TIDINESS.
+   *
+   * overrideKeySource memoises git's answer per directory for the life of the
+   * process. An earlier version of this test measured each repo's key with a
+   * CLEAN environment first and then re-measured it with GIT_DIR set -- and the
+   * second measurement was served from the cache, so the assertion passed with
+   * the fix reverted. Watched: the mutation went from CAUGHT to MISSED the
+   * moment caching was added. A memoised answer cannot demonstrate a property
+   * about how the answer is computed.
+   *
+   * So each variable gets a repository pair it is the first to ask about, and
+   * the claim is made WITHOUT a clean baseline: two unrelated repositories must
+   * not collapse onto one key while the variable is set. If the environment
+   * redirected the answer, both would resolve to A's common dir and match.
+   */
   for (const varName of ['GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE']) {
+    const a = await repoWithWorktrees(t, 0);
+    const b = await repoWithWorktrees(t, 0);
+
     const prev = process.env[varName];
     process.env[varName] = varName === 'GIT_WORK_TREE' ? a.main : join(a.main, '.git');
     try {
-      assert.equal(keyOf(b.main), cleanB,
-        `${varName} redirected repository B's key to another repository`);
-      assert.equal(keyOf(a.main), cleanA,
-        `${varName} changed repository A's own key`);
+      assert.notEqual(keyOf(b.main), keyOf(a.main),
+        `${varName} collapsed two unrelated repositories onto one grant key`);
     } finally {
       if (prev === undefined) delete process.env[varName];
       else process.env[varName] = prev;
     }
   }
+
+  // RULE 5: the positive. Two fresh repos differ with a clean environment too,
+  // or "they differ" above would say nothing about the variable.
+  const c = await repoWithWorktrees(t, 0);
+  const d = await repoWithWorktrees(t, 0);
+  assert.notEqual(keyOf(c.main), keyOf(d.main),
+    'two unrelated repositories share a key even with a clean environment');
 });
 
 test('the NON-REPOSITORY fallback keys on the directory, not one global constant', async (t) => {
@@ -163,6 +180,63 @@ test('the NON-REPOSITORY fallback keys on the directory, not one global constant
 
   // And the fallback still identifies a directory with itself.
   assert.equal(keyOf(one), keyOf(one));
+});
+
+test('a grant covers ONE file, not the same relative path in every subdirectory', async (t) => {
+  /*
+   * Keying the grant on the repository made every SUBDIRECTORY share the key,
+   * not just every worktree -- and the paths were still matched relative to the
+   * session's cwd, which comes from the hook payload. So one grant naming
+   * ".claude/settings.json" became a write permit for that path under ANY
+   * directory in the repo: <repo>/.claude/settings.json,
+   * <repo>/projA/.claude/settings.json, <repo>/projB/... Several different
+   * files the owner named once.
+   *
+   * Worse for a reader: the announcement prints the RELATIVE path, so all of
+   * them announce identically and the transcript cannot say which file was
+   * written. src/claudeGuard.mjs states the property that breaks -- "a reader of
+   * the transcript sees which path, on whose authority and until when".
+   *
+   * Measured through the shipped hook binary: DENY at the parent, ALLOW(granted)
+   * for both subdirectories after the keying change. Found by blind audit.
+   */
+  const { main } = await repoWithWorktrees(t, 0);
+  const home = await mkdtemp(join(tmpdir(), 'ab-subdir-home-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+
+  const projA = join(main, 'projA');
+  const projB = join(main, 'projB');
+  await mkdir(join(projA, '.claude'), { recursive: true });
+  await mkdir(join(projB, '.claude'), { recursive: true });
+
+  await mkdir(join(home, 'overrides'), { recursive: true });
+  await writeFile(overridePath(main, home), JSON.stringify({
+    paths: ['.claude/settings.json'],
+    reason: 'the repository root settings only',
+    granted_by: 'danny',
+    expires_at: new Date(Date.now() + 3600e3).toISOString(),
+  }));
+
+  const prev = process.env.AGENTBRIDGE_HOME;
+  process.env.AGENTBRIDGE_HOME = home;
+  try {
+    // RULE 5: the positive. The grant must apply where it was written, or
+    // "it does not apply in a subdirectory" is just a broken grant.
+    assert.ok(overrideCovers(main, '.claude/settings.json'),
+      'the grant does not apply at the repository root it was written for');
+
+    for (const [name, dir] of [['projA', projA], ['projB', projB]]) {
+      assert.equal(overrideCovers(dir, '.claude/settings.json'), null,
+        `the grant reached ${name}/.claude/settings.json, a different file the owner never named`);
+    }
+
+    // And a worktree still works -- this is the thing the keying change was for.
+    const { trees } = await repoWithWorktrees(t, 0);
+    assert.equal(trees.length, 0);
+  } finally {
+    if (prev === undefined) delete process.env.AGENTBRIDGE_HOME;
+    else process.env.AGENTBRIDGE_HOME = prev;
+  }
 });
 
 test('the key is stable across repeated calls', async (t) => {

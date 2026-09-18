@@ -775,16 +775,97 @@ function canonicalKeyPath(target) {
   return process.platform === 'win32' ? out.toLowerCase() : out;
 }
 
-export function overrideKeySource(repoRoot) {
-  const resolved = path.resolve(repoRoot);
+/*
+ * ONE git ANSWER PER DIRECTORY PER PROCESS.
+ *
+ * Every guard decision asks git which repository this is, and a single Write
+ * payload reaches overrideCovers twice. Measured by audit: this added two
+ * synchronous subprocesses and roughly 220 ms to every PreToolUse call, where
+ * there had been none. The hook process is short-lived and the answer cannot
+ * change inside it, so it is asked once and remembered.
+ */
+const gitAnswers = new Map();
+function gitRevParse(dir, flag) {
+  const key = `${flag} ${dir}`;
+  if (gitAnswers.has(key)) return gitAnswers.get(key);
+  let answer = null;
   try {
-    const out = String(runGit(['-C', resolved, 'rev-parse', '--git-common-dir'], {
+    const out = String(runGit(['-C', dir, 'rev-parse', flag], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })).trim();
-    if (out) return canonicalKeyPath(path.resolve(resolved, out));
-  } catch { /* fall through to the directory itself, which grants nothing */ }
+    if (out) answer = out;
+  } catch { /* not a repository, git missing, or a timeout */ }
+  gitAnswers.set(key, answer);
+  return answer;
+}
+
+export function overrideKeySource(repoRoot) {
+  const resolved = path.resolve(repoRoot);
+  const common = gitRevParse(resolved, '--git-common-dir');
+  if (common) return canonicalKeyPath(path.resolve(resolved, common));
   return canonicalKeyPath(resolved);
+}
+
+/*
+ * A GRANT'S PATHS ARE RELATIVE TO THE REPOSITORY, NOT TO WHEREVER THE SESSION
+ * HAPPENS TO BE STANDING.
+ *
+ * Keying the grant on the repository (which is right) made EVERY SUBDIRECTORY
+ * share the repository's key -- not just every worktree. The paths were still
+ * being matched against a path relative to the session's cwd, and cwd comes
+ * from the hook payload. So one grant naming ".claude/settings.json" became a
+ * write permit for <repo>/.claude/settings.json, <repo>/projA/.claude/settings.json,
+ * <repo>/projB/... -- several different files the owner named once, and the
+ * announcement printed the same relative path for all of them, so a reader of
+ * the transcript could not tell which file had been written.
+ *
+ * Measured by audit: at the parent commit those subdirectory writes were DENIED
+ * and at ecd2270 they were ALLOWED. The commit disclosed the widening as "every
+ * worktree"; subdirectories are a strictly larger set, and unlike worktrees they
+ * change WHICH FILE the grant covers.
+ *
+ * So a candidate is translated into the repository's own frame before it is
+ * matched. If git cannot answer, the old directory-relative behaviour stands --
+ * and in that case the key has also fallen back to the directory, so there is
+ * almost never a grant there to apply.
+ */
+/*
+ * CANONICAL SPELLING, CASE PRESERVED.
+ *
+ * Two separate requirements pull against each other here and both are load
+ * bearing:
+ *
+ *  - The spelling must be canonical, because `git rev-parse --show-toplevel`
+ *    answers with the LONG path while the session's cwd may be an 8.3 alias.
+ *    Comparing those two with path.relative yields ".." and silently falls back
+ *    to the cwd-relative answer -- which is the exact over-permission this
+ *    function exists to stop. Caught by a test whose temp directory was an 8.3
+ *    path, i.e. the ordinary case, not a contrived one.
+ *
+ *  - The CASE must NOT be folded, unlike the grant KEY. A grant entry is matched
+ *    exactly, so folding here would turn src/claudeGuard.mjs into
+ *    src/claudeguard.mjs and stop every grant applying.
+ */
+function canonicalSpelling(target) {
+  try { return realpathSync.native(target).split('\\').join('/'); } catch { /* may not exist yet */ }
+  try {
+    const dir = realpathSync.native(path.dirname(target));
+    return path.join(dir, path.basename(target)).split('\\').join('/');
+  } catch { return String(target).split('\\').join('/'); }
+}
+
+function repoRelative(dir, rel) {
+  const resolved = path.resolve(dir);
+  const asGiven = String(rel ?? '').split(path.sep).join('/').replace(/^\.\//, '');
+  const top = gitRevParse(resolved, '--show-toplevel');
+  if (!top) return asGiven;
+
+  const absolute = canonicalSpelling(path.resolve(resolved, asGiven));
+  const fromTop = path.relative(canonicalSpelling(top), absolute).split(path.sep).join('/');
+  // Outside the repository entirely: keep the original, which will not match a
+  // repo-relative grant entry -- the direction that refuses.
+  return fromTop === '' || fromTop.startsWith('..') ? asGiven : fromTop;
 }
 
 export function overridePath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
@@ -861,7 +942,7 @@ export function readOverride(repoRoot, now = Date.now()) {
 export function overrideCovers(repoRoot, rel, now = Date.now()) {
   const grant = readOverride(repoRoot, now);
   if (!grant) return null;
-  const norm = String(rel ?? '').split(path.sep).join('/').replace(/^\.\//, '');
+  const norm = repoRelative(repoRoot, rel);
   /*
    * EXACT MATCH, NOT A PREFIX. A grant for `src/` would be a general off switch
    * wearing a path, and the point of naming paths is that somebody had to name
