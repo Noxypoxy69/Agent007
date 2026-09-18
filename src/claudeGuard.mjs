@@ -217,8 +217,61 @@ export function isSessionBaselineTest(filePath, cwd = process.cwd(), sessionId =
    * baseline until a snapshot says otherwise.
    */
   if (!snapshot) {
-    return normalizedCandidates(filePath, cwd)
-      .some((c) => /(?:^|\/)test\/.+\.test\.mjs$/i.test(c) && existsSync(c));
+    /*
+     * "EXISTS" WAS STANDING IN FOR "WAS INHERITED", AND IT BLOCKED AUDITORS
+     * FROM THEIR OWN PROBES.
+     *
+     * Measured 2026-09-18 by a blind auditor: it created test/zzaudit2.test.mjs
+     * and ONE SECOND LATER could not edit it --
+     *
+     *   [agentbridge:baseline-test-immutable] ... was present when the session
+     *   began
+     *
+     * It was not. The session created it. With no snapshot this branch asked
+     * only whether the file exists NOW, so every test file a snapshot-less
+     * session wrote became immutable the instant it hit disk. That is precisely
+     * the iterate-on-a-probe workflow rule 20 depends on, and rule 20 is not
+     * optional here -- which makes this the fifth time a documented step has
+     * been blocked for exactly the people required to perform it.
+     *
+     * ASK GIT, WHICH DOES NOT NEED A SNAPSHOT TO HAVE AN OPINION. The Stop gate
+     * already reaches for the same second source for the same reason. A session
+     * begins from a commit, so a test file that is TRACKED was inherited and
+     * stays immutable; one git has never heard of was not, whatever the
+     * filesystem says about it existing.
+     *
+     * STILL FAILS CLOSED. If git cannot answer -- not a repository, git missing,
+     * command refused -- this returns to the old behaviour and treats an
+     * existing test as baseline. Unknown is not permitted; it is only no longer
+     * the answer when a better one is available.
+     *
+     * AND IT DOES NOT WIDEN THE REAL PROTECTION. The rule exists so a session
+     * cannot weaken a test it INHERITED. An untracked file was never inherited,
+     * and a session that wants one can simply create it -- which is allowed.
+     */
+    const candidates = normalizedCandidates(filePath, cwd)
+      .filter((c) => /(?:^|\/)test\/.+\.test\.mjs$/i.test(c) && existsSync(c));
+    if (candidates.length === 0) return false;
+
+    const root = repoRootOf(cwd);
+    if (!root) return true; // no repository to ask: unknown stays closed
+
+    return candidates.some((c) => {
+      const rel = path.relative(root, c).split(path.sep).join('/');
+      try {
+        runGit(['ls-files', '--error-unmatch', '--', rel], { cwd: root, stdio: 'ignore' });
+        return true; // tracked, so it came with the checkout this session began from
+      } catch (e) {
+        /*
+         * A non-zero exit from ls-files means "not tracked" and is the ANSWER.
+         * Anything else -- git absent, not a repository, a spawn failure -- is a
+         * failure to measure, and that stays closed.
+         */
+        const said = `${e?.stderr ?? ''}${e?.message ?? ''}`;
+        const answered = typeof e?.status === 'number' && /did not match any file|error-unmatch/i.test(said);
+        return !answered;
+      }
+    });
   }
   for (const candidate of normalizedCandidates(filePath, cwd)) {
     const rel = path.relative(snapshot.repoRoot, candidate).split(path.sep).join('/');
