@@ -279,7 +279,10 @@ export function toolDefs(store) {
     {
       name: 'list_locks',
       title: 'List locks',
-      description: 'Observed lock files per worktree, with holder and age.',
+      description: 'Lock files per worktree, with holder and age. A FLAT LIST CANNOT SAY '
+        + '"unknown": a session whose locks were never measured contributes nothing here and is '
+        + 'indistinguishable from one holding no locks. Check locksHeld in list_agents — null '
+        + 'there means unmeasured — before reading an absence as "not held".',
       input: obj(),
       run: async () => jsonResult((await listSessions()).flatMap((s) =>
         /*

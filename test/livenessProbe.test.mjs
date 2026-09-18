@@ -295,6 +295,73 @@ test('THE WINDOWS ARE ARGUMENTS, so a caller can tighten them without editing th
     'a tightened ack window had no effect');
 });
 
+test('THE MEASURED PARTY CANNOT MINT ITS OWN CLOCK', () => {
+  /*
+   * THE HALF I LEFT OPEN, and it defeated the module's whole argument.
+   *
+   * `ack.at` is supplied by the party whose liveness is being measured.
+   * `ackMatches` bounded it BELOW (no replays) and not above, and
+   * `classifyLiveness` asks `now - acked <= ackWindowMs` — which ANY negative
+   * value satisfies. So a year-3000 ack pinned a session LIVE permanently and
+   * `probeDue` never fired again: it could not be re-checked and could not be
+   * caught. The module proved nothing below the agent can mint the probe ID and
+   * then let the agent mint the CLOCK.
+   */
+  const far = { ...healthy(), probeId: 'p-f', probeSentAt: ago(1 * MIN), lastAckAt: ago(40 * MIN) };
+  const future = new Date(NOW + 365 * 24 * 60 * MIN).toISOString();
+
+  assert.equal(ackMatches(far, { probeId: 'p-f', at: future }, NOW), false,
+    'an ack dated a year in the future was accepted');
+  assert.equal(applyAck(far, { probeId: 'p-f', at: future }, NOW).lastAckAt, far.lastAckAt,
+    'a future-dated ack moved the liveness clock');
+
+  const pinned = { ...healthy(), lastAckAt: future, probeId: null, probeSentAt: null };
+  assert.notEqual(classifyLiveness(pinned, NOW).state, LIVENESS.LIVE,
+    'a future ack timestamp pinned the session LIVE — it can never be re-checked or caught');
+
+  /*
+   * The symmetric wedge, and the worse one: a future probeSentAt makes every
+   * age negative, so the session is "recently probed" forever and probeDue
+   * never fires. The measured party switches itself off from being measured.
+   */
+  const wedged = { ...healthy(), lastAckAt: ago(2 * 60 * MIN), probeId: 'p-w', probeSentAt: future };
+  assert.equal(probeDue(wedged, NOW), true,
+    'a future probeSentAt stopped the session ever being probed again');
+});
+
+test('ORDINARY CLOCK SKEW IS STILL TOLERATED', () => {
+  /*
+   * The direction that must not over-correct. These timestamps come from the
+   * agent's own host; refusing a legitimate one looks exactly like a dead
+   * agent, which is the failure this module exists to stop.
+   */
+  const s = { ...healthy(), probeId: 'p-s', probeSentAt: ago(1 * MIN), lastAckAt: ago(40 * MIN) };
+  const slightlyAhead = new Date(NOW + 30 * SEC).toISOString();
+  assert.equal(ackMatches(s, { probeId: 'p-s', at: slightlyAhead }, NOW), true,
+    'an ack 30 seconds ahead was refused — ordinary skew now reads as a dead agent');
+});
+
+test('THE ATTEMPT COUNT SURVIVES WHAT A STORE ACTUALLY RETURNS', () => {
+  /*
+   * `Number.isInteger` alone rejected the numeric STRING PostgREST returns for
+   * numeric and bigint columns, so '5' fell back to 1 in classifyLiveness and 0
+   * in probeDue: the budget reset every cycle and a dead session could never
+   * reach `silent`. And -1000 passed as an integer, costing a thousand extra
+   * probes before any verdict.
+   */
+  const base = { ...healthy(), lastAckAt: ago(40 * MIN), probeId: 'p', probeSentAt: ago(20 * MIN) };
+
+  assert.equal(classifyLiveness({ ...base, probeAttempts: String(PROBE_DEFAULTS.maxAttempts) }, NOW).state,
+    LIVENESS.SILENT, 'a numeric string reset the budget — a dead session never reaches silent');
+  assert.equal(classifyLiveness({ ...base, probeAttempts: -1000 }, NOW).state,
+    LIVENESS.AWAITING_ACK, 'a negative count was spent against the budget');
+  for (const bad of [NaN, Infinity, null, undefined, {}, [], 'five']) {
+    const r = classifyLiveness({ ...base, probeAttempts: bad }, NOW);
+    assert.ok(r.state === LIVENESS.AWAITING_ACK || r.state === LIVENESS.SILENT,
+      `probeAttempts=${JSON.stringify(bad)} produced ${r.state}`);
+  }
+});
+
 test('THE CONTROL: this classifier really discriminates', () => {
   /*
    * Rule 1. A classifier returning one constant satisfies whichever half of the

@@ -229,6 +229,31 @@ test('list_locks: THE THIRD TOOL THAT READS s.locks, and the one nothing watched
     const measured = await call(defs, 'list_locks', storeOf([MEASURED_EMPTY]));
     const holding = await call(defs, 'list_locks', storeOf([{ ...MEASURED_EMPTY, locks: [{ resource: 'voice_' }] }]));
 
+    /*
+     * THE ASSERTION THAT USED TO BE HERE COULD NOT FAIL, and an audit proved it
+     * by mutation: reverting the code to `(s.locks ?? [])` left this file
+     * 10/10 green. Both forms yield `[]` for `locks: null`, so both contribute
+     * zero rows — the "fix" was a no-op and the gate pinned a tautology.
+     *
+     * The real defect is not expressible in this tool's OUTPUT at all: a flat
+     * list has no per-row slot for "unknown", so an unmeasured session and one
+     * holding no locks are the same empty result. That is a genuine limit, and
+     * the honest fix is to stop the tool claiming otherwise. Its description
+     * said "OBSERVED lock files" while index.ts hardcodes `locks: null` for
+     * every hosted session — so on the deployed surface nothing was observed,
+     * ever.
+     *
+     * So the gate now checks the thing that CAN be wrong: whether the contract
+     * warns a reader, and where it sends them for the answer.
+     */
+    const def = defs(storeOf([UNMEASURED])).find((d) => d.name === 'list_locks');
+    assert.ok(!/\bObserved\b/.test(def.description),
+      `${surface}: list_locks still calls itself "Observed" while the hosted store never observes it`);
+    assert.match(def.description, /unknown/i,
+      `${surface}: list_locks does not warn that it cannot express "unmeasured"`);
+    assert.match(def.description, /locksHeld/,
+      `${surface}: list_locks does not name the field a reader should check instead`);
+
     assert.deepEqual(unmeasured, [],
       `${surface}: a session nobody measured contributed rows to list_locks`);
     assert.deepEqual(measured, [],

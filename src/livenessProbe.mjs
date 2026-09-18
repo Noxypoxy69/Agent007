@@ -115,7 +115,37 @@ export const PROBE_DEFAULTS = Object.freeze({
    * is how the roster fills with rows that are wrong in the other direction.
    */
   recheckIntervalMs: 15 * 60 * 1000,
+
+  /**
+   * How far ahead of our clock a timestamp from another machine may sit.
+   *
+   * Generous, because these arrive from the agent's own host and refusing a
+   * legitimate one looks exactly like a dead agent. Anything beyond it is not
+   * skew, it is a claim about the future, and this module refuses to be pinned
+   * by one.
+   */
+  clockSkewMs: 2 * 60 * 1000,
 });
+
+/**
+ * A consecutive-attempt count, coerced safely.
+ *
+ * `Number.isInteger` alone rejected the numeric STRING that PostgREST returns
+ * for numeric and bigint columns, so `'5'` silently fell back to 1 in
+ * `classifyLiveness` and 0 in `probeDue` — the budget reset every cycle and a
+ * dead session could never reach `silent`. And `-1000` passed as an integer,
+ * costing a thousand extra probes before a verdict. Both found by blind audit,
+ * both latent only because nothing persists these fields yet.
+ *
+ * Anything unusable reads as 0: no attempts have been proven, so none are
+ * counted against the budget.
+ */
+function attemptCount(v) {
+  const n = typeof v === 'string' ? Number(v.trim()) : v;
+  if (typeof n !== 'number' || !Number.isFinite(n)) return 0;
+  const i = Math.trunc(n);
+  return i > 0 ? i : 0;
+}
 
 export const LIVENESS = Object.freeze({
   LIVE: 'live',
@@ -137,7 +167,8 @@ export const LIVENESS = Object.freeze({
  * — trimming, folding case — is a widening nobody asked for. `scopeGrantsWrite`
  * matches an exact scope token for the same reason.
  */
-export function ackMatches(session, ack) {
+export function ackMatches(session, ack, now = Date.now(), opts = {}) {
+  const { clockSkewMs } = { ...PROBE_DEFAULTS, ...opts };
   if (!isPlainObject(session) || !isPlainObject(ack)) return false;
   if (!isNonEmptyString(session.probeId) || !isNonEmptyString(ack.probeId)) return false;
   if (session.probeId !== ack.probeId) return false;
@@ -146,7 +177,27 @@ export function ackMatches(session, ack) {
   const ackedAt = parseInstant(ack.at);
   if (sentAt === null || ackedAt === null) return false;
   // An ack that predates its own probe is a replay, not an answer.
-  return ackedAt >= sentAt;
+  if (ackedAt < sentAt) return false;
+
+  /*
+   * AND IT MAY NOT BE DATED IN THE FUTURE — the half I left open.
+   *
+   * `ack.at` is supplied by the party whose liveness is being measured. This
+   * function was bounded BELOW and not above, and `classifyLiveness` asks
+   * `now - acked <= ackWindowMs`, which any negative value satisfies. So a
+   * year-3000 ack pinned a session LIVE permanently and `probeDue` never fired
+   * again: the agent could not be re-checked and could not be caught.
+   *
+   * That defeats the whole argument of this module. It proves nothing below the
+   * agent can mint the probe ID, and then lets the agent mint the CLOCK. Found
+   * by blind audit.
+   *
+   * A generous skew, because the ack's timestamp comes from another machine and
+   * refusing a legitimate one would look exactly like a dead agent.
+   */
+  const at = typeof now === 'number' ? now : parseInstant(now);
+  if (at === null) return false;
+  return ackedAt <= at + clockSkewMs;
 }
 
 /**
@@ -158,7 +209,7 @@ export function ackMatches(session, ack) {
  * were demonstrably working.
  */
 export function classifyLiveness(session, now, opts = {}) {
-  const { ackWindowMs, ackGraceMs, maxAttempts } = { ...PROBE_DEFAULTS, ...opts };
+  const { ackWindowMs, ackGraceMs, maxAttempts, clockSkewMs } = { ...PROBE_DEFAULTS, ...opts };
   const at = typeof now === 'number' ? now : parseInstant(now);
 
   if (!isPlainObject(session) || at === null) {
@@ -174,7 +225,16 @@ export function classifyLiveness(session, now, opts = {}) {
    * lastPollAt. A poll cannot make a session live here, which is the entire
    * point — it is the signal that has been lying.
    */
-  if (acked !== null && at - acked <= ackWindowMs) {
+  /*
+   * A TIMESTAMP FROM THE FUTURE IS NOT EVIDENCE OF ANYTHING. Without this, a
+   * negative age satisfies `<= ackWindowMs` and pins the session live forever;
+   * the same shape on `probeSentAt` pins it `awaiting-ack` forever and stops
+   * `probeDue` firing. Both were routes for the measured party to mint its own
+   * clock. Beyond the skew allowance, the value is ignored rather than trusted.
+   */
+  const usable = (t) => t !== null && t <= at + clockSkewMs;
+
+  if (usable(acked) && at - acked <= ackWindowMs) {
     return {
       state: LIVENESS.LIVE,
       reason: `acked ${Math.round((at - acked) / 1000)}s ago`,
@@ -188,7 +248,7 @@ export function classifyLiveness(session, now, opts = {}) {
    * round trip, and a roster that cries wolf gets ignored — rule 14's lesson
    * about a harness that burns its own credibility.
    */
-  if (sent !== null && at - sent <= ackGraceMs) {
+  if (usable(sent) && at - sent <= ackGraceMs) {
     return {
       state: LIVENESS.AWAITING_ACK,
       reason: `probe ${session.probeId ?? '?'} sent ${Math.round((at - sent) / 1000)}s ago, within grace`,
@@ -202,7 +262,7 @@ export function classifyLiveness(session, now, opts = {}) {
    * still polling and the agent is not answering.
    */
   if (sent !== null) {
-    const attempts = Number.isInteger(session.probeAttempts) ? session.probeAttempts : 1;
+    const attempts = Math.max(1, attemptCount(session.probeAttempts));
     const pollNote = polled !== null
       ? `; still polling ${Math.round((at - polled) / 1000)}s ago`
       : '';
@@ -260,14 +320,23 @@ export function classifyLiveness(session, now, opts = {}) {
  */
 export function probeDue(session, now, opts = {}) {
   const {
-    probeIntervalMs, ackGraceMs, ackWindowMs, maxAttempts, recheckIntervalMs,
+    probeIntervalMs, ackGraceMs, ackWindowMs, maxAttempts, recheckIntervalMs, clockSkewMs,
   } = { ...PROBE_DEFAULTS, ...opts };
   const at = typeof now === 'number' ? now : parseInstant(now);
   if (!isPlainObject(session) || at === null) return false;
 
-  const sent = parseInstant(session.probeSentAt);
-  const acked = parseInstant(session.lastAckAt);
-  const attempts = Number.isInteger(session.probeAttempts) ? session.probeAttempts : 0;
+  /*
+   * A FUTURE TIMESTAMP IS IGNORED HERE TOO, and this is the direction that
+   * matters most: a `probeSentAt` in the future makes every age negative, so a
+   * session would be "recently probed" forever and never re-probed. The
+   * measured party could switch itself off from being measured.
+   */
+  const skewOk = (t) => t !== null && t <= at + clockSkewMs;
+  const sentRaw = parseInstant(session.probeSentAt);
+  const ackedRaw = parseInstant(session.lastAckAt);
+  const sent = skewOk(sentRaw) ? sentRaw : null;
+  const acked = skewOk(ackedRaw) ? ackedRaw : null;
+  const attempts = attemptCount(session.probeAttempts);
 
   // One in flight and still within grace: wait for it.
   if (sent !== null && at - sent <= ackGraceMs && (acked === null || acked < sent)) return false;
@@ -312,7 +381,7 @@ export function probeDue(session, now, opts = {}) {
  */
 export function recordProbe(session, { probeId, at }) {
   if (!isPlainObject(session) || !isNonEmptyString(probeId) || !isNonEmptyString(at)) return session;
-  const attempts = Number.isInteger(session.probeAttempts) ? session.probeAttempts : 0;
+  const attempts = attemptCount(session.probeAttempts);
   const acked = parseInstant(session.lastAckAt);
   const sent = parseInstant(session.probeSentAt);
   // A probe that follows a fresh ack starts a new sequence rather than continuing the old one.
@@ -332,8 +401,8 @@ export function recordProbe(session, { probeId, at }) {
  * live — the refusal is the default rather than an extra step somebody has to
  * remember (rule 6: assert preconditions, do not guard on them).
  */
-export function applyAck(session, ack) {
-  if (!ackMatches(session, ack)) return session;
+export function applyAck(session, ack, now = Date.now(), opts = {}) {
+  if (!ackMatches(session, ack, now, opts)) return session;
   // The attempt budget is CONSECUTIVE failures, so an answer resets it in full.
   return { ...session, lastAckAt: ack.at, probeId: null, probeSentAt: null, probeAttempts: 0 };
 }
