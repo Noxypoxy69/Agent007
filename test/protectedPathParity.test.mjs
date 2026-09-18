@@ -102,3 +102,45 @@ test('the policy and verifier sources are themselves protected', () => {
     }
   }
 });
+
+/* ============================================================================
+ * THE COMPARE IS CASE-FOLDED, BECAUSE THE FILESYSTEM IS.
+ *
+ * An exact string compare on a platform where .CLAUDE, .Claude and .claude are
+ * ONE directory. Through the shipped binary these were ALLOW while the
+ * canonical spelling was denied, and writing .CLAUDE/settings.json modifies
+ * .claude/settings.json -- git reports the canonical path as modified. So one
+ * permitted write carrying disableAllHooks removed PreToolUse AND the Stop
+ * hook, and the detected-at-Stop fallback that two other modules delegate to
+ * never ran. Reported by three separate blind audits before it was fixed.
+ * ==========================================================================*/
+
+test('a protected path is protected in every casing, in BOTH implementations', () => {
+  for (const [name, fn] of [['guardSession.mjs', fromGuardSession], ['policy.mjs', fromPolicy]]) {
+    for (const p of [
+      '.CLAUDE/settings.json', '.Claude/settings.json', '.claude/settings.json',
+      'SRC/claudeGuard.mjs', 'src/claudeGuard.MJS', 'src/CLAUDEGuard.mjs',
+      'CLAUDE.MD', 'claude.md', 'package.JSON', 'src/Policy.mjs',
+    ]) {
+      assert.equal(fn(p), true, `${name} lets ${p} through, and it is the same file as the canonical spelling`);
+    }
+  }
+});
+
+test('and folding does not swallow ordinary paths', () => {
+  /*
+   * The positive half. Without it the test above passes for a function that
+   * returns true for everything, which is rule 5.
+   */
+  for (const [name, fn] of [['guardSession.mjs', fromGuardSession], ['policy.mjs', fromPolicy]]) {
+    for (const p of ['src/collect.mjs', 'docs/notes.md', 'test/sessionWatch.test.mjs', 'README.md']) {
+      assert.equal(fn(p), false, `${name} now over-blocks ${p}`);
+    }
+  }
+});
+
+test('the worktree exemption folds too, and its nested control still does not', () => {
+  assert.equal(fromGuardSession('.CLAUDE/worktrees/x/README.md'), false, 'exempt in any casing');
+  assert.equal(fromGuardSession('.claude/worktrees/x/.CLAUDE/settings.json'), true,
+    'a nested control directory stays protected however it is spelled');
+});

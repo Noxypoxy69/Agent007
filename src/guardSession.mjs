@@ -131,12 +131,44 @@ const PROTECTION_EXEMPT_PREFIXES = Object.freeze(['.claude/worktrees/']);
 const NESTED_CONTROL_DIR = /(^|\/)\.claude\//i;
 
 /** Is a repo-relative path protected? Exact match, or under a `/` prefix entry. */
+/*
+ * THE COMPARE IS CASE-FOLDED, BECAUSE THE FILESYSTEM IS.
+ *
+ * This was an exact string compare on a platform where .CLAUDE, .Claude and
+ * .claude are ONE directory. Measured through the shipped hook binary, all
+ * ALLOW while the canonical spelling was denied:
+ *
+ *   .CLAUDE/settings.json   .Claude/settings.json   SRC/claudeGuard.mjs
+ *   src/claudeGuard.MJS     CLAUDE.MD   claude.md   package.JSON
+ *
+ * These are not lookalikes. Writing .CLAUDE/settings.json modifies
+ * .claude/settings.json -- git reports the canonical path as modified -- so one
+ * permitted write carrying disableAllHooks removes PreToolUse AND the Stop
+ * hook, and the "detected at Stop" fallback that claudeGuard and shellAllowlist
+ * delegate to four times never runs. No grant, no metacharacter, one call.
+ * realpathSync does not canonicalise case on Windows, so normalizedCandidates
+ * produced the same wrong spelling twice and the second candidate never helped.
+ *
+ * Reported by THREE separate blind audits before it was fixed. code-a closed
+ * the nested-control half with a case-insensitive flag; this is the main
+ * comparator, which stayed exact.
+ *
+ * ON CASE-SENSITIVE FILESYSTEMS this over-protects: a genuinely distinct file
+ * named src/Policy.mjs becomes unwritable. That is the direction to fail in --
+ * refusing a file nobody has is a nuisance, permitting a write to the hook
+ * configuration is the end of every layer at once. Folding is not a lookalike
+ * list; a spelling nobody enumerated is covered because case folding is a
+ * property, not a set.
+ */
 export function isProtectedRelPath(rel) {
   if (typeof rel !== 'string' || rel === '') return false;
-  const norm = rel.split(path.sep).join('/').replace(/^\.\//, '');
-  const exempt = PROTECTION_EXEMPT_PREFIXES.find((p) => norm.startsWith(p));
+  const norm = rel.split(path.sep).join('/').replace(/^\.\//, '').toLowerCase();
+  const exempt = PROTECTION_EXEMPT_PREFIXES.find((p) => norm.startsWith(p.toLowerCase()));
   if (exempt && !NESTED_CONTROL_DIR.test(norm.slice(exempt.length))) return false;
-  return PROTECTED_PATHS.some((entry) => (entry.endsWith('/') ? norm.startsWith(entry) : norm === entry));
+  return PROTECTED_PATHS.some((e) => {
+    const entry = e.toLowerCase();
+    return entry.endsWith('/') ? norm.startsWith(entry) : norm === entry;
+  });
 }
 
 /**
