@@ -149,13 +149,19 @@ test('filter values are ESCAPED, so a value cannot smuggle in another operator',
   assert.match(q, /limit=50/, 'the injected limit must not have replaced the real one');
 });
 
-test('a blank filter is omitted rather than matched as empty string', () => {
-  // `to_agent=eq.` matches nothing, so a whitespace argument would silently
-  // return an empty inbox that looks like "no replies".
-  const q = messagesQuery({ to_agent: '   ', from_agent: '', task_id: null });
-  assert.ok(!q.includes('to_agent=eq.'), q);
+test('a blank from_agent/task_id is omitted, but a supplied-but-unusable to_agent is refused', () => {
+  // from_agent and task_id keep blank-means-omit: `x=eq.` matches nothing, so a
+  // dropped-to-empty filter would silently narrow an already-scoped read.
+  const q = messagesQuery({ from_agent: '', task_id: null });
   assert.ok(!q.includes('from_agent=eq.'), q);
   assert.ok(!q.includes('task_id=eq.'), q);
+  // to_agent is different (d586a76): a SUPPLIED but unusable recipient is
+  // REFUSED, not omitted -- an unfiltered answer to "my mail" is WRONG, not
+  // merely broad, the same reason `since` throws below. This assertion replaced
+  // the old one that expected a blank to_agent to be silently dropped; that
+  // premise died when messagesQuery began throwing on an unusable recipient.
+  assert.throws(() => messagesQuery({ to_agent: '   ' }), /not a usable recipient/,
+    'a supplied blank to_agent must be refused, not dropped to no-filter');
 });
 
 test('since is exclusive, normalised to ISO, and REFUSES to be ignored', () => {
