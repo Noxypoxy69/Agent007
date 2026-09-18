@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, existsSync, rmSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -196,4 +196,52 @@ test('a hook still reads the TEMPORARY INDEX git handed it, and still cannot be 
     if (prevIndex === undefined) delete process.env.GIT_INDEX_FILE; else process.env.GIT_INDEX_FILE = prevIndex;
     if (prevDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = prevDir;
   }
+});
+
+/*
+ * THE SCAN THAT SAID "EVERY git INVOCATION GOES THROUGH safeGit" WAS WRONG.
+ *
+ * It matches /(execFileSync|spawnSync|execFile|spawn)\(\s*['"]git['"]/ -- a
+ * LITERAL. src/git.mjs held `const GIT = 'git'` and passed the variable, so the
+ * scan never saw it. The test was green, with that name, while the file called
+ * git.mjs was the one invocation that did not go through safeGit.
+ *
+ * Measured consequences, through the shipped CLI: a repository config saying
+ * `fsmonitor = sh -c 'touch MARKER; exit 1'` EXECUTED, and GIT_DIR redirected
+ * `agentbridge status --json` so it reported another repository's HEAD under
+ * this worktree's name.
+ *
+ * A pattern over source can always be spelled around. So the property is
+ * enforced IN THE CODE -- src/exec.mjs throws if asked for git -- and these
+ * assert that refusal exists and covers the spellings, rather than asserting
+ * that a particular string does not appear.
+ */
+test('exec.mjs REFUSES git, whatever it is called, so the lint cannot be spelled around', async () => {
+  const { run } = await import('../src/exec.mjs');
+
+  for (const spelling of ['git', 'git.exe', 'GIT', '/usr/bin/git', 'C:\\Program Files\\Git\\bin\\git.exe']) {
+    await assert.rejects(
+      () => run(spelling, ['--version'], { cwd: REPO }),
+      /safeGit/,
+      `${spelling} must be refused by exec.mjs and pointed at safeGit`,
+    );
+  }
+
+  /*
+   * RULE 5: the positive. exec.mjs must still run everything else, or this
+   * "fix" is just a broken module and the assertions above mean nothing.
+   */
+  const ok = await run(process.execPath, ['-e', 'process.stdout.write("fine")'], { cwd: REPO });
+  assert.equal(ok.ok, true, 'exec.mjs must still run ordinary commands');
+  assert.match(ok.stdout, /fine/);
+});
+
+test('src/git.mjs goes through safeGit, not exec.mjs', async () => {
+  // The structural half: the module that was exempt must not reach for the
+  // unhardened runner at all.
+  const src = readFileSync(path.join(REPO, 'src', 'git.mjs'), 'utf8');
+  assert.ok(!/from '\.\/exec\.mjs'/.test(src),
+    'src/git.mjs must not import the unhardened runner');
+  assert.match(src, /from '\.\/safeGit\.mjs'/,
+    'src/git.mjs must invoke git through safeGit');
 });

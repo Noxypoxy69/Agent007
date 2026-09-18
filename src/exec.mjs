@@ -57,6 +57,31 @@ function isWindowsPowerShell(file) {
  * Scoped to powershell.exe alone. Every other subprocess inherits the
  * environment unchanged.
  */
+/*
+ * git DOES NOT COME THROUGH HERE. IT COMES THROUGH src/safeGit.mjs.
+ *
+ * src/git.mjs called this module for every probe it made, which meant no
+ * SAFE_GIT_CONFIG and a fully inherited environment -- a repository's own
+ * config could execute, and GIT_DIR could redirect the answer. It went
+ * unnoticed because the test that forbids it scans for a literal `'git'` and
+ * that file passed a variable.
+ *
+ * A REFUSAL IN THE CODE RATHER THAN A PATTERN IN A TEST. A lint that reads
+ * source can always be spelled around; a throw here cannot. Any future caller
+ * that reaches for git through this module fails immediately and says where to
+ * go, instead of quietly getting the unhardened path.
+ */
+function refuseGit(file) {
+  const base = String(file ?? '').split(/[\\/]/).pop().toLowerCase();
+  if (base === 'git' || base === 'git.exe') {
+    throw new Error(
+      'git must be invoked through src/safeGit.mjs, not src/exec.mjs: '
+      + 'exec.mjs applies no SAFE_GIT_CONFIG and strips no repository-redirecting '
+      + 'environment, so a repository config can execute and GIT_DIR can redirect the answer',
+    );
+  }
+}
+
 function childEnv(file, override) {
   /*
    * AN EXPLICIT ENVIRONMENT REPLACES THE PARENT'S, IT DOES NOT EXTEND IT.
@@ -137,6 +162,7 @@ export async function run(file, args, { cwd, timeoutMs = 15000, maxBuffer = 8 * 
     throw new TypeError('exec: args must be an array of strings');
   }
   return new Promise((resolve) => {
+    refuseGit(file);
     const child = execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer, shell: false, windowsHide: true, env: childEnv(file, env) },
       (err, stdout, stderr) => {
         /*

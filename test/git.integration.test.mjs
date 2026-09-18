@@ -3,7 +3,27 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { run } from '../src/exec.mjs';
+/*
+ * FIXTURES ARE BUILT WITH execFileSync, NOT WITH THE PRODUCTION RUNNER.
+ *
+ * src/exec.mjs now REFUSES to spawn git: it applies no SAFE_GIT_CONFIG and
+ * strips no repository-redirecting environment, so src/git.mjs calling it was
+ * how a repository config could execute and GIT_DIR could redirect an answer.
+ * This file used the same door to CREATE its repositories, which is a fine
+ * thing to want and the wrong way to get it - a test that sets up through the
+ * production runner is also asserting that the runner permits what it needs.
+ */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync = promisify(execFile);
+const run = async (file, args, opts = {}) => {
+  try {
+    const { stdout, stderr } = await execFileAsync(file, args, { ...opts, windowsHide: true });
+    return { ok: true, code: 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') };
+  } catch (e) {
+    return { ok: false, code: e?.code ?? null, stdout: String(e?.stdout ?? ''), stderr: String(e?.stderr ?? '') };
+  }
+};
 import { gitState, listWorktrees } from '../src/git.mjs';
 import { discoverLocks } from '../src/locks.mjs';
 

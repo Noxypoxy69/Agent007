@@ -1,11 +1,47 @@
-import { run } from './exec.mjs';
+import { runGitAsync } from './safeGit.mjs';
 import { isLocalRemote } from './releaseRisk.mjs';
 
-const GIT = 'git';
-
-/** Fixed probe set. Nothing here is constructed from remote input. */
+/**
+ * Fixed probe set. Nothing here is constructed from remote input.
+ *
+ * THIS MODULE USED TO CALL exec.mjs DIRECTLY AND WAS EXEMPT FROM EVERYTHING.
+ *
+ * It held `const GIT = 'git'` and passed the VARIABLE, so
+ * test/safeGit.test.mjs -- which scans for the literal `execFile('git'` -- never
+ * saw it. The test was green, named "EVERY git invocation under src, bin and
+ * scripts goes through safeGit", while the file named git.mjs was the one
+ * invocation that did not. One spelling, not the property.
+ *
+ * Two things followed, both measured through the shipped CLI:
+ *
+ *   SAFE_GIT_CONFIG never applied, so core.fsmonitor ran: a repository config
+ *   saying `fsmonitor = sh -c 'touch MARKER; exit 1'` executed, and the marker
+ *   appeared. That is the executable-config surface safeGit exists to close.
+ *
+ *   The full environment was inherited, so GIT_DIR redirected the answer:
+ *   `agentbridge status --json` reported ANOTHER REPOSITORY'S HEAD under this
+ *   worktree's own name -- against a server whose instructions promise state is
+ *   observed from git plumbing and cannot be misreported by the agent.
+ *
+ * runGitAsync applies the hardening and strips the repository-redirecting
+ * variables. The result shape is preserved exactly: callers here read `ok` and
+ * `stdout` and nothing else.
+ */
 async function git(cwd, args) {
-  return run(GIT, args, { cwd });
+  return new Promise((resolve) => {
+    runGitAsync(args, { cwd, timeout: 60_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const killed = Boolean(err) && (err.killed === true || typeof err.signal === 'string');
+        resolve({
+          ok: !err,
+          code: err ? (killed ? null : (typeof err.code === 'number' ? err.code : null)) : 0,
+          signal: err?.signal ?? null,
+          killed,
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+        });
+      });
+  });
 }
 const line = (r) => (r.ok ? r.stdout.trim() : null);
 
