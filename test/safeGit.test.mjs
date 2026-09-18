@@ -328,7 +328,37 @@ function blankComments(src) {
    * value (identifier, number, closing bracket) a slash divides; anywhere else
    * it opens a pattern.
    */
+  /*
+   * A KEYWORD IS NOT A VALUE, AND TREATING IT AS ONE HID A REAL git push.
+   *
+   * The first version decided regex-or-division from the previous significant
+   * CHARACTER: after an identifier character a slash divides. But `return`,
+   * `case`, `typeof` and friends all end in identifier characters while being
+   * keywords, and a regex is perfectly legal after every one of them. So
+   *
+   *   export function looksLikeGlob(s) { return /[/*]/.test(s); }
+   *   export function realViolation(url) { return execFileSync('git', ['push', url]); }
+   *
+   * read as division, the comment opener inside the character class then opened
+   * a block comment, and everything to the next closer -- here, end of file --
+   * was blanked. Measured by blind audit: the file parses, `git push` on a
+   * caller-supplied URL sits in the tree, and this suite reports 12 of 12 green
+   * with byte positions and line numbers preserved exactly, which is the very
+   * property the commit before this one advertised as the fix.
+   *
+   * THE CANARIES CANNOT CATCH THIS BY CONSTRUCTION. They are fixed samples that
+   * do not depend on tree contents, so a blanker that runs away on a real file
+   * is invisible to them. That is the gap this comment exists to mark.
+   *
+   * So the decision now looks at the previous WORD as well as the previous
+   * character: after a keyword, a slash opens a pattern.
+   */
   const REGEX_CANNOT_FOLLOW = /[A-Za-z0-9_$)\]]/;
+  const KEYWORD_BEFORE_REGEX = new Set([
+    'return', 'case', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete',
+    'void', 'await', 'yield', 'throw', 'do', 'else', 'null', 'true', 'false',
+  ]);
+  let prevWord = '';
 
   while (i < n) {
     const c = src[i];
@@ -336,9 +366,13 @@ function blankComments(src) {
     if (state === 'code') {
       if (c === '/' && d === '/') { state = 'line'; blank(i); blank(i + 1); i += 2; continue; }
       if (c === '/' && d === '*') { state = 'block'; blank(i); blank(i + 1); i += 2; continue; }
-      if (c === '/' && !REGEX_CANNOT_FOLLOW.test(prev)) {
-        state = 'regex'; inClass = false; i += 1; continue;
+      if (c === '/' && (!REGEX_CANNOT_FOLLOW.test(prev) || KEYWORD_BEFORE_REGEX.has(prevWord))) {
+        state = 'regex'; inClass = false; prevWord = ''; i += 1; continue;
       }
+      // Accumulate the current identifier so the keyword test above has a word.
+      if (/[A-Za-z0-9_$]/.test(c)) prevWord += c;
+      else if (!/\s/.test(c)) prevWord = '';
+      else if (prevWord !== '' && !/[A-Za-z0-9_$]/.test(c)) { /* keep across the space */ }
       if (c === "'") { state = 'single'; i += 1; prev = c; continue; }
       if (c === '"') { state = 'double'; i += 1; prev = c; continue; }
       if (c === '`') { state = 'template'; i += 1; prev = c; continue; }

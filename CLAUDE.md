@@ -651,7 +651,28 @@ times.
 }
 ```
 
-**Exact repo-relative paths only** — no prefixes, no globs. `paths` are relative
+**`"*"` IS ACCEPTED, AS A WHOLE ENTRY, IN `paths` AND IN `actions`.** Added
+2026-09-18 (`a3e84bf`) on Danny's instruction after he asked about ten times:
+*"there's only 3 of you, I can't make 200 agents so they can all have small
+access."* Under the old rule the only expressible full grant was an enumeration
+of twenty protected paths plus every test file, which nobody writes by hand — so
+what got written was a four-path grant and the work stayed blocked.
+
+Only the exact token. `src/`, `src`, `''`, `src/*`, `*.mjs`, `src/**` and
+`.claude/*` still grant **nothing**, so no reader has to work out what a pattern
+covers. Reason, expiry, `MAX_GRANT_MS` and the announcement all still apply.
+
+**WHAT A WILDCARD ACTUALLY BUYS, stated honestly because the first version of
+this overstated it.** `"*"` does not name `.claude/settings.json` — but it does
+permit writing `src/claudeGuard.mjs`, and one edit later that file is writable
+with no notice, with the Stop gate classifying the drift as *granted*. So
+`GATE_SELF_CONFIG` buys **one turn of delay, not containment**. A wildcard grant
+is full write access to the guard, announced once. And separately, the
+**user-scope** `~/.claude/settings.json` carries hooks, applies to every project,
+and is writable with **no grant at all** — both protected lists are
+repo-relative. Measured by audit, 2026-09-18.
+
+Otherwise: **exact repo-relative paths only** — no prefixes, no globs. `paths` are relative
 to the REPOSITORY ROOT, not to wherever the session is standing; a grant naming
 `.claude/settings.json` covers that one file and not the same relative path in
 every subdirectory. An expiry is required and bounded by `MAX_GRANT_MS`, a

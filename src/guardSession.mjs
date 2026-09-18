@@ -716,12 +716,74 @@ function isPropagatedWorktreeControl(abs, rel) {
   if ('disableAllHooks' in hooks && hooks.disableAllHooks !== false) return false;
 
   /** A hook entry that will actually run, not merely be mentioned. */
+  /*
+   * ── "DOES IT CONTAIN THE NAME" WAS STILL A SUBSTRING TEST ─────────────────
+   *
+   * The previous version required type command, a non-inert prefix and a
+   * survivable timeout, and then asked whether the command STRING CONTAINED the
+   * guard's name. A blind audit broke that three more ways, each measured
+   * through the same drift function the Stop gate calls, each returning EXEMPT:
+   *
+   *   "exit 0 # ...agentbridge-claude-guard..."   named, inert. The inert test
+   *   "true # agentbridge-claude-guard"           was an ENUMERATION of echo,
+   *                                               colon, hash and rem -- rule 8
+   *                                               again, in the commit that
+   *                                               claimed to have fixed it. A
+   *                                               PreToolUse hook exiting 0
+   *                                               with empty stdout is a SILENT
+   *                                               ALLOW.
+   *   "node ./decoy/agentbridge-claude-guard.mjs" right name, ATTACKER'S FILE.
+   *                                               Any path the session can
+   *                                               create with that basename
+   *                                               substitutes for the guard.
+   *   armed + an extra SessionStart group,        THE WORST: armed() is a
+   *   or a second PreToolUse group, or an         .some(). Nothing constrained
+   *   extra entry inside the guard's group        what ELSE the file carried,
+   *                                               so arbitrary code could be
+   *                                               planted into another agent's
+   *                                               checkout, silent at Stop.
+   *
+   * So the question stops being "is the guard mentioned somewhere" and becomes
+   * "is EVERY hook in this file one of our own controls, invoked the way the
+   * project invokes it". A closed shape, not a search.
+   *
+   * WHAT THIS COSTS, STATED: if the project changes how it spells a hook
+   * command, existing worktree copies drift until they are refreshed. That
+   * direction is an operator seeing an unexpected diff. The direction it
+   * replaces was arbitrary code execution in a sibling checkout, unreported.
+   */
+  const CONTROL_COMMAND = new RegExp(
+    '^node\\s+"?\\$CLAUDE_PROJECT_DIR/'
+    + '(bin/agentbridge-claude-guard\\.mjs|scripts/claude-stop-gate\\.mjs|scripts/bridge-session-poll\\.mjs)'
+    + '"?(\\s+--[a-z-]+)*\\s*$',
+  );
+
   const entryRuns = (h, needle) => h
     && h.type === 'command'
     && typeof h.command === 'string'
+    && CONTROL_COMMAND.test(h.command.trim())   // the whole command, not a substring
     && h.command.includes(needle)
-    && !/^\s*(echo|:|#|rem\b)/i.test(h.command)
     && (h.timeout === undefined || (Number.isFinite(h.timeout) && h.timeout >= 5));
+
+  /*
+   * EVERY entry of EVERY group of EVERY event must be one of our controls.
+   * This is the half that closes the extra-hook class: a file may carry the
+   * guard AND anything else, and the previous check only looked for the guard.
+   */
+  const KNOWN_EVENTS = new Set(['PreToolUse', 'Stop', 'SessionStart', 'SessionEnd']);
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (event === 'disableAllHooks') continue;
+    if (!KNOWN_EVENTS.has(event)) return false;
+    if (!Array.isArray(groups)) return false;
+    for (const group of groups) {
+      if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) return false;
+      for (const h of group.hooks) {
+        if (!h || h.type !== 'command' || typeof h.command !== 'string') return false;
+        if (!CONTROL_COMMAND.test(h.command.trim())) return false;
+        if (h.timeout !== undefined && !(Number.isFinite(h.timeout) && h.timeout >= 5)) return false;
+      }
+    }
+  }
 
   const armed = (event, needle, matchesAll) => Array.isArray(hooks[event]) && hooks[event].some(
     (group) => group
@@ -1351,6 +1413,32 @@ export function overrideCovers(repoRoot, rel, now = Date.now()) {
    * what a grant says -- see GATE_SELF_CONFIG -- so the one file that decides
    * whether the guard runs at all is outside this and stays outside it. A
    * wildcard grant is broad; it is not an off switch.
+   *
+   * AND THAT SENTENCE IS WEAKER THAN IT SOUNDS, SO HERE IS THE HONEST VERSION.
+   * A blind audit measured it end to end: a wildcard permits writing
+   * src/claudeGuard.mjs, and one parseable edit later .claude/settings.json is
+   * ALLOW with no notice at all -- the Stop gate classifies that drift as
+   * granted rather than blocking, because overrideCovers now answers yes. So
+   * refusing the two JSON files while permitting the module they configure buys
+   * ONE TURN of delay, not containment.
+   *
+   * That is not a defect in this code: test/wildcardGrant.test.mjs asserts a
+   * wildcard MUST cover src/claudeGuard.mjs, and that is the owner's decision,
+   * taken deliberately after asking about ten times. The defect was the CLAIM.
+   * The next reader of "the one hard limit" would take it for a containment
+   * property, and it is a speed bump.
+   *
+   * STATED PROPERLY: a wildcard grant is full write access to the guard,
+   * announced once. GATE_SELF_CONFIG stops the most direct spelling and delays
+   * the rest by a turn. Rule 4 -- .claude/settings.json is a PROXY for "the
+   * guard runs", and guarding the proxy is not guarding the property.
+   *
+   * SEPARATELY AND WORSE, and pre-existing rather than introduced here: the
+   * USER-scope hook configuration at ~/.claude/settings.json carries hooks and
+   * disableAllHooks, applies to every project on the machine, and is writable
+   * with NO grant at all -- PROTECTED_PATHS and GATE_SELF_CONFIG are both
+   * repo-relative. Measured identical before and after this change. That is the
+   * route that needs no wildcard, and it is in front of the owner.
    */
   if (grant.paths.includes('*') && !isGateSelfConfig(norm)) return grant;
   return grant.paths.includes(norm) ? grant : null;
