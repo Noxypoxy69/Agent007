@@ -40,6 +40,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { evaluateClaudeTool, isProtectedPath } from '../src/claudeGuard.mjs';
 import { judgeShellCommand } from '../src/shellAllowlist.mjs';
 
@@ -882,6 +884,93 @@ function shortDirOf(dir) {
   const joined = spelled.join('\\');
   return joined !== dir ? joined : null;
 }
+
+test('AN ENCLOSING REPOSITORY IS NOT THIS PROJECT — the over-block half', (t) => {
+  /*
+   * The widening first asked git: `rev-parse --show-toplevel`, which answers
+   * "the repository enclosing this directory". That is a different question from
+   * "which project is this session for", and the difference over-blocks.
+   *
+   * A plain project folder inside a dotfiles-style repository made everything
+   * under the ENCLOSING repo's .claude/ unwritable -- including agent memory:
+   *
+   *   cwd = <dotfiles-repo>/proj
+   *   ../.claude/projects/p1/MEMORY.md   DENY
+   *   ../.claude/settings.json           DENY, with "configures the Stop gate
+   *                                      itself", about a gate never read here
+   *
+   * ~/.claude/ is Claude Code's USER-level directory; <project>/.claude/ is the
+   * project's. Same name, different things. An over-blocking guard gets switched
+   * off, which loses every layer, so this direction matters as much as the
+   * under-block the widening was for.
+   */
+  const lab = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'ab-enclose-')));
+  t.after(() => rmSync(lab, { recursive: true, force: true }));
+
+  const dot = path.join(lab, 'dot');
+  const proj = path.join(dot, 'proj');
+  mkdirSync(path.join(dot, '.claude', 'projects', 'p1'), { recursive: true });
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(path.join(dot, '.claude', 'settings.json'), '{}\n');
+  writeFileSync(path.join(dot, '.claude', 'projects', 'p1', 'MEMORY.md'), '# memory\n');
+  writeFileSync(path.join(proj, 'app.mjs'), '// app\n');
+  const g = (...a) => execFileSync('git', a, { cwd: dot, stdio: 'ignore' });
+  g('init', '-q');
+  g('config', 'user.email', 't@example.invalid');
+  g('config', 'user.name', 'T');
+  g('add', '-A');
+  g('commit', '-qm', 'dotfiles');
+
+  const prev = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = proj;
+  try {
+    for (const rel of ['../.claude/projects/p1/MEMORY.md', '../.claude/settings.json']) {
+      assert.equal(isProtectedPath(rel, proj), false,
+        `${rel} belongs to an enclosing repository, not this project, and must stay writable`);
+    }
+    assert.equal(isProtectedPath('app.mjs', proj), false, "the project's own file must stay writable");
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = prev;
+  }
+});
+
+test("the declared project root still protects that project's controls from a subdirectory", (t) => {
+  /*
+   * RULE 5 for the test above: if the declared root protected nothing, the
+   * "must stay writable" assertions would pass by the guard being broken.
+   */
+  const lab = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'ab-declared-')));
+  t.after(() => rmSync(lab, { recursive: true, force: true }));
+
+  const real = path.join(lab, 'real');
+  const sub = path.join(real, 'projA');
+  mkdirSync(path.join(real, '.claude'), { recursive: true });
+  mkdirSync(path.join(real, 'src'), { recursive: true });
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(path.join(real, '.claude', 'settings.json'), '{}\n');
+  writeFileSync(path.join(real, 'src', 'claudeGuard.mjs'), '// guard\n');
+  const g = (...a) => execFileSync('git', a, { cwd: real, stdio: 'ignore' });
+  g('init', '-q');
+  g('config', 'user.email', 't@example.invalid');
+  g('config', 'user.name', 'T');
+  g('add', '-A');
+  g('commit', '-qm', 'real');
+
+  const prev = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = real;
+  try {
+    assert.equal(isProtectedPath('../.claude/settings.json', sub), true,
+      "this project's hook configuration must stay protected from a subdirectory");
+    assert.equal(isProtectedPath('../src/claudeGuard.mjs', sub), true,
+      "this project's guard source must stay protected from a subdirectory");
+    assert.equal(isProtectedPath('../notes.md', sub), false,
+      'an ordinary file must stay writable');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = prev;
+  }
+});
 
 test('A CONTROL IS PROTECTED FROM A SUBDIRECTORY TOO — both rails share the repository frame', () => {
   /*

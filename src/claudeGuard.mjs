@@ -114,6 +114,47 @@ function canonicalDir(dir) {
  * because more matching means more refusals, which is the direction this
  * function is allowed to be wrong in.
  */
+/**
+ * The root of THIS PROJECT — what the harness says, not what git infers from
+ * whatever happens to be above the session.
+ *
+ * THE FIRST VERSION ASKED GIT AND OVER-BLOCKED. `rev-parse --show-toplevel`
+ * answers "the repository enclosing this directory", which is not the same
+ * question. A plain project folder inside a dotfiles-style repository made
+ * every file under the ENCLOSING repo's `.claude/` unwritable — including agent
+ * memory:
+ *
+ *   cwd = <dotfiles-repo>/proj
+ *   ../.claude/projects/p1/MEMORY.md   DENY
+ *   ../.claude/settings.json           DENY, with "configures the Stop gate
+ *                                      itself", about a gate this session never
+ *                                      reads
+ *
+ * `~/.claude/` is Claude Code's USER-level directory and `<project>/.claude/` is
+ * the project's. Same name, different things, and only the second is a control
+ * of the project being guarded. An over-blocking guard gets switched off, which
+ * loses every layer — so this direction is as serious as the under-block the
+ * widening was written to fix.
+ *
+ * CLAUDE_PROJECT_DIR is the harness's own answer to "which project is this
+ * session for", and this binary already trusts it to supply `root` and a
+ * fallback `cwd`. Using it here is not new trust, and it cannot REDUCE
+ * protection: roots feed `.some()`, so an extra root can only add refusals.
+ *
+ * RESIDUAL, STATED RATHER THAN HIDDEN: when the harness supplies no project
+ * directory, this still falls back to the enclosing repository, and the
+ * over-block above returns for that case. Every real Claude Code invocation
+ * sets the variable; a bare unit call does not, which is also why the tests
+ * below still exercise the git path.
+ */
+function projectRootOf(cwd) {
+  const declared = process.env.CLAUDE_PROJECT_DIR;
+  if (typeof declared === 'string' && declared.trim() !== '') {
+    return canonicalDir(path.resolve(declared.trim()));
+  }
+  return repoRootOf(cwd);
+}
+
 export function isProtectedPath(filePath, cwd = process.cwd()) {
   const lexicalRoot = path.resolve(cwd);
   /*
@@ -134,7 +175,7 @@ export function isProtectedPath(filePath, cwd = process.cwd()) {
    * the repository is not ours to judge" still holds: a file genuinely outside
    * is outside BOTH roots.
    */
-  const roots = [...new Set([lexicalRoot, canonicalDir(lexicalRoot), repoRootOf(cwd)].filter(Boolean))];
+  const roots = [...new Set([lexicalRoot, canonicalDir(lexicalRoot), projectRootOf(cwd)].filter(Boolean))];
   return normalizedCandidates(filePath, cwd).some((candidate) => roots.some((root) => {
     const rel = path.relative(root, candidate).split(path.sep).join('/');
     if (rel.startsWith('..')) return false;      // outside the repo is not ours to judge
