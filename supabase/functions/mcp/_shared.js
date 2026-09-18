@@ -2227,7 +2227,44 @@ export function messagesQuery({ to_agent, from_agent, task_id, type, since, limi
   const eq = (col, v) => {
     if (typeof v === 'string' && v.trim()) q.push(`${col}=eq.${encodeURIComponent(v.trim())}`);
   };
-  eq('to_agent', to_agent);
+
+  /*
+   * AN INBOX IS EVERY NAME THE SEAT ANSWERS TO, NOT THE ONE THE READER TYPED.
+   *
+   * `to_agent=eq.<id>` matched the LITERAL stored string, and the send path
+   * stores the recipient verbatim. So asking for your own canonical id returned
+   * nothing while mail addressed to your alias sat unread -- measured
+   * 2026-09-18, seconds apart on the live bridge:
+   *
+   *   to_agent "code-b"  ->  []
+   *   to_agent "b"       ->  the message
+   *
+   * That is worse than not polling. It is a CONFIDENT NEGATIVE, indistinguishable
+   * from an empty inbox, so a reader doing exactly the right thing concludes it
+   * has no mail. docs/ORDER.md predicted the symptom -- one actor with two
+   * registrations ending up with nineteen unread in one pile and ten in the
+   * other -- and named inboxNames as the read half nothing used.
+   *
+   * ONE NAME STILL USES eq, AND THAT IS NOT A CONCESSION TO A TEST. in.(x) and
+   * eq.x are the same query; keeping eq for the single-name case leaves the
+   * common query readable and leaves the escaping contract exactly where it was
+   * already pinned. It also means an UNKNOWN recipient is untouched: canonicalActor
+   * returns an unrecognised name unchanged, so inboxNames gives one element and
+   * this takes the eq branch -- including for a hostile value, which therefore
+   * still escapes through the same path it always did.
+   *
+   * VALUES ARE QUOTED AND ESCAPED INDIVIDUALLY, then joined with literal commas.
+   * Encoding the whole list would turn the separators into %2C and PostgREST
+   * would read one value containing commas, silently matching nothing.
+   */
+  const inbox = inboxNames(to_agent);
+  if (inbox.length === 1) {
+    eq('to_agent', inbox[0]);
+  } else if (inbox.length > 1) {
+    const quoted = (v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    q.push(`to_agent=in.(${inbox.map((v) => encodeURIComponent(quoted(v))).join(',')})`);
+  }
+
   eq('from_agent', from_agent);
   eq('task_id', task_id);
   eq('type', type);
