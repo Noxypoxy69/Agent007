@@ -12,7 +12,7 @@
  * FAILS CLOSED on a missing or unreadable snapshot, because "nobody knows" is
  * not "nothing changed".
  */
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -959,55 +959,98 @@ if (budget !== null && suiteMs < MIN_SUITE_MS) {
   out(`[agentbridge:stop-deadline] The work before the suite spent ${spentMs}ms of a ${budget.ms}ms hook budget (${budget.source}), leaving ${suiteMs}ms -- less than the ${MIN_SUITE_MS}ms a run needs to reach a TAP summary. NOTHING WAS VERIFIED, so this turn is not approved. Starting a run that cannot finish would spend the rest of the budget and produce this same refusal too late to be read.`);
 }
 
-const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...tests], {
-  cwd: root,
-  encoding: 'utf8',
-  timeout: suiteMs,
-  maxBuffer: 32 * 1024 * 1024,
-  /*
-   * SIGKILL, NOT THE DEFAULT SIGTERM. spawnSync sends killSignal at the timeout
-   * and then WAITS for the child to exit; it never escalates. A test -- or any
-   * child of the runner -- that installs a SIGTERM handler would hold this call
-   * open indefinitely past the deadline, which is the silent allow rebuilt
-   * through a different door, and unbounded rather than merely tight. SIGKILL
-   * cannot be trapped. On Windows both already map to TerminateProcess, so this
-   * costs nothing there and closes the hole everywhere else.
-   */
-  killSignal: 'SIGKILL',
-});
-const output = `${run.stdout || ''}\n${run.stderr || ''}`;
-
 /*
- * A DEADLINE STOP IS REPORTED AS ONE, not folded into test-run-failed. Both
- * refuse, so the security outcome is identical -- but "the suite was cut off
- * because this machine is too slow" and "a test failed" call for opposite
- * responses from whoever reads it, and a refusal nobody can act on is the kind
- * that gets the hook switched off.
+ * ═══ THIS GATE NO LONGER RUNS THE SUITE. IT CONSUMES A RESULT. ═══
+ *
+ * WHAT IT USED TO DO, AND WHY THAT COULD NOT WORK. It spawned the whole suite
+ * at every turn end. A session that also ran the suite -- which is the normal
+ * way to check your own work -- put two full copies on one machine, and a
+ * second AGENT made it three. Measured here: a solo run is ~185s, a pair is
+ * ~400-430s, and the budget is 420s. So the gate killed its own suite and
+ * reported NOTHING WAS VERIFIED six times in one session. Every single one was
+ * a duplicate of work already running, and the duplicate never learned anything
+ * the original would not have.
+ *
+ * Raising the budget to 900s moves the wall. Two copies of a growing suite find
+ * 900 the way they found 420.
+ *
+ * THE FIX IS SINGLE-FLIGHT, and the shape is borrowed: node-core-utils refuses
+ * to launch CI for a commit that already has a run in flight, and agent-studio
+ * caches baseline verification keyed by repo, sha, command and toolchain.
+ * Danny pointed at both.
+ *
+ *   a completed result for this exact tree  -> consume it
+ *   one already running for this tree       -> report it, start nothing
+ *   nothing                                 -> start ONE, detached, and refuse
+ *                                              this turn as unverified
+ *
+ * THE IDENTITY IS THE SAFETY ARGUMENT. `src/verifyCache.mjs` keys on the
+ * WORKING TREE with file contents -- not HEAD -- plus the command, the
+ * toolchain and the environment. An uncommitted edit produces a different key,
+ * so a PASS can never be reused across a change. Reusing a result for a tree
+ * nobody tested would be a forged verification, and every other control in this
+ * repository sits behind the suite.
+ *
+ * A RUN IN FLIGHT IS NOT A PASS. `admitVerification` is deliberately separate
+ * from the decision about whether to start one, because collapsing them would
+ * approve a turn on the strength of somebody else's work in progress.
+ *
+ * STARTING IS DETACHED AND UNAWAITED, so this hook still answers in
+ * milliseconds. The turn is refused -- nothing has been verified yet -- but the
+ * NEXT turn consumes the result instead of starting a seventh duplicate.
  */
-if (run.error?.code === 'ETIMEDOUT') {
-  out(`[agentbridge:stop-deadline] The suite was still running after ${suiteMs}ms and was stopped so this gate could answer before Claude Code's hook timeout cancels it and discards the answer (budget: ${budget === null ? `${UNDECLARED_SUITE_MS}ms, because no Stop timeout could be read from .claude/settings.json` : `${budget.ms}ms from ${budget.source}`}). NOTHING WAS VERIFIED, so this turn is not approved. A healthy run finishes far inside this; one that does not is a machine to fix, not a reason to approve unverified work.`);
+const { verifyKey, decideVerify, admitVerification, VERIFY, ACTION } = await import('../src/verifyCache.mjs');
+const { verificationIdentity, verifyRecordPath } = await import('../src/verifyIdentity.mjs');
+
+const ident = verificationIdentity(root, process.env);
+const keyed = verifyKey(ident);
+
+if (!keyed.ok) {
+  /*
+   * NO IDENTITY MEANS NO TRUSTWORTHY RESULT. Refuse rather than fall back to
+   * running the suite here -- falling back is how the duplicate returns.
+   */
+  out(`[agentbridge:verify-identity-unknown] Could not form a verification identity for this tree, so no result could be trusted: ${keyed.errors.join('; ')}`);
 }
 
-if (run.error || run.signal || run.status !== 0) {
-  out(`[agentbridge:test-run-failed] status=${String(run.status)} signal=${String(run.signal)} error=${run.error?.message || 'none'}`);
+let record = null;
+try { record = JSON.parse(readFileSync(verifyRecordPath(keyed.key), 'utf8')); } catch { record = null; }
+
+const decision = decideVerify(record, { now: Date.now(), key: keyed.key });
+const admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
+
+if (decision.action === ACTION.START) {
+  /*
+   * DETACHED, AND ITS OUTPUT GOES TO THE STORE RATHER THAN TO THIS PIPE. An
+   * inherited stdio handle keeps the parent's pipe open, and Claude Code waits
+   * on it -- so an unawaited child would still hold the hook for the length of
+   * the suite, which is the bug this whole change removes, rebuilt through a
+   * different door.
+   */
+  try {
+    const child = spawn(process.execPath, [path.join(root, 'scripts', 'verify-run.mjs')], {
+      cwd: root, detached: true, stdio: 'ignore',
+    });
+    child.unref();
+    out(`[agentbridge:verify-started] Nothing had verified this exact tree, so one run was started (pid ${child.pid}). `
+      + 'THIS TURN IS NOT APPROVED -- a run that has just begun has proved nothing. The next turn reads its '
+      + `result instead of starting another. Watch it with: node scripts/verify-run.mjs --status`);
+  } catch (e) {
+    out(`[agentbridge:verify-unstartable] No result exists for this tree and the verifier could not be started (${e?.message ?? e}). NOTHING WAS VERIFIED.`);
+  }
 }
 
-const one = (label) => {
-  const hits = [...output.matchAll(new RegExp(`^# ${label} (\\d+)$`, 'gm'))];
-  return hits.length === 1 ? Number(hits[0][1]) : null;
-};
-const counts = Object.fromEntries(
-  ['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo'].map((l) => [l, one(l)]),
-);
-if (Object.values(counts).some((v) => v === null)) {
-  out(`[agentbridge:tap-summary-invalid] Expected exactly one complete TAP summary; observed ${JSON.stringify(counts)}.`);
+if (decision.action === ACTION.ATTACH) {
+  out(`[agentbridge:verify-in-flight] ${decision.why}. THIS TURN IS NOT APPROVED: a run in flight is not a result. `
+    + 'No second suite was started -- that duplication is what made every run miss the deadline.');
 }
-if (
-  counts.tests <= 0 || counts.fail !== 0 || counts.cancelled !== 0
-  || counts.pass + counts.fail + counts.cancelled + counts.skipped + counts.todo !== counts.tests
-) {
-  out(`[agentbridge:tap-counts-refused] Test counts do not prove a clean reconciled run: ${JSON.stringify(counts)}.`);
+
+if (admitted.state === VERIFY.FAILED || admitted.state === VERIFY.PARTIAL || admitted.state === VERIFY.TIMED_OUT) {
+  const r = record ?? {};
+  out(`[agentbridge:verify-failed] ${admitted.state} for this exact tree: ${r.why ?? admitted.why}. `
+    + `${r.tests ?? '?'} test(s), ${r.fail ?? '?'} failing. Read the detail with: node scripts/verify-run.mjs --status --json`);
 }
+
 if (escalationBlock) out(escalationBlock);
 
 out(null);

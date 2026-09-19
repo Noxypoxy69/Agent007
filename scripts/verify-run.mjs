@@ -33,20 +33,24 @@
  *      it should escalate
  *   3  VERIFY_RUNNING elsewhere; this process started nothing
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync,
+  mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync,
 } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import {
   verifyKey, decideVerify, aggregateShards, shardPlan,
-  VERIFY, ACTION, HEARTBEAT_MS, DEAD_AFTER_MS,
+  VERIFY, ACTION, HEARTBEAT_MS,
 } from '../src/verifyCache.mjs';
-import { runGit } from '../src/safeGit.mjs';
+/*
+ * THE IDENTITY IS IMPORTED, NOT RECOMPUTED HERE. The Stop gate looks a result
+ * up by the same key this writes it under; two derivations would drift and the
+ * gate would silently find nothing and start another run -- the duplicate-suite
+ * problem returning wearing a cache. Same lesson as repoStorePath.
+ */
+import { verificationIdentity, verifyRecordPath } from '../src/verifyIdentity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -57,64 +61,10 @@ const flag = (name, fallback = null) => {
 const asJson = argv.includes('--json');
 const statusOnly = argv.includes('--status');
 
-const home = process.env.AGENTBRIDGE_HOME || path.join(os.homedir(), '.agentbridge');
-const storeDir = path.join(home, 'verify');
-
-/* ── measuring the identity ───────────────────────────────────────────── */
-
-const COMMAND = 'node --test test/**/*.test.mjs';
-
-/**
- * THE WORKING TREE, NOT HEAD.
- *
- * An uncommitted edit changes what the suite executes, and `npm test`'s glob is
- * expanded by node rather than by git -- so an UNTRACKED test file runs. Keying
- * on a commit would reuse a PASS across an edit, which is the defect a blind
- * audit demonstrated live against audit-pin: it certified a commit while an
- * auditor read a working tree.
- *
- * Content, not just names: `git status` alone says a file changed, not what it
- * now contains, so two different edits to one file would share a key.
- */
-function treeDigest() {
-  try {
-    const head = String(runGit(['-C', root, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' })).trim();
-    const status = String(runGit(['-C', root, 'status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }));
-    const dirty = status.split('\n').map((s) => s.trim()).filter(Boolean).sort();
-
-    const h = createHash('sha256').update(head);
-    const NUL = String.fromCharCode(0);
-    for (const line of dirty) {
-      const rel = line.slice(line.indexOf(' ') + 1).trim().replace(/^"|"$/g, '');
-      let body = '';
-      try { body = readFileSync(path.join(root, rel), 'utf8'); } catch { body = '(unreadable)'; }
-      h.update(`${NUL}${rel}${NUL}${body.length}${NUL}${createHash('sha256').update(body).digest('hex')}`);
-    }
-    return h.digest('hex');
-  } catch {
-    return null;   // no digest means no key means run it
-  }
-}
-
-/**
- * The environment the suite reads. AGENTBRIDGE_HOME alone decides whether a test
- * sees the operator's real grants, which is the difference between a result
- * about this repository and a result about this machine's live state.
- */
-function envDigest() {
-  const READS = ['AGENTBRIDGE_HOME', 'AGENTBRIDGE_AGENT_ID', 'CLAUDE_PROJECT_DIR', 'CI', 'NODE_OPTIONS'];
-  const NUL = String.fromCharCode(0);
-  return createHash('sha256')
-    .update(READS.map((k) => `${k}=${process.env[k] ?? ''}`).join(NUL))
-    .digest('hex')
-    .slice(0, 16);
-}
-
-const toolchain = `${process.version}-${process.platform}-${process.arch}`;
-
 /* ── the store ────────────────────────────────────────────────────────── */
 
-const fileFor = (key) => path.join(storeDir, `${key}.json`);
+const fileFor = (key) => verifyRecordPath(key);
+const storeDir = path.dirname(fileFor('x'));
 
 function readRecord(key) {
   try { return JSON.parse(readFileSync(fileFor(key), 'utf8')); } catch { return null; }
@@ -159,12 +109,7 @@ const EXIT = {
 
 /* ── main ─────────────────────────────────────────────────────────────── */
 
-const identity = {
-  tree_digest: treeDigest(),
-  command: COMMAND,
-  toolchain,
-  env_digest: envDigest(),
-};
+const identity = verificationIdentity(root, process.env);
 
 const k = verifyKey(identity);
 if (!k.ok) {
