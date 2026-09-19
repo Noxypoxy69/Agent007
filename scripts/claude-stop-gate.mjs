@@ -400,21 +400,58 @@ if (landed.length) {
     + 'worktree. Not blocking: a committed change is attributable and diffable, which is what the '
     + `snapshot exists to guarantee. Recorded:\n${landed.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`;
 }
-if (granted.length) {
-  /*
-   * RECORDED, NOT RETURNED. This must not call out() -- see its definition.
-   * The grant is re-read per entry and may be gone by now (expiry, deletion),
-   * so a missing grant degrades to naming the file rather than dereferencing
-   * null: 95725a3 added three unguarded overrideCovers calls to a script that
-   * has no try/catch anywhere, and an uncaught throw here exits 1 with empty
-   * stdout, which Claude Code reads as non-blocking.
-   */
-  carriedNotice = `[agentbridge:protected-control-overridden] Protected controls changed under an active override. Permitted, and recorded anyway:\n${granted.map((d) => {
+/**
+ * Announce granted drift, GROUPED BY GRANT rather than repeated per file.
+ *
+ * ONE WILDCARD GRANT PRINTED ITS OWN TERMS FOURTEEN TIMES. Every covered path
+ * carried the full tail -- grantor, expiry and the whole reason sentence -- so a
+ * `paths: ["*"]` grant, which is the shape the owner actually issues, produced
+ * fourteen identical copies of "granted by danny, expires ..., reason: full
+ * access for code-a, code-b and fixer, directed by Danny repeatedly" with the
+ * filenames buried between them.
+ *
+ * THAT IS NOT A COSMETIC COMPLAINT. This notice exists so a reader can see what
+ * a grant permitted, and the announcement is the only place it surfaces. A
+ * reader who scrolls past it because it is fourteen-sixteenths boilerplate is a
+ * reader the control did not reach -- rule 16's failure mode in a different
+ * costume: not a gate that cannot go green, but a report nobody finishes.
+ *
+ * WHAT IS KEPT, deliberately, because the terms are the point: every distinct
+ * grant still prints its grantor, expiry and reason IN FULL, once. Files are
+ * listed under the grant that permitted them. A file whose grant has become
+ * unreadable since the drift was recorded gets its own group and says so --
+ * that degradation is load-bearing (see the note below) and must not be folded
+ * in with the others.
+ */
+function announceGranted(marker, headline, entries) {
+  const groups = new Map();
+  for (const d of entries) {
+    /*
+     * RE-READ PER ENTRY, AND MAY BE GONE BY NOW (expiry, deletion), so a
+     * missing grant degrades to naming the file rather than dereferencing
+     * null: 95725a3 added three unguarded overrideCovers calls to a script
+     * that has no try/catch anywhere, and an uncaught throw here exits 1 with
+     * empty stdout, which Claude Code reads as non-blocking.
+     */
     const g = overrideCovers(root, d.file);
-    return g
-      ? `  ${d.file}: ${d.now} -- granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`
-      : `  ${d.file}: ${d.now} -- the grant that permitted this is no longer readable`;
-  }).join('\n')}`;
+    const key = g
+      ? `granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`
+      : 'the grant that permitted this is no longer readable';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(`      ${d.file}: ${d.now}`);
+  }
+
+  const body = [...groups].map(([terms, files]) => `  ${terms}\n${files.join('\n')}`).join('\n');
+  return `[agentbridge:${marker}] ${headline}\n${body}`;
+}
+
+if (granted.length) {
+  // RECORDED, NOT RETURNED. This must not call out() -- see its definition.
+  carriedNotice = announceGranted(
+    'protected-control-overridden',
+    'Protected controls changed under an active override. Permitted, and recorded anyway:',
+    granted,
+  );
 }
 if (drift.length) {
   out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
@@ -464,12 +501,11 @@ const testDecisions = allTestDrift.map((d) => ({ entry: d, granted: Boolean(over
 const grantedTests = testDecisions.filter((x) => x.granted).map((x) => x.entry);
 const testDrift = testDecisions.filter((x) => !x.granted).map((x) => x.entry);
 if (grantedTests.length) {
-  const note = `[agentbridge:baseline-test-overridden] Baseline tests changed under an active override. Permitted, and recorded anyway:\n${grantedTests.map((d) => {
-    const g = overrideCovers(root, d.file);
-    return g
-      ? `  ${d.file}: ${d.now} -- granted by ${g.granted_by}, expires ${g.expires_at}, reason: ${g.reason}`
-      : `  ${d.file}: ${d.now} -- the grant that permitted this is no longer readable`;
-  }).join('\n')}`;
+  const note = announceGranted(
+    'baseline-test-overridden',
+    'Baseline tests changed under an active override. Permitted, and recorded anyway:',
+    grantedTests,
+  );
   // APPEND. carriedNotice may already hold the protected-control notice, and
   // assigning over it would silently drop one of two announcements.
   carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
