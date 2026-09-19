@@ -131,7 +131,50 @@ const WRITE_FLAG_LONG = WRITE_FLAG_NAMES.filter((f) => f.startsWith('--'));
  */
 function isWriteFlagToken(token) {
   if (typeof token !== 'string') return false;
-  if (WRITE_FLAG_SHORT.some((f) => token.startsWith(f))) return true;
+
+  // The bare short flag, and the separated form `sort -o out.txt`.
+  if (WRITE_FLAG_SHORT.includes(token)) return true;
+
+  /*
+   * A GLUED SHORT VALUE COUNTS ONLY WHEN IT NAMES A PATH, AND THE VERSION
+   * WITHOUT THAT CLAUSE WAS AN OUTAGE I SHIPPED.
+   *
+   * `token.startsWith(f)` treated ANY token beginning `-o` or `-f` as a side
+   * file flag, and those two letters start a great many ordinary read options.
+   * Measured through the shipped rail after I shipped it -- every one of these
+   * worked before and was refused after:
+   *
+   *     cut -f1 package.json                 DENY
+   *     grep -o agentbridge package.json     DENY
+   *     git ls-files -o --exclude-standard   DENY   <- listing untracked files
+   *     Get-ChildItem -force src             DENY   <- and PowerShell parameter
+   *                                                    names are case-insensitive,
+   *                                                    so -Force passed and -force
+   *                                                    did not
+   *
+   * That is rule 19's outage direction, and an outage gets the hook switched
+   * off, which loses every layer at once. Found by blind audit, reported as
+   * INTRODUCED BY d050348, which is correct.
+   *
+   * THE DISTINCTION THAT SURVIVES BOTH DIRECTIONS is that a write flag's value
+   * is a PATH. `-osrc/claudeGuard.mjs` names one; `-f1` and `-o` do not. So the
+   * glued remainder must look like a path -- a separator or an extension --
+   * before it is treated as one.
+   *
+   * WHAT THAT STILL MISSES, stated rather than discovered later: a glued value
+   * that is a bare filename with no separator and no dot, such as `sort -oMakefile`,
+   * is not caught. That is a narrower residual than refusing `cut -f1` for every
+   * agent on the machine, and it cannot reach a path inside src/ without a
+   * separator. The real repair is per-TOOL arity -- `-f` is a file for grep and
+   * jq, a field list for cut, and follow for tail -- and this list has been a
+   * union across tools since before I touched it. That is its own change.
+   */
+  const glued = WRITE_FLAG_SHORT.find((f) => token.startsWith(f) && token.length > f.length);
+  if (glued) {
+    const value = token.slice(glued.length).replace(/^=/, '');
+    if (/[\\/]/.test(value) || /\.[A-Za-z0-9]+$/.test(value)) return true;
+  }
+
   const name = token.split('=')[0];
   return WRITE_FLAG_LONG.includes(name);
 }
