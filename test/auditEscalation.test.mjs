@@ -30,7 +30,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { auditEscalation } from '../src/auditLedger.mjs';
+import { auditEscalation, AUDIT_BEARING_EXTRAS } from '../src/auditLedger.mjs';
+import { PROTECTED_PATHS } from '../src/guardSession.mjs';
 
 const commit = (sha, over = {}) => ({
   sha,
@@ -181,4 +182,106 @@ test('an empty range blocks nothing and says nothing', () => {
   const r = auditEscalation({ commits: [], error: null }, []);
   assert.equal(r.block, null);
   assert.equal(r.notice, '');
+});
+
+/* ══ the narrowing dropped six controls, and the report lost half its job ══
+ *
+ * Both found by a blind audit of the commit that added the narrowing. The
+ * first is the serious one: an allowlist of names that BLOCK is open by
+ * default for everything nobody remembered to type.
+ */
+
+test('EVERY AUDIT-BEARING PATH BLOCKS UNLESS IT IS PINNED PROSE -- generated from the real lists', () => {
+  /*
+   * THE TEST THAT WOULD HAVE CAUGHT IT, AND THE REASON IT IS GENERATED.
+   *
+   * The narrowing was eleven hand-typed path names, and an auditor measured
+   * the blocking set falling 23 -> 11. Six of the twelve dropped were neither
+   * prose nor dependencies: both .claude settings files, any .claude hook
+   * script, src/moduleGraph.mjs, src/tokenFile.mjs and test/claudeGuard.test.
+   * mjs. src/moduleGraph.mjs pushed unaudited went from decision "block" to
+   * approving the turn.
+   *
+   * So the candidates come from the REAL PROTECTED_PATHS and
+   * AUDIT_BEARING_EXTRAS rather than a list typed here -- rule 7: generate the
+   * fixtures from the real list, so adding an entry extends the coverage with
+   * nobody remembering to. Add a control tomorrow and this test demands it
+   * block, on the day it is added.
+   *
+   * THE EXPECTED ANSWER IS PINNED, NOT COMPUTED. Deriving it from the same
+   * predicate the subject uses would be hollow gate #2 -- a check that
+   * reconstructs the rule agrees with itself through any regression. EXEMPT is
+   * therefore typed out, and it is the only list here that is: a new prose
+   * file fails this test until somebody adds it deliberately, which is a
+   * review step, and it fails in the direction where a control blocks by
+   * mistake rather than one going quiet by mistake.
+   */
+  const EXEMPT = [
+    'claude.md',
+    'third_party_code.md',
+    'docs/claude_guard_provenance.md',
+    'docs/order.md',
+    'docs/roadmap.md',
+    'package.json',
+    'package-lock.json',
+  ];
+
+  const candidates = [...new Set([...PROTECTED_PATHS, ...AUDIT_BEARING_EXTRAS])]
+    /* A trailing slash is a PREFIX in PROTECTED_PATHS, so stand in a real member. */
+    .map((p) => (String(p).endsWith('/') ? `${p}settings.json` : String(p)));
+  assert.ok(candidates.length >= 20,
+    `the real lists produced only ${candidates.length} candidates -- this test is not covering the repo`);
+
+  for (const p of candidates) {
+    const shouldBlock = !EXEMPT.includes(p.toLowerCase());
+    const r = auditEscalation({ commits: [commit('eeee5555', { touched: [p] })], error: null }, []);
+    assert.equal(Boolean(r.block), shouldBlock,
+      shouldBlock
+        ? `${p} is audit-bearing and is not pinned prose, so it must STOP the turn`
+        : `${p} is pinned prose and must not stop a turn`);
+  }
+});
+
+test('the six paths the narrowing dropped block again, each named', () => {
+  /*
+   * The generated test above would catch a repeat, but it says "one of 25
+   * candidates is wrong". These are the six an auditor actually demonstrated,
+   * so a future reader gets the names and not a search. Two are modules the
+   * guard IMPORTS -- guardSession's own comment says "a file the guard
+   * IMPORTS decides what the guard does" -- and .claude holds the
+   * configuration that decides whether any hook arms at all.
+   */
+  for (const p of ['.claude/settings.json', '.claude/settings.local.json', '.claude/poll-hook.mjs',
+    'src/moduleGraph.mjs', 'src/tokenFile.mjs', 'test/claudeGuard.test.mjs']) {
+    const r = auditEscalation({ commits: [commit('ffff6666', { touched: [p] })], error: null }, []);
+    assert.ok(r.block, `${p} went back to being a notice when the narrowing landed; it must block`);
+    assert.match(r.block, /audit-escaped/);
+  }
+});
+
+test('A BLOCKING COMMIT DOES NOT ERASE THE REPORT OF THE NON-BLOCKING ONES', () => {
+  /*
+   * The second finding. `notice` was set to null whenever anything blocked,
+   * and `notice` is the ONLY channel naming the unaudited commits that do not
+   * block. So one escaped control commit made every unaudited prose commit
+   * vanish from both channels -- while the commit message claimed "the REPORT
+   * still covers everything isAuditBearing covers".
+   *
+   * Reporting less the moment something goes wrong is backwards: that is
+   * exactly when the reader needs the whole picture.
+   */
+  const r = auditEscalation({
+    commits: [
+      commit('11111111', { touched: ['src/policy.mjs'] }),
+      commit('22222222', { touched: ['CLAUDE.md'] }),
+      commit('33333333', { touched: ['docs/ROADMAP.md'] }),
+    ],
+    error: null,
+  }, []);
+
+  assert.ok(r.block, 'the control commit must still block');
+  assert.match(r.block, /11111111/, 'and the block must name it');
+  assert.ok(r.notice, 'the report must survive the block, not be replaced by it');
+  assert.match(r.notice, /22222222/, 'the unaudited CLAUDE.md commit must still be reported');
+  assert.match(r.notice, /33333333/, 'and so must the unaudited docs commit');
 });

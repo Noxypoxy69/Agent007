@@ -315,34 +315,80 @@ export function formatCoverage({ commits, malformed, error }) {
  * documentation change with no audit is still worth saying -- and only this
  * list stops the turn. Decision logic, not prose and not dependencies.
  */
-export const BLOCKING_CONTROLS = Object.freeze([
-  'src/claudeguard.mjs',
-  'src/guardsession.mjs',
-  'src/shellallowlist.mjs',
-  'src/policy.mjs',
-  'src/safegit.mjs',
-  'src/actionauthority.mjs',
-  'src/auditledger.mjs',
-  'src/verifier.mjs',
-  'src/gitindexlease.mjs',
-  'scripts/claude-stop-gate.mjs',
-  'bin/agentbridge-claude-guard.mjs',
-]);
+/*
+ * WHICH AUDIT-BEARING PATHS ARE PROSE, AND THEREFORE REPORTED RATHER THAN
+ * BLOCKED. Everything else audit-bearing BLOCKS.
+ *
+ * THIS USED TO BE THE OTHER WAY ROUND AND THAT WAS A DEFECT AN AUDITOR FOUND.
+ * The first version of this narrowing was `BLOCKING_CONTROLS`, eleven
+ * hand-typed path names, and blocking required being ON it. Measured by a
+ * blind audit: the blocking set went 23 -> 11, and six of the twelve dropped
+ * were neither prose nor dependencies --
+ *
+ *     .claude/settings.json      .claude/settings.local.json
+ *     .claude/** (hook scripts)  src/moduleGraph.mjs
+ *     src/tokenFile.mjs          test/claudeGuard.test.mjs
+ *
+ * -- so a pushed, unaudited change to a hook script or to a module the guard
+ * IMPORTS stopped blocking and went back to being a notice, which is the
+ * precise state this whole module was written to end. The auditor demonstrated
+ * it end to end: src/moduleGraph.mjs pushed unaudited returned decision
+ * "block" at 7da95e0 and approved the turn at d6fcf6f.
+ *
+ * TWO LESSONS, BOTH ALREADY IN THE FILE ABOVE THIS LINE.
+ *
+ * Rule 19: a list of names fails in both directions, and an allowlist of
+ * things that block fails CLOSED for the reader and OPEN for the system --
+ * every control added after it was typed is silently exempt. The header of
+ * AUDIT_BEARING_EXTRAS says so in as many words, forty lines up: "DERIVED FROM
+ * PROTECTED_PATHS, not typed again. Two lists of one thing drift the moment
+ * somebody edits one." I typed the second list three functions below that
+ * sentence.
+ *
+ * So the question is asked the other way round, and about the SHAPE of the
+ * path rather than its name: is this prose or a dependency manifest? A new
+ * control file is neither, so it blocks the day it is added, with nobody
+ * remembering to extend anything. A new document ends in .md, so it does not.
+ *
+ * WHAT IS DELIBERATELY EXEMPT, and why each one:
+ *   *.md               Prose. CLAUDE.md, the docs/ set and THIRD_PARTY_CODE.md
+ *                      are worth auditing and worth REPORTING unaudited, but
+ *                      blocking a turn on a documentation edit is what took
+ *                      the operator machine down and nearly got this gate
+ *                      switched off entirely (rule 16).
+ *   package.json       Dependency manifests. A lockfile bump is not a
+ *   package-lock.json  decision, and npm rewrites them without being asked.
+ *
+ * Note what is NOT exempt any more: .claude/** is decision CONFIGURATION --
+ * settings.json decides whether the hooks arm at all -- and
+ * test/claudeGuard.test.mjs is how anybody would notice the guard changing.
+ * Weakening either is the cheapest way to disable a control without touching
+ * it.
+ */
+const PROSE_OR_DEPENDENCY = /(?:\.md$)|(?:^package(?:-lock)?\.json$)/;
+
+/**
+ * Normalise a git-reported path: either separator, no leading ./, folded.
+ *
+ * The backslash is BUILT rather than written. A literal backslash in a string
+ * has been silently eaten by this session shell three separate times; the file
+ * already uses this idiom for the record separator.
+ */
+function normalisePath(rel) {
+  return String(rel).split(String.fromCharCode(92)).join('/')
+    .replace(/^\.\//, '')
+    .toLowerCase();
+}
+
+/** Does changing this path stop a turn, as opposed to merely being reported? */
+export function isBlockingControl(rel) {
+  if (!isAuditBearing(rel)) return false;
+  return !PROSE_OR_DEPENDENCY.test(normalisePath(rel));
+}
 
 /** Does this commit touch decision logic, as opposed to prose or dependencies? */
 export function touchesBlockingControl(touched) {
-  return (Array.isArray(touched) ? touched : []).some((f) => {
-    /*
-     * The separator is built rather than written. A literal backslash in a
-     * string has been silently eaten by this session's shell three times
-     * tonight; fromCharCode cannot be, and this file already uses the idiom
-     * for the record separator above.
-     */
-    const norm = String(f).split(String.fromCharCode(92)).join('/')
-      .replace(/^\.\//, '')
-      .toLowerCase();
-    return BLOCKING_CONTROLS.includes(norm);
-  });
+  return (Array.isArray(touched) ? touched : []).some(isBlockingControl);
 }
 
 export function auditEscalation(coverage, unpushed) {
@@ -384,7 +430,7 @@ export function auditEscalation(coverage, unpushed) {
     /*
      * Only DECISION LOGIC stops a turn. A pushed, unaudited CLAUDE.md edit is
      * still reported in the notice below; it does not block. See
-     * BLOCKING_CONTROLS for why that distinction exists and what it cost.
+     * isBlockingControl for why that distinction exists and what it cost.
      */
     .filter((c) => touchesBlockingControl(c.touched));
   if (escaped.length === 0) return { block: null, notice: formatCoverage(safe) };
@@ -403,5 +449,35 @@ export function auditEscalation(coverage, unpushed) {
   lines.push('  to audit has passed. Record the audit in docs/audit-ledger.jsonl -- one JSON');
   lines.push('  object per line with at least {"commit":"<sha>","auditor":"<who>"} -- once a');
   lines.push('  reader who did NOT write the commit has actually looked at it.');
-  return { block: lines.join('\n'), notice: null };
+  /*
+   * BOTH CHANNELS, ALWAYS. This returned `notice: null`, and an auditor showed
+   * what that cost: `notice` is the only place the NON-blocking unaudited
+   * commits are named, so the moment one decision-logic commit escaped, every
+   * unaudited prose commit disappeared from the report entirely -- present in
+   * neither channel. The commit that introduced the filter claimed the
+   * opposite in its message ("The REPORT still covers everything isAuditBearing
+   * covers"). It did not.
+   */
+  /*
+   * BOTH CHANNELS, AND NEITHER REPEATS THE OTHER.
+   *
+   * This returned `notice: null`, and an auditor showed the cost: `notice` is
+   * the ONLY channel naming unaudited commits that do not block, so the moment
+   * one decision-logic commit escaped, every unaudited prose commit vanished
+   * from the report entirely -- present in neither channel. The commit that
+   * introduced the filter claimed the opposite in its message ("the REPORT
+   * still covers everything isAuditBearing covers"). It did not. Reporting
+   * LESS the moment something goes wrong is backwards.
+   *
+   * The commits already named in the block are removed rather than repeated,
+   * because the original null was answering a real objection -- a notice
+   * restating the block is noise, and noise is how a reader learns to skip
+   * both. If nothing else is outstanding the notice stays null.
+   */
+  const named = new Set(escaped.map((c) => String(c.sha).trim().toLowerCase()));
+  const rest = formatCoverage({
+    ...safe,
+    commits: safe.commits.filter((c) => !named.has(String(c.sha).trim().toLowerCase())),
+  });
+  return { block: lines.join('\n'), notice: rest === '' ? null : rest };
 }
