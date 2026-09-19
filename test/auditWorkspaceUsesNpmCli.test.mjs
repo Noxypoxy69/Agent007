@@ -20,7 +20,30 @@ const CODE = SRC
   .replace(/(^|[^:])\/\/[^\n]*/g, (m, p) => p + m.slice(p.length).replace(/./g, ' '));
 
 test('audit-workspace runs npm via npm-cli.js beside node, not bare npm', () => {
-  assert.match(CODE, /npm-cli\.js/, 'must reference npm-cli.js');
+  /*
+   * THIS MATCHED THE SUBJECT'S OWN ERROR MESSAGE, AND SO IT COULD NOT FAIL.
+   *
+   * The assertion was `match(CODE, /npm-cli\.js/)`. Comment-blanking was in
+   * place, but STRING LITERALS were not blanked -- and the subject contains
+   *
+   *   console.log('installing   SKIPPED -- npm-cli.js not found beside node');
+   *
+   * so the gate was satisfied by the diagnostic that fires when the workaround
+   * is MISSING. Measured 2026-09-18: reverting the resolution to `const cli =
+   * 'npm'` left this test green, 1 of 1, with the Windows bug fully restored.
+   *
+   * That is CLAUDE.md hollow gate 13 -- a gate matching `lease_token` inside
+   * the CLI's own error message about a missing lease_token -- reproduced in a
+   * test written the same night the rule was being quoted.
+   *
+   * Blanking string contents as well would break the third assertion below,
+   * which NEEDS the quotes to spot execFile('npm'). So instead of widening the
+   * blanking, the first assertion now pins the CONSTRUCT: the path.join that
+   * resolves the entry point, which prose and diagnostics cannot satisfy.
+   */
+  assert.match(CODE, /path\.join\([^;]*['"]npm-cli\.js['"]\s*\)/,
+    'must RESOLVE npm-cli.js with path.join, not merely mention it -- a string in an error '
+    + 'message satisfied the old assertion while the workaround was gone');
   assert.match(CODE, /process\.execPath/, 'must spawn node (process.execPath), not npm directly');
   assert.doesNotMatch(CODE, /(execFile\w*|spawn\w*)\(\s*['"]npm(\.cmd)?['"]/,
     'must not spawn bare npm or npm.cmd -- that is the Windows .cmd bug');
