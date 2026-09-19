@@ -193,6 +193,14 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         candidate can never satisfy a gate.
   agentbridge audits [--repo <dir>]     the blind-audit queue: every commit that
   agentbridge audit-claim --id <audit-..> --by <session>
+  agentbridge audit-record --id <audit-..> --verdict PASS|FAIL [--findings F-a,F-b]
+                                        the terminal write. Refuses unless the
+                                        writer IS the claimant, the claim lease
+                                        is live, the candidate AND its tree are
+                                        unchanged, independence is ENFORCED, and
+                                        a FAIL carries a finding. Idempotent on
+                                        an identical retry; a conflicting second
+                                        verdict is refused.
                                         changed a control and has no recorded
                                         audit. Persisted, so another session can
                                         take one -- the trigger used to print
@@ -3225,7 +3233,8 @@ try {
    */
   if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind'
       || cmd === 'finding-move' || cmd === 'repair-record' || cmd === 'regressions-due'
-      || cmd === 'audits' || cmd === 'audit-claim' || cmd === 'candidate-record') {
+      || cmd === 'audits' || cmd === 'audit-claim' || cmd === 'audit-record'
+      || cmd === 'candidate-record') {
     const {
       createFinding, openFindings, bindRepair, transition, linkToFamily, repairRecord,
       requiredRegressions, FAILURE_CLASSES, FINDING,
@@ -3425,6 +3434,52 @@ try {
       }
       const merged = mergeQueue(readQueue(), computed.jobs, { now: new Date().toISOString() });
       if (merged.added.length || merged.stranded.length) writeQueue(merged.queue);
+
+      if (cmd === 'audit-record') {
+        /*
+         * P0-3's WRITER. Every precondition lives in recordAudit, pure and
+         * tested; this reads the queue, resolves the writer the same way the
+         * claim does, and persists. The identity is NOT taken from a flag for
+         * the same reason the claim does not take one.
+         */
+        const { recordAudit } = await import('../src/auditJob.mjs');
+        const id = str_(args.id);
+        const target = merged.queue.find((j) => j.audit_id === id);
+        const resolvedW = str_(process.env.AGENTBRIDGE_SESSION_ID) ?? str_(process.env.AGENTBRIDGE_AGENT_ID);
+
+        const r = recordAudit(target, {
+          by: resolvedW ?? str_(args.by),
+          verdict: str_(args.verdict),
+          candidate_sha: str_(args.candidate) ?? target?.candidate_sha,
+          candidate_tree_sha: str_(args.tree) ?? target?.candidate_tree_sha,
+          finding_refs: str_(args.findings) ? String(args.findings).split(',') : [],
+          evidence_refs: str_(args.evidence) ? String(args.evidence).split(',') : [],
+          now: Date.now(),
+        });
+
+        if (!r.ok) {
+          console.error(`audit-record: ${r.why}`);
+          process.exit(3);
+        }
+        if (r.unchanged) {
+          console.log(`${r.job.audit_id}  ${r.job.state}  (already recorded, unchanged)`);
+          process.exit(0);
+        }
+        writeQueue(merged.queue.map((j) => (j.audit_id === id ? r.job : j)));
+        console.log(`${r.job.audit_id}  ${r.job.state}  by ${r.job.recorded_by}`);
+        if (r.job.finding_refs.length) console.log(`   findings ${r.job.finding_refs.join(', ')}`);
+        /*
+         * THE LEDGER LINE IS NOT WRITTEN HERE, DELIBERATELY. An audit record
+         * closing its own job is one write; appending a clearance to
+         * docs/audit-ledger.jsonl is a second, and that file is the artefact
+         * rule 20 rests on. It gets written by the step that can also mark the
+         * regime -- PRE_GENESIS work must never append a PASS -- and that is
+         * the genesis wiring, not this command.
+         */
+        console.log('   no ledger line written: a terminal write closes the JOB, and appending a');
+        console.log('   clearance is a separate act that must carry the trust regime with it.');
+        process.exit(0);
+      }
 
       if (cmd === 'audit-claim') {
         const id = str_(args.id);
