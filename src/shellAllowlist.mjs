@@ -135,13 +135,103 @@ const WRITE_FLAG_LONG = WRITE_FLAG_NAMES.filter((f) => f.startsWith('--'));
  * isWriteFlagToken: this is an enumeration, it is named as one, and it exists
  * because the unscoped rule refused `git diff --raw` for every agent.
  */
+/**
+ * SHORT FILE-FLAGS, PER TOOL, BECAUSE THE LETTER MEANS DIFFERENT THINGS.
+ *
+ * This is the change the note below has been asking for: "-f is a file for
+ * grep and jq, a field list for cut, and follow for tail -- and this list has
+ * been a union across tools". A union is wrong in BOTH directions and was
+ * measured wrong in both:
+ *
+ *     sort -ozz a.txt      ALLOWED   <- writes a file named zz
+ *     sort -aozz a.txt     ALLOWED   <- same, in a cluster
+ *     sort -f a.txt        REFUSED   <- fold-case, reads nothing
+ *     grep -o pat a.txt    REFUSED   <- only-matching, reads nothing
+ *
+ * The two under-blocks are the residual this file already disclosed ("a glued
+ * value that is a bare filename with no separator and no dot is not caught"),
+ * and the two over-blocks are the neighbours it warned about. One table closes
+ * all four, because the question was never "is this letter a write flag" -- it
+ * is "does THIS TOOL take a file with this letter".
+ *
+ * SCOPED, AND THE SCOPING IS THE SAFETY PROPERTY. Only tools listed here get
+ * the precise answer. Anything unlisted falls through to the union rule
+ * unchanged, so adding a tool can only ever LOOSEN, deliberately, one tool at
+ * a time, with its option set read rather than guessed. An unknown tool is
+ * still refused on the union -- which is the direction that fails safe.
+ *
+ * Entries are the SHORT letters that take a FILE, read or written, because
+ * either way the path is glued to the flag and never appears as an argument
+ * anything can judge. That is the property this whole function is about.
+ */
+const TOOL_FILE_SHORT = new Map([
+  /* -o is the output file; -f is fold-case and touches nothing. */
+  ['sort', new Set(['o'])],
+  /* -f is the pattern FILE; -o is only-matching. */
+  ['grep', new Set(['f'])],
+  ['egrep', new Set(['f'])],
+  ['fgrep', new Set(['f'])],
+  ['rg', new Set(['f'])],
+  /* -f is a field list, not a file. */
+  ['cut', new Set()],
+  /* -f is follow. */
+  ['tail', new Set()],
+  ['head', new Set()],
+  /* -f is the filter FILE. The long forms (--argfile, --rawfile, --slurpfile)
+   * are covered by the long-flag branch below. I first wrote this empty, on the
+   * strength of 'jq's file options are all long forms', and test/claudeGuard's
+   * 'jq -f evil.jq' case caught it immediately -- the note four lines above in
+   * this very file says '-f is a file for grep and jq'. */
+  ['jq', new Set(['f'])],
+  /* -o on git means other/untracked in ls-files, never an output path. */
+  ['git', new Set()],
+  ['wc', new Set()],
+  ['uniq', new Set()],
+]);
+
+/** The tool name, stripped of any path and extension the caller typed. */
+function toolName(argv0) {
+  if (typeof argv0 !== 'string' || argv0 === '') return null;
+  const base = argv0.split(/[\\/]/).pop() ?? '';
+  return base.replace(/\.(exe|cmd|bat|ps1)$/i, '').toLowerCase() || null;
+}
+
+/**
+ * Does this cluster carry one of the tool's file letters?
+ *
+ * A SHORT OPTION'S VALUE IS GLUED AND ITS FLAG IS LAST IN THE CLUSTER, so the
+ * letter may sit anywhere in the run and everything after it is the path:
+ * `-aozz` is `-a` then `-o zz`. Scanning for the letter is therefore the whole
+ * rule, and it is why `-ozz` and `-aozz` are caught without asking what the
+ * value looks like -- which is what the shape heuristic could not do.
+ */
+function clusterTakesFile(token, letters) {
+  if (!/^-[A-Za-z]/.test(token) || token.startsWith('--')) return false;
+  for (const ch of token.slice(1)) {
+    if (letters.has(ch)) return true;
+    if (!/[A-Za-z]/.test(ch)) return false;   // past the cluster, into a value
+  }
+  return false;
+}
+
 const PREFIX_RESOLVED_TOOLS = new Set(['sort']);
 
 function isWriteFlagToken(token, argv0) {
   if (typeof token !== 'string') return false;
 
-  // The bare short flag, and the separated form `sort -o out.txt`.
-  if (WRITE_FLAG_SHORT.includes(token)) return true;
+  /*
+   * THE TOOL IS ASKED FIRST, AND ITS ANSWER IS FINAL FOR SHORT FLAGS.
+   * A listed tool gets the precise rule; an unlisted one falls through to the
+   * union below, unchanged. See TOOL_FILE_SHORT.
+   */
+  const tool = toolName(argv0);
+  const letters = tool === null ? null : TOOL_FILE_SHORT.get(tool);
+  if (letters) {
+    if (clusterTakesFile(token, letters)) return true;
+  } else if (letters === undefined) {
+    // The bare short flag, and the separated form .
+    if (WRITE_FLAG_SHORT.includes(token)) return true;
+  }
 
   /*
    * A GLUED SHORT VALUE COUNTS ONLY WHEN IT NAMES A PATH, AND THE VERSION
