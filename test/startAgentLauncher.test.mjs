@@ -467,6 +467,40 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     .filter((l) => !/^\s*@?\s*echo\b/i.test(l))
     .join('\n');
 
-  assert.doesNotMatch(executable, /\bnpm\b/i,
+  /*
+   * npm IN COMMAND POSITION, NOT THE THREE LETTERS ANYWHERE.
+   *
+   * `\bnpm\b` refused a legitimate launcher, found by blind audit: `\b`
+   * matches after a backslash, so
+   *
+   *     set "PATH=%APPDATA%\npm;%PATH%"
+   *
+   * -- an ordinary way to make `claude` findable, which EXECUTES nothing --
+   * failed with "agent.cmd must not EXECUTE npm". That is rule 19 in the
+   * small: the assertion was about a vocabulary rather than about the
+   * operation, so it caught a directory name and would equally have caught
+   * a path, a comment inside a quoted string, or an agent called npm-bot.
+   *
+   * The claim is that agent.cmd must not RUN npm, so the match is on
+   * command position: start of line, or after a `&`/`|`/`(` separator, or
+   * after `call`/`start`. A backslash before it means it is part of a path,
+   * which is the whole point.
+   */
+  /* `@` suppresses echo and may prefix a command, so it is part of the position. */
+  const RUNS_NPM = /(?:^|[&|(]|\b(?:call|start)\s+)\s*@?\s*"?npm(?:\.cmd|\.exe)?\b/im;
+
+  assert.doesNotMatch(executable, RUNS_NPM,
     'agent.cmd must not EXECUTE npm: npm pipes stdin and claude comes up headless, which is the bug d0e3f88 fixed');
+
+  /*
+   * BOTH DIRECTIONS, because a matcher that refuses nothing is as useless as
+   * one that refuses everything, and this one has now failed in each
+   * direction once.
+   */
+  for (const runsIt of ['npm run start-agent', 'call npm test', 'a && npm exec claude', '@npm.cmd run x']) {
+    assert.match(runsIt, RUNS_NPM, `"${runsIt}" RUNS npm and must be refused`);
+  }
+  for (const doesNot of ['set "PATH=%APPDATA%\\npm;%PATH%"', 'set "X=C:\\tools\\npm-shim"', 'claude --agent npm-bot']) {
+    assert.doesNotMatch(doesNot, RUNS_NPM, `"${doesNot}" does not execute npm and must be allowed`);
+  }
 });
