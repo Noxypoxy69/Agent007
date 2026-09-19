@@ -71,7 +71,8 @@ test('A TASK IS BORN CLAIMABLE, or it can never be picked up', () => {
   for (const state of ['assigned', 'accepted', 'cancelled', 'open', '', null, 0, 'RUNNABLE']) {
     const v = validateTask(good({ state }));
     assert.equal(v.ok, false, `state ${JSON.stringify(state)} was accepted — it can never be claimed`);
-    assert.match(v.errors.join(' '), /claim_task admits no others/);
+    assert.match(v.errors.join(' '), /state must be one of/,
+      `the refusal does not name the state rule: ${v.errors.join('; ')}`);
   }
 });
 
