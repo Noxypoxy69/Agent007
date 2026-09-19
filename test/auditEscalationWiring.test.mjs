@@ -262,3 +262,76 @@ test('A RED SUITE MUST NOT SWALLOW THE AUDIT ESCALATION', (t) => {
   assert.match(verdict.systemMessage ?? '', /shellAllowlist/,
     `and it must still name the file, or the reader cannot act on it. ${seen}`);
 });
+
+test('AN EARLY EXIT CARRIES THE ESCALATION TOO -- not just the six after it', (t) => {
+  /*
+   * THE PREVIOUS FIX COVERED SIX OF THIRTEEN EXITS AND ITS MESSAGE SAID THE
+   * CLASS WAS CLOSED.
+   *
+   * Moving the carry into out() was described as making it "a property of
+   * LEAVING THE GATE, not of any particular reason for leaving". A blind
+   * audit showed the code did not implement that sentence: out() reads
+   * `escalationBlock`, and SEVEN call sites ran BEFORE the line assigning it,
+   * so they carried null.
+   *
+   * Two of the seven are ordinary and frequent -- protected-control-changed
+   * fires on ANY uncommitted edit to a protected file, which is routine in
+   * this repository. This test drives that exact scenario: a pushed
+   * unaudited rail change AND an uncommitted protected-file edit. The turn
+   * must block on the drift, and the rule-20 escalation must still leave the
+   * process.
+   *
+   * It is the strongest of the wiring tests because it fails against the
+   * commit that claimed to fix it, not merely against the original defect.
+   */
+  const env = guardedRepoWithRemote(t);
+  sessionStart(env, 'W5');
+
+  pushUnauditedControl(env, 'a rail change nobody audited');
+
+  /* An UNCOMMITTED edit to a different protected file: the drift exit. */
+  const safeGit = path.join(env.root, 'src', 'safeGit.mjs');
+  writeFileSync(safeGit, `${readFileSync(safeGit, 'utf8')}\n/* uncommitted */\n`);
+
+  const verdict = stop(env, 'W5');
+  const seen = JSON.stringify(verdict);
+
+  assert.match(verdict.reason ?? '', /protected-control-changed/,
+    `this scenario needs the turn to exit at the DRIFT check, which precedes the escalation. ${seen}`);
+  assert.match(verdict.systemMessage ?? '', /audit-escaped/,
+    `an early exit dropped the rule-20 escalation entirely. ${seen}`);
+  assert.match(verdict.systemMessage ?? '', /shellAllowlist/,
+    `and it must still name the file. ${seen}`);
+});
+
+test('THE RETRY TURN DOES NOT SWALLOW IT EITHER', (t) => {
+  /*
+   * The whole justification for deferring the escalation was that a turn
+   * blocking for another reason would surface it NEXT turn. This is next
+   * turn: Claude Code sets stop_hook_active after a Stop hook blocks once,
+   * and that path writes to stdout directly, never calling out(). So the
+   * escalation was not deferred by a turn -- it was dropped for the whole
+   * exchange.
+   */
+  const env = guardedRepoWithRemote(t);
+  sessionStart(env, 'W6');
+  pushUnauditedControl(env, 'a rail change nobody audited');
+
+  const r = spawnSync(process.execPath, [path.join(env.root, 'scripts', 'claude-stop-gate.mjs')], {
+    input: JSON.stringify({ session_id: 'W6', stop_hook_active: true }),
+    encoding: 'utf8',
+    timeout: 180000,
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR ?? '/tmp',
+      AGENTBRIDGE_HOME: env.home, CLAUDE_PROJECT_DIR: env.root,
+    },
+  });
+  let verdict;
+  try { verdict = JSON.parse(r.stdout || '{}'); } catch { verdict = { raw: r.stdout }; }
+  const seen = JSON.stringify(verdict);
+
+  assert.match(verdict.systemMessage ?? '', /stop-loop-break/,
+    `precondition: this must be the retry short-circuit. ${seen}`);
+  assert.match(verdict.systemMessage ?? '', /audit-escaped/,
+    `the retry turn dropped the escalation, so it was never deferred -- it was lost. ${seen}`);
+});

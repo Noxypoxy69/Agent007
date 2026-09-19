@@ -221,6 +221,112 @@ const out = (reason) => {
   process.exit(0);
 };
 
+/*
+ * ROOT AND THE ESCALATION ARE COMPUTED BEFORE THE FIRST out(), AND THAT
+ * ORDERING IS THE WHOLE POINT.
+ *
+ * The previous commit moved the carry into out() and its message claimed
+ * that closed the class structurally -- "carrying the escalation is a
+ * property of LEAVING THE GATE, not of any particular reason for leaving".
+ * A blind audit showed the code did not implement that sentence: out()
+ * reads `escalationBlock`, and SEVEN of the thirteen out() call sites ran
+ * BEFORE the line that assigns it, so they carried null.
+ *
+ * Two of those seven are ordinary, frequent exits, not edge cases:
+ *
+ *   [agentbridge:protected-control-changed]  any uncommitted edit to a
+ *                                            protected file -- routine here
+ *   [agentbridge:baseline-test-changed]      any edit to a baseline test
+ *
+ * The auditor demonstrated the same loss the previous commit quotes as the
+ * defect it was fixing: a pushed unaudited rail change plus one uncommitted
+ * protected-file edit produced a verdict with no audit-escaped in either
+ * channel. Fixing six of thirteen while announcing the class was closed is
+ * worse than the hole alone, because the next reader believes out() is the
+ * single choke point and stops looking.
+ *
+ * So the computation moves above every exit instead. It only ASSIGNS --
+ * it cannot refuse anything and has no dependency on the drift checks or
+ * the suite -- so there is nothing to order it after. `root` moves up with
+ * it because the escalation needs it, and because the first out() sits
+ * between the two.
+ *
+ * THE COST IS PAID ON EVERY EXIT NOW, including fast ones: measured at
+ * 0.31s for a 13-commit range against a 420s budget. That is the price of
+ * the property actually holding.
+ */
+const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+
+/*
+ * REPORT UNAUDITED CONTROL CHANGES. PRINT ONLY -- THIS CANNOT REFUSE ANYTHING.
+ *
+ * Rule 20 was enforced by whether the author remembered, and on 2026-09-18 the
+ * author shipped twelve commits touching the guard, the rail, the grant channel
+ * and this gate without one audit, during a session spent insisting on rule 20
+ * to two other agents. The operator noticed; nothing in the repository did. That
+ * is rule 17 pointed at rule 20 -- a control never consulted is not a control --
+ * and CLAUDE.md ranks a check script above the file rule 20 lives in.
+ *
+ * DELIBERATELY NOT A BLOCK, and not yet. Twelve commits are outstanding as this
+ * lands; refusing on them would wedge every session immediately, and a gate that
+ * arrives already red teaches people to switch it off -- rule 16, a countdown
+ * rather than a ratchet. It reports. Making it refuse is the owner's decision,
+ * once the backlog is cleared.
+ *
+ * FAILS TO SILENCE, NOT TO BLOCK: any throw here is swallowed, because this
+ * script has no try/catch anywhere and an uncaught error exits 1 with empty
+ * stdout, which Claude Code reads as NON-BLOCKING. A reporter that could disarm
+ * the gate would be worse than no reporter. Measured cost: 0.31s for a 13-commit
+ * range, against a 420s budget.
+ */
+try {
+  const { auditCoverage, auditEscalation, defaultAuditRange } = await import('../src/auditLedger.mjs');
+  let ledgerText = '';
+  try { ledgerText = readFileSync(path.join(root, 'docs', 'audit-ledger.jsonl'), 'utf8'); } catch { ledgerText = ''; }
+  const coverage = auditCoverage({ repoRoot: root, range: defaultAuditRange(root), ledgerText });
+
+  /*
+   * UNAUDITED CONTROL WORK THAT HAS BEEN PUSHED BLOCKS; LOCAL WORK REPORTS.
+   *
+   * This used to append the coverage report to carriedNotice unconditionally,
+   * which made it a systemMessage -- read by whoever happened to look. Rule 20
+   * was therefore enforced by attention. See auditEscalation() for the full
+   * account; the short version is that on the night this changed, 101 commits
+   * were pushed with 13 audited and this gate had already said so in a line
+   * nobody read.
+   *
+   * `unpushed` is null rather than empty when the question cannot be answered,
+   * because an empty list would mean "everything has been pushed" and block a
+   * fresh clone entirely. auditEscalation treats null as UNKNOWN and declines
+   * to block on it.
+   */
+  let unpushed = null;
+  try {
+    const listed = runGit(['rev-list', '@{u}..HEAD'], { cwd: root, encoding: 'utf8' });
+    unpushed = String(listed).split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch { unpushed = null; }
+
+  const { block, notice } = auditEscalation(coverage, unpushed);
+  if (notice) carriedNotice = carriedNotice ? `${carriedNotice}\n${notice}` : notice;
+  /*
+   * DEFERRED, NOT IMMEDIATE -- BLOCKING HERE SUPPRESSED THE WHOLE GATE.
+   *
+   * Found by blind audit. out() calls process.exit(0), and this line sits
+   * ABOVE discoverTests and the suite spawn. So on any turn the escalation
+   * fired, the drift verdict and the entire test run never executed -- and on
+   * the retry Stop, stop_hook_active short-circuits with only a systemMessage.
+   * An audit-coverage complaint was therefore silencing the checks it is
+   * supposed to sit beside.
+   *
+   * That is the exact failure this commit's own message warned about -- a
+   * gate that makes ordinary work impossible taking the other layers down
+   * with it -- arriving through a door I did not check. The reason is carried
+   * to the end instead, so the suite still runs and the operator gets both
+   * verdicts.
+   */
+  escalationBlock = block;
+} catch { /* a reporter must never take the gate down */ }
+
 if (!input) out('[agentbridge:stop-input-invalid] Stop hook input was not valid JSON.');
 
 /*
@@ -231,13 +337,24 @@ if (!input) out('[agentbridge:stop-input-invalid] Stop hook input was not valid 
  * owner/user turn before more work continues.
  */
 if (input.stop_hook_active === true) {
+  /*
+   * THE ESCALATION RIDES ALONG HERE TOO, AND THIS IS THE EXIT THAT MADE
+   * "DEFERRED" A LIE.
+   *
+   * This path writes to stdout directly and never calls out(), so the carry
+   * added to out() does not reach it. That matters more than the other
+   * twelve put together: the argument for deferring the audit escalation to
+   * the end of the gate was that a turn which blocked for some other reason
+   * would surface it NEXT turn. This is next turn -- and it short-circuits
+   * with only its own message, so the escalation was not deferred, it was
+   * dropped for the whole exchange.
+   */
+  const loopBreak = '[agentbridge:stop-loop-break] A Stop hook already blocked this turn. Ending the turn unapproved instead of re-entering the same autonomous verification loop. Resolve the prior guard refusal in a fresh turn.';
   process.stdout.write(`${JSON.stringify({
-    systemMessage: '[agentbridge:stop-loop-break] A Stop hook already blocked this turn. Ending the turn unapproved instead of re-entering the same autonomous verification loop. Resolve the prior guard refusal in a fresh turn.',
+    systemMessage: [loopBreak, carriedNotice, escalationBlock].filter(Boolean).join('\n'),
   })}\n`);
   process.exit(0);
 }
-
-const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
 /*
  * The session id comes from the Stop payload, so this reads the baseline THIS
@@ -785,76 +902,6 @@ if (grantedTests.length) {
 if (testDrift.length) {
   out(`[agentbridge:baseline-test-changed] Tests present at session start differ from the snapshot:\n${testDrift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
 }
-
-/*
- * REPORT UNAUDITED CONTROL CHANGES. PRINT ONLY -- THIS CANNOT REFUSE ANYTHING.
- *
- * Rule 20 was enforced by whether the author remembered, and on 2026-09-18 the
- * author shipped twelve commits touching the guard, the rail, the grant channel
- * and this gate without one audit, during a session spent insisting on rule 20
- * to two other agents. The operator noticed; nothing in the repository did. That
- * is rule 17 pointed at rule 20 -- a control never consulted is not a control --
- * and CLAUDE.md ranks a check script above the file rule 20 lives in.
- *
- * DELIBERATELY NOT A BLOCK, and not yet. Twelve commits are outstanding as this
- * lands; refusing on them would wedge every session immediately, and a gate that
- * arrives already red teaches people to switch it off -- rule 16, a countdown
- * rather than a ratchet. It reports. Making it refuse is the owner's decision,
- * once the backlog is cleared.
- *
- * FAILS TO SILENCE, NOT TO BLOCK: any throw here is swallowed, because this
- * script has no try/catch anywhere and an uncaught error exits 1 with empty
- * stdout, which Claude Code reads as NON-BLOCKING. A reporter that could disarm
- * the gate would be worse than no reporter. Measured cost: 0.31s for a 13-commit
- * range, against a 420s budget.
- */
-try {
-  const { auditCoverage, auditEscalation, defaultAuditRange } = await import('../src/auditLedger.mjs');
-  let ledgerText = '';
-  try { ledgerText = readFileSync(path.join(root, 'docs', 'audit-ledger.jsonl'), 'utf8'); } catch { ledgerText = ''; }
-  const coverage = auditCoverage({ repoRoot: root, range: defaultAuditRange(root), ledgerText });
-
-  /*
-   * UNAUDITED CONTROL WORK THAT HAS BEEN PUSHED BLOCKS; LOCAL WORK REPORTS.
-   *
-   * This used to append the coverage report to carriedNotice unconditionally,
-   * which made it a systemMessage -- read by whoever happened to look. Rule 20
-   * was therefore enforced by attention. See auditEscalation() for the full
-   * account; the short version is that on the night this changed, 101 commits
-   * were pushed with 13 audited and this gate had already said so in a line
-   * nobody read.
-   *
-   * `unpushed` is null rather than empty when the question cannot be answered,
-   * because an empty list would mean "everything has been pushed" and block a
-   * fresh clone entirely. auditEscalation treats null as UNKNOWN and declines
-   * to block on it.
-   */
-  let unpushed = null;
-  try {
-    const listed = runGit(['rev-list', '@{u}..HEAD'], { cwd: root, encoding: 'utf8' });
-    unpushed = String(listed).split('\n').map((s) => s.trim()).filter(Boolean);
-  } catch { unpushed = null; }
-
-  const { block, notice } = auditEscalation(coverage, unpushed);
-  if (notice) carriedNotice = carriedNotice ? `${carriedNotice}\n${notice}` : notice;
-  /*
-   * DEFERRED, NOT IMMEDIATE -- BLOCKING HERE SUPPRESSED THE WHOLE GATE.
-   *
-   * Found by blind audit. out() calls process.exit(0), and this line sits
-   * ABOVE discoverTests and the suite spawn. So on any turn the escalation
-   * fired, the drift verdict and the entire test run never executed -- and on
-   * the retry Stop, stop_hook_active short-circuits with only a systemMessage.
-   * An audit-coverage complaint was therefore silencing the checks it is
-   * supposed to sit beside.
-   *
-   * That is the exact failure this commit's own message warned about -- a
-   * gate that makes ordinary work impossible taking the other layers down
-   * with it -- arriving through a door I did not check. The reason is carried
-   * to the end instead, so the suite still runs and the operator gets both
-   * verdicts.
-   */
-  escalationBlock = block;
-} catch { /* a reporter must never take the gate down */ }
 
 /* RECURSIVE, matching `npm test`'s test/** glob. A flat readdir runs a different
  * suite from the one the project declares, and would approve a run that silently
