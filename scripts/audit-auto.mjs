@@ -467,12 +467,56 @@ for (const sha of shas) {
 const hollow = findings.filter((f) => f.verdict === 'HOLLOW');
 const loose = findings.filter((f) => f.verdict === 'LOOSE');
 const manual = findings.filter((f) => f.verdict === 'NEEDS-MANUAL');
+
+/*
+ * EVERY VERDICT REACHES A COUNTER, AND THE SUMMARY REFUSES TO ADD UP WRONG.
+ *
+ * A blind audit found three verdicts counted by nothing -- `collapsed`,
+ * `unknown` and `error`. So a range in which NOTHING was measured printed
+ *
+ *     gates proven: 0  hollow: 0  loose: 0  needs-manual: 0  skipped: 0
+ *
+ * which is the row a reader scans, and it is indistinguishable from a clean
+ * one. That is this repository's own bug class aimed at its own summary
+ * line, and it is the same defect the previous commit fixed ONE instance of:
+ * a HOLLOW line printed above `hollow: 0`, because the finding used a
+ * spelling no counter matched. I fixed the instance and left the class.
+ *
+ * So the buckets are derived from the findings rather than enumerated, and
+ * anything unrecognised lands in `uncounted` instead of vanishing. The total
+ * is asserted against findings.length: if those disagree the summary says so
+ * loudly rather than under-reporting, because a verdict machine whose
+ * arithmetic is wrong has no business being believed about anything else.
+ */
+const inconclusive = findings.filter((f) => ['collapsed', 'unknown', 'error'].includes(f.verdict));
+const skipped = findings.filter((f) => String(f.verdict).startsWith('no-')
+  || ['all-new', 'not-green'].includes(f.verdict));
+const proven = findings.filter((f) => f.verdict === 'real-gate');
+
+const counted = proven.length + hollow.length + loose.length + manual.length
+  + inconclusive.length + skipped.length;
+const uncounted = findings.length - counted;
+
 console.log('');
-console.log(`gates proven: ${findings.filter((f) => f.verdict === 'real-gate').length}`
+console.log(`gates proven: ${proven.length}`
   + `  hollow: ${hollow.length}`
   + `  loose: ${loose.length}`
   + `  needs-manual: ${manual.length}`
-  + `  skipped: ${findings.filter((f) => String(f.verdict).startsWith('no-') || ['all-new', 'not-green'].includes(f.verdict)).length}`);
+  + `  inconclusive: ${inconclusive.length}`
+  + `  skipped: ${skipped.length}`);
+
+if (uncounted !== 0) {
+  console.log('');
+  console.log(`SUMMARY IS WRONG: ${findings.length} finding(s) but ${counted} counted `
+    + `(${uncounted} in no bucket). A verdict was added without a counter -- the row above `
+    + 'under-reports and must not be read as a result.');
+}
+
+if (inconclusive.length) {
+  console.log('');
+  console.log(`${inconclusive.length} commit(s) were NOT MEASURED -- collapsed, unknown or errored.`);
+  console.log('That is not a pass. Nothing was established about them either way.');
+}
 if (hollow.length) {
   console.log('');
   console.log('HOLLOW is a verdict: the test did not notice the very change it shipped with.');
@@ -499,9 +543,19 @@ if (notify) {
   const body = `AUTOMATED GATE AUDIT of ${range}. No commit messages were read; only the diff and the tests.\n\n`
     + `Method: clone each commit, restore its NON-TEST files to the parent, run only the tests it touched. `
     + `They must go RED. Still green means the tests do not gate the change.\n\n${lines}\n\n`
+    /*
+     * THE "ALL CLEAR" SENTENCE MUST NOT BE SENT FOR A RANGE THAT WAS NEVER
+     * MEASURED. Found by blind audit: this said "the tests are load-bearing"
+     * whenever hollow.length was 0 -- including when every commit came back
+     * collapsed, unknown or errored, i.e. when nothing had been established
+     * at all. It is sent to the fixer lane as `type: status`, so it reads as
+     * a clearance. Absence of a finding is not a finding.
+     */
     + (hollow.length
       ? `${hollow.length} HOLLOW gate(s) -- a test that cannot fail is worse than no test, because it is counted as coverage.`
-      : 'No hollow gates in this range. This says the tests are load-bearing; it says NOTHING about whether the code is correct, which still needs a reader.');
+      : (inconclusive.length
+        ? `No hollow gates found, but ${inconclusive.length} commit(s) were NOT MEASURED (collapsed, unknown or errored). This is not a clean range -- it is a range with holes in it.`
+        : 'No hollow gates in this range. This says the tests are load-bearing; it says NOTHING about whether the code is correct, which still needs a reader.'));
 
   const r = spawnSync(process.execPath, [
     path.join(REPO, 'bin', 'agentbridge.mjs'), 'send-message',

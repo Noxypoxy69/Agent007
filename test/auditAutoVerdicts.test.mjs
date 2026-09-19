@@ -215,3 +215,73 @@ test('the ordinary two verdicts still work: red without the code is a gate, gree
   const greenOut = runAuto(green, greenSha);
   assert.match(greenOut, /HOLLOW/, `the change is unasserted, so this is hollow.\n${greenOut}`);
 });
+
+test('A RANGE THAT WAS NEVER MEASURED DOES NOT PRINT AN ALL-ZERO SUMMARY', (t) => {
+  /*
+   * Found by blind audit. Three verdicts -- collapsed, unknown, error --
+   * reached no counter at all, so a commit the tool could not measure printed
+   *
+   *     gates proven: 0  hollow: 0  loose: 0  needs-manual: 0  skipped: 0
+   *
+   * which is the line a reader scans, and is indistinguishable from a clean
+   * range. The summary is the whole point of a summary.
+   *
+   * It is also the SECOND instance of one class. The previous commit fixed a
+   * HOLLOW line printing above `hollow: 0` because the finding used a
+   * spelling no counter matched -- and stopped at that instance.
+   *
+   * THE FIXTURE PRODUCES A GENUINE COLLAPSE, not a simulated one: the test
+   * generates its cases from a JSON data file it reads with readFileSync +
+   * path.join, which subjectsOf cannot resolve as an import. So reverting
+   * the data file shrinks the test count while the reverted set and the
+   * test's imports stay disjoint -- exactly the COLLAPSED branch.
+   */
+  const env = probeRepo(t);
+
+  writeFileSync(path.join(env.root, 'src', 'cases.json'), JSON.stringify(['a', 'b']));
+  writeFileSync(path.join(env.root, 'test', 'probeGen.test.mjs'), [
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import { readFileSync } from "node:fs";',
+    'import path from "node:path";',
+    'import { fileURLToPath } from "node:url";',
+    'const here = path.dirname(fileURLToPath(import.meta.url));',
+    '/* Read, not imported: subjectsOf cannot see this as a dependency. */',
+    'const cases = JSON.parse(readFileSync(path.join(here, "..", "src", "cases.json"), "utf8"));',
+    'for (const c of cases) test(`case ${c}`, () => { assert.ok(c); });',
+    '',
+  ].join('\n'));
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'base cases');
+
+  writeFileSync(path.join(env.root, 'src', 'cases.json'), JSON.stringify(['a', 'b', 'c', 'd', 'e']));
+  /*
+   * The commit must touch a TEST file too, or audit-auto SKIPs it as "no test
+   * files touched" before the collapse branch is ever reached -- which is
+   * what the first version of this fixture did, and the precondition
+   * assertion below is what caught it.
+   */
+  writeFileSync(path.join(env.root, 'test', 'probeGen.test.mjs'),
+    `${readFileSync(path.join(env.root, 'test', 'probeGen.test.mjs'), 'utf8')}/* touched */\n`);
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'fewer cases, still unmeasured');
+  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: env.root, encoding: 'utf8' }).trim();
+
+  const out = runAuto(env, sha);
+
+  /*
+   * Precondition asserted, not guarded (rule 6): if the fixture did not
+   * actually collapse, this test measures nothing about the counters.
+   */
+  assert.match(out, /COLLAPSED/,
+    `the fixture did not reach the COLLAPSED branch, so this proves nothing.\n${out}`);
+
+  assert.doesNotMatch(out, /gates proven: 0 {2}hollow: 0 {2}loose: 0 {2}needs-manual: 0 {2}inconclusive: 0 {2}skipped: 0/,
+    `an unmeasured commit produced an all-zero summary, which reads as a clean range.\n${out}`);
+  assert.match(out, /inconclusive: 1/,
+    `the collapse must reach a counter.\n${out}`);
+  assert.match(out, /NOT MEASURED/,
+    `and the reader must be told it is not a pass.\n${out}`);
+  assert.doesNotMatch(out, /SUMMARY IS WRONG/,
+    `every finding must land in a bucket.\n${out}`);
+});

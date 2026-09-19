@@ -244,8 +244,13 @@ test('EVERY AUDIT-BEARING PATH BLOCKS UNLESS IT IS PINNED PROSE -- generated fro
 
 test('the six paths the narrowing dropped block again, each named', () => {
   /*
-   * The generated test above would catch a repeat, but it says "one of 25
-   * candidates is wrong". These are the six an auditor actually demonstrated,
+   * The generated test above would catch a repeat, but all it can say is
+   * "one of the candidates is wrong" -- and the count is deliberately not
+   * written here, because an auditor caught the previous version of this
+   * comment typing 25 when the real lists yield 22. A literal count in a
+   * comment invoking rule 21 is the joke writing itself.
+   *
+   * These are the six an auditor actually demonstrated,
    * so a future reader gets the names and not a search. Two are modules the
    * guard IMPORTS -- guardSession's own comment says "a file the guard
    * IMPORTS decides what the guard does" -- and .claude holds the

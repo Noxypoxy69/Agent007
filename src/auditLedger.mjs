@@ -315,26 +315,6 @@ export function formatCoverage({ commits, malformed, error }) {
  *                                  that question could not be answered
  * @returns {{block: string|null, notice: string|null}}
  */
-/**
- * The paths whose change is worth STOPPING A TURN over.
- *
- * NARROWER THAN isAuditBearing, DELIBERATELY, AND THE DIFFERENCE IS THE WHOLE
- * POINT. isAuditBearing derives from PROTECTED_PATHS, which includes
- * CLAUDE.md, package.json, package-lock.json and docs/. Those are sensible
- * things to protect a WRITE to; they are not rule-20 control changes that
- * need a blind reader.
- *
- * Blocking on them was a live outage: measured by audit, a documentation edit
- * (feb9f64, CLAUDE.md) and an npm-script addition (43672dc, package.json)
- * were stopping every turn on the operator's machine -- and, because the
- * block ran before the suite, suppressing the test gate with them. A gate
- * that stops ordinary work gets switched off, and this one takes the drift
- * check down with it.
- *
- * So the REPORT still covers everything isAuditBearing covers -- a
- * documentation change with no audit is still worth saying -- and only this
- * list stops the turn. Decision logic, not prose and not dependencies.
- */
 /*
  * WHICH AUDIT-BEARING PATHS ARE PROSE, AND THEREFORE REPORTED RATHER THAN
  * BLOCKED. Everything else audit-bearing BLOCKS.
@@ -469,15 +449,6 @@ export function auditEscalation(coverage, unpushed) {
   lines.push('  to audit has passed. Record the audit in docs/audit-ledger.jsonl -- one JSON');
   lines.push('  object per line with at least {"commit":"<sha>","auditor":"<who>"} -- once a');
   lines.push('  reader who did NOT write the commit has actually looked at it.');
-  /*
-   * BOTH CHANNELS, ALWAYS. This returned `notice: null`, and an auditor showed
-   * what that cost: `notice` is the only place the NON-blocking unaudited
-   * commits are named, so the moment one decision-logic commit escaped, every
-   * unaudited prose commit disappeared from the report entirely -- present in
-   * neither channel. The commit that introduced the filter claimed the
-   * opposite in its message ("The REPORT still covers everything isAuditBearing
-   * covers"). It did not.
-   */
   /*
    * BOTH CHANNELS, AND NEITHER REPEATS THE OTHER.
    *
