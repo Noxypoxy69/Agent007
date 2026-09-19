@@ -416,9 +416,50 @@ async function supervise({ sessionId, tokenFile }) {
    */
   const { pidFile } = paths(process.env, sessionId);
   let cycles = 0;
-  const mark = (fields) => updateRecord(pidFile, {
-    lastCycleAt: new Date().toISOString(), cycles, ...fields,
-  });
+  /*
+   * EVERY MARK CARRIES THE SUPERVISOR'S OWN IDENTITY, because updateRecord
+   * MERGES ONTO WHATEVER IS THERE -- INCLUDING NOTHING.
+   *
+   * Found by blind audit. `updateRecord` merges onto `readRecord(pidFile) ?? {}`,
+   * and only sessionStart ever wrote pid/sessionId/startedAt. So whenever the
+   * base record is absent, a mark CREATED a record holding just
+   * {lastCycleAt, cycles, lastVerdict} -- no pid. watcherHealth then reads
+   * pid undefined, alive(undefined) false, and prints its own contradiction:
+   *
+   *     !! DEAD   pid ? is gone and recorded no reason; last cycle 0s ago
+   *
+   * A live supervisor, marking every cycle, reported dead. Two reachable
+   * routes: `--supervise` with no preceding sessionStart (a shipped entry
+   * point, and exactly how the suite's own wiring test drives it), and
+   * sessionEnd deleting the record after a kill that was skipped because
+   * alive() said false.
+   *
+   * Worse, once pid-less the record can never be killed by sessionEnd again
+   * -- alive(undefined) is false -- so it becomes the orphaned poller this
+   * file's own RUN_DIRECTLY comment warns about.
+   *
+   * A record the supervisor writes must therefore be SELF-SUFFICIENT: whoever
+   * reads it can tell whose it is and check that process, without depending
+   * on a row somebody else wrote first.
+   */
+  const markStartedAt = new Date().toISOString();
+  const mark = (fields) => {
+    /*
+     * startedAt is a DEFAULT, not an overwrite. Writing it every cycle would
+     * reset the clock the `stalled` branch uses to notice a supervisor that
+     * came up and never completed a cycle -- turning that detection off
+     * while looking like it worked.
+     */
+    const existing = readRecord(pidFile) ?? {};
+    return updateRecord(pidFile, {
+      pid: process.pid,
+      sessionId,
+      startedAt: existing.startedAt ?? markStartedAt,
+      ...fields,
+      lastCycleAt: new Date().toISOString(),
+      cycles,
+    });
+  };
 
   /*
    * A reason on the way out, whatever the exit. An uncaught throw and a clean

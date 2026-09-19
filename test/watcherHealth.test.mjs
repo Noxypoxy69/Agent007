@@ -317,6 +317,59 @@ test('darkWatchers survives a missing polls directory rather than failing a sess
     'a liveness report must never be the thing that stops a session starting');
 });
 
+test('THE SUPERVISOR OWN RECORD MUST NOT READ AS DEAD -- writer and reader joined', async () => {
+  /*
+   * Found by blind audit. Every other test here plants a record by hand, and
+   * the wiring test asserted only that lastCycleAt and cycles appeared. So
+   * writer and reader were joined on ONE FIELD, and the supervisor could --
+   * and did -- produce a record the reader called DEAD while it was alive and
+   * cycling:
+   *
+   *     !! DEAD   pid ? is gone and recorded no reason; last cycle 0s ago
+   *
+   * updateRecord merges onto readRecord(pidFile) ?? {}, and only sessionStart
+   * ever wrote pid. Driving `--supervise` directly -- a shipped entry point,
+   * and what the wiring test itself does -- left a record with no pid.
+   *
+   * This test closes the join: take what the REAL supervisor wrote and put it
+   * through the REAL reader.
+   */
+  const home = mkdtempSync(path.join(tmpdir(), 'supervise-self-'));
+  mkdirSync(path.join(home, 'polls'), { recursive: true });
+  const sessionId = 'claude-selfread';
+  const recFile = path.join(home, 'polls', `${sessionId}.json`);
+
+  const child = spawn(process.execPath, [
+    POLL, '--supervise', '--session', sessionId,
+    '--token-file', path.join(home, 'no-such-token.txt'),
+  ], { cwd: REPO, env: { ...process.env, AGENTBRIDGE_HOME: home }, stdio: 'ignore' });
+
+  try {
+    let rec = null;
+    const deadline = Date.now() + 25_000;
+    while (Date.now() < deadline) {
+      try { rec = JSON.parse(readFileSync(recFile, 'utf8')); } catch { rec = null; }
+      if (rec && rec.lastCycleAt) break;
+      await new Promise((r) => { setTimeout(r, 250); });
+    }
+    assert.ok(rec, 'the supervisor wrote no record within 25s');
+
+    assert.equal(rec.pid, child.pid,
+      'the record must name the supervisor that wrote it, or the reader cannot check it is alive');
+
+    const h = watcherHealth(rec, { now: Date.now(), pidAlive: true });
+    assert.notEqual(h.state, 'dead',
+      `a live, cycling supervisor read as ${h.state}: ${h.detail}`);
+    assert.equal(h.wrong, false,
+      `a live, cycling supervisor was reported wrong: ${h.state} -- ${h.detail}`);
+  } finally {
+    try { child.kill('SIGTERM'); } catch { /* going away regardless */ }
+    await new Promise((r) => { setTimeout(r, 400); });
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('importing the poll script does not start, stop or register anything', () => {
   /*
    * This file imports the script for watcherHealth. The dispatch is guarded by
