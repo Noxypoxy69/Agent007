@@ -212,6 +212,83 @@ test('AFTER `--` NOTHING IS AN OPTION, which is git\'s own rule', () => {
   assert.equal(v.allowed, true, `a path after the separator was read as a sweep: ${v.reason}`);
 });
 
+/* ── the third and fourth spellings, both measured ────────────────────── */
+
+test('A SHORT WRITE FLAG CARRIES ITS VALUE GLUED, and that wrote a file', () => {
+  /*
+   * MEASURED THROUGH THE SHIPPED RAIL, then reproduced by the author:
+   *
+   *     sort -o<path> <input>      ALLOWED, exit 0, and the bytes were read back
+   *     sort '-o' <path> <input>   DENY
+   *     sort -o <path> <input>     DENY
+   *
+   * `-o<FILE>` is the canonical POSIX short-option form and exactly what GNU
+   * sort documents. The matcher accepted the flag alone and the `=` form --
+   * the two spellings I thought of. Third enumeration on this line in two days.
+   *
+   * This is the attack shellAllowlist's own header uses to explain why the rail
+   * is not a boundary: `sort -o package.json package.json` rewrites a file in
+   * place with no metacharacter and no suspicious-looking argument.
+   */
+  for (const flag of ['-o', '-f']) {
+    for (const glued of ['out.txt', 'src/claudeGuard.mjs', '=out.txt']) {
+      const v = judge(`sort ${flag}${glued} input.txt`);
+      assert.equal(v.allowed, false, `sort ${flag}${glued} was ALLOWED -- it writes a side file`);
+      assert.match(v.reason, /writes or reads a side file/,
+        `${flag}${glued} was refused by something other than the write-flag check`);
+    }
+  }
+  // The separated and quoted forms stay closed too.
+  for (const spelling of ['-o out.txt', "'-o' out.txt", '--output=out.txt', '--output out.txt']) {
+    assert.equal(judge(`sort ${spelling} input.txt`).allowed, false, `sort ${spelling} was ALLOWED`);
+  }
+});
+
+test('BUT AN ORDINARY ARGUMENT IS NOT A WRITE FLAG', () => {
+  /*
+   * Rule 5, and the direction that gets a rail switched off. Refusing every
+   * token starting with a dash would satisfy the test above.
+   */
+  for (const cmd of ['sort input.txt', 'grep -i pattern file.txt', 'ls -la',
+    'head -n 5 file.txt', 'git status', 'wc -l file.txt']) {
+    assert.equal(judge(cmd).allowed, true, `ordinary work was refused: ${cmd}`);
+  }
+});
+
+test('git HAS A SECOND SPELLING OF THE EVERYTHING SELECTOR, and it is a negation', () => {
+  /*
+   * ASKED OF GIT, NOT DERIVED. `git add -h` prints
+   *     --[no-]ignore-removal   ... (same as --no-all)
+   * so the NEGATED form is `--all`. Behavioural control from the audit: a bare
+   * dry-run add, `--no-all`, `--ignore-removal` and `--renormalize` all print
+   * "Nothing specified, nothing added"; `--no-ignore-removal` prints nothing,
+   * meaning git took the implicit whole-tree pathspec exactly as for `-A`.
+   *
+   * It was ALLOWED, and so was its abbreviation. git's `--[no-]` convention was
+   * simply outside the model, and the pathspec resolver is no backstop here
+   * because there is no operand to resolve.
+   */
+  for (const spelling of ['--no-ignore-removal', '--no-ignore-rem', '--no-ignore']) {
+    const v = judge(`git add ${spelling}`);
+    assert.equal(v.allowed, false, `git add ${spelling} was ALLOWED -- it is --all`);
+    assert.match(v.reason, /everything selector/,
+      `${spelling} was refused by a different layer than the sweep check`);
+  }
+});
+
+test('AND THE OPPOSITE FLAG STAYS ALLOWED, because it is the opposite', () => {
+  /*
+   * `--no-all` is what `--ignore-removal` means; it NARROWS. Refusing it would
+   * be the over-block, and it is not a prefix of the entry above, so the prefix
+   * rule leaves it alone. Verified through the real git as well: it prints
+   * "Nothing specified, nothing added".
+   */
+  for (const spelling of ['--no-all', '--ignore-removal', '--renormalize']) {
+    assert.equal(judge(`git add ${spelling}`).allowed, true,
+      `git add ${spelling} was refused, but it narrows rather than sweeps`);
+  }
+});
+
 test('THE CONTROL: this file can actually fail', () => {
   /*
    * Rule 1, held permanently rather than watched once. Every assertion above

@@ -84,22 +84,57 @@ const WRITE_FLAG_NAMES = Object.freeze([
   '-f', '--argfile', '--rawfile', '--slurpfile',
 ]);
 
-const alt = WRITE_FLAG_NAMES.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+/*
+ * ONE LIST, ONE CHECK. THE RAW-STRING TWIN IS GONE, AND SO IS THE ONE THAT
+ * REPLACED IT.
+ *
+ * `WRITE_FLAGS` survived as "the raw-string form for callers that have no
+ * tokenizer" -- a comment asserting a caller that did not exist. A blind audit
+ * grepped the whole tree and found no `.test()` call for it, nor for
+ * `GIT_SWEEP_SELECTOR` or `GIT_FORCE_SELECTOR`, in the same week as a commit one
+ * file over titled "three exports called by nothing: delete them". They are
+ * module-private, so the dead-export ratchet cannot see them, which is exactly
+ * how they survived.
+ *
+ * Then I replaced `WRITE_FLAG_TOKEN` with the function below and left IT dead
+ * too -- a fourth one, created by the fix for the third. Deleting them here
+ * rather than after the next audit.
+ */
+const WRITE_FLAG_SHORT = WRITE_FLAG_NAMES.filter((f) => /^-[A-Za-z]$/.test(f));
+const WRITE_FLAG_LONG = WRITE_FLAG_NAMES.filter((f) => f.startsWith('--'));
 
 /**
- * ONE LIST, TWO SHAPES, AND THE LIST IS THE ONLY PLACE A FLAG IS WRITTEN DOWN.
+ * Is this token a write flag, in any spelling the option actually has?
  *
- * These used to be two hand-kept regexes, which is the defect that produced the
- * bypass one layer up: two checks over one notional list, disagreeing about
- * what it contained. Adding a flag to WRITE_FLAG_NAMES now extends both, and
- * there is no second spelling to forget.
+ * A SHORT OPTION CARRIES ITS VALUE GLUED ON, AND MISSING THAT LET A FILE BE
+ * WRITTEN. Measured through the shipped rail by blind audit, then reproduced:
  *
- * WRITE_FLAGS keeps the raw-string form for callers that have no tokenizer.
- * WRITE_FLAG_TOKEN is the one the judge uses; see the note at its call site for
- * why anchoring to a token is the whole fix.
+ *     sort -o<path> <input>      ALLOWED, exit 0, and the file was written
+ *     sort '-o' <path> <input>   DENY
+ *     sort -o <path> <input>     DENY
+ *
+ * `-o<FILE>` is the canonical POSIX short-option form and exactly what GNU
+ * `sort` documents. The previous token matcher accepted the flag alone or glued
+ * with `=`, which are the two spellings I happened to think of -- the third
+ * enumeration on this line in two days, after the raw-string one and the
+ * exact-alternation one. Past this check `sort` meets only SAFE_ARG, whose
+ * character class accepts a glued flag naming a repository path.
+ *
+ * So the RULE is asked instead of the spellings: a short option takes a glued
+ * value, a long option takes an `=` value. Both lists are derived from
+ * WRITE_FLAG_NAMES, so adding a flag there covers every form at once.
+ *
+ * ERRING TOWARD REFUSAL IS RIGHT HERE. `-ofoo` and `-ffoo` are refused whether
+ * or not the tool would have read them as a flag; the cost is a command
+ * spelled another way, and the cost of the other direction is a file written
+ * where nothing could see the path.
  */
-const WRITE_FLAGS = new RegExp(`(^|\\s)(${alt})(=|\\s|$)`);
-const WRITE_FLAG_TOKEN = new RegExp(`^(?:${alt})(?:=.*)?$`);
+function isWriteFlagToken(token) {
+  if (typeof token !== 'string') return false;
+  if (WRITE_FLAG_SHORT.some((f) => token.startsWith(f))) return true;
+  const name = token.split('=')[0];
+  return WRITE_FLAG_LONG.includes(name);
+}
 
 /** Flags that turn an otherwise-read-only git invocation into something else. */
 const GIT_POISON = /(^|\s)(-c|--exec-path|--upload-pack|--receive-pack|--output|-o|--config-env|--git-dir|--work-tree|--namespace)(=|\s|$)/;
@@ -333,7 +368,26 @@ const GIT_SWEEP_SELECTOR = /(^|\s)(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(\s|
  * The short forms stay CLUSTERS. `-qf` is force with company, `-am` is a sweep
  * with company, and an exact `-f` misses both.
  */
-const GIT_SWEEP_LONG = Object.freeze(['--all', '--update']);
+/*
+ * `--no-ignore-removal` IS `-A`, AND GIT SAYS SO ITSELF.
+ *
+ * `git add -h` prints:  --[no-]ignore-removal  ... (same as --no-all)
+ *
+ * so the NEGATED form is the all selector. Measured through the shipped rail by
+ * blind audit, with a behavioural control rather than a reading of the help:
+ * a bare dry-run add, `--no-all`, `--ignore-removal` and `--renormalize` all
+ * print "Nothing specified, nothing added"; `--no-ignore-removal` prints
+ * NOTHING, meaning git took the implicit whole-tree pathspec exactly as it does
+ * for `-A`. It was ALLOWED, and so was its abbreviation.
+ *
+ * git's `--[no-]` convention was simply outside the model -- the list held the
+ * positive spellings and resolved prefixes of those. And the pathspec resolver
+ * is NOT a backstop here, because there is no operand for it to resolve.
+ *
+ * `--no-all` is deliberately absent: it is the OPPOSITE, and it is not a prefix
+ * of the entry below, so it stays allowed.
+ */
+const GIT_SWEEP_LONG = Object.freeze(['--all', '--update', '--no-ignore-removal']);
 const GIT_FORCE_LONG = Object.freeze(['--force', '--discard-changes', '--hard', '--theirs', '--ours']);
 
 const GIT_SWEEP_SHORT = /^-[A-Za-z]*[aAuU][A-Za-z]*$/;
@@ -646,7 +700,7 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
    * an interpreter builds its target at runtime and cannot be judged from the
    * command string at all.
    */
-  const writeFlag = tokens.find((t) => WRITE_FLAG_TOKEN.test(t));
+  const writeFlag = tokens.find(isWriteFlagToken);
   if (writeFlag) {
     return {
       allowed: false,
