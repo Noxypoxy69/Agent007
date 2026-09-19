@@ -39,6 +39,51 @@ try {
 
 const result = auditCoverage({ repoRoot, range, ledgerText });
 
+/*
+ * §7.1: THE JOBS ARE MATERIALISED HERE, NOT LEFT FOR SOMEBODY TO REMEMBER.
+ *
+ * "This is mandatory. The worker must not remember to request it." Naming the
+ * shas and stopping is what this script did, and naming a problem is not a
+ * trigger -- it is the notice the escalation gate was already ignoring.
+ *
+ * `--jobs` prints the blind packet for every unaudited candidate: the identity,
+ * the touched paths, the proofs §7.4 demands -- and NOT the commit subject,
+ * which is the maker's own account of the work and the first thing §7.2 says a
+ * reviewer must not see. src/auditJob.mjs refuses to build a job carrying one.
+ *
+ * WHAT THIS STILL IS NOT. A job printed here is a demand, not a running audit.
+ * The Stop hook is the only thing that fires without anybody remembering, and
+ * wiring it is one import in scripts/claude-stop-gate.mjs. Said plainly so
+ * nobody reads a capability as a control -- which is the mistake this whole
+ * section exists to stop.
+ */
+if (args.includes('--jobs')) {
+  const { auditJobsFor } = await import('../src/auditJob.mjs');
+  const { runGit } = await import('../src/safeGit.mjs');
+  const treeShaFor = (sha) => {
+    try {
+      return String(runGit(['-C', repoRoot, 'rev-parse', `${sha}^{tree}`], { encoding: 'utf8' })).trim();
+    } catch { return null; }
+  };
+
+  const { jobs, unmeasurable, error } = auditJobsFor(result, {
+    treeShaFor, now: new Date().toISOString(),
+  });
+
+  if (error) {
+    console.error(`[agentbridge:audit-jobs-unknown] ${error}`);
+    console.error('  Treat this as UNKNOWN, not as "no audits are due".');
+    process.exit(2);
+  }
+  console.log(JSON.stringify({ range, jobs, unmeasurable }, null, 2));
+  /*
+   * Exit 1 when audits are DUE. A trigger that exits 0 with work outstanding is
+   * the hollow shape audit-auto already shipped once: a run that proved nothing
+   * indistinguishable from one that proved everything.
+   */
+  process.exit(jobs.length > 0 || unmeasurable.length > 0 ? 1 : 0);
+}
+
 if (asJson) {
   console.log(JSON.stringify({ range, ...result }, null, 2));
 } else {
