@@ -1006,13 +1006,34 @@ if (budget !== null && suiteMs < MIN_SUITE_MS) {
  * milliseconds. The turn is refused -- nothing has been verified yet -- but the
  * NEXT turn consumes the result instead of starting a seventh duplicate.
  */
-const { verifyKey, decideVerify, admitVerification, VERIFY, ACTION } = await import('../src/verifyCache.mjs');
-const { verificationIdentity, verifyRecordPath } = await import('../src/verifyIdentity.mjs');
+/*
+ * ═══ EVERY THROW IN THIS SECTION BECOMES A REFUSAL, NEVER A SILENT EXIT ═══
+ *
+ * THIS SCRIPT HAS NO try/catch ANYWHERE, ON PURPOSE, and its own header says
+ * why: an uncaught throw exits 1 with EMPTY STDOUT, which Claude Code reads as
+ * NON-BLOCKING. That is a disarm, not an error.
+ *
+ * I then added two dynamic imports and a runner to the hottest path in the
+ * file. MEASURED: `test/stopGateDeadline.test.mjs` went from refusing to
+ * `{"blocked":false,"reason":""}` in 399ms -- the gate ALLOWED a turn it should
+ * have refused, because a module failed to resolve in that fixture and the
+ * throw walked straight out of the process. A verification layer whose absence
+ * silently approves everything is worse than no verification layer, and it is
+ * the exact shape rule 17 is about: the wiring is a separate claim from the
+ * logic, and only the logic had tests.
+ *
+ * So the whole section is wrapped, and the catch REFUSES. Failing closed here
+ * costs a blocked turn and a legible reason; failing open costs the gate.
+ */
+let verifyBlock = null;
+try {
+  const { verifyKey, decideVerify, admitVerification, VERIFY, ACTION } = await import('../src/verifyCache.mjs');
+  const { verificationIdentity, verifyRecordPath } = await import('../src/verifyIdentity.mjs');
 
-const ident = verificationIdentity(root, process.env);
-const keyed = verifyKey(ident);
+  const ident = verificationIdentity(root, process.env);
+  const keyed = verifyKey(ident);
 
-if (!keyed.ok) {
+  if (!keyed.ok) {
   /*
    * NO IDENTITY MEANS NO TRUSTWORTHY RESULT. Refuse rather than fall back to
    * running the suite here -- falling back is how the duplicate returns.
@@ -1137,12 +1158,25 @@ if (decision.action === ACTION.ATTACH) {
     + 'No second suite was started -- that duplication is what made every run miss the deadline.');
 }
 
-if (admitted.state === VERIFY.FAILED || admitted.state === VERIFY.PARTIAL || admitted.state === VERIFY.TIMED_OUT) {
-  const r = record ?? {};
-  out(`[agentbridge:verify-failed] ${admitted.state} for this exact tree: ${r.why ?? admitted.why}. `
-    + `${r.tests ?? '?'} test(s), ${r.fail ?? '?'} failing. Read the detail with: node scripts/verify-run.mjs --status --json`);
+  if (admitted.state === VERIFY.FAILED || admitted.state === VERIFY.PARTIAL || admitted.state === VERIFY.TIMED_OUT) {
+    const r = record ?? {};
+    verifyBlock = `[agentbridge:verify-failed] ${admitted.state} for this exact tree: ${r.why ?? admitted.why}. `
+      + `${r.tests ?? '?'} test(s), ${r.fail ?? '?'} failing. Read the detail with: npm run verify -- --status --json`;
+  }
+} catch (e) {
+  /*
+   * A THROW HERE REFUSES. See the header above this block: this script has no
+   * other try/catch because an uncaught throw exits 1 with empty stdout, which
+   * Claude Code reads as NON-BLOCKING -- so the one thing a broken verification
+   * layer must never do is let the turn through. Measured: a module that failed
+   * to resolve in a test fixture produced `{"blocked":false,"reason":""}`.
+   */
+  verifyBlock = `[agentbridge:verify-unavailable] The verification layer could not run (${e?.message ?? e}). `
+    + 'NOTHING WAS VERIFIED, so this turn is not approved. This refuses rather than passing, because a '
+    + 'verification layer whose absence approves everything is worse than none.';
 }
 
+if (verifyBlock) out(verifyBlock);
 if (escalationBlock) out(escalationBlock);
 
 out(null);
