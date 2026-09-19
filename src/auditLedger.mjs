@@ -315,6 +315,24 @@ export function formatCoverage({ commits, malformed, error }) {
     }
     if (missing.length > 20) lines.push(`  ...and ${missing.length - 20} more`);
   }
+  /*
+   * A CHECK THAT SKIPS SOMETHING MUST NOT PRINT A CLEAN PASS -- CLAUDE.md says
+   * so about the NUL-byte files, and it applies here.
+   *
+   * When a package.json commit is reported, the reader has no way to know that
+   * the executable-surface test looked at six keys and NOT at dependencies --
+   * which execute via postinstall with no script at all. Naming the gap where
+   * the report is read is the difference between a known limit and a silent
+   * one, and it stops UNWATCHED_EXECUTION_KEYS being a constant only a test
+   * ever looks at.
+   */
+  if (commits.some((c) => (Array.isArray(c?.touched) ? c.touched : [])
+    .some((f) => normalisePath(f) === 'package.json'))) {
+    lines.push(`  NOTE: a package.json change above was judged on its executable surface only. `
+      + `${UNWATCHED_EXECUTION_KEYS.join(', ')} are NOT examined, and they execute -- `
+      + 'npm install runs postinstall with no script present. Neither is package-lock.json.');
+  }
+
   for (const m of malformed) {
     lines.push(`  ledger line ${m.line} is not a usable entry: ${m.text}`);
   }

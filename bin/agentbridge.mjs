@@ -3297,7 +3297,7 @@ try {
        * for one repository share one derivation (see repoStorePath).
        */
       const {
-        auditJobsFor, mergeQueue, claimJob, authorSessionFrom, JOB,
+        auditJobsFor, mergeQueue, claimJob, authorSessionFrom, satisfiesGate, JOB,
       } = await import('../src/auditJob.mjs');
       const { auditCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
       const { runGit: rgA } = await import('../src/safeGit.mjs');
@@ -3394,9 +3394,30 @@ try {
         process.exit(0);
       }
       console.log('');
+      let diagnosticOnly = 0;
       for (const j of open) {
         console.log(`${j.audit_id}  ${String(j.candidate_sha).slice(0, 8)}  ${j.state}${j.claimed_by ? ` by ${j.claimed_by}` : ''}`);
         console.log(`   touched ${(j.touched ?? []).slice(0, 4).join(', ')}`);
+        /*
+         * A CLAIMED JOB SAYS WHETHER ITS VERDICT COULD COUNT, where the verdict
+         * is read. Otherwise a reader sees CLAIMED, later sees PASS, and stops
+         * -- without ever learning that the independence behind it was the
+         * claimant's own assertion. satisfiesGate is the one predicate that
+         * answers it, so it is asked here rather than re-derived from two other
+         * fields by whoever is looking.
+         */
+        if (j.state === JOB.CLAIMED) {
+          const counts = satisfiesGate(j);
+          if (!counts) diagnosticOnly += 1;
+          console.log(`   ${counts ? 'GATE-SATISFYING' : 'DIAGNOSTIC ONLY'}  independence=${j.independence ?? 'unknown'}`
+            + ` (author=${j.author_source ?? 'none'}, claimant=${j.claimed_by_source ?? 'asserted'})`);
+        }
+      }
+      if (diagnosticOnly > 0) {
+        console.log('');
+        console.log(`${diagnosticOnly} claimed audit(s) CANNOT satisfy a control gate. Only an authoritative`);
+        console.log('author identity plus a credential-resolved claimant qualifies -- a commit trailer is');
+        console.log('written by the author and cannot establish that the reviewer is not the author.');
       }
       console.log('');
       console.log('Claim one with: agentbridge audit-claim --id <audit-...> --by <your session>');
