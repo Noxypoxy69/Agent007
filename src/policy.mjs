@@ -58,6 +58,13 @@ export const PROTECTED_PATHS = Object.freeze([
   // no recovery. Added 2026-09-19; put in BOTH lists in the same edit, which is
   // the third time this file's own comments ask for.
   '.mcp.json',
+  // The §7.1 trigger pulled these into the guard's import closure:
+  // claude-stop-gate -> auditJob -> reviewerPacket -> resultEnvelope. Full
+  // reasoning in guardSession.mjs. Added to BOTH lists in one edit, which is
+  // the fourth time this file's comments ask for that.
+  'src/auditJob.mjs',
+  'src/reviewerPacket.mjs',
+  'src/resultEnvelope.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

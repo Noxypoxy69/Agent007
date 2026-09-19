@@ -122,6 +122,29 @@ export const PROTECTED_PATHS = Object.freeze([
    * have. Rule 8: fix the matcher, not the five strings the prober tried.
    */
   '.mcp.json',
+  /*
+   * THREE MORE THE CLOSURE GREW, AND THE DERIVED GATE CAUGHT THEM THE SAME DAY.
+   *
+   * Wiring the §7.1 audit trigger into scripts/claude-stop-gate.mjs made it
+   * import src/auditJob.mjs, which imports src/reviewerPacket.mjs, which imports
+   * src/resultEnvelope.mjs. Three files entered the guard's import closure and
+   * none was protected -- so each was writable with no grant, and since the
+   * binary fails to load when one is missing, deleting any of them disables the
+   * guard outright.
+   *
+   * This is the third time that has happened (actionAuthority, gitIndexLease,
+   * now these) and the third time nobody had to notice: the closure is COMPUTED
+   * by test/guardDependenciesProtected.test.mjs, which named all three in the
+   * same run that wired them. The paragraph above is right that the list is not
+   * the fix.
+   *
+   * reviewerPacket in particular decides what a blind reviewer is allowed to
+   * see. A session that could rewrite it could hand every future auditor the
+   * maker's own account of the work.
+   */
+  'src/auditJob.mjs',
+  'src/reviewerPacket.mjs',
+  'src/resultEnvelope.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

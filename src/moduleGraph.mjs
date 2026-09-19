@@ -82,6 +82,11 @@ export const DEFAULT_ENTRY_POINTS = [
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */
   'bin/agentbridge-deploy-check.mjs',
+  /* THE VERIFIER. Invoked by a person, by npm, and by the Stop gate once the
+   * gate stops running tests itself -- so what it imports is shipped. Declared
+   * for the same reason as the two above: from the graph an entry point and an
+   * orphan are identical, and the difference has to be stated by a person. */
+  'scripts/verify-run.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
