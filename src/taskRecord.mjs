@@ -261,13 +261,20 @@ export function createTask({
  * differing only in case — which would be a trap for humans long before it was
  * a problem for this check.
  */
+/*
+ * SPLIT INTO SEGMENTS RATHER THAN CHAINING REGEXES, because the chain was
+ * wrong and the test caught it: dropping the interior "./" left `./src/a` as
+ * `/src/a`, a leading slash that matched nothing. Five substitutions whose
+ * order matters is a worse tool than one pass over the parts, and a path IS its
+ * parts — empty segments (from `//` or a trailing slash) and `.` segments carry
+ * no meaning, so removing them is the whole normalisation.
+ */
 const canonPath = (p) => String(p ?? '')
   .trim()
-  .replace(/\\/g, '/')        // a backslash is a separator on the platform this runs on
-  .replace(/\/{2,}/g, '/')    // src//a is src/a
-  .replace(/(^|\/)\.(?=\/)/g, '$1') // drop interior "./" segments
-  .replace(/^\.\//, '')       // and a leading one
-  .replace(/\/+$/, '')        // a trailing slash names the same directory
+  .replace(/\\/g, '/')  // a backslash is a separator on the platform this runs on
+  .split('/')
+  .filter((seg) => seg !== '' && seg !== '.')
+  .join('/')
   .toLowerCase();
 
 export function pathsCollide(a = [], b = []) {

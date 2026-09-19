@@ -482,13 +482,15 @@ export function createTask({
  * the same file with the gate silent. Fixed at the matcher rather than by
  * listing the five somebody happened to try. See src/taskRecord.mjs.
  */
+// Segment-based, not a chain of substitutions whose order matters: dropping the
+// interior "./" left `./src/a` as `/src/a`. A path IS its parts, and empty and
+// "." segments carry no meaning. See src/taskRecord.mjs.
 const canonPath = (p) => String(p ?? '')
   .trim()
   .replace(/\\/g, '/')
-  .replace(/\/{2,}/g, '/')
-  .replace(/(^|\/)\.(?=\/)/g, '$1')
-  .replace(/^\.\//, '')
-  .replace(/\/+$/, '')
+  .split('/')
+  .filter((seg) => seg !== '' && seg !== '.')
+  .join('/')
   .toLowerCase();
 
 export function pathsCollide(a = [], b = []) {
