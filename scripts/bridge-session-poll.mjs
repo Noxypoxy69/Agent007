@@ -94,13 +94,56 @@ function paths(env, sessionId) {
   return { dir, pidFile: path.join(dir, `${sessionId}.json`), logFile: path.join(dir, `${sessionId}.log`) };
 }
 
+/**
+ * Every node pid on this machine, in ONE query -- or null if nobody could ask.
+ *
+ * THE PER-RECORD QUERY MADE THE REPORT DEFEAT ITSELF. alive() spawned
+ * `tasklist` once per pid, and both --status and the SessionStart dark-watcher
+ * report call it in a LOOP. Measured by blind audit: 20 records with live pids
+ * took 16.6 SECONDS, roughly 830ms each, inside a SessionStart hook whose
+ * declared budget is 30s and which has already spent up to 60s on
+ * register-session. So the more agents there are, the more likely the report
+ * is killed before it prints -- and the many-agent case is precisely the one
+ * this whole mechanism exists for.
+ *
+ * Dead pids were never the problem: process.kill(pid, 0) throws for them
+ * without any spawn. It is the LIVE ones that cost, which is the wrong way
+ * round for a machine running a fleet.
+ *
+ * Returns null rather than an empty Set when the probe itself fails, because
+ * "no node processes exist" and "nobody could ask" must not render alike --
+ * the second is how every watcher on the machine reads dead at once.
+ */
+let LIVE_PIDS_CACHE;
+function liveNodePids() {
+  if (LIVE_PIDS_CACHE !== undefined) return LIVE_PIDS_CACHE;
+  if (process.platform !== 'win32') { LIVE_PIDS_CACHE = null; return null; }
+  const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq node.exe', '/NH', '/FO', 'CSV'],
+    { encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0 || typeof r.stdout !== 'string') { LIVE_PIDS_CACHE = null; return null; }
+  const pids = new Set();
+  for (const m of String(r.stdout).matchAll(/^"node\.exe","(\d+)"/gim)) pids.add(Number(m[1]));
+  LIVE_PIDS_CACHE = pids;
+  return pids;
+}
+
+/**
+ * Is this pid a live node process?
+ *
+ * Returns TRUE, FALSE, or NULL FOR "COULD NOT TELL". The third is not
+ * pedantry: if the process-table probe cannot run -- a restricted PATH in the
+ * hook environment, an EDR product blocking the spawn, EMFILE under load --
+ * the old code returned false for every pid, so a whole machine's watchers
+ * read DEAD at once and --status exited 1 naming every agent as dark. A
+ * whole-fleet false alarm is exactly the report people learn to ignore.
+ */
 function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); } catch { return false; }
   if (process.platform !== 'win32') return true;
-  const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'],
-    { encoding: 'utf8', windowsHide: true });
-  return r.status === 0 && /"node\.exe"/i.test(String(r.stdout));
+  const live = liveNodePids();
+  if (live === null) return null;
+  return live.has(pid);
 }
 
 const readRecord = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
@@ -179,6 +222,22 @@ export function watcherHealth(rec, { now, pidAlive, pollSeconds = POLL_SECONDS }
        * error, but reporting it as fine is how an agent stays invisible for
        * hours with a tidy explanation on disk.
        */
+      wrong: true,
+    };
+  }
+
+  /*
+   * A pid we COULD NOT CHECK is not a dead pid. alive() returns null when the
+   * process-table probe itself failed, and reading that as "gone" made every
+   * watcher on the machine read DEAD at once. Unknown is wrong -- it still
+   * needs a human -- but it is a different wrong, and saying which is the
+   * whole point of this function.
+   */
+  if (pidAlive === null || pidAlive === undefined) {
+    return {
+      state: 'unknown',
+      detail: `could not determine whether pid ${rec.pid ?? '?'} is running; `
+        + 'the process-table probe did not answer. UNKNOWN, not dead.',
       wrong: true,
     };
   }
@@ -655,7 +714,14 @@ async function sessionStart() {
 
   const { dir, pidFile, logFile } = paths(env, sessionId);
   const existing = readRecord(pidFile);
-  if (existing && alive(existing.pid)) {
+  /*
+   * `!== false` rather than truthy: alive() now returns null for "could not
+   * tell", and treating that as "not running" would detach a SECOND
+   * supervisor for the same session -- two pollers, two heartbeats, and a pid
+   * record that only remembers one of them. When in doubt, assume the
+   * existing one is alive and do not start a rival.
+   */
+  if (existing && alive(existing.pid) !== false) {
     say(`agentbridge poll: already polling for ${sessionId} (pid ${existing.pid})`);
     return;
   }
@@ -768,7 +834,14 @@ async function sessionEnd() {
    * later looking as though it died rather than stopped -- the precise confusion
    * deregistering exists to prevent.
    */
-  if (rec && alive(rec.pid)) { try { process.kill(rec.pid, 'SIGTERM'); } catch { /* going away regardless */ } }
+  /*
+   * `!== false` again, for the opposite reason. If we cannot tell whether the
+   * supervisor is alive, TRY to stop it: a signal to a dead pid throws and is
+   * caught, while a skipped signal leaves an orphaned poller that nothing can
+   * ever stop -- sessionEnd then deletes its record, and the hazard this file
+   * already warns about becomes real.
+   */
+  if (rec && alive(rec.pid) !== false) { try { process.kill(rec.pid, 'SIGTERM'); } catch { /* going away regardless */ } }
 
   const tokenFile = String(env.AGENTBRIDGE_TOKEN_FILE ?? '').trim() || DEFAULT_TOKEN_FILE;
   const r = spawnSync(process.execPath, [

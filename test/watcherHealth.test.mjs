@@ -29,7 +29,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, linkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -396,4 +396,263 @@ test('importing the poll script does not start, stop or register anything', () =
   assert.match(out, /IMPORTED-QUIETLY/, out);
   assert.doesNotMatch(out, /is polling|NOT POLLING|deregister/,
     'an import ran a dispatch branch -- RUN_DIRECTLY has regressed');
+});
+
+/* ══ "could not tell" is a third answer, and the report must cost O(1) ═════
+ *
+ * Both of these come from one blind audit of the dark-watcher report. They
+ * are opposite failures of the same line -- `pidAlive: alive(rec?.pid)` in a
+ * loop -- and neither had a test.
+ */
+
+test('A PID THAT COULD NOT BE CHECKED IS UNKNOWN, NOT DEAD', () => {
+  /*
+   * alive() now returns null when the process-table probe itself fails. The
+   * old code returned false, so ONE failed spawn made every watcher on the
+   * machine read DEAD at once and --status named every agent as dark.
+   *
+   * A whole-fleet false alarm is worse than no report: it is precisely the
+   * alarm people learn to skip, and then the layer is gone (rule 16). Unknown
+   * is still WRONG -- nobody can say anybody is being watched -- but it sends
+   * the reader to the probe instead of to five innocent agents.
+   */
+  const rec = { pid: 4242, agentId: 'code-a', sessionId: 's', startedAt: ago(600),
+    lastCycleAt: new Date().toISOString(), cycles: 4 };
+
+  const unknown = watcherHealth(rec, { now: Date.now(), pidAlive: null });
+  assert.equal(unknown.state, 'unknown', 'a failed probe must not be reported as a dead process');
+  assert.equal(unknown.wrong, true, 'but it is still not a watcher anybody can vouch for');
+  assert.match(unknown.detail, /could not determine/i,
+    'and the detail must send the reader at the probe, not at the agent');
+
+  /*
+   * THE POSITIVE CONTROLS, both of them. This change makes a previously
+   * two-valued branch three-valued, so the test has to show the other two
+   * still land where they did -- a rule that answers "unknown" to everything
+   * would pass the assertion above and report nothing forever.
+   */
+  assert.equal(watcherHealth(rec, { now: Date.now(), pidAlive: true }).state, 'healthy',
+    'a live cycling watcher is still healthy');
+  assert.equal(watcherHealth(rec, { now: Date.now(), pidAlive: false }).state, 'dead',
+    'and a pid genuinely confirmed gone is still DEAD, not softened to unknown');
+});
+
+test('undefined pidAlive is unknown too -- an omitted probe is not a dead process', () => {
+  /* The caller that forgets the option must fail the same safe way. */
+  const rec = { pid: 4242, agentId: 'code-a', startedAt: ago(600) };
+  assert.equal(watcherHealth(rec, { now: Date.now() }).state, 'unknown');
+});
+
+test('--status REPORTS UNKNOWN RATHER THAN A FLEET OF DEAD WATCHERS, through the real script', () => {
+  /*
+   * The wiring claim, driven end to end (rule 17): watcherHealth having an
+   * unknown branch proves nothing about what alive() actually hands it.
+   *
+   * NOTHING IS MOCKED. The shipped script runs its real spawnSync, and the
+   * `tasklist` it finds is a real program that really exits non-zero -- the
+   * field failure the audit predicted, where the probe is present but cannot
+   * answer. The stand-in is derived from process.execPath rather than built
+   * or named (rule 21): node.exe under another name rejects tasklist's
+   * switches and exits 1, which is all this needs.
+   *
+   * IT MUST GO ON PATH, NOT IN THE CWD. Measured here while writing this:
+   * a copy in the child's working directory is NOT picked up -- libuv does
+   * its own PATH search -- and stripping PATH entirely does not work either,
+   * because CreateProcess still finds the real tasklist in System32. The
+   * first version of this test did exactly that and passed against the
+   * defect for the wrong reason.
+   *
+   * The pids are REAL AND LIVE (this test runner), so process.kill(pid, 0)
+   * succeeds and the only unanswerable question is the node-ness one
+   * tasklist owns. That is precisely the state the old code called dead.
+   */
+  const shimDir = mkdtempSync(path.join(tmpdir(), 'no-tasklist-'));
+  const shim = path.join(shimDir, 'tasklist.exe');
+  try { linkSync(process.execPath, shim); } catch { cpSync(process.execPath, shim); }
+
+  const live = { pid: process.pid, startedAt: ago(600), lastCycleAt: new Date().toISOString(), cycles: 4 };
+  const home = withHome({
+    'claude-a': { ...live, agentId: 'code-a', sessionId: 'claude-a' },
+    'claude-b': { ...live, agentId: 'code-b', sessionId: 'claude-b' },
+  });
+  try {
+    const env = { ...process.env, AGENTBRIDGE_HOME: home };
+    /* Windows environment keys are case-insensitive; a plain object copy is not. */
+    const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+    env[pathKey] = `${shimDir}${path.delimiter}${env[pathKey] ?? ''}`;
+
+    const r = spawnSync(process.execPath, [POLL, '--status'],
+      { cwd: REPO, encoding: 'utf8', timeout: 30_000, env });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+
+    /*
+     * The precondition is an ASSERTION, not a guard (rule 6): if the shim did
+     * not win the lookup, the real tasklist answered, both watchers read
+     * healthy, and every assertion below would be measuring nothing.
+     */
+    assert.doesNotMatch(out, /HEALTHY/,
+      `the tasklist stand-in did not win PATH resolution -- this test proved nothing. ${out}`);
+    assert.equal(r.status, 1, `unknown is still wrong, so the exit must stay non-zero. ${out}`);
+    assert.match(out, /UNKNOWN/, out);
+    assert.doesNotMatch(out, /DEAD/,
+      `no watcher may be called DEAD on the strength of a probe that never answered. ${out}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+  }
+});
+
+test('THE REPORT COSTS ONE PROCESS-TABLE QUERY, NOT ONE PER WATCHER', () => {
+  /*
+   * THE DEFECT THAT MADE THE FEATURE DEFEAT ITSELF. alive() spawned tasklist
+   * per pid; --status and the SessionStart report both call it in a loop.
+   * Measured by blind audit: 20 live records took 16,620ms -- inside a
+   * SessionStart hook budgeted at 30s that has already spent up to 60s on
+   * register-session. The more agents on the machine, the likelier the report
+   * dies before printing, and the many-agent case is the one it exists for.
+   *
+   * THE COST OF A SPAWN IS A PROPERTY OF THIS MACHINE, NOT OF THE CODE, so it
+   * is measured here rather than typed (rule 21). A literal millisecond
+   * budget would be a fact about whoever's laptop wrote it, and would go red
+   * on a loaded CI box while the defect was absent.
+   *
+   * The shape of the claim is what matters: adding ELEVEN live watchers must
+   * not add eleven process-table queries. Pre-fix the delta is ~11x one
+   * query; post-fix it is ~0. Two is a wide margin that still fails loudly.
+   */
+  const probe = () => {
+    const t0 = Date.now();
+    spawnSync('tasklist', ['/FI', 'IMAGENAME eq node.exe', '/NH', '/FO', 'CSV'],
+      { encoding: 'utf8', windowsHide: true });
+    return Date.now() - t0;
+  };
+  probe();                                        // warm the loader; first spawn is not typical
+  const queryMs = Math.min(probe(), probe(), probe());
+  assert.ok(queryMs > 0, 'the cost unit must be measured, not assumed');
+
+  const live = (n) => {
+    const recs = {};
+    for (let i = 0; i < n; i += 1) {
+      recs[`claude-${i}`] = { pid: process.pid, agentId: `a-${i}`, sessionId: `claude-${i}`,
+        startedAt: ago(600), lastCycleAt: new Date().toISOString(), cycles: 4 };
+    }
+    return withHome(recs);
+  };
+  const timed = (home) => {
+    const t0 = Date.now();
+    try { runStatus(home); } finally { rmSync(home, { recursive: true, force: true }); }
+    return Date.now() - t0;
+  };
+
+  const one = timed(live(1));
+  const twelve = timed(live(12));
+  const added = twelve - one;
+
+  assert.ok(added < queryMs * 2,
+    `eleven more watchers added ${added}ms, and one process-table query costs ${queryMs}ms here. `
+    + 'That is a per-record query: the report scales with the fleet it is meant to survey.');
+});
+
+/* ── the two call sites, which the tri-state changed in OPPOSITE directions ──
+ *
+ * `alive()` gained a third answer, so every caller had to decide what "could
+ * not tell" means for IT. Getting that wrong is silent in both places, and a
+ * boolean-shaped mutation (`!== false` back to a plain truthiness test) is
+ * invisible to every test above.
+ */
+
+/** node.exe under tasklist's name: found first on PATH, and exits non-zero. */
+function brokenProbePath(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'no-tasklist-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const shim = path.join(dir, 'tasklist.exe');
+  try { linkSync(process.execPath, shim); } catch { cpSync(process.execPath, shim); }
+  return dir;
+}
+const withPath = (env, dir) => {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  return { ...env, [key]: `${dir}${path.delimiter}${env[key] ?? ''}` };
+};
+
+test('AN UNCHECKABLE PID DOES NOT GET A SECOND SUPERVISOR DETACHED AGAINST IT', (t) => {
+  /*
+   * sessionStart skips detaching when a supervisor is already running. Read
+   * null as "not running" and it starts a RIVAL: two pollers on one session,
+   * two heartbeats, and a pid record that remembers only the newer one -- so
+   * the older is unstoppable, which is the orphan hazard this file already
+   * warns about, manufactured by the very check meant to prevent it.
+   *
+   * When in doubt, do not start a rival. The cost of being wrong that way is
+   * one session that is not polled and says so; the other way it is a poller
+   * nothing can ever reach.
+   */
+  const home = mkdtempSync(path.join(tmpdir(), 'rival-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(path.join(home, 'polls'), { recursive: true });
+  const token = path.join(home, 'token.txt');
+  writeFileSync(token, 'not-a-real-token\n');
+  writeFileSync(path.join(home, 'polls', 'claude-rival.json'),
+    JSON.stringify({ pid: process.pid, agentId: 'code-a', sessionId: 'claude-rival', startedAt: ago(600) }));
+
+  const r = spawnSync(process.execPath, [POLL, '--session-start'], {
+    cwd: REPO, encoding: 'utf8', timeout: 60_000,
+    input: JSON.stringify({ session_id: 'rival' }),
+    env: withPath({ ...process.env, AGENTBRIDGE_HOME: home, AGENTBRIDGE_AGENT_ID: 'code-a',
+      AGENTBRIDGE_TOKEN_FILE: token,
+      /*
+       * A DEAD LOOPBACK, SO NO FAILURE OF THIS TEST CAN REACH THE OPERATOR'S
+       * LIVE BRIDGE. Under the shipped code the run returns before
+       * register-session. Under the mutation this test exists to catch, it
+       * does NOT -- and a test whose failure mode is registering a fixture
+       * session against production is a worse bug than the one it detects.
+       * Loopback also avoids the Windows/node libuv abort, which needs a
+       * remote fetch to reproduce.
+       */
+      AGENTBRIDGE_REGISTER_URL: 'http://127.0.0.1:1/register' }, brokenProbePath(t)),
+  });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+
+  assert.match(out, /already polling/,
+    `an unverifiable supervisor must be left alone, not raced. ${out}`);
+  assert.doesNotMatch(out, /NOT POLLING/,
+    `the run must reach the liveness check, not bail earlier -- otherwise this proves nothing. ${out}`);
+});
+
+test('AN UNCHECKABLE PID IS STILL SIGNALLED AT SESSION END', async (t) => {
+  /*
+   * The opposite default, for the opposite cost. Here "could not tell" must
+   * NOT mean "leave it": sessionEnd deletes the pid record moments later, so
+   * a supervisor skipped here survives with nothing on disk pointing at it.
+   * A signal to a pid that turns out to be dead throws and is caught, which
+   * is free; the skipped signal is permanent.
+   *
+   * The victim is a REAL detached node process, not a planted number, and the
+   * assertion is that it is gone -- rule 4: the far end, not a proxy for it.
+   */
+  const home = mkdtempSync(path.join(tmpdir(), 'sigterm-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(path.join(home, 'polls'), { recursive: true });
+
+  const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
+    { stdio: 'ignore' });
+  const exited = new Promise((resolve) => { victim.on('exit', () => resolve(true)); });
+  t.after(() => { try { victim.kill('SIGKILL'); } catch { /* already gone */ } });
+
+  writeFileSync(path.join(home, 'polls', 'claude-victim.json'),
+    JSON.stringify({ pid: victim.pid, agentId: 'code-a', sessionId: 'claude-victim', startedAt: ago(600) }));
+
+  /* Precondition asserted, not assumed (rule 6): it must be alive to prove killed. */
+  assert.doesNotThrow(() => process.kill(victim.pid, 0), 'the victim never started');
+
+  spawnSync(process.execPath, [POLL, '--session-end'], {
+    cwd: REPO, encoding: 'utf8', timeout: 60_000,
+    input: JSON.stringify({ session_id: 'victim' }),
+    env: withPath({ ...process.env, AGENTBRIDGE_HOME: home,
+      AGENTBRIDGE_TOKEN_FILE: path.join(home, 'no-such-token.txt') }, brokenProbePath(t)),
+  });
+
+  const done = await Promise.race([exited,
+    new Promise((resolve) => { setTimeout(() => resolve(false), 10_000); })]);
+  assert.equal(done, true,
+    'the supervisor outlived the session end that deleted its record -- nothing can stop it now');
 });
