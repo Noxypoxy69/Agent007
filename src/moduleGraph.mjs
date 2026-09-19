@@ -219,10 +219,33 @@ export const NAME_ONLY_SPLICES = {
  * work, which costs more than it looks -- it pushes the next author toward the
  * NAME_ONLY_SPLICES escape hatch rather than toward writing the pair.
  *
- * So ask for the SHAPE instead of the name: a behaviour pair is any test that
- * imports a module AND the splice target it is copied into, because comparing
- * the two is the only reason to import both. That is a property of what the
- * test does; a filename is a property of who wrote it.
+ * So ask for the SHAPE instead of the name -- but the FIRST attempt at that was
+ * worse than the filename it replaced, and the correction is the interesting
+ * part.
+ *
+ * IT CREDITED ANY TEST THAT IMPORTED THE MODULE AND THE TARGET, on the
+ * reasoning that comparing them is the only reason to hold both. It is not.
+ * `test/messagesQueryInbox.test.mjs` imports `messagesQuery` from the splice
+ * target and `inboxNames` from src/coordination.mjs, uses the second purely as
+ * a precondition ("b is an alias of code-b"), and never touches the spliced
+ * copy of it. That one incidental import credited src/coordination.mjs -- the
+ * module NAME_ONLY_SPLICES itself calls "HIGHEST RISK of the eight", carrying
+ * validateMessage and the executable-text guard that b6 inverted to prove a
+ * name check insufficient.
+ *
+ * Measured by blind audit, 2026-09-18: SEVEN of the eight name-only entries
+ * were credited that way. The gate read ~10 of 11 compared where the truth is
+ * 3 of 11 -- so a check written to stop a ratio being a fact nobody computed
+ * had started reporting a false one. Under-crediting real work pushes an author
+ * toward the escape hatch; over-crediting removes the reason to write the pair
+ * at all, and that is the worse direction.
+ *
+ * THE SHAPE OF A BEHAVIOUR PAIR IS THE SAME NAME FROM BOTH SIDES. A test that
+ * compares two copies has to name the same export twice -- `ackMatches` out of
+ * src/livenessProbe.mjs and `ackMatches` out of _shared.js, whatever it aliases
+ * them to locally. A test that merely uses a helper imports it once. So the
+ * question asked is the intersection of the imported names, which is a property
+ * of the comparison rather than of the file list.
  */
 export function behaviourComparedModules(root, splices = DEFAULT_SPLICES) {
   const targets = Object.keys(splices);
@@ -240,14 +263,64 @@ export function behaviourComparedModules(root, splices = DEFAULT_SPLICES) {
     let text;
     try { text = readFileSync(path.join(root, 'test', name), 'utf8'); } catch { continue; }
 
-    const imported = new Set();
-    for (const m of text.matchAll(/from\s+'\.\.\/([^']+)'/g)) imported.add(m[1]);
-    // Only a test that holds BOTH halves can be comparing them.
-    if (!targets.some((t) => imported.has(t))) continue;
+    const byPath = importedNamesByPath(text);
+    // The names this test took OUT OF the splice target, aliases resolved to
+    // the exported name -- `x as srcX` is still a claim about `x`.
+    const fromTarget = new Set();
+    for (const t of targets) {
+      for (const n of byPath.get(t) ?? []) fromTarget.add(n);
+    }
+    if (fromTarget.size === 0) continue;   // holds no copy: cannot be comparing
     sawAny = true;
-    for (const i of imported) if (!targets.includes(i)) found.add(i);
+
+    for (const [p, ns] of byPath) {
+      if (targets.includes(p)) continue;
+      // The same export, named on both sides. That is the comparison.
+      if ([...ns].some((n) => fromTarget.has(n))) found.add(p);
+    }
   }
   return sawAny ? found : null;
+}
+
+/**
+ * Every `../`-relative import in a file, as path -> set of EXPORTED names.
+ *
+ * Aliases are resolved back to the exported name, because `ackMatches as srcAck`
+ * is still a claim about `ackMatches` -- and renaming one side is exactly what a
+ * behaviour pair does to hold both copies at once.
+ */
+function importedNamesByPath(text) {
+  const byPath = new Map();
+  /*
+   * `[^;]` RATHER THAN `[\s\S]`, AND THE DIFFERENCE IS A REAL BUG I SHIPPED.
+   *
+   * A lazy `[\s\S]*?` between `import` and `from '../…'` starts at the FIRST
+   * `import` in the file and expands across every statement that does not end
+   * in a `../` specifier. In test/sharedSpliceMatches.test.mjs that meant the
+   * match began at `import { test } from 'node:test'` and ran to line 4, so the
+   * first `{…}` inside it was `{ test }` -- and bridge/collisions.mjs was
+   * recorded as importing `test` instead of `detectCollisions`. The one file in
+   * the repository that exists to compare splices was read as comparing
+   * nothing.
+   *
+   * An import statement ends at a semicolon, so the clause cannot contain one.
+   * Every specifier is matched and the non-relative ones are dropped afterwards
+   * rather than skipped by the pattern, so a `node:` import can no longer be
+   * swallowed into its neighbour's clause.
+   */
+  for (const m of text.matchAll(/import\s+([^;]*?)\s+from\s+'([^']+)'/g)) {
+    const [, clause, spec] = m;
+    if (!spec.startsWith('../')) continue;
+    const p = spec.slice(3);
+    if (!byPath.has(p)) byPath.set(p, new Set());
+    const braces = /\{([\s\S]*?)\}/.exec(clause);
+    if (!braces) continue;               // default or namespace import: no names
+    for (const part of braces[1].split(',')) {
+      const exported = part.trim().split(/\s+as\s+/)[0].trim();
+      if (exported) byPath.get(p).add(exported);
+    }
+  }
+  return byPath;
 }
 
 /** Reached only through a hand-maintained copy. Shipped, but not by an import. */
