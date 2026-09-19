@@ -71,7 +71,7 @@ const isTest = (f) => /(^|\/)test\/.+\.test\.mjs$/.test(f);
  * reads with new URL(...). A test says what it tests; this reads that rather
  * than guessing from the filename, which would match by coincidence.
  */
-function subjectsOf(testFiles, root = REPO) {
+function subjectsOf(testFiles, root = REPO, { transitive = false } = {}) {
   /*
    * `root` DEFAULTS TO THE LIVE WORKTREE AND THAT IS A KNOWN DEFECT.
    *
@@ -85,21 +85,66 @@ function subjectsOf(testFiles, root = REPO) {
    * test-only path still calls it without one; that call site is the
    * remaining half of the defect and is NOT fixed here.
    */
+  /*
+   * `transitive` FOLLOWS RE-EXPORTS, AND IT IS OPT-IN FOR A REASON.
+   *
+   * A blind audit found two spellings of the same blind spot: a test that
+   * imports a BARREL (`export * from './impl.mjs'`) and a test that uses a
+   * DYNAMIC `await import(...)`. Both are real load-bearing gates and both
+   * scored COLLAPSED -- "nothing the test imports was reverted" -- which is
+   * the not-a-gate verdict, for gates that work.
+   *
+   * The barrel case is not a matching failure: `export * from './x.mjs'`
+   * already contains `from './x.mjs'`, so depth one matches it. The failure
+   * is DEPTH. The test imports the barrel, the barrel re-exports the impl,
+   * the commit changed the impl, and the impl never appears in the set.
+   *
+   * WHY IT IS NOT ON BY DEFAULT. The two callers want different things:
+   *
+   *   the collapse check     asks "does this test DEPEND on a reverted
+   *                          file". Transitive is exactly right: a
+   *                          dependency two hops away is still a dependency.
+   *   the test-only path     REVERTS each subject it is given. Transitive
+   *                          there would check out the parent version of
+   *                          every module in the closure -- a far larger
+   *                          mutation than the commit made, and the verdict
+   *                          would be about a repository nobody wrote.
+   *
+   * So the closure is requested by the caller that can use it. Bounded by a
+   * visited set, and only relative specifiers are followed, so a bare
+   * package name never drags node_modules in.
+   */
+  const RELS = (src) => [
+    ...[...src.matchAll(/from\s+['"](\.\.?\/[^'"]+)['"]/g)].map((m) => m[1]),
+    ...[...src.matchAll(/new URL\(\s*['"](\.\.?\/[^'"]+)['"]/g)].map((m) => m[1]),
+    /*
+     * `import('...')`, with or without await. The dynamic form was matched by
+     * nothing, so a test whose subject is loaded at run time looked like a
+     * test with no subject at all.
+     */
+    ...[...src.matchAll(/\bimport\(\s*['"](\.\.?\/[^'"]+)['"]\s*\)/g)].map((m) => m[1]),
+  ];
+
   const out = new Set();
-  for (const t of testFiles) {
+  const seen = new Set();
+  const queue = [...testFiles];
+
+  while (queue.length) {
+    const file = queue.shift();
+    if (seen.has(file)) continue;
+    seen.add(file);
+
     let src;
-    try { src = readFileSync(path.join(root, t), 'utf8'); } catch { continue; }
-    const rels = [
-      ...[...src.matchAll(/from\s+['"](\.\.?\/[^'"]+)['"]/g)].map((m) => m[1]),
-      ...[...src.matchAll(/new URL\(\s*['"](\.\.?\/[^'"]+)['"]/g)].map((m) => m[1]),
-    ];
-    for (const rel of rels) {
-      const abs = path.resolve(path.dirname(path.join(root, t)), rel);
+    try { src = readFileSync(path.join(root, file), 'utf8'); } catch { continue; }
+
+    for (const rel of RELS(src)) {
+      const abs = path.resolve(path.dirname(path.join(root, file)), rel);
       const repoRel = path.relative(root, abs).split(path.sep).join('/');
       // Its own siblings are not its subject, and nor is anything outside the repo.
       if (repoRel.startsWith('..') || isTest(repoRel)) continue;
       if (!existsSync(abs)) continue;
       out.add(repoRel);
+      if (transitive && !seen.has(repoRel)) queue.push(repoRel);
     }
   }
   return [...out];
@@ -378,7 +423,8 @@ for (const sha of shas) {
        * had some other cause and the assertions never ran. That is the
        * auditor's original case, and it is reported as a lead, not a verdict.
        */
-      const imported = new Set(subjectsOf(tests, work));
+      /* Transitive: a dependency two hops behind a barrel is still a dependency. */
+      const imported = new Set(subjectsOf(tests, work, { transitive: true }));
       const revertedAndImported = restorable.filter((f) => imported.has(f));
 
       if (revertedAndImported.length > 0) {

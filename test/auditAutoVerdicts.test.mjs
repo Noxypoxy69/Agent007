@@ -285,3 +285,101 @@ test('A RANGE THAT WAS NEVER MEASURED DOES NOT PRINT AN ALL-ZERO SUMMARY', (t) =
   assert.doesNotMatch(out, /SUMMARY IS WRONG/,
     `every finding must land in a bucket.\n${out}`);
 });
+
+/* ══ the collapse branch's blind spots: a barrel, and a dynamic import ═══
+ *
+ * BOTH FIXTURES MUST DROP THE TEST COUNT **AND** FAIL SOMETHING, or they
+ * never reach the collapse branch at all and prove nothing. The first
+ * versions of these two tests did neither: reverting turned one assertion
+ * red without changing the count, so they took the ordinary "tests go red"
+ * GATE path -- which works regardless of subjectsOf -- and passed against
+ * the defect they were written for.
+ *
+ * So each generates its cases from a value behind the indirection (count
+ * drops on revert) AND asserts one behaviour that the revert breaks
+ * (after.fail > 0). That combination lands exactly on the branch where
+ * "is the reverted file among this test's dependencies" decides the verdict.
+ */
+
+/** A subject whose CASES drive the test count and whose answer() is asserted. */
+const IMPL_BASE = 'export const CASES = ["a", "b"];\nexport const answer = () => 1;\n';
+const IMPL_NEW = 'export const CASES = ["a", "b", "c", "d", "e"];\nexport const answer = () => 2;\n';
+
+const genSpec = (importLine, use) => [
+  'import test from "node:test";',
+  'import assert from "node:assert/strict";',
+  importLine,
+  '/* Count comes from CASES, so reverting the subject SHRINKS it. */',
+  `for (const c of ${use}.CASES) test(\`case \${c}\`, () => { assert.ok(c); });`,
+  '/* And one assertion the revert actually breaks, so after.fail > 0. */',
+  `test("answers 2", () => { assert.equal(${use}.answer(), 2); });`,
+  '',
+].join('\n');
+
+function landIndirect(env, { files, spec, testName }) {
+  for (const [rel, body] of Object.entries(files.base)) {
+    writeFileSync(path.join(env.root, rel), body);
+  }
+  writeFileSync(path.join(env.root, 'test', testName), spec);
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'base');
+
+  for (const [rel, body] of Object.entries(files.next)) {
+    writeFileSync(path.join(env.root, rel), body);
+  }
+  writeFileSync(path.join(env.root, 'test', testName),
+    `${readFileSync(path.join(env.root, 'test', testName), 'utf8')}/* touched */\n`);
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'the behaviour the test pins');
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: env.root, encoding: 'utf8' }).trim();
+}
+
+test('A GATE BEHIND A BARREL RE-EXPORT IS A GATE, NOT A COLLAPSE', (t) => {
+  /*
+   * Found by blind audit. The test imports a barrel, the barrel re-exports
+   * the implementation, the commit changes the implementation. subjectsOf
+   * resolved only the barrel, so the reverted file and the test's imports
+   * looked disjoint and the verdict was COLLAPSED -- the NOT-a-gate verdict
+   * -- for a gate that works.
+   *
+   * It was never a matching failure: `export * from './impl.mjs'` contains
+   * `from './impl.mjs'`, so depth one already saw the barrel. The failure was
+   * DEPTH, which is why the fix is a closure and not another regex.
+   */
+  const env = probeRepo(t);
+  const sha = landIndirect(env, {
+    testName: 'barrel.test.mjs',
+    files: {
+      base: { 'src/barrelImpl.mjs': IMPL_BASE, 'src/barrel.mjs': "export * from './barrelImpl.mjs';\n" },
+      next: { 'src/barrelImpl.mjs': IMPL_NEW },
+    },
+    spec: genSpec('import * as subject from "../src/barrel.mjs";', 'subject'),
+  });
+
+  const out = runAuto(env, sha);
+  assert.doesNotMatch(out, /COLLAPSED/,
+    `a real gate two hops behind a barrel was reported as not-a-gate.\n${out}`);
+  assert.match(out, /GATE/, out);
+  assert.match(out, /barrelImpl\.mjs/,
+    `the implementation must be named as the dependency that was reverted.\n${out}`);
+});
+
+test('A GATE REACHED BY A DYNAMIC import() IS A GATE, NOT A COLLAPSE', (t) => {
+  /*
+   * The second spelling from the same audit, and a plain matching gap:
+   * subjectsOf matched `from '...'` and `new URL('...')` and nothing else, so
+   * a subject loaded at run time looked like no subject at all.
+   */
+  const env = probeRepo(t);
+  const sha = landIndirect(env, {
+    testName: 'dyn.test.mjs',
+    files: { base: { 'src/dyn.mjs': IMPL_BASE }, next: { 'src/dyn.mjs': IMPL_NEW } },
+    spec: genSpec('const subject = await import("../src/dyn.mjs");', 'subject'),
+  });
+
+  const out = runAuto(env, sha);
+  assert.doesNotMatch(out, /COLLAPSED/,
+    `a real gate behind a dynamic import was reported as not-a-gate.\n${out}`);
+  assert.match(out, /GATE/, out);
+  assert.match(out, /dyn\.mjs/, out);
+});
