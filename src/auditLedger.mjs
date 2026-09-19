@@ -159,8 +159,28 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
     if (!sha || sha.trim() === '') continue;
 
     const files = lines.map((f) => f.trim()).filter(Boolean);
-    const touched = files.filter(isAuditBearing);
+    let touched = files.filter(isAuditBearing);
     if (touched.length === 0) continue;
+
+    /*
+     * package.json IS SPLIT BY KEY HERE, BECAUSE THIS IS THE ONLY PLACE WITH
+     * git. isBlockingControl is pure and cannot ask what changed inside the
+     * file; see its note for why the whole-file answer is wrong in both
+     * directions. A commit that changed `scripts` is reported under the
+     * marker, which blocks; one that only moved dependencies keeps the plain
+     * path, which is still REPORTED and still does not stop the turn.
+     *
+     * The extra git calls are bounded by the number of package.json commits
+     * in the range -- normally zero -- so the one-pass property the comment
+     * above insists on is preserved for every other commit.
+     */
+    if (touched.some((f) => normalisePath(f) === 'package.json')) {
+      let changed = true;
+      try { changed = scriptsChanged(repoRoot, sha.trim()); } catch { changed = true; }
+      if (changed) {
+        touched = touched.map((f) => (normalisePath(f) === 'package.json' ? SCRIPTS_MARKER : f));
+      }
+    }
 
     const key = sha.trim().toLowerCase();
     const entry = audited.get(key)
@@ -429,6 +449,50 @@ const CONFIG_DIR = /(?:^|\/)\.claude\//;
  */
 const WORKTREE_CONTENT = /(?:^|\/)\.claude\/worktrees\/[^/]+\/(?!(?:.*\/)?\.claude\/)/;
 
+/**
+ * The marker auditCoverage emits for a package.json commit that changed the
+ * `scripts` key. Not a real path -- see isBlockingControl.
+ */
+export const SCRIPTS_MARKER = 'package.json#scripts';
+
+/**
+ * Did this commit change package.json's `scripts` key?
+ *
+ * TWO git CALLS, AND ONLY FOR COMMITS THAT TOUCH package.json. The cost note
+ * on auditCoverage rejects per-commit subprocesses across a whole range, and
+ * rightly -- forty commits was forty spawns. This is bounded by the number of
+ * package.json commits in the range, which is normally zero.
+ *
+ * FAILS CLOSED. If either side cannot be read or parsed -- a root commit with
+ * no parent, a malformed file mid-history -- the answer is "changed", so the
+ * commit blocks. Unreadable is UNKNOWN, and unknown must not render as
+ * "nothing happened here".
+ *
+ * Keys are sorted before comparison, so a reformat or a reorder is not
+ * reported as a decision. What matters is which script names exist and what
+ * they run.
+ */
+export function scriptsChanged(repoRoot, sha) {
+  const scriptsAt = (rev) => {
+    let text;
+    try {
+      text = runGit(['show', `${rev}:package.json`], { cwd: repoRoot, encoding: 'utf8' });
+    } catch { return undefined; }
+    let parsed;
+    try { parsed = JSON.parse(String(text)); } catch { return undefined; }
+    const scripts = parsed?.scripts;
+    if (!scripts || typeof scripts !== 'object') return '';
+    const unit = String.fromCharCode(31);
+    const rec = String.fromCharCode(30);
+    return Object.keys(scripts).sort().map((k) => `${k}${unit}${String(scripts[k])}`).join(rec);
+  };
+
+  const after = scriptsAt(sha);
+  const before = scriptsAt(`${sha}^`);
+  if (after === undefined || before === undefined) return true;
+  return after !== before;
+}
+
 /** Is this path decision configuration rather than prose, by where it lives? */
 function isConfigDirPath(p) {
   if (!CONFIG_DIR.test(p)) return false;
@@ -450,8 +514,33 @@ function normalisePath(rel) {
 
 /** Does changing this path stop a turn, as opposed to merely being reported? */
 export function isBlockingControl(rel) {
-  if (!isAuditBearing(rel)) return false;
   const p = normalisePath(rel);
+  /*
+   * SCRIPTS ARE NOT DEPENDENCIES, AND package.json IS BOTH.
+   *
+   * PROSE_OR_DEPENDENCY exempts package.json whole, because "a lockfile bump
+   * is not a decision and npm rewrites them without being asked". An auditor
+   * pointed out what that leaves open, using this repository's own
+   * documentation as the evidence: CLAUDE.md records that `npm run pwn`
+   * OVERWROTE src/claudeGuard.mjs, that npm install/ci/run are all ALLOW
+   * through the shipped rail, and that `npm test`'s glob is expanded by node
+   * rather than judged. package.json is where the names of those scripts
+   * live, so a pushed unaudited change to it is decision-bearing in a way the
+   * exemption's rationale does not cover.
+   *
+   * Neither whole-file answer is right:
+   *
+   *   block the file    re-creates the outage the exemption was added for.
+   *                     43672dc, an npm-script addition, was one of the two
+   *                     commits stopping every turn on the operator machine.
+   *   exempt the file   leaves an execution channel entirely unaudited.
+   *
+   * So the split is by KEY. The decision needs git, which this pure
+   * predicate does not have, so auditCoverage makes it per commit and emits
+   * SCRIPTS_MARKER in place of the path; here we only honour it.
+   */
+  if (p === SCRIPTS_MARKER) return true;
+  if (!isAuditBearing(rel)) return false;
   if (isConfigDirPath(p)) return true;   // see CONFIG_DIR: markdown there is not prose
   return !PROSE_OR_DEPENDENCY.test(p);
 }

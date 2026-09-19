@@ -21,6 +21,7 @@ import path from 'node:path';
 
 import {
   isAuditBearing, parseLedger, auditCoverage, formatCoverage, AUDIT_BEARING_EXTRAS,
+  auditEscalation, scriptsChanged,
   defaultAuditRange,
 } from '../src/auditLedger.mjs';
 import { PROTECTED_PATHS } from '../src/guardSession.mjs';
@@ -230,4 +231,104 @@ test('the shipped ledger parses, and every line names an auditor', async () => {
     assert.ok(sha.length >= 7, `${sha} is too short to identify a commit`);
     assert.notEqual(row.auditor.trim(), '', `${sha} names no auditor`);
   }
+});
+
+/* ══ package.json is a dependency manifest AND an execution channel ══════ */
+
+function repoWithPackageJson(t) {
+  const dir = lab(t);
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  g('init', '-q');
+  g('config', 'user.email', 't@example.invalid');
+  g('config', 'user.name', 'T');
+
+  const pkg = (scripts, deps) => JSON.stringify({ name: 'p', scripts, dependencies: deps }, null, 2);
+
+  writeFileSync(path.join(dir, 'package.json'), pkg({ test: 'node --test' }, { a: '1.0.0' }));
+  g('add', '-A'); g('commit', '-qm', 'base');
+  const base = g('rev-parse', 'HEAD').trim();
+
+  /* Dependencies only: npm churn, nobody decided anything. */
+  writeFileSync(path.join(dir, 'package.json'), pkg({ test: 'node --test' }, { a: '1.0.1', b: '2.0.0' }));
+  g('add', '-A'); g('commit', '-qm', 'bump a dependency');
+  const depsOnly = g('rev-parse', 'HEAD').trim();
+
+  /* A new script: an executable name, which IS a decision. */
+  writeFileSync(path.join(dir, 'package.json'),
+    pkg({ test: 'node --test', pwn: 'node ./evil.mjs' }, { a: '1.0.1', b: '2.0.0' }));
+  g('add', '-A'); g('commit', '-qm', 'add a script');
+  const scripted = g('rev-parse', 'HEAD').trim();
+
+  /* Reformat only: same scripts, different key order and whitespace. */
+  writeFileSync(path.join(dir, 'package.json'),
+    JSON.stringify({ dependencies: { b: '2.0.0', a: '1.0.1' }, name: 'p', scripts: { pwn: 'node ./evil.mjs', test: 'node --test' } }));
+  g('add', '-A'); g('commit', '-qm', 'reformat');
+  const reformat = g('rev-parse', 'HEAD').trim();
+
+  return { dir, base, depsOnly, scripted, reformat };
+}
+
+const blockFor = (dir, sha) => auditEscalation(
+  auditCoverage({ repoRoot: dir, range: `${sha}^..${sha}`, ledgerText: '' }),
+  [],
+).block;
+
+test('A NEW npm SCRIPT BLOCKS; A DEPENDENCY BUMP DOES NOT', async (t) => {
+  /*
+   * package.json was exempt whole, on the grounds that a lockfile bump is not
+   * a decision. An auditor pointed out what that leaves open using this
+   * repository's own docs: CLAUDE.md records that `npm run pwn` OVERWROTE
+   * src/claudeGuard.mjs, that npm install/ci/run are all ALLOW through the
+   * shipped rail, and that `npm test`'s glob is expanded by node rather than
+   * judged. package.json is where those script names live.
+   *
+   * Neither whole-file answer works -- blocking it re-creates the outage the
+   * exemption was added for (43672dc, an npm-script addition, was one of two
+   * commits stopping every turn), and exempting it leaves an execution
+   * channel unaudited. So it is split by KEY.
+   */
+  const r = repoWithPackageJson(t);
+
+  const scripted = blockFor(r.dir, r.scripted);
+  assert.ok(scripted, 'adding an npm script is adding an executable name, and must block');
+  assert.match(scripted, /package\.json#scripts/,
+    'and the report must say WHICH half of the file decided it');
+
+  /*
+   * The outage direction, and the reason this is a key split rather than a
+   * path flip: dependency churn must stay quiet or every npm install stops
+   * the machine.
+   */
+  assert.equal(blockFor(r.dir, r.depsOnly), null,
+    'a dependency bump is not a decision and must not stop a turn');
+
+  /* And it is still REPORTED, because unaudited is still worth saying. */
+  const notice = auditEscalation(
+    auditCoverage({ repoRoot: r.dir, range: `${r.depsOnly}^..${r.depsOnly}`, ledgerText: '' }), [],
+  ).notice;
+  assert.match(notice ?? '', /package\.json/, 'a dependency change is reported even though it does not block');
+});
+
+test('a reformat of package.json is not a decision', async (t) => {
+  /*
+   * Keys are sorted before comparison. A gate that fires on whitespace is one
+   * people route around, and reordering a scripts block changes nothing about
+   * what runs.
+   */
+  const r = repoWithPackageJson(t);
+  assert.equal(blockFor(r.dir, r.reformat), null,
+    'same script names, same commands, different order -- nothing was decided');
+});
+
+test('scriptsChanged FAILS CLOSED when it cannot read either side', async (t) => {
+  /*
+   * A root commit has no parent, and a malformed manifest cannot be parsed.
+   * Unreadable is UNKNOWN, and unknown must not render as "nothing happened"
+   * -- that is the direction that loses a finding.
+   */
+  const r = repoWithPackageJson(t);
+  assert.equal(scriptsChanged(r.dir, r.base), true,
+    'the root commit has no parent to compare against, so it cannot be cleared');
+  assert.equal(scriptsChanged(r.dir, 'not-a-sha'), true,
+    'an unreadable revision is unknown, not unchanged');
 });
