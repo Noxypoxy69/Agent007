@@ -272,7 +272,38 @@ const GIT_SWEEPS_TREE = new Set(['add', 'commit', 'restore', 'checkout', 'switch
 /* Writes refs only. Cannot alter a tracked file's content in the worktree. */
 const GIT_REF_ONLY = new Set(['fetch', 'tag']);
 /* Has its own branch above, with its own reasons. */
-const GIT_JUDGED_ABOVE = new Set(['push']);
+const GIT_JUDGED_ABOVE = new Set(['push', 'stash']);
+
+/**
+ * The only `git stash` forms that read rather than write.
+ *
+ * STASH WAS FILED UNDER "IMPORTS SOMEBODY ELSE'S COMMITS", AND IT IMPORTS
+ * NOTHING. That bucket's comment justifies leaving merge, rebase, pull,
+ * cherry-pick and revert alone because refusing them is a workflow outage and
+ * Stop's drift check is the backstop. Every word of that is true of those five
+ * and none of it is true of stash: a bare `git stash` takes every modified
+ * tracked file and resets the worktree to HEAD.
+ *
+ * So it had the effect the sweep branch exists to refuse -- the same effect as
+ * `git restore .`, which that branch's own comment calls "the sharpest of them:
+ * the hook re-imports that module on every call, so reverting the tree disarms
+ * PreToolUse for the rest of the session" -- and it reached it with no sweep
+ * check at all, because it was in the wrong bucket. In a clone three sessions
+ * share it also destroys every one of their uncommitted changes, in one
+ * permitted command with no operand to inspect. Found by blind audit; the
+ * destructive form was deliberately never executed, by them or by me.
+ *
+ * THE MODULE-LOAD ASSERTION COULD NOT CATCH THIS. It proves every GIT_WRITE
+ * verb is in SOME bucket, so a verb in the WRONG bucket passes silently -- a
+ * completeness check that cannot see correctness. That is worth more than the
+ * one verb: the same hole covers every other member of every other set.
+ *
+ * DEFAULT-DENY IS RIGHT HERE, against rule 19's usual direction, because the
+ * DANGEROUS form is the bare one. `git stash` with no subcommand is the sweep;
+ * an unknown subcommand is refused rather than assumed safe, and the two that
+ * only read are named.
+ */
+const GIT_STASH_READS = new Set(['list', 'show']);
 /*
  * Imports somebody else's commits over the tree. These remain ALLOWED and that
  * is a deliberate, documented gap rather than an oversight: refusing merge,
@@ -282,7 +313,7 @@ const GIT_JUDGED_ABOVE = new Set(['push']);
  * drift that is supposed to catch it. Recorded here so the next reader does not
  * mistake silence for safety.
  */
-const GIT_IMPORTS_HISTORY = new Set(['merge', 'rebase', 'stash', 'cherry-pick', 'apply', 'revert', 'pull']);
+const GIT_IMPORTS_HISTORY = new Set(['merge', 'rebase', 'cherry-pick', 'apply', 'revert', 'pull']);
 
 /*
  * VERBS THAT OVERWRITE THE FILE THEY NAME, as against verbs that merely RECORD
@@ -808,6 +839,27 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
       return GIT_BRANCH_LIST.test(command.trim())
         ? { allowed: true }
         : { allowed: false, reason: 'git branch writes a ref unless it is listing' };
+    }
+    if (tokens[1] === 'stash') {
+      /*
+       * Only the two reading forms pass. Everything else -- bare, push, save,
+       * pop, apply, drop, clear, branch, create, store -- either sweeps the
+       * worktree or destroys a stash entry that may hold another session's
+       * work, and none of them names an operand this rail could inspect.
+       */
+      const sub = tokens[2];
+      if (sub && GIT_STASH_READS.has(sub)) return { allowed: true };
+      return {
+        allowed: false,
+        reason: sub
+          ? `"git stash ${sub}" changes the working tree or the stash stack without naming a `
+            + 'path, so nothing here can see what it would touch. Only "git stash list" and '
+            + '"git stash show" read'
+          : '"git stash" with no subcommand takes every modified tracked file and resets the '
+            + 'working tree to HEAD -- the same effect as an everything-selector restore, and in '
+            + "a shared clone it discards every other session's uncommitted work. Commit what you "
+            + 'want to keep, or name the paths',
+      };
     }
     if (tokens[1] === 'push') {
       /*
