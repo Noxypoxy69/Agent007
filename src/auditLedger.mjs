@@ -245,3 +245,106 @@ export function formatCoverage({ commits, malformed, error }) {
   }
   return lines.join('\n');
 }
+
+/**
+ * WHICH UNAUDITED CONTROL COMMITS SHOULD STOP A TURN, AND WHICH SHOULD ONLY
+ * BE REPORTED.
+ *
+ * ═══ WHY THIS EXISTS: THE DETECTOR WORKED AND CHANGED NOTHING ═══
+ *
+ * Measured 2026-09-19. `scripts/check-audit-coverage.mjs` exits 1 and names
+ * every commit that changed a control with no audit recorded. The Stop gate
+ * already imports auditCoverage, already calls it on every turn, and already
+ * gets the right answer -- and then appends it to `carriedNotice`, which is
+ * a systemMessage. It never reaches `out()`, which is what blocks.
+ *
+ * So rule 20 -- nobody certifies their own work -- was enforced by whether
+ * anyone happened to read a notice. On the night this was written, three
+ * agents each certified their own work, each was wrong, and each was caught
+ * only by a separate reader who was summoned by hand. 101 commits were pushed
+ * with 13 audited and nothing objected. The Stop gate had said so, in a line
+ * underneath the override-grant block that everyone had stopped reading.
+ *
+ * That is rule 17 one level up: not a control that is never consulted, but a
+ * control that IS consulted and whose answer changes nothing.
+ *
+ * ═══ WHY IT BLOCKS AT THE BOUNDARY RATHER THAN EVERY TURN ═══
+ *
+ * Blocking on any unaudited control commit would fire on the turn that writes
+ * one, which is every guard turn, before the author could possibly have got an
+ * audit. A gate that makes ordinary work impossible gets switched off, and
+ * switching this one off loses the drift check with it -- the override
+ * incentive this repository already names as a vulnerability.
+ *
+ * So the line is PUSHED. Unaudited work that is still local is a note: the
+ * author is mid-change and the audit is ahead of them. Unaudited work that has
+ * left this machine is different in kind -- other clones can now build on it,
+ * and the moment to have audited it has passed. That is the exact shape of
+ * what went wrong: the push, not the commit.
+ *
+ * ═══ AN UNDETERMINABLE ANSWER DOES NOT BLOCK, AND SAYS SO ═══
+ *
+ * `unpushed` is null when nobody could ask git which commits have left (no
+ * upstream, detached head, a clone with a different refspec). Blocking then
+ * would take the machine down on a fresh clone, so it reports instead -- but
+ * it reports UNKNOWN rather than clean, because "could not tell" and "nothing
+ * to do" must never render alike.
+ *
+ * @param {object} coverage    the return of auditCoverage()
+ * @param {string[]|null} unpushed  SHAs not yet on the upstream, or null if
+ *                                  that question could not be answered
+ * @returns {{block: string|null, notice: string|null}}
+ */
+export function auditEscalation(coverage, unpushed) {
+  /*
+   * NORMALISE BEFORE DELEGATING, BECAUSE A THROW HERE DISABLES THE CONTROL
+   * SILENTLY.
+   *
+   * formatCoverage iterates `malformed` and reads `commits.length`, so a
+   * partial coverage object makes it throw. In the Stop gate this call sits
+   * inside `catch { /* a reporter must never take the gate down *\/ }` -- so a
+   * throw would not surface as an error, it would surface as the escalation
+   * never firing. A gate that fails silently open is the exact shape this
+   * whole module exists to remove, and it would be invisible precisely when
+   * something unusual had happened.
+   */
+  const safe = {
+    commits: Array.isArray(coverage?.commits) ? coverage.commits : [],
+    malformed: Array.isArray(coverage?.malformed) ? coverage.malformed : [],
+    error: coverage?.error ?? null,
+  };
+  const { commits, error } = safe;
+  if (error) return { block: null, notice: formatCoverage(safe) };
+
+  const missing = commits.filter((c) => !c?.audited);
+  if (missing.length === 0) return { block: null, notice: formatCoverage(safe) };
+
+  if (!Array.isArray(unpushed)) {
+    return {
+      block: null,
+      notice: `${formatCoverage(safe)}\n`
+        + '  [agentbridge:audit-escalation-unknown] Could not determine which of these have been '
+        + 'pushed, so none is being blocked on. That is UNKNOWN, not clean.',
+    };
+  }
+
+  const local = new Set(unpushed.map((s) => String(s).trim().toLowerCase()));
+  const escaped = missing.filter((c) => !local.has(String(c.sha).trim().toLowerCase()));
+  if (escaped.length === 0) return { block: null, notice: formatCoverage(safe) };
+
+  const lines = [
+    `[agentbridge:audit-escaped] ${escaped.length} commit(s) changed a control, were PUSHED, and `
+      + 'have no audit recorded. Rule 20: the party that wrote a fix cannot clear it.',
+  ];
+  for (const c of escaped.slice(0, 10)) {
+    lines.push(`  ${String(c.sha).slice(0, 8)}  ${String(c.subject).slice(0, 58)}`);
+    lines.push(`            ${c.touched.slice(0, 4).join(', ')}`);
+  }
+  if (escaped.length > 10) lines.push(`  ...and ${escaped.length - 10} more`);
+  lines.push('');
+  lines.push('  These have left this machine, so other clones can build on them and the moment');
+  lines.push('  to audit has passed. Record the audit in docs/audit-ledger.jsonl -- one JSON');
+  lines.push('  object per line with at least {"commit":"<sha>","auditor":"<who>"} -- once a');
+  lines.push('  reader who did NOT write the commit has actually looked at it.');
+  return { block: lines.join('\n'), notice: null };
+}

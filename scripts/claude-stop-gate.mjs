@@ -501,12 +501,35 @@ if (testDrift.length) {
  * range, against a 420s budget.
  */
 try {
-  const { auditCoverage, formatCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
+  const { auditCoverage, auditEscalation, defaultAuditRange } = await import('../src/auditLedger.mjs');
   let ledgerText = '';
   try { ledgerText = readFileSync(path.join(root, 'docs', 'audit-ledger.jsonl'), 'utf8'); } catch { ledgerText = ''; }
   const coverage = auditCoverage({ repoRoot: root, range: defaultAuditRange(root), ledgerText });
-  const note = formatCoverage(coverage);
-  if (note) carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
+
+  /*
+   * UNAUDITED CONTROL WORK THAT HAS BEEN PUSHED BLOCKS; LOCAL WORK REPORTS.
+   *
+   * This used to append the coverage report to carriedNotice unconditionally,
+   * which made it a systemMessage -- read by whoever happened to look. Rule 20
+   * was therefore enforced by attention. See auditEscalation() for the full
+   * account; the short version is that on the night this changed, 101 commits
+   * were pushed with 13 audited and this gate had already said so in a line
+   * nobody read.
+   *
+   * `unpushed` is null rather than empty when the question cannot be answered,
+   * because an empty list would mean "everything has been pushed" and block a
+   * fresh clone entirely. auditEscalation treats null as UNKNOWN and declines
+   * to block on it.
+   */
+  let unpushed = null;
+  try {
+    const listed = runGit(['rev-list', '@{u}..HEAD'], { cwd: root, encoding: 'utf8' });
+    unpushed = String(listed).split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch { unpushed = null; }
+
+  const { block, notice } = auditEscalation(coverage, unpushed);
+  if (notice) carriedNotice = carriedNotice ? `${carriedNotice}\n${notice}` : notice;
+  if (block) out(block);
 } catch { /* a reporter must never take the gate down */ }
 
 /* RECURSIVE, matching `npm test`'s test/** glob. A flat readdir runs a different
