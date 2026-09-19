@@ -444,13 +444,33 @@ try {
       && i.state !== ITEM_STATES.WAIVED
       && i.state !== ITEM_STATES.NOT_APPLICABLE);
 
-    if (outstanding.length) {
+    /*
+     * A TEMPLATE THAT REQUIRES NOTHING ESTABLISHES NOTHING.
+     *
+     * The first version of this fix computed `outstanding` over `items` and
+     * stopped there -- so a template with no requirements produced NO items,
+     * outstanding was 0, blocked was 0, and the command exited 0 for a
+     * checklist that proved nothing. A blind audit caught it: the commit's
+     * headline said "exit 0 means the checklist is complete" and left the
+     * emptiest case in the class returning success.
+     *
+     * canAdvance, in the same module, already refuses exactly this -- "template
+     * X requires no proof through Y; nothing was verified, so nothing is
+     * established" -- with a unit test pinning it. So one command was
+     * answering the same question two different ways depending on which flag
+     * you passed. Vacuous truth is the oldest way to get a green board.
+     */
+    if (items.length === 0) {
+      console.log('');
+      console.log(`  template ${template.id ?? '(unnamed)'} requires NO proof at all, so nothing is`);
+      console.log('  established. Exit 1: an empty checklist is not a satisfied one.');
+    } else if (outstanding.length) {
       console.log('');
       console.log(`  ${outstanding.length} of ${items.length} required item(s) are NOT satisfied. `
         + 'Exit 1: nothing here authorises anything.');
     }
 
-    process.exit(outstanding.length || blocked.length ? 1 : 0);
+    process.exit(items.length === 0 || outstanding.length || blocked.length ? 1 : 0);
   }
 
   if (cmd === 'init') {

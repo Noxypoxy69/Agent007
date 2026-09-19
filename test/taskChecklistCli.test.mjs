@@ -140,3 +140,53 @@ test('--advance REFUSED exits 1, PERMITTED exits 0', (t) => {
   assert.equal(permitted.status, 0, permitted.out);
   assert.match(permitted.out, /PERMITTED/, permitted.out);
 });
+
+test('A TEMPLATE THAT REQUIRES NOTHING EXITS NON-ZERO TOO', (t) => {
+  /*
+   * THE HALF MY OWN FIX LEFT OPEN, found by blind audit.
+   *
+   * The first version computed `outstanding` over `items` and stopped. A
+   * template with no requirements produces NO items, so outstanding was 0,
+   * blocked was 0, and the command exited 0 for a checklist that proved
+   * nothing -- in the commit whose headline was "exit 0 means the checklist
+   * is complete". The emptiest case in the class was the one left returning
+   * success.
+   *
+   * canAdvance already refuses exactly this, in the same module, with a unit
+   * test pinning it. So one command answered the same question two ways
+   * depending on which flag you passed, and the disagreeing half was the one
+   * automation reads.
+   */
+  const r = checklist(t, {
+    task: TASK,
+    template: { id: 'tpl-empty', phases: ['verify'], requirements: {} },
+    evidence: [],
+    waivers: [],
+  });
+
+  assert.equal(r.status, 1,
+    `a template requiring no proof establishes nothing and must not exit 0. ${r.out}`);
+  assert.match(r.out, /requires NO proof at all/, r.out);
+
+  /* A template with no phases at all is the same claim, one step emptier. */
+  const noPhases = checklist(t, {
+    task: TASK, template: { id: 'tpl-bare' }, evidence: [], waivers: [],
+  });
+  assert.equal(noPhases.status, 1,
+    `a template with no phases proves nothing either. ${noPhases.out}`);
+
+  /*
+   * And the two halves must AGREE. The defect was that --advance refused
+   * while the bare command said success, so this pins them to the same
+   * answer rather than just fixing one side.
+   */
+  const advanced = checklist(t, {
+    task: TASK,
+    template: { id: 'tpl-empty', phases: ['verify'], requirements: {} },
+    evidence: [],
+    waivers: [],
+  }, ['--advance', 'verify']);
+  assert.equal(advanced.status, 1, advanced.out);
+  assert.match(advanced.out, /REFUSED/, advanced.out);
+  assert.match(advanced.out, /requires no proof/, advanced.out);
+});
