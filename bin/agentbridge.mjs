@@ -164,6 +164,13 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         one is live. Prints a path; never writes
                                         one -- an agent that writes its own
                                         permission file has forged the grant.
+  agentbridge audit-pin [--rev <rev>] [--task <id>] [--attempt <n>] [--id <s>]
+  agentbridge audit-pin --verify <pin.json> [--rev <rev>]
+                                        capture what an audit is about at its
+                                        START, and recheck before its verdict is
+                                        admitted. Exit 0 only when the candidate
+                                        is unchanged; 1 STALE, 2 UNKNOWN -- a
+                                        failed lookup must not look like a pass.
   agentbridge task-checklist --file <state.json> [--advance <phase>]
                                         derive a task's checklist from its
                                         evidence and print it. READ-ONLY: it
@@ -2993,6 +3000,69 @@ try {
    * signing the owner's name to it is the thing the channel exists to prevent,
    * and "granted_by" means nothing if the grantee fills it in.
    */
+  /*
+   * AUDIT PINNING, THE COMMAND AN AUDITOR ACTUALLY RUNS.
+   *
+   * An audit judges a CANDIDATE. If the tree moves while it runs, the verdict
+   * is about something that no longer exists -- and it looks identical either
+   * way. Reproduced without trying: four audits ran in one session against a
+   * branch three sessions were pushing to, HEAD moved seven commits between
+   * assigning one piece of work and starting it, and two auditors reported the
+   * worktree changing under them mid-pass.
+   *
+   * `--capture` at the start, `--verify <file>` before the verdict is admitted.
+   * The decision is src/auditPin.mjs, pure and tested; this reads git and
+   * prints. Exit 0 only for OK: STALE and UNKNOWN both refuse, and they are
+   * reported separately because they call for opposite responses -- re-run
+   * against the new candidate, versus find out why the recheck failed.
+   */
+  if (cmd === 'audit-pin') {
+    const { capturePin, admitVerdict, PIN } = await import('../src/auditPin.mjs');
+    const { readFileSync: rf } = await import('node:fs');
+    const { runGit: rg } = await import('../src/safeGit.mjs');
+
+    const at = String(args.rev ?? 'HEAD');
+    const read = (spec) => {
+      try { return String(rg(['rev-parse', spec], { cwd: process.cwd(), encoding: 'utf8' })).trim(); }
+      catch { return null; }
+    };
+    const reading = {
+      task_id: args.task ? String(args.task) : null,
+      attempt: args.attempt !== undefined ? args.attempt : null,
+      base_sha: read(`${at}^`),
+      candidate_sha: read(at),
+      candidate_tree_sha: read(`${at}^{tree}`),
+    };
+
+    if (args.verify) {
+      let pin;
+      try { pin = JSON.parse(rf(String(args.verify), 'utf8')); }
+      catch (e) {
+        console.error(`audit-pin: could not read ${args.verify}: ${e?.message ?? e}`);
+        process.exit(2);
+      }
+      const v = admitVerdict(pin, reading);
+      console.log(`state    ${v.state}`);
+      console.log(`why      ${v.why}`);
+      if (v.moved.length) console.log(`moved    ${v.moved.join(', ')}`);
+      /*
+       * UNKNOWN EXITS 2, NOT 1. A failed lookup and a real refusal must never
+       * render alike -- the same reason check-first prints LOOKUP INCOMPLETE
+       * rather than "nothing found".
+       */
+      process.exit(v.state === PIN.OK ? 0 : (v.state === PIN.STALE ? 1 : 2));
+    }
+
+    const r = capturePin({ audit_id: args.id ? String(args.id) : `audit-${Date.now()}`, ...reading });
+    if (!r.ok) {
+      console.error('audit-pin: cannot capture a usable pin');
+      for (const e of r.errors) console.error(`  ${e}`);
+      process.exit(2);
+    }
+    console.log(JSON.stringify(r.pin, null, 2));
+    process.exit(0);
+  }
+
   if (cmd === 'grant-path') {
     const { overridePath, readOverride, overrideKeySource } = await import('../src/guardSession.mjs');
     const repo = args.repo ? String(args.repo) : process.cwd();
