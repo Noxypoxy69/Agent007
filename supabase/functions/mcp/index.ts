@@ -707,7 +707,7 @@ async function settleOpenRequestsAgainstPolicy({ decided_by }) {
  * CLI uses and the one with the mutation table behind it. The transport decides
  * WHO may call; it does not get its own opinion about WHAT is allowed.
  */
-function coordinatorStore(label) {
+function coordinatorStore(label, { owner = false } = {}) {
   /*
    * NAMED, NOT ANONYMOUS, AND THAT IS A BUG FIX RATHER THAN A STYLE CHOICE.
    *
@@ -1331,6 +1331,31 @@ function coordinatorStore(label) {
       return { ok: true, decision: row, settled_requests: settled };
     },
   };
+
+  /*
+   * ONLY AN OWNER TOKEN GETS record_owner_decision, AND IT IS REMOVED RATHER
+   * THAN REFUSED.
+   *
+   * Scope decides which tools EXIST, not which ones refuse — a refusal string
+   * is something a model argues with, a missing tool is not. toolDefs builds
+   * record_owner_decision only when the store carries the method, so deleting
+   * it here means a coordinator token does not see it in tools/list at all and
+   * gets -32602 no-such-tool if it asks.
+   *
+   * WHY THE COORDINATOR LOSES IT. created_by is bound to the authenticated
+   * label, and the anchor requires that label to name the owner. The only
+   * coordinator token in existence is labelled "chatgpt-work coordinator" — a
+   * party Danny removed from the team on 2026-09-16, whose grant of
+   * task.assign.nonproduction, message.send and lane.coordinate was revoked at
+   * the same time. Leaving the tool on that scope offers a credential a
+   * capability it can no longer satisfy, which is a confusing failure at best.
+   *
+   * And the OAuth write consent hands out the coordinator token, so anything
+   * left on that scope is reachable by every write-scoped remote connector.
+   * "This client may direct my agents" must not be the same credential as
+   * "this client may decide for me".
+   */
+  if (!owner) delete store.recordOwnerDecision;
 
   return store;
 }
@@ -2563,12 +2588,25 @@ Deno.serve(async (request) => {
   let scope = null;
   let label = null;
   try {
-    // Coordinator first: it is the superset. A token in neither table is 401.
-    label = await tokenLabel('coordinator_tokens', bearer);
-    if (label) scope = 'coordinator';
+    /*
+     * OWNER FIRST, because it is the superset of coordinator, which is the
+     * superset of reader. Each table is checked in turn and a token in NONE of
+     * them is 401 — which is what keeps a registration or dispatcher token off
+     * this surface entirely.
+     *
+     * A FIFTH TABLE RATHER THAN A SCOPE COLUMN, per CLAUDE.md: one table with a
+     * scope column is one typo away from promoting a reader to an owner, and a
+     * promotion by typo is one nobody reviews.
+     */
+    label = await tokenLabel('owner_tokens', bearer);
+    if (label) scope = 'owner';
     else {
-      label = await tokenLabel('reader_tokens', bearer);
-      if (label) scope = 'reader';
+      label = await tokenLabel('coordinator_tokens', bearer);
+      if (label) scope = 'coordinator';
+      else {
+        label = await tokenLabel('reader_tokens', bearer);
+        if (label) scope = 'reader';
+      }
     }
   } catch (e) {
     return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
@@ -2586,6 +2624,14 @@ Deno.serve(async (request) => {
   try { msg = await request.json(); }
   catch { return rpcError(null, -32700, 'parse error'); }
 
-  const store = scope === 'coordinator' ? coordinatorStore(label) : readStore;
+  /*
+   * An owner token carries everything a coordinator does AND the decision
+   * ledger; a coordinator carries everything a reader does and no ledger.
+   * Nesting rather than three separate stores, because three parallel stores is
+   * how two of them drift.
+   */
+  const store = scope === 'owner' ? coordinatorStore(label, { owner: true })
+    : scope === 'coordinator' ? coordinatorStore(label)
+      : readStore;
   return handleRpc(msg, toolDefs(store));
 });
