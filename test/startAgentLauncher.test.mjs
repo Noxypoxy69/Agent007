@@ -197,7 +197,18 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
    */
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-exec-'));
   const elsewhere = mkdtempSync(path.join(tmpdir(), 'agentcmd-cwd-'));
-  const report = path.join(box, 'report.txt');
+  /*
+   * THE REPORT LIVES OUTSIDE `box`, BECAUSE `box` IS ON THE CHILD'S PATH.
+   *
+   * v5 put it at path.join(box, 'report.txt') and prepended box to PATH so
+   * the stub claude.cmd would be found. A blind audit then took the first
+   * PATH entry inside agent.cmd -- one `for /f "tokens=1 delims=;"` line --
+   * and wrote the report itself: no cd, no set, no claude, 8 of 8 GREEN.
+   * Telling the subject where the evidence goes is the same mistake as
+   * telling it what to print, one variable further out.
+   */
+  const vault = mkdtempSync(path.join(tmpdir(), 'agentcmd-vault-'));
+  const report = path.join(vault, 'report.txt');
   /* Generated here and NEVER exported to the subject. Its presence is the proof. */
   const nonce = `n-${Math.random().toString(16).slice(2)}-${Date.now()}`;
   try {
@@ -271,6 +282,23 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
       `agent.cmd never reached claude -- no stub report was written. stdout was:\n${out}`);
     const said = readFileSync(report, 'utf8');
 
+    /*
+     * THE NONCE IS THE POSITIVE CONTROL, AND v5 NEVER ASSERTED IT.
+     *
+     * v5's commit message said "the positive control is now the nonce, not
+     * the file's existence". It was not: the assertion went into a patch that
+     * silently did not apply and I did not check, so the nonce was generated,
+     * echoed by the stub, and compared to nothing. A blind audit found four
+     * references to it and no assertion. I then repeated the same silent-patch
+     * mistake twice more while fixing it, which is why this one went in with
+     * an editor rather than a script.
+     *
+     * The subject never sees this value, so a report carrying it is evidence
+     * the STUB wrote the file, not merely that a file exists.
+     */
+    assert.ok(said.includes(`NONCE=[${nonce}]`),
+      `the report does not carry the stub's nonce, so it was not written by claude. Report:\n${said}`);
+
     assert.match(said, /ID=\[code-a\]/,
       'AGENTBRIDGE_AGENT_ID did not reach claude. Without it the SessionStart poll hook '
       + 'declines and exits 0: the watcher never runs and the roster shows this agent offline.');
@@ -296,6 +324,7 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
   } finally {
     rmSync(box, { recursive: true, force: true });
     rmSync(elsewhere, { recursive: true, force: true });
+    rmSync(vault, { recursive: true, force: true });
   }
 });
 
