@@ -130,7 +130,45 @@ const COMMIT_TAKES_VALUE = /^(-m|-F|-C|-c|-t|--message|--file|--author|--date|--
  * like, and accepting it would make the fence satisfiable by adding a file
  * name to the exact command that breaks it.
  */
-const COMMIT_WIDENS = /^(-a|--all|-i|--include|--amend|-[A-Za-z]*[ai][A-Za-z]*)$/;
+const COMMIT_WIDEN_LONG = Object.freeze(['--all', '--include', '--amend']);
+
+/*
+ * A SHORT CLUSTER CARRIES ITS FLAGS TOGETHER. `-am`, `-ia`, `-qa` are all the
+ * widening flag with company, and an exact alternation of `-a` and `-i` misses
+ * every one of them.
+ */
+const COMMIT_WIDEN_SHORT = /^-[A-Za-z]*[ai][A-Za-z]*$/;
+
+/**
+ * Does this token widen the commit past the paths it names?
+ *
+ * GIT ACCEPTS ANY UNAMBIGUOUS PREFIX OF A LONG OPTION, AND THE FIRST VERSION OF
+ * THIS MATCHED SPELLINGS INSTEAD OF THE RULE. `--amen` and `--includ` are the
+ * same commands as `--amend` and `--include` to git, and neither matched an
+ * exact alternation, so `git commit --amen README.md` was ALLOWED and amended.
+ * Found by an independent audit hours after I shipped it.
+ *
+ * That is the enumeration mistake this repository has now made on four separate
+ * matchers: the sweep spellings, the pathspec-file flags, the sweep selectors,
+ * and this. Every time, the fix was to ask what the thing MEANS rather than how
+ * it is written. Here the meaning is "a prefix git would resolve to one of
+ * these", so that is what is asked.
+ *
+ * ERRING TOWARD REFUSAL IS CORRECT HERE AND IS NOT AN ACCIDENT. `--a` is a
+ * prefix of both `--all` and `--amend`, so git itself calls it ambiguous and
+ * refuses; matching it costs a caller nothing they could have run anyway. The
+ * asymmetry runs the other way from rule 19's outage warning, because every
+ * refusal here has a compliant alternative one word away -- drop the flag and
+ * name the paths.
+ */
+function commitWidens(token) {
+  if (typeof token !== 'string') return false;
+  const name = token.split('=')[0];
+  if (COMMIT_WIDEN_SHORT.test(name)) return true;
+  // `--` alone is the pathspec separator, never an option.
+  if (name.length <= 2) return false;
+  return COMMIT_WIDEN_LONG.some((f) => f.startsWith(name));
+}
 
 /**
  * Judge a `git commit` against the shared index.
@@ -175,7 +213,7 @@ export function commitFence(argv) {
     if (COMMIT_TAKES_VALUE.test(t)) { j += 1; continue; }   // a value, not a flag
     if (t.startsWith('-')) {
       // `--opt=value` carries its value inline and consumes nothing after it.
-      if (COMMIT_WIDENS.test(t)) widened = true;
+      if (commitWidens(t)) widened = true;
       continue;
     }
     if (t.trim() !== '') named = true;                      // a bare operand

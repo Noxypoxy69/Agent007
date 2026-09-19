@@ -79,7 +79,27 @@ const SAFE_ARG = /^[A-Za-z0-9._/@:=+,^~[\]?*%-]+$/;
  * header is explicit that naming instances is not closing the class: `sort -o`
  * rewrites in place, and five siblings turned up in the audit that found it.
  */
-const WRITE_FLAGS = /(^|\s)(-o|--output|--output-file|--to-file|--from-file|-f|--argfile|--rawfile|--slurpfile)(=|\s|$)/;
+const WRITE_FLAG_NAMES = Object.freeze([
+  '-o', '--output', '--output-file', '--to-file', '--from-file',
+  '-f', '--argfile', '--rawfile', '--slurpfile',
+]);
+
+const alt = WRITE_FLAG_NAMES.map((f) => f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+
+/**
+ * ONE LIST, TWO SHAPES, AND THE LIST IS THE ONLY PLACE A FLAG IS WRITTEN DOWN.
+ *
+ * These used to be two hand-kept regexes, which is the defect that produced the
+ * bypass one layer up: two checks over one notional list, disagreeing about
+ * what it contained. Adding a flag to WRITE_FLAG_NAMES now extends both, and
+ * there is no second spelling to forget.
+ *
+ * WRITE_FLAGS keeps the raw-string form for callers that have no tokenizer.
+ * WRITE_FLAG_TOKEN is the one the judge uses; see the note at its call site for
+ * why anchoring to a token is the whole fix.
+ */
+const WRITE_FLAGS = new RegExp(`(^|\\s)(${alt})(=|\\s|$)`);
+const WRITE_FLAG_TOKEN = new RegExp(`^(?:${alt})(?:=.*)?$`);
 
 /** Flags that turn an otherwise-read-only git invocation into something else. */
 const GIT_POISON = /(^|\s)(-c|--exec-path|--upload-pack|--receive-pack|--output|-o|--config-env|--git-dir|--work-tree|--namespace)(=|\s|$)/;
@@ -294,8 +314,41 @@ const GIT_SWEEP_SELECTOR = /(^|\s)(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(\s|
  * its own commit. A flag's VALUE is skipped here using the arity table this
  * file already maintains, so a message is never mistaken for an option.
  */
-const GIT_SWEEP_TOKEN = /^(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(=.*)?$/;
-const GIT_FORCE_TOKEN = /^(-f|--force|--discard-changes|--hard|--theirs|--ours)(=.*)?$/;
+/*
+ * A LONG OPTION IS WHATEVER PREFIX GIT WOULD RESOLVE, NOT THE FULL SPELLING.
+ *
+ * git accepts any unambiguous prefix of a long option, so `--al` is `--all`,
+ * `--up` is `--update`, and `--forc` is `--force`. An exact alternation misses
+ * every one of them -- found by an independent audit within hours of the
+ * token-anchored rewrite that was itself the fix for a quoting bypass. Two
+ * enumerations in one night on one matcher, which is the argument for asking
+ * what a flag MEANS rather than listing how it is written.
+ *
+ * ERRING TOWARD REFUSAL IS RIGHT ON THIS SIDE. `--a` is a prefix of several of
+ * these, so git calls it ambiguous and refuses it too; matching it costs a
+ * caller nothing they could have run. And every refusal here has a compliant
+ * alternative one word away -- name the paths -- so rule 19's outage asymmetry
+ * does not apply the way it does to a tool-name roster.
+ *
+ * The short forms stay CLUSTERS. `-qf` is force with company, `-am` is a sweep
+ * with company, and an exact `-f` misses both.
+ */
+const GIT_SWEEP_LONG = Object.freeze(['--all', '--update']);
+const GIT_FORCE_LONG = Object.freeze(['--force', '--discard-changes', '--hard', '--theirs', '--ours']);
+
+const GIT_SWEEP_SHORT = /^-[A-Za-z]*[aAuU][A-Za-z]*$/;
+const GIT_FORCE_SHORT = /^-[A-Za-z]*f[A-Za-z]*$/;
+
+const flagMatches = (token, short, long) => {
+  if (typeof token !== 'string') return false;
+  const name = token.split('=')[0];
+  if (short.test(name)) return true;
+  if (name.length <= 2) return false;          // `--` is the separator, not an option
+  return long.some((f) => f.startsWith(name));
+};
+
+const GIT_SWEEP_TOKEN = { test: (t) => flagMatches(t, GIT_SWEEP_SHORT, GIT_SWEEP_LONG) };
+const GIT_FORCE_TOKEN = { test: (t) => flagMatches(t, GIT_FORCE_SHORT, GIT_FORCE_LONG) };
 
 /**
  * The tokens a git command presents as OPTIONS: flag values removed, and
@@ -531,16 +584,53 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
     };
   }
 
-  if (WRITE_FLAGS.test(command)) {
-    return { allowed: false, reason: 'a flag that writes or reads a side file (-o, --output, --to-file, -f, --argfile, ...)' };
-  }
-
   const parsed = tokenize(command);
   if (!parsed.balanced) {
     return { allowed: false, reason: 'the command contains an unbalanced quoted string' };
   }
   const tokenInfo = parsed.tokens;
   const tokens = tokenInfo.map((t) => t.value);
+
+  /*
+   * THE WRITE-FLAG CHECK MOVED BELOW THE TOKENIZER, AND IT HAD TO.
+   *
+   * MEASURED, NOT DERIVED, 2026-09-19. This ran against the raw command string
+   * with a trailing `(=|\s|$)` anchor, and quoting the flag defeated it. The
+   * attack is the one this file's own header uses to explain why the rail is
+   * not a boundary -- `sort -o <file> <file>` rewrites a file in place with no
+   * metacharacter and no suspicious argument. Both halves observed through the
+   * shipped guard, one character apart:
+   *
+   *   sort -o   out in     DENY  "a flag that writes or reads a side file"
+   *   sort '-o' out in     ALLOW  and the file was written; I read it back
+   *
+   * Same cause as the git selectors above and found by the same audit: a
+   * pattern asked of the command TEXT when a tokenizer that strips quotes was
+   * sitting eight lines below it.
+   *
+   * NO ARITY TABLE HERE, AND THAT IS THE DIFFERENCE FROM THE GIT CASE. This
+   * applies to every approved command, so nothing can say whether a token is a
+   * flag or some flag's value. It is therefore anchored per token and asks
+   * nothing else -- `--output=x` carries its value inline and still matches.
+   *
+   * WHAT THE NARROWING COSTS, because per-token is strictly tighter than
+   * substring-in-raw-string and that direction can open something. What it
+   * stops catching is a write flag INSIDE a single quoted argument, such as
+   * `echo "a -o b"` -- which writes nothing, and was a false refusal. For it to
+   * be a real loss the flag would have to reach a program as part of one
+   * argument, and a program that splits its own argument into flags is an
+   * interpreter; every interpreter is already refused by the shape list, since
+   * an interpreter builds its target at runtime and cannot be judged from the
+   * command string at all.
+   */
+  const writeFlag = tokens.find((t) => WRITE_FLAG_TOKEN.test(t));
+  if (writeFlag) {
+    return {
+      allowed: false,
+      reason: `"${writeFlag}" writes or reads a side file (-o, --output, --to-file, -f, --argfile, ...), `
+        + 'so what it touches never appears as an argument to judge',
+    };
+  }
   const first = tokens[0];
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first)) {
     return { allowed: false, reason: 'a leading environment assignment can change what the command resolves to' };

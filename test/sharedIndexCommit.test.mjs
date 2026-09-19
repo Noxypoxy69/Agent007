@@ -80,6 +80,14 @@ test('A FLAG THAT RE-OPENS THE WINDOW BEATS A PATHSPEC SITTING BESIDE IT', () =>
    * `--amend` rewrites a commit that already exists rather than recording the
    * named paths, so the paths do not bound what it touches either.
    */
+  /*
+   * THE PREFIXES AND CLUSTERS ARE HERE BECAUSE GIT ACCEPTS THEM AS THE FLAG.
+   * `git commit --amen` amends; `git commit --includ` includes. An exact
+   * alternation missed every one, and an independent audit found
+   * `git commit --amen README.md` ALLOWED hours after I shipped the matcher.
+   * Fourth enumeration mistake on a matcher in this repository; the fix is the
+   * same one every time -- ask what git would resolve, not how it is spelled.
+   */
   for (const c of [
     'git commit -a src/a.mjs -m message',
     'git commit --all src/a.mjs -m message',
@@ -87,6 +95,13 @@ test('A FLAG THAT RE-OPENS THE WINDOW BEATS A PATHSPEC SITTING BESIDE IT', () =>
     'git commit --include src/a.mjs -m message',
     'git commit --amend src/a.mjs -m message',
     'git commit -am message src/a.mjs',
+    'git commit --amen src/a.mjs -m message',
+    'git commit --ame src/a.mjs -m message',
+    'git commit --includ src/a.mjs -m message',
+    'git commit --inc src/a.mjs -m message',
+    'git commit --al src/a.mjs -m message',
+    'git commit -qa src/a.mjs -m message',
+    'git commit -vi src/a.mjs -m message',
   ]) {
     assert.equal(commitNamesItsPaths(argv(c)), false, `a widening flag was overridden by a pathspec: ${c}`);
   }

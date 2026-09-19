@@ -58,8 +58,18 @@ const QUOTES = ['', "'", '"'];
  * The fixture was wrong, not the code -- which is the whole reason to ask the
  * table rather than restate what a regex appeared to mean.
  */
-const SWEEPS = ['-A', '-a', '-u', '--all', '--update', '-am', '-Av'];
-const FORCES = ['-f', '--force', '--hard', '--theirs', '--ours', '--discard-changes'];
+/*
+ * PREFIXES AND CLUSTERS ARE IN THE LIST BECAUSE GIT TREATS THEM AS THE FLAG.
+ *
+ * git resolves any unambiguous prefix of a long option, so `--al` IS `--all`
+ * and `--forc` IS `--force`, and a short cluster carries its flags together, so
+ * `-qf` IS force. An independent audit found all three classes walking past the
+ * token-anchored matchers within hours of my writing them -- the second
+ * enumeration mistake on the same two lines in one night.
+ */
+const SWEEPS = ['-A', '-a', '-u', '--all', '--update', '-am', '-Av', '--al', '--up', '--upd', '-qa', '-vu'];
+const FORCES = ['-f', '--force', '--hard', '--theirs', '--ours', '--discard-changes',
+  '--forc', '--har', '--thei', '--discard', '-qf', '-fq'];
 
 /* ── the positive, first ──────────────────────────────────────────────── */
 
