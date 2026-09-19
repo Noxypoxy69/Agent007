@@ -302,6 +302,64 @@ test('telemetry records the attempt once, and a repeat report does not double it
   assert.equal(first.spent.cacheCreation, 40, 'cache creation is preserved, separate from read');
 });
 
+/*
+ * THE HEADLINE PATH: the aggregate must be BOUND INTO THE DURABLE ROW, not just
+ * returned. A blind clone audit found the binding block never ran under test --
+ * every telemetry test omitted io.records/routing, so `attemptRow` stayed null
+ * and the finishAttempt binding was skipped; a mutation nulling it passed the
+ * whole suite. These drive the true path: ledger + io.usage + io.records +
+ * task.routing together, and assert the FINISHED row.
+ */
+const DIGEST = 'a'.repeat(64);
+const ROUTING = Object.freeze({
+  engine: 'claude-code', model: 'claude-opus-5', roleProfile: 'builder',
+  workerSlotId: 'slot-3', sessionId: 'sess-1', leaseId: 'lease-9', fenceToken: '41',
+  repo: 'agentbridge', baseSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+  taskClass: 'code-edit', riskClass: 'routine', environmentDigest: DIGEST,
+});
+const recordingTask = { ...task, routing: ROUTING, context_digest: DIGEST };
+
+test('the aggregate is BOUND INTO the durable row on the true path, not merely returned', async () => {
+  let finished = null;
+  const records = { start: async () => {}, finish: async (row) => { finished = row; } };
+  const out = await runAttempt({
+    task: recordingTask,
+    contract,
+    workspaces: fakeWorkspaces(),
+    io: { ...io(), usage: { input: 100, output: 20, cacheRead: 900, cacheCreation: 40, source: 'test-provider' }, records },
+    executor: executorThat(GREEN),
+    reviewer: createFakeReviewer(),
+    ledger: createLedger({ budget: 10_000 }),
+  });
+  assert.equal(out.accepted, true, `precondition: the attempt is accepted (${out.verdict?.reasons?.join(',') ?? ''})`);
+  assert.ok(finished, 'the durable finish write must have happened (io.records.finish called)');
+  assert.equal(finished.tokensPrompt, 100, 'input bound into the durable row, not dropped');
+  assert.equal(finished.tokensCompletion, 20, 'output bound, not swapped with input');
+  assert.equal(finished.tokensCacheRead, 900);
+  assert.equal(finished.tokensCacheCreation, 40);
+  assert.equal(finished.usageObserved, true);
+  assert.equal(finished.usageSource, 'test-provider');
+});
+
+test('with NO usage observed, the durable row records null tokens, never 0', async () => {
+  let finished = null;
+  const records = { start: async () => {}, finish: async (row) => { finished = row; } };
+  await runAttempt({
+    task: recordingTask,
+    contract,
+    workspaces: fakeWorkspaces(),
+    io: { ...io(), records }, // ledger present, but no io.usage
+    executor: executorThat(GREEN),
+    reviewer: createFakeReviewer(),
+    ledger: createLedger({ budget: 10_000 }),
+  });
+  assert.ok(finished, 'the durable finish write must have happened');
+  assert.equal(finished.usageObserved, false, 'no provider usage means observed is false');
+  for (const f of ['tokensPrompt', 'tokensCompletion', 'tokensCacheRead', 'tokensCacheCreation', 'usageSource']) {
+    assert.equal(finished[f], null, `${f} must be null when usage was not observed, not 0`);
+  }
+});
+
 test('A RUN MAY NOT OUTLIVE THE LEASE THAT AUTHORISES IT', async () => {
   /*
    * Reported from the live system by code-c: the default lease is 900s and the

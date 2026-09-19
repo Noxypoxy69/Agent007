@@ -63,9 +63,11 @@ test('overBudget is true, false, or NULL when there is no budget', () => {
   assert.equal(overBudget(createLedger()), null);
 });
 
-test('negative counts are refused', () => {
+test('negative counts are refused, on every dimension', () => {
   assert.throws(() => record(createLedger(), event('e1', 'execute', -1, 0)), /non-negative/);
-  assert.throws(() => record(createLedger(), event('e1', 'execute', 0, 0, -5)), /non-negative/);
+  assert.throws(() => record(createLedger(), event('e1', 'execute', 0, -1)), /non-negative/);
+  assert.throws(() => record(createLedger(), event('e1', 'execute', 0, 0, -5)), /non-negative/, 'cacheRead');
+  assert.throws(() => record(createLedger(), event('e1', 'execute', 0, 0, 0, -5)), /non-negative/, 'cacheCreation');
 });
 
 test('a non-integer count is refused', () => {

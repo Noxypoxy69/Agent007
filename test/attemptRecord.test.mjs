@@ -164,7 +164,9 @@ test('the four token dimensions are persisted separately, and null is not zero',
 test('a negative or non-integer token count is refused, and usageObserved must be boolean', () => {
   const base = { record: started(), finishedAt: T1, ending: 'exited', exitCode: 0 };
   assert.throws(() => finishAttempt({ ...base, tokensCacheRead: -1 }), /non-negative/);
+  assert.throws(() => finishAttempt({ ...base, tokensCacheCreation: 1.5 }), /non-negative/);
   assert.throws(() => finishAttempt({ ...base, tokensPrompt: 1.5 }), /non-negative/);
+  assert.throws(() => finishAttempt({ ...base, tokensCompletion: -1 }), /non-negative/);
   assert.throws(() => finishAttempt({ ...base, usageObserved: 'yes' }), /usageObserved/);
 });
 
