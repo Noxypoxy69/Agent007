@@ -35,9 +35,9 @@
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { HOME } from '../src/config.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -66,8 +66,16 @@ if (!agentId || !SAFE.test(agentId)) {
  */
 function known() {
   try {
-    const f = path.join(homedir(), '.agentbridge', 'registrations.json');
-    const rows = JSON.parse(readFileSync(f, 'utf8'));
+    /*
+     * ASK config.mjs FOR THE STORE, DO NOT REBUILD THE PATH. This read used to
+     * be homedir() + '/.agentbridge' spelled out here, which ignored
+     * AGENTBRIDGE_HOME and therefore reached the OPERATOR'S REAL STORE from
+     * every context including a test. That is rule 21 -- the roster it checked
+     * against was an accident of one machine -- and it is the same isolation
+     * hole code-b measured when two auditors ran against Danny's live store.
+     * config.mjs already owns this decision; there is one HOME and this is it.
+     */
+    const rows = JSON.parse(readFileSync(path.join(HOME, 'registrations.json'), 'utf8'));
     return [...new Set(rows.map((r) => r.agent_id).filter(Boolean))].sort();
   } catch { return []; }
 }
