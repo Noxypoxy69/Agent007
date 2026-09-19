@@ -1940,6 +1940,24 @@ export function settingsAddsOnly(text) {
       weakens.push(`${key} (its name says it runs something, whatever it contains)`);
       continue;
     }
+    /*
+     * ALREADY DECIDED, AND THE SHAPE RULES MUST NOT RE-OPEN IT.
+     *
+     * `enableAllProjectMcpServers` matches `^enableAll`, so the new
+     * permit-everything rule refused it -- and the live
+     * `.claude/settings.local.json` on the operator machine carries it. That is
+     * the unrecoverable over-block this whole change exists to remove,
+     * reintroduced by the fix for the under-block, on the very file the audit
+     * used as its example. Caught by "THE MEASURED FIXTURE", which is there
+     * precisely because a fixture that is a shape the system really produces is
+     * the only one that can fail for the real case.
+     *
+     * The decision stands where the header made it: these two are admitted, and
+     * `.mcp.json` -- the file they enable, which is tracked and therefore
+     * recoverable -- is protected instead.
+     */
+    if (key === 'enabledMcpjsonServers' || key === 'enableAllProjectMcpServers') continue;
+
     if (loosens(key, value)) {
       weakens.push(`${key} (turns a protection off; a boolean or an emptied list is invisible to a value test)`);
       continue;
