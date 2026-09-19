@@ -107,7 +107,24 @@ function linkModules(work) {
 function filesOf(sha) {
   const out = git(['show', '--name-only', '--format=', sha]);
   const files = out.split('\n').map((s) => s.trim()).filter(Boolean);
-  return { tests: files.filter(isTest), sources: files.filter((f) => !isTest(f)) };
+  /*
+   * ANYTHING UNDER test/ IS TEST-SIDE AND IS NEVER REVERTED.
+   *
+   * Found by blind audit. `sources` was "everything that is not *.test.mjs",
+   * so test/helpers/*.mjs and test/fixtures/*.mjs -- which exist in this
+   * repository -- were treated as THE CODE and reverted. A commit touching
+   * only a test and its own helper therefore reported GATE: the "code" whose
+   * removal turned the test red was a test fixture. That reads as proof of
+   * coverage for a commit that shipped no product code at all.
+   *
+   * The question this tool asks is "does this commit's test fail without this
+   * commit's CODE", so the test side of the tree is not code by definition.
+   * A commit that changes only test/ now has no sources and falls into the
+   * test-only path, where it is reported as needing judgement rather than
+   * silently scored.
+   */
+  const underTest = (f) => /(^|\/)test\//.test(f);
+  return { tests: files.filter(isTest), sources: files.filter((f) => !underTest(f)) };
 }
 
 /** node --test with a real exit status; never piped, so the code is node's. */
@@ -121,7 +138,23 @@ function runTests(cwd, files, home) {
     const m = [...text.matchAll(new RegExp(`^\\u2139 ${label} (\\d+)`, 'gm'))];
     return m.length ? Number(m[m.length - 1][1]) : -1;
   };
-  return { status: r.status, pass: num('pass'), fail: num('fail'), text };
+  const pass = num('pass');
+  const fail = num('fail');
+  const tests = num('tests');
+
+  /*
+   * "COULD NOT RUN" AND "FAILED" MUST NOT RENDER ALIKE, and the -1 sentinel
+   * must never reach an operator.
+   *
+   * Found by blind audit. node --test prints no summary block at all when a
+   * file is missing or the runner cannot start, so num() returned -1 -- and
+   * -1 was then printed verbatim ("fail -1") and fed into the verdict
+   * arithmetic, where it renders a run that EXPLODED as a weak-gate lead.
+   * A non-zero exit is not evidence a test ran (rule 3); the reported COUNT
+   * is, so that is what decides.
+   */
+  const ran = tests >= 0 && pass >= 0 && fail >= 0;
+  return { status: r.status, pass, fail, tests, ran, text };
 }
 
 const findings = [];
@@ -288,7 +321,36 @@ for (const sha of shas) {
     git(['checkout', `${sha}^`, '--', ...restorable], work);
 
     const after = runTests(work, tests, home);
-    const red = after.fail > 0 || (after.status !== 0 && after.pass === 0);
+
+    /*
+     * A SUITE THAT COLLAPSED IS NOT A GATE THAT FIRED.
+     *
+     * Found by blind audit. Any non-zero fail count was read as GATE, so a
+     * run where the parent version of an unrelated reverted file fails to
+     * IMPORT -- six real tests becoming one file-level crash -- was
+     * indistinguishable from six assertions catching the change. Nothing the
+     * test asserts differed; the module list simply stopped loading. The one
+     * signal that separates them was computed and thrown away.
+     *
+     * So the count must survive the revert. If the number of tests that RAN
+     * drops, the comparison is not between two versions of the code, it is
+     * between a suite and a wreck.
+     */
+    if (!after.ran) {
+      console.log(`${short}  UNKNOWN the suite did not run after the revert -- no summary was produced  [${tests.join(' ')}]`);
+      console.log('         That is NOT a gate and NOT a pass: nothing was measured.');
+      findings.push({ sha: short, verdict: 'unknown', detail: 'no test summary after revert' });
+      continue;
+    }
+    if (before.ran && after.tests < before.tests) {
+      console.log(`${short}  COLLAPSED ${before.tests} tests became ${after.tests} after the revert  [${tests.join(' ')}]`);
+      console.log('         The suite stopped loading rather than the assertions firing.');
+      console.log('         This is NOT a gate: look for an import that the parent version breaks.');
+      findings.push({ sha: short, verdict: 'collapsed', detail: `${before.tests} -> ${after.tests} tests` });
+      continue;
+    }
+
+    const red = after.fail > 0;
 
     if (red) {
       console.log(`${short}  GATE   tests go red without the code (fail ${after.fail})  [${tests.join(' ')}]`);
