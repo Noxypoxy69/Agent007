@@ -235,8 +235,28 @@ export function formatCoverage({ commits, malformed, error }) {
   if (missing.length > 0) {
     lines.push(`[agentbridge:audit-missing] ${missing.length} commit(s) changed a control with no audit recorded:`);
     for (const c of missing.slice(0, 20)) {
-      lines.push(`  ${c.sha.slice(0, 8)}  ${c.subject.slice(0, 60)}`);
-      lines.push(`            ${c.touched.slice(0, 4).join(', ')}${c.touched.length > 4 ? ` +${c.touched.length - 4} more` : ''}`);
+      /*
+       * EVERY FIELD IS COERCED, BECAUSE A THROW HERE FAILS SILENTLY OPEN.
+       *
+       * Found by blind audit. auditEscalation hardens its own inputs and this
+       * function did not: c.touched.slice(...) threw on null, undefined and a
+       * plain string, and c.sha / c.subject were assumed to be strings.
+       *
+       * In the Stop gate the whole block sits inside
+       * a catch whose whole body is the comment "a reporter must never take
+       * the gate down", so a throw
+       * does not surface as an error -- it surfaces as the ENTIRE audit
+       * escalation never firing. That is the failure mode the comment above
+       * auditEscalation already claims to have closed, one function along,
+       * and it is the one shape this module exists to remove.
+       *
+       * Unreachable through auditCoverage today, which always builds arrays.
+       * That is exactly the argument that was true of the last three things
+       * here that turned out to be reachable.
+       */
+      const touched = Array.isArray(c?.touched) ? c.touched.map((f) => String(f)) : [];
+      lines.push(`  ${String(c?.sha ?? '(no sha)').slice(0, 8)}  ${String(c?.subject ?? '').slice(0, 60)}`);
+      lines.push(`            ${touched.slice(0, 4).join(', ')}${touched.length > 4 ? ` +${touched.length - 4} more` : ''}`);
     }
     if (missing.length > 20) lines.push(`  ...and ${missing.length - 20} more`);
   }

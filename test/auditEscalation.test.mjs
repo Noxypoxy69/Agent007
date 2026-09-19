@@ -285,3 +285,52 @@ test('A BLOCKING COMMIT DOES NOT ERASE THE REPORT OF THE NON-BLOCKING ONES', () 
   assert.match(r.notice, /22222222/, 'the unaudited CLAUDE.md commit must still be reported');
   assert.match(r.notice, /33333333/, 'and so must the unaudited docs commit');
 });
+
+test('A MALFORMED COMMIT RECORD IS REPORTED, NOT THROWN', () => {
+  /*
+   * Found by blind audit. auditEscalation normalises its own inputs with a
+   * comment explaining that a throw here "disables the control silently" --
+   * and then hands the records to formatCoverage, which did
+   * c.touched.slice(0, 4) with no guard at all.
+   *
+   *   touched null       -> Cannot read properties of null (reading 'slice')
+   *   touched undefined  -> Cannot read properties of undefined
+   *   touched 'a string' -> c.touched.slice(...).join is not a function
+   *
+   * In the Stop gate that whole call sits inside a catch whose entire body is
+   * a comment about reporters not taking the gate down. So the throw does not
+   * surface as an error: it surfaces as the ENTIRE rule-20 escalation never
+   * firing, on exactly the turn where something was unusual enough to produce
+   * a malformed record.
+   *
+   * Not reachable through auditCoverage today, which always builds arrays --
+   * which is the same argument that was true of three other things in this
+   * file that turned out to be reachable. A reporter that crashes reports
+   * nothing, and nothing is indistinguishable from "everything is audited".
+   */
+  for (const touched of [null, undefined, 'src/policy.mjs', 42, {}]) {
+    const coverage = { commits: [{ sha: 'aaaa1111', subject: 's', touched, audited: false }], error: null };
+    assert.doesNotThrow(() => auditEscalation(coverage, []),
+      `touched=${JSON.stringify(touched)} took the reporter down`);
+  }
+
+  for (const bad of [{ sha: null }, { sha: 7 }, { subject: null }, { subject: {} }]) {
+    const coverage = {
+      commits: [{ sha: 'aaaa1111', subject: 's', touched: ['CLAUDE.md'], audited: false, ...bad }],
+      error: null,
+    };
+    assert.doesNotThrow(() => auditEscalation(coverage, []),
+      `${JSON.stringify(bad)} took the reporter down`);
+  }
+
+  /*
+   * The positive control: hardening must not have turned the reporter into a
+   * thing that silently says nothing. A well-formed unaudited commit is still
+   * named.
+   */
+  const good = auditEscalation(
+    { commits: [{ sha: 'bbbb2222', subject: 'real', touched: ['CLAUDE.md'], audited: false }], error: null }, [],
+  );
+  assert.match(good.notice ?? '', /bbbb2222/);
+  assert.match(good.notice ?? '', /CLAUDE\.md/);
+});
