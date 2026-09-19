@@ -129,6 +129,43 @@ test('a missing authorised tuple fails CLOSED', () => {
   assert.ok(hasRule(r, 'expected'));
 });
 
+/* ── the audit's fail-OPEN, closed: an empty AUTHORISED FIELD is STALE, not skipped ── */
+
+test('AUDIT D2 REGRESSION: an all-empty authorised tuple does NOT clear a fully re-assigned terminal task', () => {
+  // The exact input the blind audit traced to ok:true before the fix.
+  const r = revalidateStart({
+    task: liveTask({ lease_token: 'tok-99', assigned_session: 'sess-EVIL', attempt: 99, base_sha: 'b'.repeat(40), state: 'done' }),
+    expected: { leaseToken: '', session: '', attempt: null, baseSha: '', state: '' },
+    reservedPaths: [],
+    registry: REG, laneId: 'messaging', now: NOW,
+  });
+  assert.equal(r.ok, false, 'an empty authorised tuple must never clear a reassigned terminal task');
+});
+
+test('an empty expected lease token is STALE, not skipped', () => {
+  const r = good({ expected: { ...AUTHORISED, leaseToken: '' } });
+  assert.equal(r.ok, false);
+  assert.ok(hasRule(r, 'lease-token'));
+});
+
+test('an empty expected session is STALE, not skipped', () => {
+  const r = good({ expected: { ...AUTHORISED, session: '' } });
+  assert.equal(r.ok, false);
+  assert.ok(hasRule(r, 'session'));
+});
+
+test('a null expected attempt is STALE, not skipped', () => {
+  const r = good({ expected: { ...AUTHORISED, attempt: null } });
+  assert.equal(r.ok, false);
+  assert.ok(hasRule(r, 'attempt'));
+});
+
+test('AUDIT D3 REGRESSION: reserved paths with no registry fail CLOSED, not skipped', () => {
+  const r = good({ reservedPaths: ['src/lib/reply/x.ts'], registry: null });
+  assert.equal(r.ok, false, 'an unverifiable reservation must not read as current');
+  assert.ok(hasRule(r, 'reservation'));
+});
+
 /* ── the gap this closes: the commit guard cannot see a stale claim ─────── */
 
 test('THE GAP: evaluateCommit (path-only) passes a clean commit while the claim is already stale; revalidateStart catches it', () => {

@@ -264,13 +264,20 @@ function verdict(findings) {
  * PURE, like everything else here: the caller fetches the live task and passes
  * `now`; this returns a verdict and touches no clock, git or store.
  *
+ * NOT WIRED YET. This is the decision; the CALL is a separate step. Nothing in a
+ * mutation path invokes it today, so as of this commit the SYSTEM does not
+ * revalidate -- a blind audit flagged that (rule 17). The intended call site is
+ * the claim/attempt-start boundary in the worker path, immediately before the
+ * executor runs, and wiring it there needs a worktree-capable session to prove
+ * end to end. Until that lands this is a tested decision, not an enforced one.
+ *
  * @param {object} input
  * @param {object|null} input.task          the LIVE task row now {lease_token, assigned_session, attempt, base_sha, state}
- * @param {object|null} input.expected      the tuple authorised at claim {leaseToken, session, attempt, baseSha, state}
- * @param {string[]}    input.reservedPaths paths this work will mutate; each must still be owned by laneId
- * @param {object|null} input.registry      parsed lane registry (for path ownership)
- * @param {string|null} input.laneId        the acting lane
- * @param {string|number|null} input.now    the instant to judge lease liveness against
+ * @param {object|null} input.expected      the tuple authorised at claim {leaseToken, session, attempt, baseSha, state} -- ALL required; an absent dimension is STALE, not skipped
+ * @param {string[]}    input.reservedPaths paths this work will mutate; each must still be owned by laneId (CROSS-LANE only; intra-lane duplication needs a reservation store that does not exist yet)
+ * @param {object|null} input.registry      parsed lane registry (for path ownership); required if reservedPaths is non-empty, else STALE
+ * @param {string|null} input.laneId        the acting lane; required if reservedPaths is non-empty
+ * @param {string|Date|null} input.now      the instant to judge lease liveness against. An ISO string or a Date; a NUMBER is rejected by leaseState's Date.parse and fails closed (STALE), so do not pass Date.now() -- pass new Date().toISOString()
  * @returns {{ok:boolean, stale:boolean, findings:Array}}
  */
 export function revalidateStart(input) {
@@ -306,40 +313,60 @@ export function revalidateStart(input) {
   if (ls !== 'live') {
     stale('lease', `the lease is not live (state ${ls}); the claim that authorised this work has lapsed or cannot be judged`);
   }
-  if (nonEmpty(expected.leaseToken) && task.lease_token !== expected.leaseToken) {
-    stale('lease-token', 'this claim has been superseded; the work was re-assigned under a new lease token');
-  }
-  if (nonEmpty(expected.session) && task.assigned_session !== expected.session) {
-    stale('session', `the task is assigned to ${task.assigned_session ?? '(none)'}, not the authorised session`);
-  }
-  if (expected.attempt !== null && expected.attempt !== undefined
-      && Number(task.attempt) !== Number(expected.attempt)) {
-    stale('attempt', `the current attempt is ${task.attempt}, not the authorised ${expected.attempt}`);
-  }
-  if (nonEmpty(expected.baseSha) && task.base_sha !== expected.baseSha) {
-    stale('baseline', `the task base moved from ${expected.baseSha} to ${task.base_sha ?? '(none)'}; the workspace would sit on a different commit`);
-  }
-  if (nonEmpty(expected.state) && task.state !== expected.state) {
-    stale('state', `the task state is "${task.state}", not the authorised "${expected.state}"; it may be superseded or terminal`);
-  }
+  /*
+   * EACH AUTHORISED DIMENSION IS REQUIRED, AND ABSENT IS STALE, NOT SKIPPED.
+   *
+   * An earlier version guarded each comparison with nonEmpty(expected.X), which
+   * SKIPPED the check when the authorised field was empty -- the maker-rule
+   * short-circuit, fail-OPEN: a tuple with an empty expected.session let a task
+   * reassigned to another session pass as current, and a blind audit traced the
+   * exact all-empty-tuple input that returned ok:true for a fully re-assigned
+   * terminal task. The contract is fail-closed, so a dimension with no
+   * authorised value to compare against cannot be confirmed current -- STALE.
+   */
+  if (!nonEmpty(expected.leaseToken)) stale('lease-token', 'no authorised lease token to revalidate against; the claim cannot be confirmed current');
+  else if (task.lease_token !== expected.leaseToken) stale('lease-token', 'this claim has been superseded; the work was re-assigned under a new lease token');
+
+  if (!nonEmpty(expected.session)) stale('session', 'no authorised session to revalidate against');
+  else if (task.assigned_session !== expected.session) stale('session', `the task is assigned to ${task.assigned_session ?? '(none)'}, not the authorised session`);
+
+  if (expected.attempt === null || expected.attempt === undefined) stale('attempt', 'no authorised attempt number to revalidate against');
+  else if (Number(task.attempt) !== Number(expected.attempt)) stale('attempt', `the current attempt is ${task.attempt}, not the authorised ${expected.attempt}`);
+
+  if (!nonEmpty(expected.baseSha)) stale('baseline', 'no authorised base sha to revalidate against');
+  else if (task.base_sha !== expected.baseSha) stale('baseline', `the task base moved from ${expected.baseSha} to ${task.base_sha ?? '(none)'}; the workspace would sit on a different commit`);
+
+  if (!nonEmpty(expected.state)) stale('state', 'no authorised state to revalidate against');
+  else if (task.state !== expected.state) stale('state', `the task state is "${task.state}", not the authorised "${expected.state}"; it may be superseded or terminal`);
 
   /*
    * Path reservation reuses lane ownership -- there is no separate reservation
-   * store, and inventing one would be a second source of truth. A path this
-   * work will mutate that is now FOREIGN means another lane took it after the
-   * claim, which is exactly the reservation being lost.
+   * store, and inventing one would be a second source of truth. TWO LIMITS,
+   * stated rather than hidden:
+   *   (1) reserved paths declared with no registry or lane cannot be confirmed,
+   *       which is STALE, not skipped -- an earlier version skipped it, fail-open.
+   *   (2) lane ownership catches a path taken by ANOTHER lane. It does NOT catch
+   *       two sessions in the SAME lane both starting the same work -- the
+   *       intra-lane duplication this package's own motivating incident was.
+   *       Detecting that needs a session-level reservation store, which does not
+   *       exist yet; until it does, this dimension is a CROSS-LANE check only and
+   *       must not be read as covering intra-lane collision.
    */
-  if (registry && laneId) {
-    for (const p of reservedPaths) {
-      if (classifyPath(registry, laneId, p) === FOREIGN) {
-        const owners = ownersOfPath(registry, p);
-        stale(
-          'reservation',
-          owners.length
-            ? `${p} is now owned by ${owners.join(', ')}; the reservation this work relied on is gone`
-            : `${p} is no longer this lane's to mutate`,
-          { path: p, owners },
-        );
+  if (reservedPaths.length > 0) {
+    if (!registry || !nonEmpty(laneId)) {
+      stale('reservation', 'reserved paths were declared but no registry or lane was supplied to confirm they still hold; unverifiable is not current');
+    } else {
+      for (const p of reservedPaths) {
+        if (classifyPath(registry, laneId, p) === FOREIGN) {
+          const owners = ownersOfPath(registry, p);
+          stale(
+            'reservation',
+            owners.length
+              ? `${p} is now owned by ${owners.join(', ')}; the reservation this work relied on is gone`
+              : `${p} is no longer this lane's to mutate`,
+            { path: p, owners },
+          );
+        }
       }
     }
   }
