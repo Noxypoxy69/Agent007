@@ -13,7 +13,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { auditJobsFor, assertBlind, auditIdFor, REQUIRED_PROOFS } from '../src/auditJob.mjs';
+import {
+  auditJobsFor, assertBlind, auditIdFor, formatAuditJobs, REQUIRED_PROOFS,
+} from '../src/auditJob.mjs';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -157,4 +159,68 @@ test('JUNK IN THE COVERAGE OBJECT DOES NOT THROW', () => {
 test('THE CONTROL: this distinguishes, in both directions', () => {
   assert.equal(run().jobs.length, 1);
   assert.equal(run({ commits: [] }).jobs.length, 0);
+});
+
+/* ── the gate's half, which the gate itself cannot test ───────────────── */
+
+test('formatAuditJobs NAMES THE QUEUE and points at the full packet', () => {
+  const out = formatAuditJobs(run());
+  assert.match(out, /audit-due/);
+  assert.match(out, /src\/guardSession\.mjs/, 'the touched control was not named');
+  assert.match(out, /check-audit-coverage\.mjs --jobs/, 'a reader cannot reach the packet');
+});
+
+test('AND IT STILL DOES NOT LEAK THE SUBJECT into the gate message', () => {
+  /*
+   * The formatter is a second place the maker summary could arrive, and it is
+   * the one an operator actually reads. assertBlind guards the job; this guards
+   * the rendering of it.
+   */
+  assert.ok(!formatAuditJobs(run()).includes('forgery route'));
+});
+
+test('NOTHING DUE PRINTS NOTHING, so the caller can interpolate without deciding', () => {
+  assert.equal(formatAuditJobs({ jobs: [], unmeasurable: [], error: null }), '');
+  assert.equal(formatAuditJobs({ jobs: [], unmeasurable: [] }), '');
+});
+
+test('AN UNREADABLE CANDIDATE IS SAID OUT LOUD, not silently absent from the queue', () => {
+  const out = formatAuditJobs({ jobs: [], unmeasurable: [A], error: null });
+  assert.match(out, /could not be read/);
+  assert.match(out, /UNKNOWN, not audited/);
+});
+
+test('AN ERROR RENDERS AS UNKNOWN, never as an empty queue', () => {
+  const out = formatAuditJobs({ jobs: [], unmeasurable: [], error: 'git was unreachable' });
+  assert.match(out, /audit-jobs-unknown/);
+  assert.match(out, /not as "none are due"/);
+});
+
+test('formatAuditJobs COERCES EVERY FIELD, because a throw here disarms the whole block', () => {
+  /*
+   * In the Stop gate this call sits inside a catch whose entire body is the
+   * comment "a reporter must never take the gate down". A throw does not
+   * surface as an error -- it surfaces as the audit block never firing, on the
+   * one turn something unusual happened. formatCoverage shipped exactly this
+   * defect and an audit found it; this is the same function one along.
+   */
+  for (const junk of [
+    undefined, null, 'nonsense', 42,
+    { jobs: 'not an array', unmeasurable: null },
+    { jobs: [null, 42, {}], unmeasurable: [null, undefined] },
+    { jobs: [{ audit_id: null, candidate_sha: null, touched: 'nope' }], unmeasurable: [] },
+    { jobs: [{ touched: [null, undefined, 7] }], unmeasurable: [{}] },
+  ]) {
+    assert.doesNotThrow(() => formatAuditJobs(junk), `threw on ${JSON.stringify(junk)}`);
+    assert.equal(typeof formatAuditJobs(junk), 'string');
+  }
+});
+
+test('THE QUEUE IS CAPPED, so a long backlog cannot bury the rest of the gate', () => {
+  const many = Array.from({ length: 25 }, (_, i) => ({
+    audit_id: `audit-${i}`, candidate_sha: String(i).padStart(40, '0'), touched: ['src/a.mjs'],
+  }));
+  const out = formatAuditJobs({ jobs: many, unmeasurable: [], error: null });
+  assert.match(out, /\.\.\.and 15 more/);
+  assert.ok(out.split('\n').length < 25, 'the gate message grew with the backlog');
 });

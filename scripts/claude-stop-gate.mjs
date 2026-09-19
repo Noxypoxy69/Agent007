@@ -308,6 +308,46 @@ try {
 
   const { block, notice } = auditEscalation(coverage, unpushed);
   if (notice) carriedNotice = carriedNotice ? `${carriedNotice}\n${notice}` : notice;
+
+  /*
+   * ═══ §7.1: THE AUDIT IS QUEUED BY THE COMMIT, NOT BY SOMEBODY REMEMBERING ═══
+   *
+   * "This is mandatory. The worker must not remember to request it."
+   *
+   * Everything else in Layer 0 records what an audit FOUND -- the finding
+   * registry, the repair binding, the repair record, the regression injection --
+   * and none of it makes an audit happen. scripts/check-audit-coverage.mjs
+   * --jobs builds the blind packets correctly and has to be RUN, which is the
+   * remembering. This hook is the only thing that fires on its own, which makes
+   * it the only place the trigger can live (rule 17: a control nobody consults
+   * is not a control).
+   *
+   * A NOTICE, NOT A BLOCK, AND DELIBERATELY. The escalation above already blocks
+   * on unaudited work that has been PUSHED, which is the boundary worth stopping
+   * at. Blocking again on merely COMMITTED work would fire on the turn that
+   * writes a control -- every guard turn -- before an audit could exist, and a
+   * gate that makes ordinary work impossible gets switched off, taking the drift
+   * check with it (rule 16).
+   *
+   * BOUNDED. auditJobsFor asks for a tree sha ONE per UNAUDITED commit, and the
+   * coverage pass above has already filtered to commits that touched a control.
+   * On this repository that is 2 rev-parse calls, measured at ~0.06s against a
+   * 420s budget. An audited commit costs nothing, so the steady state is zero.
+   */
+  const { auditJobsFor, formatAuditJobs } = await import('../src/auditJob.mjs');
+  const treeShaFor = (candidate) => {
+    try {
+      return String(runGit(['-C', root, 'rev-parse', `${candidate}^{tree}`], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      })).trim();
+    } catch {
+      return null;   // unreadable is reported by auditJobsFor, never dropped
+    }
+  };
+  const queued = formatAuditJobs(auditJobsFor(coverage, {
+    treeShaFor, now: new Date().toISOString(),
+  }));
+  if (queued) carriedNotice = carriedNotice ? `${carriedNotice}\n${queued}` : queued;
   /*
    * DEFERRED, NOT IMMEDIATE -- BLOCKING HERE SUPPRESSED THE WHOLE GATE.
    *
