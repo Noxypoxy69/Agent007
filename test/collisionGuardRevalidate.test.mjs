@@ -166,6 +166,33 @@ test('AUDIT D3 REGRESSION: reserved paths with no registry fail CLOSED, not skip
   assert.ok(hasRule(r, 'reservation'));
 });
 
+test('AUDIT D-A REGRESSION: reservedPaths as a STRING fails CLOSED (no char-by-char iteration passing a foreign path)', () => {
+  // A bare string has a .length; the old loop iterated it character by character,
+  // every char UNCLAIMED, so a foreign path passed as a string read as still-held.
+  const r = good({ reservedPaths: 'src/lib/merchantPhone.server.ts' });
+  assert.equal(r.ok, false, 'a string reservedPaths must not read as current');
+  assert.ok(hasRule(r, 'reservation'));
+});
+
+test('AUDIT D-A REGRESSION: an empty or non-string reserved entry fails CLOSED', () => {
+  assert.equal(good({ reservedPaths: [''] }).ok, false, 'an empty reserved entry is not confirmable');
+  assert.equal(good({ reservedPaths: [null] }).ok, false, 'a null reserved entry is not confirmable');
+  assert.ok(hasRule(good({ reservedPaths: [123] }), 'reservation'), 'a non-string reserved entry is STALE');
+});
+
+/* ── D-B: epoch-ms now is accepted, so the natural Date.now() caller is not refused ── */
+
+test('AUDIT D-B: a current claim with an epoch-ms now (Date.now() shape) is OK, not refused', () => {
+  const r = good({ now: Date.parse(NOW) }); // a finite number, the shape Date.now() returns
+  assert.equal(r.ok, true, `a current claim with a numeric now was wrongly refused: ${r.findings.map((f) => f.rule).join(', ')}`);
+});
+
+test('AUDIT D-B: an expired lease with an epoch-ms now is still STALE', () => {
+  const r = good({ task: liveTask({ lease_expires_at: PAST }), now: Date.parse(NOW) });
+  assert.equal(r.ok, false);
+  assert.ok(hasRule(r, 'lease'));
+});
+
 /* ── the gap this closes: the commit guard cannot see a stale claim ─────── */
 
 test('THE GAP: evaluateCommit (path-only) passes a clean commit while the claim is already stale; revalidateStart catches it', () => {

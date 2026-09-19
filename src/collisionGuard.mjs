@@ -274,10 +274,10 @@ function verdict(findings) {
  * @param {object} input
  * @param {object|null} input.task          the LIVE task row now {lease_token, assigned_session, attempt, base_sha, state}
  * @param {object|null} input.expected      the tuple authorised at claim {leaseToken, session, attempt, baseSha, state} -- ALL required; an absent dimension is STALE, not skipped
- * @param {string[]}    input.reservedPaths paths this work will mutate; each must still be owned by laneId (CROSS-LANE only; intra-lane duplication needs a reservation store that does not exist yet)
+ * @param {string[]}    input.reservedPaths ARRAY of paths this work will mutate; each must be a non-empty string still owned by laneId (a non-array, or a non-string entry, is STALE). CROSS-LANE only; intra-lane duplication needs a reservation store that does not exist yet
  * @param {object|null} input.registry      parsed lane registry (for path ownership); required if reservedPaths is non-empty, else STALE
  * @param {string|null} input.laneId        the acting lane; required if reservedPaths is non-empty
- * @param {string|Date|null} input.now      the instant to judge lease liveness against. An ISO string or a Date; a NUMBER is rejected by leaseState's Date.parse and fails closed (STALE), so do not pass Date.now() -- pass new Date().toISOString()
+ * @param {string|number|Date|null} input.now the instant to judge lease liveness against: an ISO string, a Date, or epoch-ms (a finite number is normalised to ISO). A non-finite or unparseable now fails closed (STALE), never reads as live
  * @returns {{ok:boolean, stale:boolean, findings:Array}}
  */
 export function revalidateStart(input) {
@@ -307,9 +307,15 @@ export function revalidateStart(input) {
    * missing or unparseable `now` -- caught and treated as not-live, because a
    * lease whose liveness cannot be judged must fail closed, not throw past the
    * caller or read as live.
+   *
+   * ACCEPT epoch-ms too. leaseState uses Date.parse, which rejects a bare
+   * epoch-ms number, so a caller passing Date.now() -- the most natural value --
+   * would refuse every current claim (audit D-B). A finite number is normalised
+   * to ISO before leaseState sees it; a string or Date passes through unchanged.
    */
+  const nowArg = (typeof now === 'number' && Number.isFinite(now)) ? new Date(now).toISOString() : now;
   let ls;
-  try { ls = leaseState(task, { now }); } catch { ls = 'unknowable'; }
+  try { ls = leaseState(task, { now: nowArg }); } catch { ls = 'unknowable'; }
   if (ls !== 'live') {
     stale('lease', `the lease is not live (state ${ls}); the claim that authorised this work has lapsed or cannot be judged`);
   }
@@ -352,11 +358,25 @@ export function revalidateStart(input) {
    *       exist yet; until it does, this dimension is a CROSS-LANE check only and
    *       must not be read as covering intra-lane collision.
    */
-  if (reservedPaths.length > 0) {
+  if (reservedPaths !== null && reservedPaths !== undefined && !Array.isArray(reservedPaths)) {
+    /*
+     * A caller type-slip is STALE, not skipped. A bare STRING has a .length and
+     * would enter the loop below, then for..of iterates it CHARACTER by
+     * character -- each char classifies UNCLAIMED, never FOREIGN, so a genuinely
+     * reserved path passed as a string reads as still-held. Fail-open, and the
+     * exact defect a blind audit found (D-A). A non-array reservation cannot be
+     * confirmed, so it is not current.
+     */
+    stale('reservation', 'reservedPaths must be an array of paths; a non-array reservation cannot be confirmed and is not current');
+  } else if (Array.isArray(reservedPaths) && reservedPaths.length > 0) {
     if (!registry || !nonEmpty(laneId)) {
       stale('reservation', 'reserved paths were declared but no registry or lane was supplied to confirm they still hold; unverifiable is not current');
     } else {
       for (const p of reservedPaths) {
+        if (!nonEmpty(p)) {
+          stale('reservation', 'a reserved path entry is empty or not a string; an unreadable reservation is not current');
+          continue;
+        }
         if (classifyPath(registry, laneId, p) === FOREIGN) {
           const owners = ownersOfPath(registry, p);
           stale(
