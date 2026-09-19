@@ -615,6 +615,37 @@ caller nothing true about what happened.
 Heartbeat is the OLD daemon protocol. The bridge roster is built from
 `/register`, which is why every row on it carries a sessionId.
 
+**THE WATCHER'S OWN LIVENESS: ASK, DO NOT INFER FROM SILENCE.**
+
+```bash
+node scripts/bridge-session-poll.mjs --status    # exit 1 if any watcher is not watching
+```
+
+The poll supervisor is detached, its healthy path is `continue` and
+`continue`, and it writes to a log nobody reads. So until 2026-09-19 **a dead
+watcher and a working one produced byte-identical evidence**: an empty log and
+a `startedAt` from hours ago. Measured that night — two poll logs on this
+machine, both 0 bytes, no supervisor process alive for either, code-a silent
+4884s and code-b silent 22976s, and the only reason anyone noticed is that
+`send_message` happened to attach a note about it. Diagnosis was: list a
+directory, observe two empty files, query the process table by hand, infer.
+
+The supervisor now **marks every cycle** and **records a reason on every
+exit**, so the states are distinguishable and `dead` means precisely *gone
+without saying why*. A `stopped` watcher still reports as wrong: a tidy
+explanation on disk is still an agent nobody can see. An **empty polls
+directory is the alarm, not the all-clear** — it means nothing is being
+watched at all.
+
+`--session-start` runs the same check and names any OTHER watcher that has
+gone dark, because a check nobody runs is a check nobody runs. It is silent
+when all is well; an alarm that fires every session is one people learn to
+skip, and then the layer is gone (rule 16).
+
+**A session started outside `agent.cmd` has no watcher at all**, because the
+poll hook declines without `AGENTBRIDGE_AGENT_ID` and exits 0. That is the
+original defect and it is why the launcher exists.
+
 ## The override grant, and where it lives
 
 A guarded session that must write a protected control needs a grant. It is a
