@@ -334,7 +334,7 @@ try {
    * evaluator is the single definition every other surface must also use.
    */
   if (cmd === 'task-checklist') {
-    const { evaluateTask, canAdvance } = await import('../src/taskGate.mjs');
+    const { evaluateTask, canAdvance, ITEM_STATES } = await import('../src/taskGate.mjs');
     const { readFileSync } = await import('node:fs');
     const file = args.file ?? args.f;
     if (!file) {
@@ -369,7 +369,15 @@ try {
     for (const item of items) {
       const mark = { VERIFIED: 'ok  ', WAIVED: 'waiv', FAILED: 'FAIL', RUNNING: '... ', PENDING: '    ' }[item.state] ?? '    ';
       console.log(`  [${mark}] ${item.item_id}`);
-      if (item.satisfied_by) console.log(`           by ${item.satisfied_by}`);
+      /*
+       * satisfied_by already reads "waiver by <who>" for a waived item, so
+       * prefixing it again printed "by waiver by danny". Say "by" only when
+       * the value does not already carry its own preposition.
+       */
+      if (item.satisfied_by) {
+        const via = String(item.satisfied_by);
+        console.log(`           ${via.startsWith('waiver ') ? '' : 'by '}${via}`);
+      }
       /*
        * REJECTIONS ARE PRINTED. "No evidence" and "evidence you are not
        * allowed to count" are different situations for the reader, and
@@ -400,7 +408,36 @@ try {
       process.exit(verdict.ok ? 0 : 1);
     }
 
-    process.exit(blocked.length ? 1 : 0);
+    /*
+     * EXIT 0 MEANS THE CHECKLIST IS COMPLETE, NOT "THE COMMAND RAN".
+     *
+     * This exited `blocked.length ? 1 : 0`, so a task with NOTHING PROVEN --
+     * every item PENDING, no evidence at all -- exited 0. Automation reads 0
+     * as success, and this repository's own HELP for observe-sha states the
+     * opposite policy in capitals: "There is no exit 0. This command cannot
+     * authorise anything, so it must not return the status automation reads
+     * as success."
+     *
+     * A blind audit flagged it, and it is the same defect as the module it
+     * reports on: SAYING a thing is done and the thing BEING done must not
+     * be the same act. A status code that cannot distinguish "all proven"
+     * from "nothing attempted" is a box that checks itself.
+     *
+     * So 0 requires every required item to be satisfied -- VERIFIED, WAIVED
+     * or NOT_APPLICABLE. Anything outstanding is 1, and the reason is on the
+     * board above.
+     */
+    const outstanding = items.filter((i) => i.state !== ITEM_STATES.VERIFIED
+      && i.state !== ITEM_STATES.WAIVED
+      && i.state !== ITEM_STATES.NOT_APPLICABLE);
+
+    if (outstanding.length) {
+      console.log('');
+      console.log(`  ${outstanding.length} of ${items.length} required item(s) are NOT satisfied. `
+        + 'Exit 1: nothing here authorises anything.');
+    }
+
+    process.exit(outstanding.length || blocked.length ? 1 : 0);
   }
 
   if (cmd === 'init') {
