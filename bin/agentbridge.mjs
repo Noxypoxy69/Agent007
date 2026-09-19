@@ -164,6 +164,14 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         one is live. Prints a path; never writes
                                         one -- an agent that writes its own
                                         permission file has forged the grant.
+  agentbridge task-checklist --file <state.json> [--advance <phase>]
+                                        derive a task's checklist from its
+                                        evidence and print it. READ-ONLY: it
+                                        records nothing and advances nothing,
+                                        because a box turns green when a proof
+                                        says so, never because a command ran.
+                                        The file holds { task, template,
+                                        evidence, waivers }.
   agentbridge doctor                    verify secret sealing and file permissions
   agentbridge daemon start
 
