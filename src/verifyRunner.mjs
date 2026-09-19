@@ -105,7 +105,24 @@ function runShard(root, shard) {
 export async function runVerification({
   root, key, identity, shards = 4, concurrency = 2, home = undefined, now = () => Date.now(),
 } = {}) {
-  const plan = shardPlan({ total: shards, files: countTestFiles(root) });
+  /*
+   * THE SHARD COUNT IS CLAMPED TO THE FILES THAT EXIST, and the caller's number
+   * is a ceiling rather than a demand.
+   *
+   * `shardPlan` refuses more shards than files, correctly: an empty shard exits
+   * 0 having executed nothing, which is a pass proving nothing. But refusing is
+   * the wrong answer to give a CALLER who simply asked for a sensible default
+   * against a small tree -- and it produced a real fail-open. A fixture with one
+   * test file made a four-shard plan refuse, runVerification returned PARTIAL in
+   * 400ms, and the Stop gate approved the turn because PARTIAL took a branch
+   * that returned no state.
+   *
+   * The module's refusal stays exactly as strict; choosing a number it will
+   * accept is this function's job.
+   */
+  const files = countTestFiles(root);
+  const wanted = Number.isInteger(shards) && shards > 0 ? shards : 1;
+  const plan = shardPlan({ total: files > 0 ? Math.min(wanted, files) : 1, files });
   if (!plan.ok) {
     const rec = {
       key, identity, state: VERIFY.PARTIAL, why: plan.errors.join('; '), pid: process.pid,

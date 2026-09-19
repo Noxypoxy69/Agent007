@@ -1158,10 +1158,37 @@ if (decision.action === ACTION.ATTACH) {
     + 'No second suite was started -- that duplication is what made every run miss the deadline.');
 }
 
-  if (admitted.state === VERIFY.FAILED || admitted.state === VERIFY.PARTIAL || admitted.state === VERIFY.TIMED_OUT) {
+  /*
+   * ═══ ONLY A PASS PASSES. EVERYTHING ELSE REFUSES, INCLUDING "NO ANSWER". ═══
+   *
+   * THE FAIL-OPEN THIS REPLACES, MEASURED. The first version asked
+   * `admitted.state === FAILED || PARTIAL || TIMED_OUT`. But `admitVerification`
+   * routes PARTIAL and TIMED_OUT through the START branch -- they are not
+   * results, so the honest answer is "run one" -- and that branch returns
+   * `state: null`. So the comparison was never true for exactly the two states
+   * that mean NOTHING WAS PROVED, and the gate approved the turn.
+   *
+   * `test/stopGateDeadline.test.mjs` caught it: the fixture holds one test file,
+   * a four-shard plan is correctly refused as "empty shards prove nothing",
+   * runVerification returned PARTIAL in 400ms, and the gate said
+   * `{"blocked":false,"reason":""}`.
+   *
+   * That is rule 4 in my own code: `admitted.state` is a DERIVED value and I
+   * asserted on it instead of on the record, which is the evidence. It agreed
+   * with the truth for PASSED and FAILED and went null for the unusual cases --
+   * which is exactly when a gate is supposed to speak.
+   *
+   * So the question is inverted. A turn is approved only by a record that says
+   * PASSED for this exact identity; any other state, and the absence of one,
+   * refuses and says which.
+   */
+  const state = typeof record?.state === 'string' ? record.state : null;
+  if (state !== VERIFY.PASSED) {
     const r = record ?? {};
-    verifyBlock = `[agentbridge:verify-failed] ${admitted.state} for this exact tree: ${r.why ?? admitted.why}. `
-      + `${r.tests ?? '?'} test(s), ${r.fail ?? '?'} failing. Read the detail with: npm run verify -- --status --json`;
+    verifyBlock = `[agentbridge:verify-failed] ${state ?? 'no result'} for this exact tree`
+      + `${r.why ? `: ${r.why}` : ''}. ${r.tests ?? '?'} test(s), ${r.fail ?? '?'} failing. `
+      + 'NOTHING PROVED THIS TREE PASSES, so this turn is not approved. '
+      + 'Read the detail with: npm run verify -- --status --json';
   }
 } catch (e) {
   /*
