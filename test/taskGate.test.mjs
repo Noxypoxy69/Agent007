@@ -489,3 +489,41 @@ test('LOW: producer_session is read once, so a changing getter cannot mislabel t
       'the receipt must name the party the decision was actually made on');
   }
 });
+
+test('the window for an earlier target still includes phases declared before it', () => {
+  /*
+   * The regression, stated as its own claim rather than buried in the case
+   * above. Target 'reproduce' sits at index 1; 'verify' is declared at index
+   * 0, so it is inside the window and its proof is required.
+   */
+  const dup = {
+    id: 'dup',
+    phases: ['verify', 'reproduce', 'verify'],
+    requirements: { reproduce: ['reproduction_result'], verify: ['positive_test_result'] },
+  };
+  const r = canAdvance({
+    task: TASK, template: dup, targetPhase: 'reproduce',
+    evidence: [ev({ type: 'reproduction_result' })],
+  });
+  assert.equal(r.ok, false,
+    'advancing to reproduce was permitted with the verify declared BEFORE it still PENDING');
+  assert.match(r.why, /verify:positive_test_result/);
+});
+
+test('the checklist is printed in DECLARED phase order, not reordered by a duplicate', () => {
+  /*
+   * The same reordering showed up on the board: de-duplicating to last moved
+   * 'verify' behind 'reproduce', so the phases printed out of the order the
+   * template declares them. A board that reorders itself when a template
+   * repeats a name is one nobody can read against the template.
+   */
+  const dup = {
+    id: 'dup',
+    phases: ['verify', 'reproduce', 'verify'],
+    requirements: { reproduce: ['reproduction_result'], verify: ['positive_test_result'] },
+  };
+  const { items } = evaluateTask({ task: TASK, template: dup });
+  const order = [...new Set(items.map((i) => i.phase))];
+  assert.deepEqual(order, ['verify', 'reproduce'],
+    'phases must appear in the order the template declares them, first occurrence winning');
+});

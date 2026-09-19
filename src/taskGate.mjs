@@ -338,14 +338,57 @@ function requirementsFor(template, phase) {
  * strange template did not intend, which is visible and arguable, rather than
  * silently skipping one.
  */
-function phasesOf(template) {
+/** Every declared phase name, in declared order, DUPLICATES KEPT. */
+function declaredPhases(template) {
   const out = [];
   for (const p of Array.isArray(template?.phases) ? template.phases : []) {
     const name = str(p);
-    if (name === null) continue;
-    const at = out.indexOf(name);
-    if (at !== -1) out.splice(at, 1);
-    out.push(name);
+    if (name !== null) out.push(name);
+  }
+  return out;
+}
+
+/*
+ * THE DISTINCT PHASES, IN DECLARED ORDER, FIRST OCCURRENCE WINS.
+ *
+ * THIS FUNCTION USED TO DE-DUPLICATE TO THE *LAST* POSITION AND THAT WAS A
+ * REGRESSION I SHIPPED. It was written to close a real hole -- indexOf()
+ * returns the FIRST index, so a template whose target phase also appeared
+ * earlier collapsed the advancement window and let a task advance with later
+ * proofs still PENDING. Moving duplicates to the end fixed that direction and
+ * OPENED THE MIRROR IMAGE, because it REORDERS the list.
+ *
+ * Found by blind audit, on the commit message's own fixture:
+ *
+ *     phases: ['verify', 'reproduce', 'verify']
+ *     canAdvance(..., targetPhase: 'reproduce')
+ *       parent  -> ok:false, "verify:positive_test_result (PENDING)"
+ *       mine    -> ok:true,  "every required proof through reproduce is satisfied"
+ *
+ * De-duplicating to last turns the list into ['reproduce', 'verify'], so
+ * 'reproduce' becomes index 0 and the window excludes the 'verify' that was
+ * DECLARED BEFORE IT. My commit message claimed this "fails closed: the worst
+ * case is demanding a proof a strange template did not intend". It did the
+ * opposite: it silently skipped one. My new test only exercised the direction
+ * I had fixed, so it was green over the hole it created.
+ *
+ * The real mistake was making ONE function serve two different questions.
+ * Ordering for the board and the boundary of an advancement window are not
+ * the same thing, and squeezing both out of a single de-duplicated list means
+ * every fix for one breaks the other. They are separate now:
+ *
+ *   phasesOf        distinct names in DECLARED order -- what the board shows.
+ *                   First occurrence wins, so a duplicate cannot reorder the
+ *                   display either, which the audit also flagged.
+ *   canAdvance      uses declaredPhases() and lastIndexOf, so the window is
+ *                   every phase at or before the LAST mention of the target.
+ *                   That is strictly more demanding than either version and
+ *                   is fail-closed in both directions.
+ */
+function phasesOf(template) {
+  const out = [];
+  for (const name of declaredPhases(template)) {
+    if (!out.includes(name)) out.push(name);
   }
   return out;
 }
@@ -431,14 +474,30 @@ export function evaluateTask({ task, template, evidence = [], waivers = [] } = {
  * exists to prevent.
  */
 export function canAdvance({ task, template, evidence = [], waivers = [], targetPhase } = {}) {
-  const phases = phasesOf(template);
-  const target = phases.indexOf(str(targetPhase));
+  /*
+   * THE WINDOW IS COMPUTED FROM THE DECLARED LIST, NOT THE DE-DUPLICATED ONE,
+   * AND FROM THE *LAST* MENTION OF THE TARGET.
+   *
+   * Both halves matter and each one is a hole that has actually shipped here:
+   *
+   *   first mention  a template naming the target early collapses the window
+   *                  and the task advances with later proofs PENDING.
+   *   reordered list ...and de-duplicating to fix that moved the target
+   *                  ahead of phases declared BEFORE it, so those dropped out
+   *                  of the window instead. See phasesOf.
+   *
+   * Taking every phase at or before the LAST occurrence in the raw declared
+   * order is more demanding than both, and cannot be gamed by repeating a
+   * name: repeating it can only ever ENLARGE the window.
+   */
+  const declared = declaredPhases(template);
+  const target = declared.lastIndexOf(str(targetPhase));
   if (target === -1) {
     return { ok: false, why: `"${targetPhase}" is not a phase of template ${template?.id ?? '(none)'}` };
   }
 
   const { items } = evaluateTask({ task, template, evidence, waivers });
-  const upTo = new Set(phases.slice(0, target + 1));
+  const upTo = new Set(declared.slice(0, target + 1));
   const inScope = items.filter((i) => upTo.has(i.phase));
 
   if (inScope.length === 0) {
