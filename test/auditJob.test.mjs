@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   auditJobsFor, assertBlind, auditIdFor, formatAuditJobs, REQUIRED_PROOFS,
-  mergeQueue, claimJob, authorSessionFrom, independenceOf, satisfiesGate,
+  mergeQueue, claimJob, authorSessionFrom, independenceOf, satisfiesGate, recordAudit,
 } from '../src/auditJob.mjs';
 
 const A = 'a'.repeat(40);
@@ -160,6 +160,129 @@ test('JUNK IN THE COVERAGE OBJECT DOES NOT THROW', () => {
 test('THE CONTROL: this distinguishes, in both directions', () => {
   assert.equal(run().jobs.length, 1);
   assert.equal(run({ commits: [] }).jobs.length, 0);
+});
+
+/* ── P0-3: the terminal write ─────────────────────────────────────────── */
+
+const claimed = (over = {}) => ({
+  audit_id: 'audit-1',
+  candidate_sha: A,
+  candidate_tree_sha: TREE_A,
+  touched: ['src/guardSession.mjs'],
+  state: 'CLAIMED',
+  claimed_by: 'session_REVIEWER',
+  claimed_at: 1_000_000,
+  independence: 'enforced',
+  ...over,
+});
+
+const write = (over = {}) => recordAudit(claimed(over.job ?? {}), {
+  by: 'session_REVIEWER',
+  verdict: 'PASS',
+  candidate_sha: A,
+  candidate_tree_sha: TREE_A,
+  now: 1_000_000 + 60_000,
+  ...over,
+});
+
+test('THE POSITIVE CONTROL: a valid terminal write closes the job', () => {
+  const r = write();
+  assert.equal(r.ok, true, r.why);
+  assert.equal(r.job.state, 'COMPLETED_PASS');
+  assert.equal(r.job.recorded_by, 'session_REVIEWER');
+});
+
+test('ONLY `enforced` INDEPENDENCE MAY CLOSE AN AUDIT', () => {
+  /*
+   * The mechanical failure this refuses: type a --by that is not the author,
+   * get ASSERTED, record a PASS, satisfy the control. A claim may be asserted
+   * and stay visible for diagnostics; CLOSING a job is a clearance.
+   *
+   * This refuses every audit on this machine today, because nothing resolves
+   * an authenticated principal. That is the correct behaviour, not a gap.
+   */
+  for (const independence of ['asserted', 'unverifiable', undefined, null]) {
+    const r = write({ job: { independence } });
+    assert.equal(r.ok, false, `${independence} was allowed to close an audit`);
+    assert.match(r.why, /not enforced/);
+  }
+});
+
+test('THE CANDIDATE MUST NOT HAVE MOVED -- both the commit and the tree', () => {
+  /*
+   * Demonstrated live against this repository: an auditor pinned a clean tree,
+   * 193 lines landed in a file it was auditing while it read, and --verify said
+   * OK three times. Both halves are checked because two commits can carry one
+   * tree and one commit cannot carry two.
+   */
+  assert.match(write({ candidate_sha: B }).why, /names candidate/);
+  assert.match(write({ candidate_tree_sha: TREE_B }).why, /content moved while the audit ran/);
+});
+
+test('THE WRITER MUST BE THE CLAIMANT, and the lease must still be live', () => {
+  assert.match(write({ by: 'session_SOMEBODY_ELSE' }).why, /did not claim this audit/);
+  assert.match(write({ now: 1_000_000 + 3 * 60 * 60_000 }).why, /past the/);
+  /* A claim with no recorded time is not "recent by default". */
+  assert.equal(write({ job: { claimed_at: null } }).ok, false);
+});
+
+test('A JOB NOBODY CLAIMED CANNOT BE CLOSED', () => {
+  assert.match(write({ job: { state: 'PENDING' } }).why, /verdict from nowhere/);
+  assert.equal(recordAudit(null, { by: 'x', verdict: 'PASS' }).ok, false);
+});
+
+test('THE VERDICT IS PASS OR FAIL, and nothing else', () => {
+  for (const verdict of ['INCONCLUSIVE', 'pass ', '', null, true, 'MAYBE']) {
+    const r = write({ verdict });
+    if (verdict === 'pass ') { assert.equal(r.ok, true, 'case and whitespace should normalise'); continue; }
+    assert.equal(r.ok, false, `${JSON.stringify(verdict)} was accepted as a verdict`);
+  }
+});
+
+test('A FAIL WITH NO FINDING IS PROSE', () => {
+  /*
+   * §8.1: every real defect produces a structured finding. A failure recorded
+   * with nothing attached leaves the repair step with nothing to bind to, which
+   * is how a defect becomes a sentence somebody has to remember.
+   */
+  assert.match(write({ verdict: 'FAIL' }).why, /reviewer prose/);
+  const ok = write({ verdict: 'FAIL', finding_refs: ['F-abc123'] });
+  assert.equal(ok.ok, true, ok.why);
+  assert.equal(ok.job.state, 'COMPLETED_FAIL');
+  assert.deepEqual(ok.job.finding_refs, ['F-abc123']);
+});
+
+test('AN IDENTICAL RETRY SUCCEEDS; A CONFLICTING SECOND WRITE IS REFUSED', () => {
+  /*
+   * A runtime that cannot tell whether its write landed must be able to repeat
+   * it -- and the retry is checked BEFORE the fences, because the state it
+   * would otherwise be fenced against is the one its own first write produced.
+   *
+   * A different verdict is refused: an audit whose answer can be revised after
+   * the fact is not a record.
+   */
+  const done = write().job;
+  const retry = recordAudit(done, {
+    by: 'session_REVIEWER', verdict: 'PASS', candidate_sha: A, candidate_tree_sha: TREE_A, now: 9_000_000,
+  });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.unchanged, true);
+
+  const flip = recordAudit(done, {
+    by: 'session_REVIEWER', verdict: 'FAIL', finding_refs: ['F-x'], candidate_sha: A, candidate_tree_sha: TREE_A, now: 9_000_000,
+  });
+  assert.equal(flip.ok, false);
+  assert.match(flip.why, /cannot be revised/);
+});
+
+test('FINDING REFS ARE SORTED, so an identical retry is recognisable', () => {
+  const a = write({ verdict: 'FAIL', finding_refs: ['F-b', 'F-a'] }).job;
+  assert.deepEqual(a.finding_refs, ['F-a', 'F-b']);
+  const retry = recordAudit(a, {
+    by: 'session_REVIEWER', verdict: 'FAIL', finding_refs: ['F-b', 'F-a'],
+    candidate_sha: A, candidate_tree_sha: TREE_A, now: 2_000_000,
+  });
+  assert.equal(retry.unchanged, true, 'the same findings in another order read as a different write');
 });
 
 /* ── the queue, and independence as a machine predicate ──────────────── */
