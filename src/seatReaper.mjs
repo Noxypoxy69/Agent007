@@ -48,7 +48,21 @@ export const STALE_WINDOW_MS = 600 * 1000;
  */
 export const REAP_AFTER_WINDOWS = 6;
 
+/**
+ * A timestamp, or null for anything that is not one.
+ *
+ * STRINGS ONLY, AND A TEST CAUGHT WHY. `Date.parse` coerces its argument, so
+ * `Date.parse(0)` is `Date.parse("0")` — the year 2000, twenty-six years ago,
+ * comfortably past any cutoff. A heartbeat of `0` therefore read as a very dead
+ * seat and was reclaimed, when the honest reading of a non-timestamp is that
+ * nobody knows. That is the "unknown is not death" property failing through the
+ * one input shape I had not considered, and it deletes rows.
+ *
+ * The column is `timestamptz` and PostgREST renders it as a string or null, so
+ * requiring a string loses nothing real and closes the coercion.
+ */
 const ms = (v) => {
+  if (typeof v !== 'string') return null;
   const t = Date.parse(v);
   return Number.isNaN(t) ? null : t;
 };
