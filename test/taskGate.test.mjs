@@ -635,3 +635,44 @@ test('expiry is judged against a caller-supplied clock, not the wall clock', () 
     'one second after expiry it does not',
   );
 });
+
+test('A RECORDED FAILURE IS RECOGNISED IN ANY CASE, while admitting a pass stays strict', () => {
+  /*
+   * Found by blind audit. Every id in this module is case-folded; the one
+   * field that decides FAILED was not. So `status: "FAILED"` was not seen as
+   * a failure -- it fell through to the not-passed branch, the item read
+   * PENDING, and `blocked` stayed EMPTY.
+   *
+   * `blocked` is what the CLI gates its exit code on, so `task-checklist`
+   * printed no failure banner and EXITED 0 for a task carrying a recorded
+   * failure. A re-run-until-green shape, invisible.
+   *
+   * The two directions are deliberately asymmetric and each is fail-closed:
+   * recognising failure is permissive, admitting a pass is strict.
+   */
+  for (const spelling of ['FAILED', 'Failed', ' failed ']) {
+    const r = evaluateTask({ task: TASK, template: TEMPLATE, evidence: [ev({ status: spelling })] });
+    const item = r.items.find((i) => i.phase === 'reproduce');
+    assert.equal(item.state, ITEM_STATES.FAILED,
+      `status ${JSON.stringify(spelling)} is a recorded failure and must read FAILED`);
+    assert.equal(r.blocked.length, 1,
+      `and it must reach blocked, which is the field the CLI exits on -- ${JSON.stringify(spelling)}`);
+  }
+
+  /*
+   * The strict direction, unchanged and asserted here so a future "let us
+   * just fold both" cannot pass: a variant of passed must NOT satisfy.
+   */
+  for (const spelling of ['PASSED', 'Passed']) {
+    const r = evaluateTask({ task: TASK, template: TEMPLATE, evidence: [ev({ status: spelling })] });
+    assert.notEqual(r.items.find((i) => i.phase === 'reproduce').state, ITEM_STATES.VERIFIED,
+      `status ${JSON.stringify(spelling)} must not satisfy a requirement`);
+  }
+
+  assert.equal(
+    evaluateTask({ task: TASK, template: TEMPLATE, evidence: [ev({ status: 'RUNNING' })] })
+      .items.find((i) => i.phase === 'reproduce').state,
+    ITEM_STATES.RUNNING,
+    'a running proof should read RUNNING whatever its case, not PENDING',
+  );
+});

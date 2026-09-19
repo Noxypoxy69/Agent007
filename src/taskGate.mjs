@@ -217,7 +217,31 @@ export function admissibleEvidence(type, task, evidence) {
       rejected.push({ evidence_id: rId, why: 'wrong task, attempt or candidate' });
       continue;
     }
-    if (rStatus === 'failed') {
+    /*
+     * THE TWO STATUS CHECKS ARE DELIBERATELY ASYMMETRIC ABOUT CASE, AND EACH
+     * DIRECTION IS THE FAIL-CLOSED ONE.
+     *
+     * A blind audit found that every id in this module is case-folded while
+     * the one field deciding FAILED was not, so `status: "FAILED"` was not
+     * recognised as a failure. It fell through to the not-passed branch, the
+     * item read PENDING, `blocked` stayed EMPTY -- and `blocked` is what the
+     * CLI gates its exit code on, so `task-checklist` printed no failure
+     * banner and exited 0 for a task with a recorded failure.
+     *
+     *   RECOGNISING FAILURE IS PERMISSIVE. Anything that spells "failed" in
+     *   any case is a failure. Missing one spelling loses a failure, and a
+     *   lost failure is a green board.
+     *
+     *   ADMITTING A PASS STAYS STRICT. Exactly 'passed', lower case. An
+     *   unrecognised status must never satisfy a requirement, so a variant
+     *   is rejected rather than guessed at -- which is also what
+     *   test/taskGate's existing "invented statuses" case pins, with 'PASSED'
+     *   among the things that must NOT verify.
+     *
+     * Folding both would have been symmetrical and wrong: it would make the
+     * permissive choice on the side where permissiveness turns a box green.
+     */
+    if (rStatus !== null && rStatus.toLowerCase() === 'failed') {
       rejected.push({ evidence_id: rId, why: 'the proof itself reports failure' });
       continue;
     }
@@ -495,7 +519,8 @@ export function evaluateTask({ task, template, evidence = [], waivers = [], now 
       if (failed) state = ITEM_STATES.FAILED;
       else if (admitted.length > 0) state = ITEM_STATES.VERIFIED;
       else if (waiver) state = ITEM_STATES.WAIVED;
-      else if (list.some((r) => sameId(r?.type, type) && str(r?.status) === 'running' && evidenceMatches(r, task))) {
+      else if (list.some((r) => sameId(r?.type, type)
+        && str(r?.status)?.toLowerCase() === 'running' && evidenceMatches(r, task))) {
         /* RUNNING is scoped to THIS task -- it used to scan raw evidence, so a
          * proof belonging to another task read as in-flight on this one. */
         state = ITEM_STATES.RUNNING;
