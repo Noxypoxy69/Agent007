@@ -128,6 +128,15 @@ export const DEFAULT_SPLICES = {
     'src/ownWork.mjs',
     'src/ownerDecisions.mjs',
     'src/permissionRequest.mjs',
+    /*
+     * Added 2026-09-18. `/task-create` calls validateTask, createTask and
+     * pathsCollide out of the splice, and the module was being counted as
+     * test-only debt for it -- the exact false positive the SPLICED category
+     * was created to end. All eight of its export names are carried by
+     * _shared.js, checked by verifySplices rather than asserted here, and
+     * test/taskRecordSplice.test.mjs is the behaviour half.
+     */
+    'src/taskRecord.mjs',
     'bridge/collisions.mjs',
     'mcp/toolDefs.mjs',
   ],
@@ -195,23 +204,50 @@ export const NAME_ONLY_SPLICES = {
 };
 
 /**
- * Which declared modules the behaviour half actually compares, READ FROM THAT
- * FILE rather than restated here.
+ * Which declared modules the behaviour half actually compares, READ FROM THE
+ * TESTS rather than restated here.
  *
  * A second hand-kept list would be one more copy of a claim, which is the class
  * of defect this whole gate exists for. Adding a behaviour pair should make the
  * ratio improve on its own, without anybody remembering to update a constant.
+ *
+ * THE FILENAME USED TO BE THE ANSWER, AND IT WAS TOO NARROW. This read exactly
+ * `test/sharedSpliceMatches.test.mjs`, so a behaviour pair written in a file of
+ * its own was invisible: `test/taskRecordSplice.test.mjs` imports both halves
+ * of src/taskRecord.mjs and compares them, and the gate still reported the
+ * module as trusted to a name check only. That is a gate under-crediting real
+ * work, which costs more than it looks -- it pushes the next author toward the
+ * NAME_ONLY_SPLICES escape hatch rather than toward writing the pair.
+ *
+ * So ask for the SHAPE instead of the name: a behaviour pair is any test that
+ * imports a module AND the splice target it is copied into, because comparing
+ * the two is the only reason to import both. That is a property of what the
+ * test does; a filename is a property of who wrote it.
  */
-export function behaviourComparedModules(root, testFile = 'test/sharedSpliceMatches.test.mjs') {
-  let text;
+export function behaviourComparedModules(root, splices = DEFAULT_SPLICES) {
+  const targets = Object.keys(splices);
+  let names;
   try {
-    text = readFileSync(path.join(root, testFile), 'utf8');
+    names = readdirSync(path.join(root, 'test'));
   } catch {
-    return null; // absent under this root: not evidence either way
+    return null; // no test directory under this root: not evidence either way
   }
+
   const found = new Set();
-  for (const m of text.matchAll(/from\s+'\.\.\/([^']+)'/g)) found.add(m[1]);
-  return found;
+  let sawAny = false;
+  for (const name of names) {
+    if (!name.endsWith('.test.mjs')) continue;
+    let text;
+    try { text = readFileSync(path.join(root, 'test', name), 'utf8'); } catch { continue; }
+
+    const imported = new Set();
+    for (const m of text.matchAll(/from\s+'\.\.\/([^']+)'/g)) imported.add(m[1]);
+    // Only a test that holds BOTH halves can be comparing them.
+    if (!targets.some((t) => imported.has(t))) continue;
+    sawAny = true;
+    for (const i of imported) if (!targets.includes(i)) found.add(i);
+  }
+  return sawAny ? found : null;
 }
 
 /** Reached only through a hand-maintained copy. Shipped, but not by an import. */

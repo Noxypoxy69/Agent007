@@ -292,6 +292,60 @@ const KNOWN = {
   'src/moduleGraph.mjs':
     'This gate itself, not yet wired to a command. Becomes test-only once its test lands, ' +
     'and reachable when a caller exists.',
+
+  /*
+   * ── added 2026-09-18, and the list had been red for days ──────────────
+   *
+   * A RATCHET THAT HAS BEEN FAILING SINCE fdb3cbb CATCHES NOTHING. Six modules
+   * accumulated here across two agents' work and the gate has reported all six
+   * on every run since, which means a SEVENTH would have arrived invisibly --
+   * rule 16, a red gate nobody can make green teaches people to ignore red.
+   * Each entry below states the real reason and the condition that removes it,
+   * so the list can shrink; none of them is "we decided not to care".
+   */
+
+  'src/livenessProbe.mjs':
+    'PARTIALLY SPLICED, WHICH IS WHY IT IS NOT IN DEFAULT_SPLICES. _shared.js carries ' +
+    'ackMatches and applyAck -- what the /ack route needs -- and NOT parseInstant, ' +
+    'PROBE_DEFAULTS, LIVENESS, classifyLiveness, probeDue or recordProbe. verifySplices ' +
+    'requires every export name and correctly refuses a partial copy, so declaring it a ' +
+    'splice would be a lie that also weakened the check for the two names that are real. ' +
+    'The six absent names decide WHEN to probe and how to read the answer, and nothing ' +
+    'schedules a prober yet: that is the unfinished half of the liveness work, not a ' +
+    'classification problem. This entry goes when a prober calls probeDue on a schedule.',
+
+  'src/seatReaper.mjs':
+    'A JS MIRROR OF LOGIC THE DATABASE EXECUTES -- the same category as src/runtime.mjs ' +
+    'above, and carrying the same risk of two live implementations. The sweep must run in ' +
+    'the database because a reaper that is not scheduled is a comment, and this project ' +
+    'has shipped that exact defect. The PREDICATE is here because three attempts to prove ' +
+    'it in a rolled-back transaction were each vacuous for a different reason: FOR UPDATE ' +
+    'SKIP LOCKED skips the probing transaction\'s own rows, a trigger rewrites heartbeat_at ' +
+    'on write so a stale seat cannot be fabricated, and what remained reachable was the ' +
+    'happy path and none of the three safety refusals. So the SQL in ' +
+    '20260919030000 mirrors this shape and this is where the suite can watch it fail. ' +
+    'This entry goes when the two are compared rather than mirrored -- a scratch table ' +
+    'without the trigger, or a live end-to-end check after deploy.',
+
+  'src/stopGateBudget.mjs':
+    'PRESERVED, NOT ADOPTED. Arrived in fdb3cbb, whose own message says it is SUPERSEDED ' +
+    'by 30aacd6 and must not be built on, and that nothing in that commit is wired to a ' +
+    'guard. It is carried because losing in-flight work is worse than holding it. This ' +
+    'entry goes when it is deleted in favour of 30aacd6, which is an owner call because ' +
+    'the two disagree about the Stop budget.',
+
+  'src/memory/canonical.mjs':
+    'PRESERVED, NOT ADOPTED -- fdb3cbb, same preservation commit as stopGateBudget. Its ' +
+    'tests landed later in e87d097, so it reads as test-only rather than unreferenced. ' +
+    'This entry goes when the memory surface acquires a production caller or is dropped.',
+
+  'src/memory/patternCatalog.mjs':
+    'PRESERVED, NOT ADOPTED -- fdb3cbb. Audited and found sound; still called by nothing ' +
+    'shipped. This entry goes with a production caller.',
+
+  'src/memory/patternIndexer.mjs':
+    'PRESERVED, NOT ADOPTED -- fdb3cbb. Audited and found sound; still called by nothing ' +
+    'shipped. This entry goes with a production caller.',
 };
 
 test('THE REAL REPO HAS NO ORPHAN BEYOND THE KNOWN LIST', () => {
