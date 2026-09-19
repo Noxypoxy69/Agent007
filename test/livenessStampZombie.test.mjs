@@ -22,6 +22,14 @@
  * Reachable: sessionEnd only kills the supervisor when it can find AND verify
  * the pid (`if (rec && alive(rec.pid))`), and poll records are observably
  * absent while their logs remain.
+ *
+ * WHAT THIS FILE DELIBERATELY DOES NOT CONTAIN. A first version of this work
+ * also shipped shouldStampLiveness(), a fix refusing to refresh a
+ * declared-offline row. It was REVERTED: nothing in the repository could call
+ * it (its only consumer is the edge function, which needs a deploy), so it was
+ * an exported control nothing consults -- and it tripped two gates saying so,
+ * the dead-export ratchet and the _shared.js splice check. The FINDING below is
+ * the durable part; the fix belongs with the deploy that can wire it.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,7 +38,6 @@ import {
   isLive,
   observedCapacity,
   registryFromSessions,
-  shouldStampLiveness,
   STALE_AFTER_MS,
 } from '../src/liveRegistry.mjs';
 
@@ -82,39 +89,6 @@ test('THE ZOMBIE: a one-second-old and a one-hour-old offline row are indistingu
 
   assert.ok(60 * 60 * 1000 > STALE_AFTER_MS,
     'precondition: the stale fixture really is past the window, so the comparison means something');
-});
-
-/* ── the decision that closes it ────────────────────────────────────────── */
-
-test('shouldStampLiveness REFUSES to refresh a declared-offline row, and says why', () => {
-  const d = shouldStampLiveness(row());
-  assert.equal(d.stamp, false);
-  assert.match(d.reason, /age out/,
-    'the reason must name the consequence, because that is what a reader acts on');
-});
-
-test('shouldStampLiveness permits every capacity that can still be live', () => {
-  for (const capacity of ['idle', 'busy', 'blocked']) {
-    const d = shouldStampLiveness(row({ capacity }));
-    assert.equal(d.stamp, true, `${capacity} must still be stamped -- refusing it would be an outage`);
-  }
-
-  /*
-   * A row with no declared capacity at all must still be stamped. Denying the
-   * unrecognised case is how a name-list becomes an outage (rule 19), and this
-   * predicate sits on the path that keeps every live worker visible.
-   */
-  assert.equal(shouldStampLiveness({ session_id: 's', heartbeat_at: ago(1000) }).stamp, true,
-    'an absent capacity is not a declared shutdown');
-  assert.equal(shouldStampLiveness(row({ capacity: 'OFFLINE' })).stamp, true,
-    'only the exact stored token is a declaration; a different spelling is not one');
-});
-
-test('a missing or non-object row is refused rather than stamped', () => {
-  for (const nothing of [null, undefined, 'offline', 42]) {
-    assert.equal(shouldStampLiveness(nothing).stamp, false,
-      'there is no session here to keep alive');
-  }
 });
 
 /* ── the reader, end to end ─────────────────────────────────────────────── */
