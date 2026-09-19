@@ -48,11 +48,17 @@
  *   freezes its holder out of every branch.
  */
 import { classifyPath, ownersOfPath, laneMatchesBranch, SHARED, FOREIGN } from './laneRegistry.mjs';
+import { leaseState } from './leases.mjs';
 
 /** Severities, in the order that decides the exit code. */
 export const CANNOT_RUN = 'cannot-run';
 export const BLOCK = 'block';
 export const WARN = 'warn';
+
+/** A start-time revalidation outcome that is not a commit-exit severity. */
+export const STALE = 'stale';
+
+const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 
 /** Exit codes. These ARE the contract; a hook consumes nothing else. */
 export const EXIT_ALLOW = 0;
@@ -223,6 +229,126 @@ function verdict(findings) {
   const has = (s) => findings.some((f) => f.severity === s);
   const exitCode = has(CANNOT_RUN) ? EXIT_CANNOT_RUN : has(BLOCK) ? EXIT_REFUSE : EXIT_ALLOW;
   return { exitCode, findings, blocked: exitCode !== EXIT_ALLOW };
+}
+
+/**
+ * START-TIME REVALIDATION — because assignment-time checks cannot see a claim
+ * that happened AFTER them.
+ *
+ * evaluateCommit above runs at commit, on PATHS. It has no notion of a lease,
+ * an attempt, or a baseline, so it cannot catch the failure this exists for: a
+ * worker that was validly assigned, then had its lease expire, its task
+ * re-assigned or superseded, or its base commit move, and begins mutating
+ * anyway. Measured twice in CLAUDE.md -- two agents answered the same question
+ * 65 minutes apart and again 9 minutes apart, and the collision guard saw
+ * nothing both times because a check that runs once at assignment cannot see a
+ * claim made after it.
+ *
+ * SYMMETRIC WITH THE TERMINAL WRITE. Package 0 fenced the terminal write on the
+ * tuple {task, attempt, lease token, assigned session, expected state}. This
+ * revalidates the SAME tuple at the other boundary -- the moment before work
+ * begins -- so a claim that will be refused at return is refused before the
+ * tokens are spent, not after.
+ *
+ * LEASE SEMANTICS ARE NOT REIMPLEMENTED HERE. Whether a lease is live is
+ * leaseState's decision, called rather than re-derived -- the attemptRecord
+ * header's warning, that a second implementation of lease semantics is the one
+ * nobody watches when they disagree, applies directly. This composes that
+ * decision with the equality checks and the path-ownership check the guard
+ * already owns.
+ *
+ * FAIL CLOSED. An unreadable task or a missing authorised tuple is STALE, not
+ * OK: "cannot confirm the claim is current" must refuse to start, the same way
+ * the Stop gate refuses on an unreadable snapshot. Unknown is not clean.
+ *
+ * PURE, like everything else here: the caller fetches the live task and passes
+ * `now`; this returns a verdict and touches no clock, git or store.
+ *
+ * @param {object} input
+ * @param {object|null} input.task          the LIVE task row now {lease_token, assigned_session, attempt, base_sha, state}
+ * @param {object|null} input.expected      the tuple authorised at claim {leaseToken, session, attempt, baseSha, state}
+ * @param {string[]}    input.reservedPaths paths this work will mutate; each must still be owned by laneId
+ * @param {object|null} input.registry      parsed lane registry (for path ownership)
+ * @param {string|null} input.laneId        the acting lane
+ * @param {string|number|null} input.now    the instant to judge lease liveness against
+ * @returns {{ok:boolean, stale:boolean, findings:Array}}
+ */
+export function revalidateStart(input) {
+  const {
+    task = null,
+    expected = null,
+    reservedPaths = [],
+    registry = null,
+    laneId = null,
+    now = null,
+  } = input ?? {};
+
+  const findings = [];
+  const stale = (rule, message, extra = {}) => findings.push({ rule, severity: STALE, message, ...extra });
+
+  if (!task || typeof task !== 'object') {
+    stale('task', 'the live task could not be read; refusing to start work on a claim that cannot be confirmed current');
+    return startVerdict(findings);
+  }
+  if (!expected || typeof expected !== 'object') {
+    stale('expected', 'no authorised claim tuple was supplied to revalidate against; unknown is not current');
+    return startVerdict(findings);
+  }
+
+  /*
+   * Lease liveness: leaseState decides, this composes. leaseState THROWS on a
+   * missing or unparseable `now` -- caught and treated as not-live, because a
+   * lease whose liveness cannot be judged must fail closed, not throw past the
+   * caller or read as live.
+   */
+  let ls;
+  try { ls = leaseState(task, { now }); } catch { ls = 'unknowable'; }
+  if (ls !== 'live') {
+    stale('lease', `the lease is not live (state ${ls}); the claim that authorised this work has lapsed or cannot be judged`);
+  }
+  if (nonEmpty(expected.leaseToken) && task.lease_token !== expected.leaseToken) {
+    stale('lease-token', 'this claim has been superseded; the work was re-assigned under a new lease token');
+  }
+  if (nonEmpty(expected.session) && task.assigned_session !== expected.session) {
+    stale('session', `the task is assigned to ${task.assigned_session ?? '(none)'}, not the authorised session`);
+  }
+  if (expected.attempt !== null && expected.attempt !== undefined
+      && Number(task.attempt) !== Number(expected.attempt)) {
+    stale('attempt', `the current attempt is ${task.attempt}, not the authorised ${expected.attempt}`);
+  }
+  if (nonEmpty(expected.baseSha) && task.base_sha !== expected.baseSha) {
+    stale('baseline', `the task base moved from ${expected.baseSha} to ${task.base_sha ?? '(none)'}; the workspace would sit on a different commit`);
+  }
+  if (nonEmpty(expected.state) && task.state !== expected.state) {
+    stale('state', `the task state is "${task.state}", not the authorised "${expected.state}"; it may be superseded or terminal`);
+  }
+
+  /*
+   * Path reservation reuses lane ownership -- there is no separate reservation
+   * store, and inventing one would be a second source of truth. A path this
+   * work will mutate that is now FOREIGN means another lane took it after the
+   * claim, which is exactly the reservation being lost.
+   */
+  if (registry && laneId) {
+    for (const p of reservedPaths) {
+      if (classifyPath(registry, laneId, p) === FOREIGN) {
+        const owners = ownersOfPath(registry, p);
+        stale(
+          'reservation',
+          owners.length
+            ? `${p} is now owned by ${owners.join(', ')}; the reservation this work relied on is gone`
+            : `${p} is no longer this lane's to mutate`,
+          { path: p, owners },
+        );
+      }
+    }
+  }
+
+  return startVerdict(findings);
+}
+
+function startVerdict(findings) {
+  return Object.freeze({ ok: findings.length === 0, stale: findings.length > 0, findings });
 }
 
 /** Render a verdict for a terminal. Wording is never asserted on; the code is. */
