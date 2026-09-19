@@ -200,11 +200,21 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
      * above insists on is preserved for every other commit.
      */
     if (touched.some((f) => normalisePath(f) === 'package.json')) {
-      let changed = true;
-      try { changed = scriptsChanged(repoRoot, sha.trim()); } catch { changed = true; }
-      if (changed) {
-        touched = touched.map((f) => (normalisePath(f) === 'package.json' ? SCRIPTS_MARKER : f));
-      }
+      let verdict = 'unknown';
+      try { verdict = scriptsChanged(repoRoot, sha.trim()); } catch { verdict = 'unknown'; }
+      /*
+       * THE MARKER IS APPENDED, NOT SUBSTITUTED, AND THE AUDIT WAS RIGHT ABOUT
+       * WHY THAT MATTERS. The first version REPLACED the path, so
+       * `check-audit-coverage --json` emitted `"touched": ["package.json#scripts"]`
+       * -- a phantom to any consumer doing existsSync or `git log -- <path>`,
+       * and the report no longer named the file that actually changed. Every
+       * other entry in that array is a real repo-relative path.
+       *
+       * `unknown` adds nothing: it is not a decision and it is not a clean
+       * bill. It stays a plain package.json, reported and not blocking, which
+       * is what an unanswerable question deserves.
+       */
+      if (verdict === 'changed') touched = [...touched, SCRIPTS_MARKER];
     }
 
     const key = sha.trim().toLowerCase();
@@ -480,6 +490,31 @@ const WORKTREE_CONTENT = /(?:^|\/)\.claude\/worktrees\/[^/]+\/(?!(?:.*\/)?\.clau
  */
 export const SCRIPTS_MARKER = 'package.json#scripts';
 
+/*
+ * ═══ THE ONE THIS STILL DOES NOT COVER, NAMED RATHER THAN QUIETLY LEFT ═══
+ *
+ * `dependencies` and `devDependencies` are an execution channel and are not
+ * watched. CLAUDE.md, in the same paragraph this feature's rationale quotes:
+ * "`npm install <pkg>` needs no pre-existing script at all -- it fetches and
+ * runs `postinstall`." A blind audit measured the gap and also found
+ * package-lock.json alone, with `resolved` repointed at an attacker's tarball,
+ * passes with no block at all.
+ *
+ * WATCHING THEM IS NOT OBVIOUSLY RIGHT, WHICH IS WHY IT IS NOT DONE HERE.
+ * A dependency bump is frequent, npm rewrites the lockfile unprompted, and
+ * blocking every one of them on a pushed-unaudited rule re-creates precisely
+ * the outage the whole-file exemption was added to end -- 43672dc, an npm
+ * change, stopped every turn on the operator machine. The keys above were
+ * chosen because they execute AND essentially never churn, so closing them
+ * costs nothing; these two fail the second test.
+ *
+ * So it is an owner decision with a real cost either way, recorded here with
+ * the measurement rather than settled by whoever touched the file last.
+ */
+export const UNWATCHED_EXECUTION_KEYS = Object.freeze([
+  'dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies',
+]);
+
 /**
  * Did this commit change package.json's `scripts` key?
  *
@@ -497,25 +532,120 @@ export const SCRIPTS_MARKER = 'package.json#scripts';
  * reported as a decision. What matters is which script names exist and what
  * they run.
  */
-export function scriptsChanged(repoRoot, sha) {
-  const scriptsAt = (rev) => {
-    let text;
-    try {
-      text = runGit(['show', `${rev}:package.json`], { cwd: repoRoot, encoding: 'utf8' });
-    } catch { return undefined; }
-    let parsed;
-    try { parsed = JSON.parse(String(text)); } catch { return undefined; }
-    const scripts = parsed?.scripts;
-    if (!scripts || typeof scripts !== 'object') return '';
-    const unit = String.fromCharCode(31);
-    const rec = String.fromCharCode(30);
-    return Object.keys(scripts).sort().map((k) => `${k}${unit}${String(scripts[k])}`).join(rec);
-  };
+/*
+ * ═══ WHICH package.json KEYS EXECUTE, MEASURED RATHER THAN ASSUMED ═══
+ *
+ * The first version watched `scripts` alone. A blind audit enumerated what that
+ * leaves open, every one of them a pushed unaudited change returning no block:
+ * dependencies, devDependencies, packageManager, bin, overrides, workspaces,
+ * main/exports, type/engines -- and package-lock.json with `resolved` repointed
+ * at an attacker's tarball.
+ *
+ * The keys below are the ones that execute WITHOUT anybody typing a command and
+ * that essentially never churn, so watching them costs nothing:
+ *
+ *   bin              names an executable this package installs onto PATH
+ *   packageManager   corepack downloads and RUNS the tarball this string names
+ *   overrides        silently substitutes what a dependency resolves to
+ *   resolutions      the same, for yarn
+ *   workspaces       widens which package.json files npm will install from
+ *
+ * `dependencies` and `devDependencies` are deliberately NOT here, and that is a
+ * decision rather than an oversight -- see the note on DEPENDENCY_KEYS below.
+ */
+const EXECUTING_KEYS = Object.freeze(['scripts', 'bin', 'packageManager', 'overrides', 'resolutions', 'workspaces']);
 
-  const after = scriptsAt(sha);
-  const before = scriptsAt(`${sha}^`);
-  if (after === undefined || before === undefined) return true;
-  return after !== before;
+/**
+ * Serialise the execution-bearing keys of package.json at a revision.
+ *
+ * Returns a string, `''` for "the file has none of them", or `undefined` for
+ * "could not be read" -- three answers, because collapsing the third into
+ * either of the others is the whole of D2 and D4 below.
+ *
+ * NUL LENGTH FRAMING, AND THE AUDIT NAMED THE FIX IN OUR OWN DOCUMENTATION.
+ * The first version joined `${k}\x1f${v}` on `\x1e` with no lengths, so
+ * `{"pwn":"benign\x1etest\x1fnode --test"}` and
+ * `{"pwn":"benign","test":"node --test"}` serialised IDENTICALLY -- the second
+ * defining a real `test` script that did not exist before. Measured. CLAUDE.md
+ * says it in as many words about deployGate and auditRange: "without the
+ * framing, two different file lists can hash the same."
+ */
+function executableSurfaceAt(repoRoot, rev) {
+  let text;
+  try {
+    text = runGit(['show', `${rev}:package.json`], {
+      cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch { return undefined; }
+  let parsed;
+  try { parsed = JSON.parse(String(text)); } catch { return undefined; }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+
+  const NUL = String.fromCharCode(0);
+  const frame = (s) => `${s.length}${NUL}${s}`;
+  const parts = [];
+  for (const key of EXECUTING_KEYS) {
+    const v = parsed[key];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      for (const k of Object.keys(v).sort()) parts.push(frame(key), frame(k), frame(JSON.stringify(v[k])));
+    } else {
+      parts.push(frame(key), frame(JSON.stringify(v)));
+    }
+  }
+  return parts.join(NUL);
+}
+
+/**
+ * Did this commit change package.json's executable surface?
+ *
+ * @returns {'changed'|'same'|'unknown'}
+ *
+ * ═══ THREE ANSWERS, BECAUSE FAILING CLOSED PRODUCED AN UNCLEARABLE BLOCK ═══
+ *
+ * The first version returned a boolean and answered `true` whenever either side
+ * could not be read. A blind audit measured what that does:
+ *
+ *   a repository with <= 50 commits, whose ROOT commit creates package.json
+ *   a `git clone --depth 1`, whose boundary commit's parent is absent
+ *
+ * Both block, unconditionally, on every turn. And the recovery is worse than
+ * the block: the only way to clear it is a ledger line asserting that "a reader
+ * who did NOT write the commit has actually looked at it" -- for a root commit
+ * nobody audited. A gate whose false positives are cleared by FABRICATING an
+ * audit record corrupts the one artefact the whole rule-20 mechanism rests on.
+ *
+ * So the two unreadable cases are separated, because they are not the same
+ * question:
+ *
+ *   a ROOT commit genuinely has no parent. Its executable surface is whatever
+ *   it introduces, compared against nothing -- so if it defines any, that IS an
+ *   addition and blocking is correct; if it defines none, nothing happened.
+ *   Asked with %P, which is empty only for a true root.
+ *
+ *   a SHALLOW boundary records a parent that is not in the object store. That
+ *   is UNKNOWN: the comparison cannot be made, and neither "changed" nor "same"
+ *   is honest. It is reported as unknown and does not block, which is the same
+ *   judgement formatCoverage already makes with its audit-coverage-unknown
+ *   channel and check-first makes with LOOKUP INCOMPLETE.
+ */
+export function scriptsChanged(repoRoot, sha) {
+  const after = executableSurfaceAt(repoRoot, sha);
+  if (after === undefined) return 'unknown';
+
+  let parents = '';
+  try {
+    parents = String(runGit(['log', '-1', '--format=%P', sha], {
+      cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    })).trim();
+  } catch { return 'unknown'; }
+
+  /* A true root commit: compare against nothing, which is honest and readable. */
+  if (parents === '') return after === '' ? 'same' : 'changed';
+
+  const before = executableSurfaceAt(repoRoot, `${sha}^`);
+  if (before === undefined) return 'unknown';
+  return after === before ? 'same' : 'changed';
 }
 
 /** Is this path decision configuration rather than prose, by where it lives? */
