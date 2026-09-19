@@ -207,10 +207,23 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
    * Telling the subject where the evidence goes is the same mistake as
    * telling it what to print, one variable further out.
    */
-  const vault = mkdtempSync(path.join(tmpdir(), 'agentcmd-vault-'));
+  /*
+   * A RANDOM PREFIX, NOT A FIXED ONE. An auditor enumerated the vault with
+   * one line -- for /d %%D in ("%TEMP%\agentcmd-vault-*") -- because
+   * mkdtemp only randomises the SUFFIX. This removes that route on its own.
+   * It does NOT make the vault unfindable: the path is still written into
+   * box\claude.cmd, which the subject can read. See the long note below.
+   */
+  const vault = mkdtempSync(path.join(tmpdir(), `${Math.random().toString(36).slice(2, 10)}-`));
   const report = path.join(vault, 'report.txt');
   /* Generated here and NEVER exported to the subject. Its presence is the proof. */
   const nonce = `n-${Math.random().toString(16).slice(2)}-${Date.now()}`;
+  /*
+   * BOUND AND CLEANED UP. This was an inline mkdtemp in the child env, so
+   * nothing ever removed it: an audit counted 117 stale agentcmd-home-*
+   * directories on this machine against 0 leaked vaults.
+   */
+  const childHome = mkdtempSync(path.join(tmpdir(), 'agentcmd-home-'));
   try {
     /*
      * THE STUB REPORTS THROUGH A FILE, NOT THROUGH STDOUT, AND THAT IS THE
@@ -243,9 +256,77 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
      * the evidence was produced by the thing under test.
      *
      * Now the path is a literal inside the stub file the TEST writes, and the
-     * stub reports a NONCE the test generates and never exports. agent.cmd
-     * cannot write to a path it is never given, and cannot produce a nonce it
-     * never sees, so a report bearing that nonce is proof the stub ran.
+     * stub reports a NONCE the test generates and never puts in the child's
+     * environment.
+     *
+     * ═══ AND THAT CLAIM WAS STILL FALSE. READ THIS BEFORE WRITING v8. ═══
+     *
+     * This comment used to end: "agent.cmd cannot write to a path it is never
+     * given, and cannot produce a nonce it never sees, so a report bearing
+     * that nonce is proof the stub ran." Two independent blind audits
+     * defeated it the same way, and they were right:
+     *
+     *   BOTH THE PATH AND THE NONCE ARE WRITTEN, IN PLAINTEXT, INTO
+     *   box\claude.cmd -- and `box` is prepended to the child's PATH by this
+     *   very test, because that is how the stub gets found.
+     *
+     * One `for /f "tokens=1 delims=;" %%A in ("%PATH%")` line finds box, one
+     * `findstr` pulls out both secrets, and a launcher with no cd, no set and
+     * no claude writes a perfect report: 8 of 8 green. One auditor also found
+     * a second, independent route -- `%TEMP%\agentcmd-vault-*` was an
+     * enumerable fixed prefix.
+     *
+     * STOP LOOKING FOR A BETTER HIDING PLACE. Six versions have now moved the
+     * secret: into stdout, into the environment, into box, into a vault, into
+     * the stub's text. The move fails every time for a structural reason:
+     *
+     *   The stub must be ON THE CHILD'S PATH to be launched at all, so the
+     *   subject can always read it. Anything the stub needs in order to write
+     *   the report -- where to write, what to write -- is therefore readable
+     *   by the subject, which can then write the report itself. There is no
+     *   channel that reaches the stub and not the launcher, because the
+     *   launcher is the stub's parent and owns its whole environment.
+     *
+     * SO STATE THE PROPERTY THIS GATE ACTUALLY HAS, rather than overclaiming
+     * a seventh time (rule 8: an adversarial probe bounds nothing, and the
+     * answer is to fix the matcher -- here the matcher cannot be fixed, so
+     * the bound gets written down instead):
+     *
+     *   IT CATCHES A LAUNCHER THAT DOES NOT DO THE WORK. Drop the cd, drop
+     *   either set, drop the claude invocation, and the report is absent or
+     *   wrong, because the stub is the only thing that would have written it.
+     *   That is the failure this gate exists for -- the day-long outage came
+     *   from a launcher that quietly stopped setting AGENTBRIDGE_AGENT_ID,
+     *   not from one that forged evidence.
+     *
+     *   IT DOES NOT CATCH DELIBERATE FORGERY, and cannot. A launcher that
+     *   reads claude.cmd and writes the report itself passes. Nothing in a
+     *   shared filesystem can prevent that.
+     *
+     * WHERE THE EVIDENCE FOR THAT COMES FROM, stated because it is not mine.
+     * Two independent auditors demonstrated the forgery, one with a full
+     * md5 ledger of the swapped-in agent.cmd and 8 of 8 green, and their two
+     * routes differed:
+     *
+     *   route A  read the nonce from the stub, find the vault by enumerating
+     *            a FIXED prefix under the child's TEMP.  <- closed above, by
+     *            randomising the prefix. That auditor's exact script no
+     *            longer finds the vault.
+     *   route B  read BOTH the path and the nonce out of the stub on PATH.
+     *            NOT closed, and not closable -- see above.
+     *
+     * I tried twice to reproduce route B here and both attempts died on cmd
+     * quoting, so the unforgeability claim is retracted on THEIR measurement
+     * rather than on a demonstration of my own. That is worth saying plainly:
+     * a failed reproduction is not counter-evidence, and treating my own two
+     * broken batch scripts as proof the gate holds would be exactly the
+     * self-certification rule 20 exists to stop.
+     *
+     * Anyone tempted to close this properly: the only sound direction left is
+     * to stop asking the child for evidence and observe the process tree from
+     * outside -- confirm a real `claude` process existed with the expected
+     * parent, cwd and environment. That is a different and much heavier test,
+     * and it should be a deliberate decision, not a seventh patch.
      */
     writeFileSync(path.join(box, 'claude.cmd'),
       '@echo off\r\n'
@@ -267,7 +348,7 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
            * tests would write into the operator's live store, which is rule 21
            * and is a defect this repository has already paid for twice.
            */
-          AGENTBRIDGE_HOME: mkdtempSync(path.join(tmpdir(), 'agentcmd-home-')),
+          AGENTBRIDGE_HOME: childHome,
           PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}`,
         },
       });
@@ -325,6 +406,7 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
     rmSync(box, { recursive: true, force: true });
     rmSync(elsewhere, { recursive: true, force: true });
     rmSync(vault, { recursive: true, force: true });
+    rmSync(childHome, { recursive: true, force: true });
   }
 });
 
