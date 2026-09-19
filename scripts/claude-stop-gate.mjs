@@ -352,6 +352,23 @@ const allDrift = protectedDrift(root, snapshot);
  * attribute rules, so it answers the question actually being asked. If git
  * cannot answer, the entry stays BLOCKING: unknown is not clean.
  */
+/**
+ * Is this path ignored by git -- so it can NEVER be committed?
+ *
+ * Asked of git rather than by reading .gitignore, because git owns the pattern
+ * grammar and precedence. Unknown is NOT ignored: a throw keeps the caller on
+ * the strict path.
+ */
+function isIgnored(rel) {
+  try {
+    const out = runGit(['ls-files', '--ignored', '--exclude-standard', '--others', '--', rel],
+      { cwd: root, encoding: 'utf8' });
+    return String(out).trim() !== '';
+  } catch {
+    return false;
+  }
+}
+
 function isCommittedWork(rel) {
   try {
     /*
@@ -438,9 +455,32 @@ const driftDecisions = allDrift.map((d) => {
      * src/claudeGuard.mjs and nothing refused. Committing that must not buy
      * silence.
      */
+    /*
+     * AN IGNORED SELF-CONFIG CAN NEVER BE COMMITTED, SO DEMANDING IT WAS AN
+     * UNRECOVERABLE BLOCK -- the same failure as the one above, from the fix
+     * for the one above.
+     *
+     * `.claude/settings.local.json` is named in .gitignore and `.claude/` is a
+     * protected PREFIX, so it is drift-tracked. After the ignored-path fix it
+     * could never be `landed`: not committable (gitignored, and a git write
+     * naming a `.claude/` path is refused anyway) and the snapshot re-mints
+     * only at SessionStart. Every turn blocked, no route to clear it.
+     *
+     * AND CLAUDE CODE WRITES THAT FILE ITSELF when the operator approves a
+     * permission mid-turn, so this would fire on an ordinary approval and
+     * strand the session. Found by blind audit, one commit after I introduced
+     * it while closing the opposite hole.
+     *
+     * SO THE TEST IS THE STRONGEST PROPERTY THE FILE CAN ACTUALLY HAVE. A
+     * tracked config offers committed AND armed, and both are demanded. An
+     * ignored one can only ever offer armed, so armed is what is asked -- and
+     * the announcement for it must not borrow the committed wording, because
+     * "attributable and diffable" is false for a file in no history. That is
+     * the sentence the previous audit caught; it is not being re-used here.
+     */
     landed: !granted
       && d.now !== 'deleted'
-      && isCommittedWork(d.file)
+      && (isCommittedWork(d.file) || (isGateSelfConfig(d.file) && isIgnored(d.file)))
       /*
        * THE GATE'S OWN CONFIG IS RELIEVED ONLY WHEN IT STILL ARMS THE GATE, and
        * that is a different question from who committed it.
@@ -477,11 +517,36 @@ if (landed.length) {
    * change is on the record, so this line IS the record from the gate's side.
    * Recorded rather than returned, like the grant notice below it.
    */
-  carriedNotice = `${carriedNotice ? `${carriedNotice}\n` : ''}`
-    + '[agentbridge:protected-control-committed] Protected controls differ from this session\'s '
-    + 'snapshot because they were COMMITTED -- by this session or another agent sharing the '
-    + 'worktree. Not blocking: a committed change is attributable and diffable, which is what the '
-    + `snapshot exists to guarantee. Recorded:\n${landed.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`;
+  /*
+   * TWO GROUPS, BECAUSE THEY ARE RELIEVED ON DIFFERENT GROUNDS AND ONE OF THEM
+   * IS NOT IN GIT AT ALL.
+   *
+   * A committed control is attributable and diffable, and that is the whole
+   * argument for not blocking it. An IGNORED self-config is relieved on a
+   * weaker property -- it still arms the gate -- and printing it under the
+   * committed wording would assert three things that are false for it: in
+   * history, diffable, revertible. That exact sentence, applied to a gitignored
+   * file, is what the previous audit called CRITICAL. It is not reused here.
+   */
+  const committed = landed.filter((d) => !(isGateSelfConfig(d.file) && isIgnored(d.file)));
+  const ignoredSelf = landed.filter((d) => isGateSelfConfig(d.file) && isIgnored(d.file));
+  const parts = [];
+
+  if (committed.length) {
+    parts.push('[agentbridge:protected-control-committed] Protected controls differ from this session\'s '
+      + 'snapshot because they were COMMITTED -- by this session or another agent sharing the '
+      + 'worktree. Not blocking: a committed change is attributable and diffable, which is what the '
+      + `snapshot exists to guarantee. Recorded:\n${committed.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
+  }
+  if (ignoredSelf.length) {
+    parts.push('[agentbridge:gate-config-ignored-but-armed] This gate\'s own configuration changed and '
+      + 'is GITIGNORED, so it is not in history, not diffable and not revertible -- the committed '
+      + 'relief does not apply and is not being claimed. It is not blocking only because it still '
+      + 'arms every control: the guard on all tools, this gate, and the session-start snapshot. '
+      + 'Claude Code writes this file when a permission is approved, which is why a block here has '
+      + `no recovery. Read it if you did not expect a change:\n${ignoredSelf.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
+  }
+  carriedNotice = [carriedNotice, ...parts].filter(Boolean).join('\n');
 }
 /**
  * Announce granted drift, GROUPED BY GRANT rather than repeated per file.

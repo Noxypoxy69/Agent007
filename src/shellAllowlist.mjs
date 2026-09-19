@@ -175,8 +175,31 @@ function isWriteFlagToken(token) {
     if (/[\\/]/.test(value) || /\.[A-Za-z0-9]+$/.test(value)) return true;
   }
 
+  /*
+   * A LONG FLAG RESOLVES BY PREFIX, AND THIS WAS THE ONE MATCHER IN THE FILE
+   * THAT NEVER LEARNED THAT. Sixth round of the same mistake.
+   *
+   * GNU getopt_long accepts any unambiguous abbreviation, and every sibling
+   * matcher here already resolves prefixes -- flagMatches, PATHSPEC_FILE_FLAGS,
+   * commitWidens, commitTakesValue. This one kept `includes(name)`. Measured
+   * through the shipped rail, and the file really was written:
+   *
+   *     sort --out=<path> package.json      ALLOWED, 948 bytes written
+   *     sort --out  <path> package.json     ALLOWED
+   *     sort --o=   <path> package.json     ALLOWED
+   *     sort --output=<path> package.json   DENY  (the only spelling covered)
+   *
+   * `sort --out=src/claudeGuard.mjs src/claudeGuard.mjs` is the in-place
+   * rewrite this file's own header calls the canonical attack, two characters
+   * short of the spelling that was denied.
+   *
+   * ERRING TOWARD REFUSAL, as with the git matchers: a prefix ambiguous to the
+   * tool is refused by the tool anyway, so matching it costs a caller nothing
+   * they could have run, and every refusal here has another spelling.
+   */
   const name = token.split('=')[0];
-  return WRITE_FLAG_LONG.includes(name);
+  if (name.length <= 2) return false;               // `--` is not an option
+  return WRITE_FLAG_LONG.some((f) => f.startsWith(name));
 }
 
 /** Flags that turn an otherwise-read-only git invocation into something else. */
@@ -428,6 +451,17 @@ const EMPTY_FLAG_SET = new Set();
  * `--no-all` is deliberately absent: it is the OPPOSITE, and it is not a prefix
  * of the entry below, so it stays allowed.
  */
+/**
+ * Push options that rewrite or destroy history on the far end.
+ *
+ * Separate from the force list because `push` has no tree to sweep -- what it
+ * damages is somebody else's branch. Prefix-resolved like every other long
+ * option, so `--forc` and `--del` are refused too.
+ */
+const PUSH_REWRITE_LONG = Object.freeze([
+  '--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete', '--prune',
+]);
+
 const GIT_SWEEP_LONG = Object.freeze(['--all', '--update', '--no-ignore-removal']);
 const GIT_FORCE_LONG = Object.freeze(['--force', '--discard-changes', '--hard', '--theirs', '--ours']);
 
@@ -785,8 +819,30 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        *
        * --force is checked explicitly here, and a leading `+` on a refspec is the
        * same thing spelled differently.
+       *
+       * AND THE SHORT CLUSTER REACHES IT, WHICH THIS BRANCH NEVER SAW. The
+       * cluster matcher built for exactly this -- GIT_FORCE_TOKEN -- was applied
+       * only to GIT_SWEEPS_TREE, and `push` lives in GIT_JUDGED_ABOVE, so it
+       * never consulted it. Measured through the shipped rail:
+       *
+       *     git push --dry-run --force <remote>   DENY, the force reason
+       *     git push --dry-run -qf <remote>       ALLOWED -- and the refusal
+       *                                           came from GIT, not from us
+       *
+       * A bare `-f` was denied only by ACCIDENT, by the unrelated write-flag
+       * matcher, with a refusal naming a mechanism that does not apply -- rule
+       * 18 from the inside. One extra letter and it was gone. `badRef` still
+       * catches master and main, so what this opened was a force push to any
+       * NON-default branch: the shared branches the other agents push to,
+       * including the one this work is on.
+       *
+       * The commit that wrote GIT_FORCE_TOKEN is titled "force, in every
+       * spelling it actually has". It only touched the sweep branch.
        */
-      if (/(^|\s)(--force|--force-with-lease|--mirror|--delete)(=|\s|$)/.test(command)) {
+      const pushOptions = gitOptionTokens(tokens, 'push');
+      const pushRewrites = (t) => GIT_FORCE_TOKEN.test(t)
+        || flagMatches(t, /^$/, PUSH_REWRITE_LONG);
+      if (pushOptions.some(pushRewrites)) {
         return { allowed: false, reason: 'a force, mirror or delete push rewrites history that is not this session\'s to rewrite' };
       }
       const badRef = tokens.slice(2).find((t) => /^\+/.test(t) || /^(master|main)$/.test(t) || /:(master|main)$/.test(t));
