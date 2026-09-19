@@ -162,6 +162,15 @@ test('A PUSHED UNAUDITED CONTROL COMMIT RETURNS A DECISION, NOT A MESSAGE', (t) 
     'and the reason must be the escalation, not some other refusal');
   assert.match(verdict.reason ?? '', /shellAllowlist/,
     'naming the file, or the reader cannot act on it');
+
+  /*
+   * AND IT IS NOT ALSO PASTED INTO systemMessage. The escalation rides along
+   * on OTHER exits so a red suite cannot swallow it; when the escalation is
+   * itself the reason, a second copy is noise, and noise is how a reader
+   * learns to skip both channels.
+   */
+  assert.doesNotMatch(verdict.systemMessage ?? '', /audit-escaped/,
+    'the escalation is the reason here, so it must not be duplicated as a notice');
 });
 
 test('A PUSHED DOCS COMMIT IS REPORTED BUT DOES NOT BLOCK', (t) => {
@@ -200,4 +209,56 @@ test('AN UNPUSHED CONTROL COMMIT DOES NOT BLOCK THE TURN THAT WROTE IT', (t) => 
   assert.notEqual(verdict.reason ?? '', undefined);
   assert.doesNotMatch(verdict.reason ?? '', /audit-escaped/,
     'unpushed work must not be escalated; the audit is ahead of the author');
+});
+
+test('A RED SUITE MUST NOT SWALLOW THE AUDIT ESCALATION', (t) => {
+  /*
+   * THE OTHER HALF OF THE DEFERRAL, AND IT WAS A HOLE RATHER THAN A DELAY.
+   *
+   * Deferring the escalation past the suite fixed the outage where an
+   * audit-coverage complaint exited before the tests ever ran. It also meant
+   * the reason lived in ONE variable across six intervening out() calls --
+   * zero-test-files, two stop-deadline paths, test-run-failed,
+   * tap-summary-invalid, tap-counts-refused -- each of which exits with only
+   * its own reason. auditEscalation returns notice:null when it blocks, so
+   * there was no second copy anywhere.
+   *
+   * And the next turn does not recover it: the retry Stop short-circuits on
+   * stop_hook_active. So a turn with a red suite SKIPPED the rule-20
+   * escalation outright -- and a red suite is exactly when somebody is most
+   * likely to push unaudited work and move on.
+   *
+   * The turn must still block on the test failure, because that is the more
+   * urgent verdict and the operator needs the real reason. But the
+   * escalation has to leave the process somewhere, and systemMessage is the
+   * channel that survives another block.
+   */
+  const env = guardedRepoWithRemote(t);
+  sessionStart(env, 'W4');
+
+  /* A committed, genuinely failing test: the suite goes red honestly. */
+  writeFileSync(path.join(env.root, 'test', 'red.test.mjs'),
+    'import test from "node:test";\nimport assert from "node:assert/strict";\n'
+    + 'test("this one really fails", () => { assert.equal(1, 2); });\n');
+  env.git('add', 'test/red.test.mjs');
+  env.git('commit', 'test/red.test.mjs', '-m', 'a test that fails');
+
+  pushUnauditedControl(env, 'a rail change nobody audited');
+
+  const verdict = stop(env, 'W4');
+  const seen = JSON.stringify(verdict);
+
+  /*
+   * Precondition asserted, not guarded (rule 6): if the run did not actually
+   * take an early exit, this proves nothing about the carry.
+   */
+  assert.doesNotMatch(verdict.reason ?? '', /audit-escaped/,
+    `this scenario needs the turn to block on something EARLIER than the escalation. ${seen}`);
+  assert.ok(verdict.decision === 'block',
+    `a red suite must still block the turn. ${seen}`);
+
+  assert.match(verdict.systemMessage ?? '', /audit-escaped/,
+    `the rule-20 escalation left no trace on a turn that blocked for another reason. ${seen}`);
+  assert.match(verdict.systemMessage ?? '', /shellAllowlist/,
+    `and it must still name the file, or the reader cannot act on it. ${seen}`);
 });

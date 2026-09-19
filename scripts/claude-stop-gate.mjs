@@ -189,7 +189,34 @@ let carriedNotice = null;
 let escalationBlock = null;
 const out = (reason) => {
   const decision = reason ? { decision: 'block', reason } : {};
-  if (carriedNotice) decision.systemMessage = carriedNotice;
+  /*
+   * THE ESCALATION RIDES ALONG ON WHATEVER EXIT HAPPENS FIRST.
+   *
+   * Found by blind audit, and it is worse than the "deferred" word suggests.
+   * Deferring the audit-coverage block to the end of the gate fixed one
+   * outage and opened another: SIX out() calls sit between where
+   * escalationBlock is assigned and where it is emitted -- zero-test-files,
+   * two stop-deadline paths, test-run-failed, tap-summary-invalid and
+   * tap-counts-refused. Each exits with only its own reason, and
+   * auditEscalation returns notice:null when it blocks, so the rule-20
+   * complaint existed in exactly one variable and that variable was dropped.
+   *
+   * AND IT IS NOT SEEN NEXT TURN EITHER. The retry Stop short-circuits on
+   * stop_hook_active with only a systemMessage, so a turn whose suite is red
+   * or over budget SKIPS the escalation entirely rather than postponing it --
+   * and a red suite is precisely when somebody is most likely to push
+   * unaudited work and move on.
+   *
+   * So it is attached here, once, rather than at six call sites: this is a
+   * property of leaving the gate, not of any particular reason for leaving,
+   * and patching the six would leave the seventh to whoever adds it next.
+   * Skipped when the reason IS the escalation, so the final
+   * out(escalationBlock) does not print itself twice.
+   */
+  const carry = (escalationBlock && reason !== escalationBlock)
+    ? [carriedNotice, escalationBlock].filter(Boolean).join('\n')
+    : carriedNotice;
+  if (carry) decision.systemMessage = carry;
   process.stdout.write(`${JSON.stringify(decision)}\n`);
   process.exit(0);
 };
