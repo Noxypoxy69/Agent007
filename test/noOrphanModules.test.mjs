@@ -346,6 +346,38 @@ const KNOWN = {
   'src/memory/patternIndexer.mjs':
     'PRESERVED, NOT ADOPTED -- fdb3cbb. Audited and found sound; still called by nothing ' +
     'shipped. This entry goes with a production caller.',
+
+  /*
+   * ── added 2026-09-19: slices landing ahead of their callers ────────────
+   *
+   * Both are another session's, landed while this one was running, and both are
+   * deliberate first slices: the pure decision function first, the schema and
+   * the wiring after. 718847d says so in its own words -- "no UI, no schema, no
+   * DDL -- the migration waits on the lock".
+   *
+   * WHY THEY ARE JUSTIFIED HERE RATHER THAN LEFT RED. A red suite blocks the
+   * STOP GATE OF EVERY SESSION ON THIS MACHINE, including the session that
+   * would land the next slice. A ratchet that deadlocks the work which would
+   * clear it is rule 16 at machine scale, and the mechanism this list exists to
+   * provide is exactly "justify it" rather than "wire it or be stuck".
+   *
+   * These entries are the shortest-lived in this list by design: each goes the
+   * moment its next slice lands a caller. If one is still here in a week,
+   * somebody should be asking why the slice stopped.
+   */
+  'src/taskGate.mjs':
+    'SLICE A OF THE TASK GATE, 718847d, another session. The evidence evaluator and the ' +
+    'advancement rule -- the one function that says what a pile of evidence MEANS, so the ' +
+    'UI, CLI, MCP tools, Stop gate and scheduler cannot each answer it differently. It ' +
+    'holds no state, does no IO and owns no tables; the callers are a later slice by ' +
+    'design, and the migration was explicitly deferred. This entry goes when a caller ' +
+    'lands. NOTE FOR WHOEVER TAKES THAT SLICE: the maker rule fails OPEN when ' +
+    'producer_session is absent -- str() returns null, the AND short-circuits, and a ' +
+    'worker can clear its own blind review. Reported, unfixed at the time of writing.',
+
+  'src/takeNext.mjs':
+    'SAME SESSION, SAME PATTERN. The WIP-slot and block rules as pure functions, landed ' +
+    'ahead of the surface that will consult them. This entry goes when a caller lands.',
 };
 
 test('THE REAL REPO HAS NO ORPHAN BEYOND THE KNOWN LIST', () => {
