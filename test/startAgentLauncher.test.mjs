@@ -468,65 +468,69 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     .join('\n');
 
   /*
-   * IS npm BEING RUN? ASK THE SHAPE, NOT THE POSITION, AND NOT THE SPELLING.
+   * ANY MENTION OF npm IN AN EXECUTABLE LINE IS REFUSED. FAIL CLOSED, ON
+   * PURPOSE, AFTER FOUR ATTEMPTS AT PRECISION EACH FAILED.
    *
-   * THIS MATCHER HAS NOW FAILED IN BOTH DIRECTIONS, ONCE EACH, AND BOTH
-   * FAILURES WERE FOUND BY BLIND AUDIT. The history is the argument for the
-   * version below, so it is written down rather than summarised.
+   * THE HISTORY IS THE ARGUMENT. Four versions, three auditors:
    *
-   * v1 was \bnpm\b. It OVER-BLOCKED: \b matches after a backslash, so
+   *   v1  \bnpm\b                  0 missed, over-blocked 4+ spellings
+   *   v2  command-position anchor   MISSED 8, all caught by v1
+   *   v3  "is it being run" shape   MISSED 7 AND over-blocked 6 -- worse
+   *                                 than v2 in both directions at once
+   *   v4  \bnpm\b again, deliberately
    *
-   *     set "PATH=%APPDATA%\npm;%PATH%"
+   * v3 is the one that settles it. I replaced v2 believing I had found the
+   * property rather than another vocabulary, and wrote two premises into the
+   * commit message. An auditor falsified BOTH:
    *
-   * -- an ordinary way to make claude findable, which executes nothing --
-   * failed with "agent.cmd must not EXECUTE npm". Four such spellings.
+   *   "an npm EXECUTABLE is named ... a full path to it is still running it"
+   *       NAMING IS NOT RUNNING. `if exist "%APPDATA%\npm\npm.cmd" set ...`,
+   *       `set "NPMEXE=...\npm.cmd"` and `del "...\npm.cmd"` all name it and
+   *       execute nothing.
    *
-   * v2 (mine) anchored on COMMAND POSITION: start of line, after & | (, or
-   * after call/start. It removed the over-block and opened EIGHT
-   * under-blocks, every one of which v1 caught:
+   *   "a path component is followed by a separator or a hyphen, never by
+   *    whitespace-then-letter"
+   *       `set "PATH=C:\Program Files\npm tools;%PATH%"` is a path component
+   *       followed by whitespace then a letter.
    *
-   *     cmd /c npm run start-agent        start /b npm run agent
-   *     cmd.exe /c npm test               if exist claude.cmd npm run x
-   *     powershell -c "npm run x"         for /f %%i in ('npm run x') do ...
-   *     "C:\Program Files\nodejs\npm.cmd" run x
-   *     %APPDATA%\npm\npm.cmd run x
+   * And it missed npm's own global flags, which come BEFORE the subcommand
+   * (`npm --silent run`, `npm -s run`), a quoted invocation (`"npm" run` --
+   * which v2 had handled and v3 dropped), a caret line-continuation, and
+   * `npm.ps1`, because rule 1 enumerated .cmd and .exe. A spelling list, in
+   * the same line whose comment cited rule 19 against spelling lists.
    *
-   * That is the shape CLAUDE.md warns about twice over. Rule 19: a list of
-   * names fails in both directions, and "command position" turned out to be
-   * a list of the separators I happened to think of. Rule 8: my commit
-   * message quoted "fix the matcher, not the five strings the prober tried"
-   * and then pinned exactly the four spellings the matcher matched.
+   * THE REAL LESSON IS NOT "TRY HARDER". Deciding whether a batch file
+   * executes npm is parsing cmd.exe -- quoting, carets, PATHEXT, variable
+   * expansion, `for /f` subshells, `call`, `start`, and indirection through
+   * node running npm-cli.js. A regex cannot do it, and every narrowing that
+   * removes a false positive removes true positives with it. Four data
+   * points, each found by someone who did not write the previous one.
    *
-   * v3 asks the question the assertion actually makes -- is npm being RUN --
-   * as a property of the text rather than of its surroundings:
+   * SO THE GATE STOPS PRETENDING TO BE PRECISE AND FAILS CLOSED. Any npm in
+   * an executable line is refused. The direction matters: a MISS ships a
+   * launcher that brings claude up headless, which is the day-long outage
+   * d0e3f88 fixed. An OVER-BLOCK is a red test, a human reading one line,
+   * and either rewriting it or narrowing this deliberately with evidence.
+   * One of those failures is silent.
    *
-   *   1. an npm EXECUTABLE is named: npm.cmd or npm.exe, however it is
-   *      reached. A full path to it is still running it.
-   *   2. bare npm is followed by whitespace and a letter, i.e. a subcommand.
+   * WHAT IT COSTS TODAY: NOTHING, MEASURED. agent.cmd mentions npm three
+   * times and all three are in comments, which the stripping above removes.
+   * The over-blocks below are all hypothetical launchers, not this one.
    *
-   * A path component is what the false positives all were, and a path
-   * component is followed by a separator or a hyphen -- `\npm;`, `npm-shim`,
-   * `npm-bot` -- never by whitespace-then-letter. No separator vocabulary,
-   * no subcommand vocabulary: `npm frobnicate` is caught without anyone
-   * adding "frobnicate" to a list.
-   *
-   * Measured against all twelve running spellings and all four
-   * non-running ones: 0 missed, 0 over-blocked. v1 was 0 missed / 4
-   * over-blocked; v2 was 8 missed / 0 over-blocked.
+   * THE STRIPPING IS WHAT MAKES THIS LIVABLE, so it is pinned by its own
+   * assertion below. Without it the gate would refuse agent.cmd for
+   * explaining, in prose, why npm was abandoned -- which is hollow gate 13,
+   * a check matching its own subject's commentary.
    */
-  const RUNS_NPM = /\bnpm(?:\.cmd|\.exe)\b|\bnpm\b[ \t]+[A-Za-z]/i;
+  const RUNS_NPM = /\bnpm\b/i;
 
   assert.doesNotMatch(executable, RUNS_NPM,
-    'agent.cmd must not EXECUTE npm: npm pipes stdin and claude comes up headless, which is the bug d0e3f88 fixed');
+    'agent.cmd must not mention npm in an executable line: npm pipes stdin and claude comes up '
+    + 'headless, which is the bug d0e3f88 fixed. This gate fails CLOSED -- see the note above.');
 
   /*
-   * THE ADVERSARIAL SET IS PINNED, BOTH DIRECTIONS, AND IT IS THE REAL ONE.
-   *
-   * Every entry below was produced by an auditor defeating a previous
-   * version of this line, not invented here. Rule 8's actual instruction is
-   * that a probe bounds nothing -- so the answer is the shape rule above,
-   * and this table exists to stop the NEXT narrowing silently dropping a
-   * spelling somebody already demonstrated.
+   * EVERY SPELLING THREE AUDITORS DEMONSTRATED, all refused. Not invented
+   * here: each line defeated some previous version of this matcher.
    */
   const RUNS_IT = [
     'npm run start-agent',
@@ -542,18 +546,46 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     '"C:\\Program Files\\nodejs\\npm.cmd" run start-agent',
     '%APPDATA%\\npm\\npm.cmd run x',
     'npm frobnicate',
+    /* the seven v3 missed */
+    'npm --silent run start-agent',
+    'npm --prefix "%~dp0" run agent',
+    'npm -s run agent',
+    '"npm" run start-agent',
+    'npm.ps1 run agent',
+    'node "%APPDATA%\\npm\\node_modules\\npm\\bin\\npm-cli.js" run agent',
   ];
-  const DOES_NOT = [
-    'set "PATH=%APPDATA%\\npm;%PATH%"',
-    'set "PATH=%APPDATA%\\npm"',
-    'set "X=C:\\tools\\npm-shim"',
-    'claude --agent npm-bot',
-  ];
-
   for (const runsIt of RUNS_IT) {
-    assert.match(runsIt, RUNS_NPM, `"${runsIt}" RUNS npm and must be refused`);
+    assert.match(runsIt, RUNS_NPM, `"${runsIt}" must be refused`);
   }
-  for (const doesNot of DOES_NOT) {
-    assert.doesNotMatch(doesNot, RUNS_NPM, `"${doesNot}" does not execute npm and must be allowed`);
+
+  /*
+   * ACCEPTED OVER-BLOCKS, ASSERTED SO THEY ARE A DECISION AND NOT A
+   * SURPRISE. Each of these executes nothing and is refused anyway. If one
+   * ever needs to be written in agent.cmd, this gate goes red, somebody
+   * reads one line, and narrows it deliberately with the evidence in hand --
+   * which is the review this matcher's history says must not be skipped.
+   */
+  for (const overBlocked of [
+    'if exist "%APPDATA%\\npm\\npm.cmd" set "PATH=%APPDATA%\\npm;%PATH%"',
+    'set "NPMEXE=%APPDATA%\\npm\\npm.cmd"',
+    'set "PATH=%APPDATA%\\npm;%PATH%"',
+    'set "PATH=C:\\Program Files\\npm tools;%PATH%"',
+    'findstr /c:"npm run" package.json',
+    'claude --agent npm-bot',
+  ]) {
+    assert.match(overBlocked, RUNS_NPM,
+      `"${overBlocked}" executes nothing but is refused ANYWAY -- fail-closed, by decision`);
   }
+
+  /*
+   * THE POSITIVE CONTROL, and the reason the whole thing is usable: the real
+   * launcher passes. It mentions npm three times in prose and the stripping
+   * removes all three, so a fail-closed matcher is not a permanently red
+   * gate (rule 16).
+   */
+  assert.match(readFileSync(path.join(REPO, 'agent.cmd'), 'utf8'), /npm/i,
+    'precondition: agent.cmd DOES discuss npm, so the stripping is load-bearing');
+  assert.doesNotMatch(executable, /npm/i,
+    'and after stripping rem/echo lines there is none left -- if this fails the '
+    + 'launcher gained a real npm line and somebody must look');
 });
