@@ -29,7 +29,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, linkSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, linkSync, cpSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -502,55 +502,89 @@ test('--status REPORTS UNKNOWN RATHER THAN A FLEET OF DEAD WATCHERS, through the
   }
 });
 
-test('THE REPORT COSTS ONE PROCESS-TABLE QUERY, NOT ONE PER WATCHER', () => {
+test('THE REPORT MAKES ONE PROCESS-TABLE QUERY, NOT ONE PER WATCHER', (t) => {
   /*
-   * THE DEFECT THAT MADE THE FEATURE DEFEAT ITSELF. alive() spawned tasklist
-   * per pid; --status and the SessionStart report both call it in a loop.
-   * Measured by blind audit: 20 live records took 16,620ms -- inside a
-   * SessionStart hook budgeted at 30s that has already spent up to 60s on
-   * register-session. The more agents on the machine, the likelier the report
-   * dies before printing, and the many-agent case is the one it exists for.
+   * THE DEFECT: alive() spawned tasklist once per pid, and both --status and
+   * the SessionStart dark-watcher report call it in a loop. The report got
+   * slower exactly as the fleet grew -- and the many-agent case is the one it
+   * exists for.
    *
-   * THE COST OF A SPAWN IS A PROPERTY OF THIS MACHINE, NOT OF THE CODE, so it
-   * is measured here rather than typed (rule 21). A literal millisecond
-   * budget would be a fact about whoever's laptop wrote it, and would go red
-   * on a loaded CI box while the defect was absent.
+   * THIS TEST USED TO MEASURE TIME, AND A BLIND AUDIT CAUGHT IT PASSING
+   * AGAINST THE DEFECT. It timed one tasklist spawn and asserted that eleven
+   * more watchers added less than two of those. On a COLD machine the
+   * IMAGENAME query it used as the yardstick ranged 138ms-2008ms, while the
+   * per-pid query the defect actually makes is a stable ~150ms -- so the
+   * budget ballooned past the thing it was bounding and the gate reported
+   * pass after spending 39.8 seconds watching the bug happen.
    *
-   * The shape of the claim is what matters: adding ELEVEN live watchers must
-   * not add eleven process-table queries. Pre-fix the delta is ~11x one
-   * query; post-fix it is ~0. Two is a wide margin that still fails loudly.
+   * Two different prices, and the volatile one was the yardstick. Worse, the
+   * one run that matters most -- "watch it fail", performed once, per rule 1
+   * -- is the run most likely to be cold.
+   *
+   * SO IT COUNTS INSTEAD OF TIMING. The claim was never about milliseconds;
+   * it is that the number of process-table queries does not scale with the
+   * number of watchers. That is an integer, and an integer cannot be flaky.
+   *
+   * HOW THE COUNT IS TAKEN, without mocking the subject: a copy of node.exe
+   * named tasklist.exe goes first on the child's PATH, and NODE_OPTIONS gives
+   * it a --require hook that appends one byte per invocation. The shipped
+   * script runs its real spawnSync; the thing it finds really runs and really
+   * records that it ran. The hook counts only when its own execPath is
+   * tasklist.exe, so the poll script and its other children are not counted.
+   *
+   * The stand-in exits non-zero, so the watchers read UNKNOWN. That is
+   * irrelevant here: this test asserts how many times the probe was called,
+   * not what it answered.
    */
-  const probe = () => {
-    const t0 = Date.now();
-    spawnSync('tasklist', ['/FI', 'IMAGENAME eq node.exe', '/NH', '/FO', 'CSV'],
-      { encoding: 'utf8', windowsHide: true });
-    return Date.now() - t0;
-  };
-  probe();                                        // warm the loader; first spawn is not typical
-  const queryMs = Math.min(probe(), probe(), probe());
-  assert.ok(queryMs > 0, 'the cost unit must be measured, not assumed');
+  const dir = mkdtempSync(path.join(tmpdir(), 'tlcount-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
 
-  const live = (n) => {
-    const recs = {};
-    for (let i = 0; i < n; i += 1) {
-      recs[`claude-${i}`] = { pid: process.pid, agentId: `a-${i}`, sessionId: `claude-${i}`,
-        startedAt: ago(600), lastCycleAt: new Date().toISOString(), cycles: 4 };
-    }
-    return withHome(recs);
-  };
-  const timed = (home) => {
-    const t0 = Date.now();
-    try { runStatus(home); } finally { rmSync(home, { recursive: true, force: true }); }
-    return Date.now() - t0;
-  };
+  const counter = path.join(dir, 'counter.cjs');
+  writeFileSync(counter, [
+    "const p = require('path');",
+    "const f = require('fs');",
+    "if (p.basename(process.execPath).toLowerCase() === 'tasklist.exe') {",
+    "  try { f.appendFileSync(process.env.TASKLIST_COUNTER, 'x'); } catch { /* ignore */ }",
+    '}',
+    '',
+  ].join('\n'));
 
-  const one = timed(live(1));
-  const twelve = timed(live(12));
-  const added = twelve - one;
+  const shim = path.join(dir, 'tasklist.exe');
+  try { linkSync(process.execPath, shim); } catch { cpSync(process.execPath, shim); }
 
-  assert.ok(added < queryMs * 2,
-    `eleven more watchers added ${added}ms, and one process-table query costs ${queryMs}ms here. `
-    + 'That is a per-record query: the report scales with the fleet it is meant to survey.');
+  const countFile = path.join(dir, 'count.txt');
+  writeFileSync(countFile, '');
+
+  const recs = {};
+  for (let i = 0; i < 12; i += 1) {
+    recs[`claude-${i}`] = {
+      pid: process.pid, agentId: `a-${i}`, sessionId: `claude-${i}`,
+      startedAt: ago(600), lastCycleAt: new Date().toISOString(), cycles: 4,
+    };
+  }
+  const home = withHome(recs);
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+
+  const env = withPath({ ...process.env, AGENTBRIDGE_HOME: home }, dir);
+  env.NODE_OPTIONS = `--require ${JSON.stringify(counter)}`;
+  env.TASKLIST_COUNTER = countFile;
+
+  const r = spawnSync(process.execPath, [POLL, '--status'],
+    { cwd: REPO, encoding: 'utf8', timeout: 120_000, env });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+
+  const calls = readFileSync(countFile, 'utf8').length;
+
+  /*
+   * Precondition asserted, not guarded (rule 6): if the shim never ran, the
+   * count is zero for an uninteresting reason and proves nothing.
+   */
+  assert.ok(calls >= 1,
+    `the tasklist stand-in was never invoked, so this test measured nothing. ${out}`);
+
+  assert.equal(calls, 1,
+    `twelve watchers cost ${calls} process-table queries. The report scales with the fleet `
+    + 'it is meant to survey, which is what made it time out on the machines that need it.');
 });
 
 /* ── the two call sites, which the tri-state changed in OPPOSITE directions ──
@@ -587,7 +621,29 @@ test('AN UNCHECKABLE PID DOES NOT GET A SECOND SUPERVISOR DETACHED AGAINST IT', 
    * nothing can ever reach.
    */
   const home = mkdtempSync(path.join(tmpdir(), 'rival-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
+  /*
+   * REAP BEFORE REMOVING THE STORE, OR A FAILING RUN LEAVES AN IMMORTAL
+   * POLLER.
+   *
+   * Found by blind audit, with the evidence still running on the operator's
+   * machine: a detached supervisor from THIS fixture, started four minutes
+   * before the commit was authored, out of the shared worktree. When this
+   * test fails -- against the parent, or under the mutation it exists to
+   * catch -- sessionStart runs to completion and spawns a real detached
+   * poller. t.after then deleted the temp home and nothing killed the child.
+   *
+   * The pid record is the only thing that knows about it, so it must be read
+   * BEFORE the directory goes. A test whose failure mode is the exact hazard
+   * its own docstring is about has no business shipping.
+   */
+  t.after(() => {
+    let spawned = null;
+    try { spawned = JSON.parse(readFileSync(path.join(home, 'polls', 'claude-rival.json'), 'utf8')); } catch { /* none */ }
+    if (spawned && Number.isInteger(spawned.pid) && spawned.pid !== process.pid) {
+      try { process.kill(spawned.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    rmSync(home, { recursive: true, force: true });
+  });
   mkdirSync(path.join(home, 'polls'), { recursive: true });
   const token = path.join(home, 'token.txt');
   writeFileSync(token, 'not-a-real-token\n');
@@ -618,41 +674,171 @@ test('AN UNCHECKABLE PID DOES NOT GET A SECOND SUPERVISOR DETACHED AGAINST IT', 
     `the run must reach the liveness check, not bail earlier -- otherwise this proves nothing. ${out}`);
 });
 
-test('AN UNCHECKABLE PID IS STILL SIGNALLED AT SESSION END', async (t) => {
+test('AN UNIDENTIFIABLE PID IS NOT TERMINATED AT SESSION END', async (t) => {
   /*
-   * The opposite default, for the opposite cost. Here "could not tell" must
-   * NOT mean "leave it": sessionEnd deletes the pid record moments later, so
-   * a supervisor skipped here survives with nothing on disk pointing at it.
-   * A signal to a pid that turns out to be dead throws and is caught, which
-   * is free; the skipped signal is permanent.
+   * THIS TEST ASSERTED THE OPPOSITE FOR ONE COMMIT, AND THE OPPOSITE WAS
+   * DESTRUCTIVE.
    *
-   * The victim is a REAL detached node process, not a planted number, and the
-   * assertion is that it is gone -- rule 4: the far end, not a proxy for it.
+   * I had `alive(rec.pid) !== false` here, reasoning that a signal to a dead
+   * pid throws and is caught, so trying costs nothing. A blind audit showed
+   * what that actually does: it TERMINATED A LIVE, UNRELATED, NON-NODE
+   * PROCESS whose pid happened to sit in a stale poll record.
+   *
+   *     PARENT   victim pid=21820 PING.EXE -> STILL-RUNNING
+   *     COMMIT   victim pid=32272 PING.EXE -> EXITED code=1
+   *
+   * The reasoning was wrong at its root: this branch is reached only when we
+   * CANNOT tell, and process.kill(pid, 0) has already proved something is
+   * running under that pid. On Windows SIGTERM is TerminateProcess -- no
+   * handler, no veto. And pid reuse reaches this with no probe failure at
+   * all, which is the open defect on this file; `!== false` promoted it from
+   * a reporting error to a destructive one.
+   *
+   * The victim here is deliberately NOT a node process, because that is the
+   * case that proves the point: nothing about it belongs to this project.
    */
-  const home = mkdtempSync(path.join(tmpdir(), 'sigterm-'));
+  const home = mkdtempSync(path.join(tmpdir(), 'nokill-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   mkdirSync(path.join(home, 'polls'), { recursive: true });
 
-  const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
-    { stdio: 'ignore' });
-  const exited = new Promise((resolve) => { victim.on('exit', () => resolve(true)); });
+  /* ping loops for ~30s without being node, and needs no cleanup if it survives. */
+  const victim = spawn('ping', ['-n', '30', '127.0.0.1'], { stdio: 'ignore' });
+  let exited = false;
+  victim.on('exit', () => { exited = true; });
   t.after(() => { try { victim.kill('SIGKILL'); } catch { /* already gone */ } });
+  await new Promise((r) => { setTimeout(r, 300); });
 
-  writeFileSync(path.join(home, 'polls', 'claude-victim.json'),
-    JSON.stringify({ pid: victim.pid, agentId: 'code-a', sessionId: 'claude-victim', startedAt: ago(600) }));
+  assert.doesNotThrow(() => process.kill(victim.pid, 0), 'precondition: the victim is running');
 
-  /* Precondition asserted, not assumed (rule 6): it must be alive to prove killed. */
-  assert.doesNotThrow(() => process.kill(victim.pid, 0), 'the victim never started');
+  const pidFile = path.join(home, 'polls', 'claude-victim.json');
+  writeFileSync(pidFile, JSON.stringify({
+    pid: victim.pid, agentId: 'code-a', sessionId: 'claude-victim', startedAt: ago(600),
+  }));
 
-  spawnSync(process.execPath, [POLL, '--session-end'], {
-    cwd: REPO, encoding: 'utf8', timeout: 60_000,
+  const r = spawnSync(process.execPath, [POLL, '--session-end'], {
+    cwd: REPO,
+    encoding: 'utf8',
+    timeout: 60_000,
     input: JSON.stringify({ session_id: 'victim' }),
     env: withPath({ ...process.env, AGENTBRIDGE_HOME: home,
       AGENTBRIDGE_TOKEN_FILE: path.join(home, 'no-such-token.txt') }, brokenProbePath(t)),
   });
 
+  await new Promise((res) => { setTimeout(res, 500); });
+  assert.equal(exited, false,
+    'session end TERMINATED a live non-node process because it could not identify the pid');
+
+  /*
+   * AND THE RECORD SURVIVES. Declining to signal is only safe if the thing we
+   * declined to stop stays visible -- deleting the record is what would turn
+   * it into an orphan nothing can find, which is the hazard that pushed me
+   * into killing it in the first place.
+   */
+  assert.ok(existsSync(pidFile),
+    'the record was deleted for a supervisor we chose not to stop, so --status can no longer see it');
+  assert.match(`${r.stdout ?? ''}${r.stderr ?? ''}`, /could NOT confirm/,
+    'and it must say so, rather than reporting a clean stop it did not perform');
+});
+
+test('a CONFIRMED live supervisor is still stopped at session end', async (t) => {
+  /*
+   * THE POSITIVE CONTROL (rule 5). Refusing to kill what we cannot identify
+   * is only correct if we still kill what we CAN -- otherwise session end
+   * stops stopping anything and every session leaks its poller.
+   *
+   * No broken probe here: tasklist answers, the pid is a real node process,
+   * so alive() returns true rather than null.
+   */
+  const home = mkdtempSync(path.join(tmpdir(), 'dokill-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(path.join(home, 'polls'), { recursive: true });
+
+  const victim = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const exited = new Promise((resolve) => { victim.on('exit', () => resolve(true)); });
+  t.after(() => { try { victim.kill('SIGKILL'); } catch { /* already gone */ } });
+
+  const pidFile = path.join(home, 'polls', 'claude-live.json');
+  writeFileSync(pidFile, JSON.stringify({
+    pid: victim.pid, agentId: 'code-a', sessionId: 'claude-live', startedAt: ago(600),
+  }));
+  assert.doesNotThrow(() => process.kill(victim.pid, 0), 'precondition: the supervisor is running');
+
+  spawnSync(process.execPath, [POLL, '--session-end'], {
+    cwd: REPO,
+    encoding: 'utf8',
+    timeout: 60_000,
+    input: JSON.stringify({ session_id: 'live' }),
+    env: { ...process.env, AGENTBRIDGE_HOME: home,
+      AGENTBRIDGE_TOKEN_FILE: path.join(home, 'no-such-token.txt') },
+  });
+
   const done = await Promise.race([exited,
     new Promise((resolve) => { setTimeout(() => resolve(false), 10_000); })]);
-  assert.equal(done, true,
-    'the supervisor outlived the session end that deleted its record -- nothing can stop it now');
+  assert.equal(done, true, 'a confirmed live node supervisor must still be stopped');
+  assert.equal(existsSync(pidFile), false, 'and its record removed, because it really was stopped');
+});
+
+test('A LIVE PID THAT IS NOT NODE READS DEAD -- the node-ness check is load-bearing', async (t) => {
+  /*
+   * A MUTATION AN AUDITOR FOUND UNCAUGHT: `return live.has(pid)` -> `return
+   * true` left all 24 tests green. That membership test is the whole point of
+   * liveNodePids, and it is what limits the blast radius of a recycled pid --
+   * so the one line protecting session end from signalling a stranger had
+   * nothing falsifying it.
+   *
+   * It survived because every fixture used either process.pid (a real node)
+   * or 999999, and 999999 is rejected by process.kill(pid, 0) BEFORE tasklist
+   * is ever consulted. So no test ever reached the membership question.
+   *
+   * This one does: a real, live, NON-node pid, with the probe working.
+   */
+  const home = mkdtempSync(path.join(tmpdir(), 'notnode-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(path.join(home, 'polls'), { recursive: true });
+
+  const stranger = spawn('ping', ['-n', '30', '127.0.0.1'], { stdio: 'ignore' });
+  t.after(() => { try { stranger.kill('SIGKILL'); } catch { /* already gone */ } });
+  await new Promise((r) => { setTimeout(r, 300); });
+  assert.doesNotThrow(() => process.kill(stranger.pid, 0), 'precondition: the stranger is running');
+
+  writeFileSync(path.join(home, 'polls', 'claude-stranger.json'), JSON.stringify({
+    pid: stranger.pid, agentId: 'code-a', sessionId: 'claude-stranger',
+    startedAt: ago(600), lastCycleAt: new Date().toISOString(), cycles: 4,
+  }));
+
+  const r = runStatus(home);
+  assert.match(r.out, /DEAD/,
+    `a pid held by ping.exe is not our watcher, so the watcher is gone. ${r.out}`);
+  assert.doesNotMatch(r.out, /HEALTHY/,
+    `a live pid that is not node was reported as a healthy watcher. ${r.out}`);
+  assert.equal(r.status, 1, r.out);
+});
+
+test('A RECORD WITH NO PID READS DEAD, NOT UNKNOWN', async () => {
+  /*
+   * The other uncaught mutation: `return false` -> `return null` for a
+   * missing or malformed pid, which left every test green.
+   *
+   * This case is load-bearing and the script says so in its own comment: a
+   * crashed poller rewrites its record WITHOUT a pid, and it must read dead.
+   * Under the mutation it reads unknown -- and sessionStart's `!== false`
+   * then refuses to start a supervisor for that session at all, so the
+   * session is never polled and the record never changes. A permanent,
+   * self-sustaining silence.
+   *
+   * The unit tests could not reach it: they pass pidAlive in directly, so
+   * alive() never runs. This drives the shipped script.
+   */
+  const home = withHome({
+    'claude-nopid': {
+      agentId: 'code-a', sessionId: 'claude-nopid',
+      startedAt: ago(7200), lastCycleAt: new Date().toISOString(), cycles: 4,
+    },
+  });
+  try {
+    const r = runStatus(home);
+    assert.match(r.out, /DEAD/,
+      `a record naming no pid is a crashed poller, not an unanswerable question. ${r.out}`);
+    assert.doesNotMatch(r.out, /UNKNOWN/, r.out);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

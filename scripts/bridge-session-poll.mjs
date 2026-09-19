@@ -188,7 +188,8 @@ const STALL_AFTER_CYCLES = 2;
  * which is the lesson classifyCycle was extracted for.
  *
  * @param {object|null} rec       the parsed .json poll record, or null
- * @param {{now:number, pidAlive:boolean, pollSeconds?:number}} ctx
+ * @param {{now:number, pidAlive:boolean|null, pollSeconds?:number}} ctx -- pidAlive is
+ *        TRI-STATE: true, false, or null for "the probe could not answer".
  * @returns {{state:string, detail:string, wrong:boolean}}
  *   healthy   marked a cycle recently and the process is up
  *   starting  detached, not yet through its first cycle
@@ -841,7 +842,46 @@ async function sessionEnd() {
    * ever stop -- sessionEnd then deletes its record, and the hazard this file
    * already warns about becomes real.
    */
-  if (rec && alive(rec.pid) !== false) { try { process.kill(rec.pid, 'SIGTERM'); } catch { /* going away regardless */ } }
+  /*
+   * ONLY A CONFIRMED LIVE NODE PROCESS IS SIGNALLED. `=== true`, not
+   * `!== false`.
+   *
+   * THIS LINE WAS `!== false` FOR ONE COMMIT AND IT WAS DESTRUCTIVE. A blind
+   * audit demonstrated it against a real non-node victim: put a live
+   * `ping.exe` pid in a stale poll record, break the process-table probe, run
+   * --session-end, and the commit TERMINATED IT. The parent left it alone.
+   *
+   *     PARENT 8e9908e   victim pid=21820 PING.EXE -> STILL-RUNNING
+   *     COMMIT 50470d4   victim pid=32272 PING.EXE -> EXITED code=1
+   *
+   * I had reasoned "a signal to a dead pid throws and is caught, so trying is
+   * free". That is true only if the pid is DEAD, and this branch exists
+   * precisely for the case where we cannot tell -- where process.kill(pid, 0)
+   * has ALREADY PROVED something is running under that pid. On Windows
+   * SIGTERM is TerminateProcess, so there is no handler and no veto: whatever
+   * holds the pid dies.
+   *
+   * So the safe default was applied to the wrong risk. The two costs are not
+   * comparable:
+   *
+   *   skip the signal   an orphaned poller survives -- visible in --status,
+   *                     stoppable by hand, bounded.
+   *   send the signal   an unrelated process on the operator's machine is
+   *                     destroyed, silently, with no record of what it was.
+   *
+   * Pid reuse makes this reachable without any probe failure at all: a record
+   * naming a pid that has since been recycled is exactly this situation. That
+   * is the open D3 on this file, and `!== false` turned it from a reporting
+   * error into a destructive one.
+   *
+   * The record is DELIBERATELY NOT DELETED in the unknown case below, so a
+   * poller we declined to stop stays discoverable instead of becoming the
+   * untraceable orphan that skipping the signal was supposed to avoid.
+   */
+  const supervisorLiveness = rec ? alive(rec.pid) : false;
+  if (supervisorLiveness === true) {
+    try { process.kill(rec.pid, 'SIGTERM'); } catch { /* going away regardless */ }
+  }
 
   const tokenFile = String(env.AGENTBRIDGE_TOKEN_FILE ?? '').trim() || DEFAULT_TOKEN_FILE;
   const r = spawnSync(process.execPath, [
@@ -849,7 +889,20 @@ async function sessionEnd() {
     ...(fs.existsSync(tokenFile) ? ['--token-file', tokenFile] : []),
   ], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 30_000 });
 
-  try { fs.rmSync(pidFile, { force: true }); } catch { /* best effort */ }
+  /*
+   * KEEP THE RECORD WHEN WE DECLINED TO STOP IT. Deleting it here is what
+   * turns "a poller we chose not to signal" into "a poller nothing can find":
+   * --status reads this directory, so removing the file makes the process
+   * invisible to the one command that would report it.
+   */
+  if (supervisorLiveness === null) {
+    say(`agentbridge poll: could NOT confirm whether pid ${rec?.pid ?? '?'} is our supervisor, `
+      + `so it was not signalled and ${sessionId}'s record was kept. If a poller is still `
+      + 'running, --status will keep naming it; stop it by hand. Refusing to TerminateProcess '
+      + 'a pid we cannot identify is deliberate -- it may not be ours.');
+  } else {
+    try { fs.rmSync(pidFile, { force: true }); } catch { /* best effort */ }
+  }
 
   if (!rec) { say(`agentbridge poll: nothing was polling for ${sessionId}`); return; }
   say(r.status === 0
