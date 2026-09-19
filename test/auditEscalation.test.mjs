@@ -135,6 +135,48 @@ test('sha comparison is case- and whitespace-insensitive, so a real rev-list mat
     'an uppercase entry in the unpushed list must still match a lowercase sha');
 });
 
+test('DOCS AND DEPENDENCIES DO NOT STOP A TURN -- they are reported, not blocked', () => {
+  /*
+   * A LIVE OUTAGE, found by blind audit. isAuditBearing derives from
+   * PROTECTED_PATHS, which includes CLAUDE.md, package.json, package-lock.json
+   * and docs/. Those are worth protecting a WRITE to; they are not rule-20
+   * control changes needing a blind reader.
+   *
+   * Blocking on them stopped every turn on the operator's machine -- a
+   * documentation edit (feb9f64, CLAUDE.md) and an npm-script addition
+   * (43672dc, package.json) -- and because the block ran before the suite, it
+   * suppressed the test gate too. A gate that stops ordinary work gets
+   * switched off, and this one took the drift check with it.
+   */
+  for (const prose of [['CLAUDE.md'], ['package.json'], ['package-lock.json'], ['docs/ROADMAP.md']]) {
+    const r = auditEscalation({ commits: [commit('aaaa1111', { touched: prose })], error: null }, []);
+    assert.equal(r.block, null, `${prose[0]} must not stop a turn`);
+    assert.ok(r.notice, `${prose[0]} must still be REPORTED -- unaudited is worth saying`);
+    assert.match(r.notice, /audit-missing/);
+  }
+});
+
+test('decision logic DOES stop a turn, and a mixed commit blocks on the code half', () => {
+  /* The positive control: narrowing must not have turned the gate off. */
+  for (const control of ['src/claudeGuard.mjs', 'src/shellAllowlist.mjs', 'scripts/claude-stop-gate.mjs',
+    'src/policy.mjs', 'src/safeGit.mjs', 'bin/agentbridge-claude-guard.mjs']) {
+    const r = auditEscalation({ commits: [commit('bbbb2222', { touched: [control] })], error: null }, []);
+    assert.ok(r.block, `${control} is decision logic and must stop the turn`);
+  }
+
+  const mixed = auditEscalation(
+    { commits: [commit('cccc3333', { touched: ['CLAUDE.md', 'src/guardSession.mjs'] })], error: null }, [],
+  );
+  assert.ok(mixed.block, 'a commit touching prose AND control must still block on the control');
+});
+
+test('path spelling does not decide it: separators and case are normalised', () => {
+  const win = auditEscalation(
+    { commits: [commit('dddd4444', { touched: [`src${String.fromCharCode(92)}ClaudeGuard.mjs`] })], error: null }, [],
+  );
+  assert.ok(win.block, 'a backslash-separated, differently-cased control path must still block');
+});
+
 test('an empty range blocks nothing and says nothing', () => {
   const r = auditEscalation({ commits: [], error: null }, []);
   assert.equal(r.block, null);

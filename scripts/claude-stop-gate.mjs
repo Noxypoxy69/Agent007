@@ -185,6 +185,8 @@ try { input = JSON.parse(raw || '{}'); } catch { input = null; }
  * circuits the checks below it.
  */
 let carriedNotice = null;
+/* Set by the audit-coverage escalation; emitted after the suite, never before. */
+let escalationBlock = null;
 const out = (reason) => {
   const decision = reason ? { decision: 'block', reason } : {};
   if (carriedNotice) decision.systemMessage = carriedNotice;
@@ -625,7 +627,23 @@ try {
 
   const { block, notice } = auditEscalation(coverage, unpushed);
   if (notice) carriedNotice = carriedNotice ? `${carriedNotice}\n${notice}` : notice;
-  if (block) out(block);
+  /*
+   * DEFERRED, NOT IMMEDIATE -- BLOCKING HERE SUPPRESSED THE WHOLE GATE.
+   *
+   * Found by blind audit. out() calls process.exit(0), and this line sits
+   * ABOVE discoverTests and the suite spawn. So on any turn the escalation
+   * fired, the drift verdict and the entire test run never executed -- and on
+   * the retry Stop, stop_hook_active short-circuits with only a systemMessage.
+   * An audit-coverage complaint was therefore silencing the checks it is
+   * supposed to sit beside.
+   *
+   * That is the exact failure this commit's own message warned about -- a
+   * gate that makes ordinary work impossible taking the other layers down
+   * with it -- arriving through a door I did not check. The reason is carried
+   * to the end instead, so the suite still runs and the operator gets both
+   * verdicts.
+   */
+  escalationBlock = block;
 } catch { /* a reporter must never take the gate down */ }
 
 /* RECURSIVE, matching `npm test`'s test/** glob. A flat readdir runs a different
@@ -697,4 +715,6 @@ if (
 ) {
   out(`[agentbridge:tap-counts-refused] Test counts do not prove a clean reconciled run: ${JSON.stringify(counts)}.`);
 }
+if (escalationBlock) out(escalationBlock);
+
 out(null);

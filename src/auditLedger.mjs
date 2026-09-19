@@ -295,6 +295,56 @@ export function formatCoverage({ commits, malformed, error }) {
  *                                  that question could not be answered
  * @returns {{block: string|null, notice: string|null}}
  */
+/**
+ * The paths whose change is worth STOPPING A TURN over.
+ *
+ * NARROWER THAN isAuditBearing, DELIBERATELY, AND THE DIFFERENCE IS THE WHOLE
+ * POINT. isAuditBearing derives from PROTECTED_PATHS, which includes
+ * CLAUDE.md, package.json, package-lock.json and docs/. Those are sensible
+ * things to protect a WRITE to; they are not rule-20 control changes that
+ * need a blind reader.
+ *
+ * Blocking on them was a live outage: measured by audit, a documentation edit
+ * (feb9f64, CLAUDE.md) and an npm-script addition (43672dc, package.json)
+ * were stopping every turn on the operator's machine -- and, because the
+ * block ran before the suite, suppressing the test gate with them. A gate
+ * that stops ordinary work gets switched off, and this one takes the drift
+ * check down with it.
+ *
+ * So the REPORT still covers everything isAuditBearing covers -- a
+ * documentation change with no audit is still worth saying -- and only this
+ * list stops the turn. Decision logic, not prose and not dependencies.
+ */
+export const BLOCKING_CONTROLS = Object.freeze([
+  'src/claudeguard.mjs',
+  'src/guardsession.mjs',
+  'src/shellallowlist.mjs',
+  'src/policy.mjs',
+  'src/safegit.mjs',
+  'src/actionauthority.mjs',
+  'src/auditledger.mjs',
+  'src/verifier.mjs',
+  'src/gitindexlease.mjs',
+  'scripts/claude-stop-gate.mjs',
+  'bin/agentbridge-claude-guard.mjs',
+]);
+
+/** Does this commit touch decision logic, as opposed to prose or dependencies? */
+export function touchesBlockingControl(touched) {
+  return (Array.isArray(touched) ? touched : []).some((f) => {
+    /*
+     * The separator is built rather than written. A literal backslash in a
+     * string has been silently eaten by this session's shell three times
+     * tonight; fromCharCode cannot be, and this file already uses the idiom
+     * for the record separator above.
+     */
+    const norm = String(f).split(String.fromCharCode(92)).join('/')
+      .replace(/^\.\//, '')
+      .toLowerCase();
+    return BLOCKING_CONTROLS.includes(norm);
+  });
+}
+
 export function auditEscalation(coverage, unpushed) {
   /*
    * NORMALISE BEFORE DELEGATING, BECAUSE A THROW HERE DISABLES THE CONTROL
@@ -329,7 +379,14 @@ export function auditEscalation(coverage, unpushed) {
   }
 
   const local = new Set(unpushed.map((s) => String(s).trim().toLowerCase()));
-  const escaped = missing.filter((c) => !local.has(String(c.sha).trim().toLowerCase()));
+  const escaped = missing
+    .filter((c) => !local.has(String(c.sha).trim().toLowerCase()))
+    /*
+     * Only DECISION LOGIC stops a turn. A pushed, unaudited CLAUDE.md edit is
+     * still reported in the notice below; it does not block. See
+     * BLOCKING_CONTROLS for why that distinction exists and what it cost.
+     */
+    .filter((c) => touchesBlockingControl(c.touched));
   if (escaped.length === 0) return { block: null, notice: formatCoverage(safe) };
 
   const lines = [
