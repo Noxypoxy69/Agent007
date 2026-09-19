@@ -43,8 +43,11 @@
  *
  * WAIVED is the only state a human can cause directly, it requires owner
  * authority, and an agent may not waive its own required item -- see
- * `evaluateTask`, which drops a waiver whose grantor is the worker.
+ * `usableWaiver`, which is where all of that is enforced and where the limits
+ * of it are written down.
  */
+import { isOwnerId } from './ownerDecisions.mjs';
+
 export const ITEM_STATES = Object.freeze({
   PENDING: 'PENDING',
   RUNNING: 'RUNNING',
@@ -281,7 +284,61 @@ export function admissibleEvidence(type, task, evidence) {
  * as the maker rule: exact equality was defeated by one capital letter, and
  * by a task carrying no worker id at all.
  */
-function usableWaiver(waivers, itemId, task) {
+/*
+ * A WAIVER IS THE OTHER ROUTE TO A GREEN BOX, AND IT WAS THE WEAKER ONE.
+ *
+ * Every rule above is about refusing evidence. A waiver skips all of it --
+ * WAIVED counts as satisfied -- so this function is the whole of rule 20 on
+ * that path, and a blind audit found it admitting a waiver whose only
+ * credential was a non-empty `granted_by` string.
+ *
+ * Three things changed, and one deliberately did not.
+ *
+ *  1 THE GRANTOR MUST BE THE OWNER. `granted_by` used to be any non-empty
+ *    text, so `granted_by: "sess-worker"` cleared a blind review as long as
+ *    the task did not name that session (see 2). src/ownerDecisions.mjs has
+ *    had isOwnerId the whole time and this module never asked it. A waiver
+ *    is an owner decision; it should go through the same anchor as every
+ *    other one.
+ *
+ *  2 INDEPENDENCE FAILS CLOSED. The old check was
+ *
+ *        if (!differ(grantor, task?.worker_session)
+ *            && str(task?.worker_session) !== null) continue;
+ *
+ *    so when the task carried NO worker_session the guard was skipped
+ *    entirely and the worker waived its own blind review. That is the exact
+ *    inverse of the maker rule two functions up, which refuses when either
+ *    side is absent -- and this module's own comment claimed it "fails closed
+ *    ... and by a task carrying no worker id at all". It did not. Demonstrated
+ *    end to end through the CLI by the auditor.
+ *
+ *    Independence is a POSITIVE claim: to allow a waiver we must be able to
+ *    SEE that the grantor is not the worker. If the task names no worker at
+ *    all, we cannot see it, so it does not count.
+ *
+ *  3 AN EXPIRY IS REQUIRED AND BOUNDED, matching the override-grant channel
+ *    in guardSession, which has required one for months. A waiver with no end
+ *    is a permanent hole in a checklist nobody re-reads.
+ *
+ * WHAT THIS STILL DOES NOT DO, said plainly because the last version of this
+ * comment overclaimed and that is what the audit punished:
+ *
+ *   IT DOES NOT AUTHENTICATE THE GRANTOR. The waivers reaching this function
+ *   come from caller-supplied JSON -- today, a file the worker itself writes.
+ *   Nothing inside a pure evaluator can tell a real owner decision from a
+ *   worker typing `"granted_by": "danny"`. Authentication needs a trusted
+ *   store, and the schema for one is still behind the shared-DB lock.
+ *
+ *   So `granted_by` is a CLAIM, not a credential -- exactly like `auditor` in
+ *   the audit ledger, whose value is that its ABSENCE is visible. What these
+ *   three changes buy is that a forged waiver must now explicitly impersonate
+ *   the owner and carry a live expiry, which is attributable and arguable,
+ *   rather than being indistinguishable from ordinary bookkeeping.
+ */
+const MAX_WAIVER_MS = 30 * 24 * 60 * 60 * 1000;
+
+function usableWaiver(waivers, itemId, task, now = Date.now()) {
   for (const w of Array.isArray(waivers) ? waivers : []) {
     if (!w || typeof w !== 'object') continue;
     if (!sameId(w.item_id, itemId)) continue;
@@ -289,6 +346,7 @@ function usableWaiver(waivers, itemId, task) {
 
     const grantor = str(w.granted_by);
     if (grantor === null) continue;
+    if (!isOwnerId(grantor)) continue;
 
     /* Bound to this task, this attempt, and this candidate when one exists. */
     if (!sameId(w.task_id, task?.task_id)) continue;
@@ -298,9 +356,22 @@ function usableWaiver(waivers, itemId, task) {
     const candidate = str(task?.candidate_sha);
     if (candidate !== null && !sameId(w.candidate_sha, candidate)) continue;
 
-    /* The worker may not waive its own item, under either of its names. */
-    if (!differ(grantor, task?.worker_session) && str(task?.worker_session) !== null) continue;
-    if (!differ(grantor, task?.worker_id) && str(task?.worker_id) !== null) continue;
+    /*
+     * INDEPENDENCE, AS A POSITIVE CLAIM. At least one worker identity must be
+     * visible, and the grantor must differ from every identity that IS
+     * visible.
+     */
+    const workerSession = str(task?.worker_session);
+    const workerId = str(task?.worker_id);
+    if (workerSession === null && workerId === null) continue;
+    if (workerSession !== null && !differ(grantor, workerSession)) continue;
+    if (workerId !== null && !differ(grantor, workerId)) continue;
+
+    /* An expiry is required, must be in the future, and is bounded. */
+    const expires = Date.parse(str(w.expires_at) ?? '');
+    if (!Number.isFinite(expires)) continue;
+    if (expires <= now) continue;
+    if (expires - now > MAX_WAIVER_MS) continue;
 
     return w;
   }
@@ -398,7 +469,7 @@ function phasesOf(template) {
  *
  * @returns {{items: Array, byPhase: object, blocked: Array}}
  */
-export function evaluateTask({ task, template, evidence = [], waivers = [] } = {}) {
+export function evaluateTask({ task, template, evidence = [], waivers = [], now = Date.now() } = {}) {
   const items = [];
   const list = Array.isArray(evidence) ? evidence : [];
   const phases = phasesOf(template);
@@ -407,7 +478,7 @@ export function evaluateTask({ task, template, evidence = [], waivers = [] } = {
     for (const type of requirementsFor(template, phase)) {
       const itemId = `${phase}:${type}`;
       const { admitted, rejected } = admissibleEvidence(type, task, list);
-      const waiver = usableWaiver(waivers, itemId, task);
+      const waiver = usableWaiver(waivers, itemId, task, now);
       const failed = rejected.some((r) => r.why === 'the proof itself reports failure');
 
       /*
@@ -473,7 +544,7 @@ export function evaluateTask({ task, template, evidence = [], waivers = [] } = {
  * one file answering the same question differently is the failure this module
  * exists to prevent.
  */
-export function canAdvance({ task, template, evidence = [], waivers = [], targetPhase } = {}) {
+export function canAdvance({ task, template, evidence = [], waivers = [], targetPhase, now = Date.now() } = {}) {
   /*
    * THE WINDOW IS COMPUTED FROM THE DECLARED LIST, NOT THE DE-DUPLICATED ONE,
    * AND FROM THE *LAST* MENTION OF THE TARGET.
@@ -496,7 +567,7 @@ export function canAdvance({ task, template, evidence = [], waivers = [], target
     return { ok: false, why: `"${targetPhase}" is not a phase of template ${template?.id ?? '(none)'}` };
   }
 
-  const { items } = evaluateTask({ task, template, evidence, waivers });
+  const { items } = evaluateTask({ task, template, evidence, waivers, now });
   const upTo = new Set(declared.slice(0, target + 1));
   const inScope = items.filter((i) => upTo.has(i.phase));
 

@@ -166,7 +166,11 @@ test('a worker cannot waive its own required item', () => {
 });
 
 test('an owner waiver with a reason WAIVES the item, and one without a reason does not', () => {
-  const bound = { task_id: 't-1', attempt: 3, candidate_sha: 'cafe1234' };
+  const bound = {
+    task_id: 't-1', attempt: 3, candidate_sha: 'cafe1234',
+    /* An expiry is required now, matching the override-grant channel. */
+    expires_at: new Date(Date.now() + 3600_000).toISOString(),
+  };
   const good = [{ item_id: 'blind-review:blind_review_result', reason: 'deploy frozen', granted_by: 'danny', ...bound }];
   assert.equal(
     evaluateTask({ task: TASK, template: TEMPLATE, waivers: good })
@@ -526,4 +530,108 @@ test('the checklist is printed in DECLARED phase order, not reordered by a dupli
   const order = [...new Set(items.map((i) => i.phase))];
   assert.deepEqual(order, ['verify', 'reproduce'],
     'phases must appear in the order the template declares them, first occurrence winning');
+});
+
+/* ══ the waiver channel, which was the weaker of the two routes to green ══ */
+
+const LIVE = () => new Date(Date.now() + 3600_000).toISOString();
+const waiver = (over = {}) => ({
+  item_id: 'blind-review:blind_review_result',
+  reason: 'deploy frozen',
+  granted_by: 'danny',
+  task_id: 't-1',
+  attempt: 3,
+  candidate_sha: 'cafe1234',
+  expires_at: LIVE(),
+  ...over,
+});
+const waivedState = (waivers, task = TASK) => evaluateTask({ task, template: TEMPLATE, waivers })
+  .items.find((i) => i.phase === 'blind-review').state;
+
+test('CRITICAL: the self-waiver check no longer fails OPEN when the task names no worker', () => {
+  /*
+   * Found by blind audit and demonstrated end to end through the CLI. The
+   * check was
+   *
+   *     if (!differ(grantor, task?.worker_session)
+   *         && str(task?.worker_session) !== null) continue;
+   *
+   * so a task carrying no worker_session skipped the guard entirely and the
+   * worker waived its own blind review -- while the source comment claimed it
+   * failed closed "by a task carrying no worker id at all".
+   *
+   * Independence is a POSITIVE claim, exactly as it is in the maker rule two
+   * functions above: if we cannot SEE two different parties, it does not
+   * count.
+   */
+  const noWorker = { task_id: 't-1', attempt: 3, candidate_sha: 'cafe1234' };
+  assert.equal(waivedState([waiver({ granted_by: 'danny' })], noWorker), ITEM_STATES.PENDING,
+    'a task naming no worker cannot establish that the grantor is not the worker');
+
+  /* And with only worker_id present, the check must still bite on that name. */
+  const idOnly = { task_id: 't-1', attempt: 3, candidate_sha: 'cafe1234', worker_id: 'danny' };
+  assert.equal(waivedState([waiver({ granted_by: 'danny' })], idOnly), ITEM_STATES.PENDING,
+    'the grantor matching the only visible worker identity must still be refused');
+});
+
+test('CRITICAL: granted_by must be the OWNER, not merely a non-empty string', () => {
+  /*
+   * `granted_by` accepted any text, so the waiver channel was a rule-20
+   * bypass needing no credential at all. src/ownerDecisions.mjs has exported
+   * isOwnerId the whole time and this module never asked it.
+   */
+  for (const who of ['sess-worker', 'fixer', 'code-a', 'the team', 'admin']) {
+    assert.equal(waivedState([waiver({ granted_by: who })]), ITEM_STATES.PENDING,
+      `"${who}" is not the owner and must not be able to waive a blind review`);
+  }
+
+  /* The positive control, in both spellings the roster recognises. */
+  for (const who of ['danny', 'Danny', ' owner ']) {
+    assert.equal(waivedState([waiver({ granted_by: who })]), ITEM_STATES.WAIVED,
+      `"${who}" is the owner and must still be able to waive, or this is an outage`);
+  }
+});
+
+test('a waiver must carry a live, bounded expiry', () => {
+  /*
+   * The override-grant channel in guardSession has required an expiry for
+   * months and bounds it at MAX_GRANT_MS; this channel required none at all,
+   * so a waiver was permanent. A permanent waiver is a hole in a checklist
+   * nobody re-reads.
+   */
+  assert.equal(waivedState([waiver({ expires_at: undefined })]), ITEM_STATES.PENDING,
+    'no expiry means a permanent waiver');
+  assert.equal(waivedState([waiver({ expires_at: 'whenever' })]), ITEM_STATES.PENDING,
+    'an unparseable expiry is no expiry');
+  assert.equal(waivedState([waiver({ expires_at: new Date(Date.now() - 1000).toISOString() })]),
+    ITEM_STATES.PENDING, 'an expired waiver has expired');
+  assert.equal(
+    waivedState([waiver({ expires_at: new Date(Date.now() + 400 * 24 * 3600_000).toISOString() })]),
+    ITEM_STATES.PENDING, 'an expiry beyond the bound is not a bounded expiry');
+
+  assert.equal(waivedState([waiver()]), ITEM_STATES.WAIVED, 'the positive control: a live expiry works');
+});
+
+test('expiry is judged against a caller-supplied clock, not the wall clock', () => {
+  /*
+   * Rule 21: a test that depends on the machine's clock encodes an accident
+   * of that machine. The evaluator takes `now`, so the boundary can be
+   * asserted exactly rather than approached with a sleep.
+   */
+  const at = Date.parse('2026-01-01T00:00:00Z');
+  const expires = new Date(at + 1000).toISOString();
+  const w = [waiver({ expires_at: expires })];
+
+  assert.equal(
+    evaluateTask({ task: TASK, template: TEMPLATE, waivers: w, now: at })
+      .items.find((i) => i.phase === 'blind-review').state,
+    ITEM_STATES.WAIVED,
+    'one second before expiry it still applies',
+  );
+  assert.equal(
+    evaluateTask({ task: TASK, template: TEMPLATE, waivers: w, now: at + 2000 })
+      .items.find((i) => i.phase === 'blind-review').state,
+    ITEM_STATES.PENDING,
+    'one second after expiry it does not',
+  );
 });
