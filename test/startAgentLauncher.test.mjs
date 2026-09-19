@@ -162,7 +162,6 @@ test('agent.cmd assigns the variable and invokes claude -- the construct, not a 
    * launcher that no longer launches. Hollow gate 13, three rediscoveries.
    */
   const lines = cmd.split(/\r?\n/).filter((l) => !/^\s*(rem\b|::)/i.test(l));
-  const live = lines.join('\n');
 
   /*
    * `echo` lines are prose too. agent.cmd's usage block legitimately POINTS AT
@@ -173,11 +172,32 @@ test('agent.cmd assigns the variable and invokes claude -- the construct, not a 
    */
   const executable = lines.filter((l) => !/^\s*echo\b/i.test(l)).join('\n');
 
-  assert.match(live, /set\s+"?AGENTBRIDGE_AGENT_ID=%~1"?/i,
+  /*
+   * ALL FOUR ASSERTIONS USE `executable`, AND THE FIRST VERSION USED IT FOR ONE.
+   *
+   * Found by blind audit. This file built `executable`, wrote the paragraph
+   * above explaining precisely why an echoed line proves nothing, and then
+   * checked three of its four properties against `live` -- which still
+   * contains the echo lines. So the gate could be satisfied by agent.cmd
+   * PRINTING the words instead of doing them.
+   *
+   * Demonstrated, not theorised: prefixing `echo ` to the real lines and
+   * moving the claude invocation into an unreachable if-block left this file
+   * 6 of 6 GREEN, while the script set no AGENTBRIDGE_AGENT_ID, never cd'd to
+   * the repository, and launched nothing -- reintroducing BOTH defects the
+   * launcher exists to prevent (b00d96e's unset variable that made the poll
+   * hook decline and exit 0, and the wrong cwd that loads no
+   * .claude/settings.json). The assertion messages below name those exact
+   * consequences, and could not see them.
+   *
+   * `live` is now used for nothing. A view that only prose can satisfy has no
+   * business in a gate.
+   */
+  assert.match(executable, /set\s+"?AGENTBRIDGE_AGENT_ID=%~1"?/i,
     'agent.cmd must ASSIGN AGENTBRIDGE_AGENT_ID from its first argument');
-  assert.match(live, /cd\s+\/d\s+"%~dp0"/i,
+  assert.match(executable, /cd\s+\/d\s+"%~dp0"/i,
     'it must cd to the repository, or the session loads no .claude/settings.json and runs unguarded');
-  assert.match(live, /^\s*claude\s*$/m,
+  assert.match(executable, /^\s*claude\s*$/m,
     'it must invoke claude as a bare command in this shell, not through a pipe');
 
   assert.doesNotMatch(executable, /\bnpm\b/i,
