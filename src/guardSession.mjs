@@ -145,6 +145,22 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/auditJob.mjs',
   'src/reviewerPacket.mjs',
   'src/resultEnvelope.mjs',
+  /*
+   * THE VERIFICATION LAYER, and the gate now depends on it for its loudest
+   * verdict. `verifyCache` decides whether a result may be reused, and a
+   * session that could rewrite it could make the gate accept a PASS for a tree
+   * nobody tested -- which is worse than any single test failing, because every
+   * other control in this repository sits behind the suite. `verifyIdentity`
+   * computes the key both the gate and the CLI look results up by; `verifyRunner`
+   * produces them.
+   *
+   * Named by test/guardDependenciesProtected.test.mjs in the same run that
+   * wired them, which is the fourth time the computed closure has caught an
+   * import the day it landed.
+   */
+  'src/verifyCache.mjs',
+  'src/verifyIdentity.mjs',
+  'src/verifyRunner.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
