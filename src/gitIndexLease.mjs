@@ -152,16 +152,30 @@ const COMMIT_TAKES_VALUE = /^(-m|-F|-C|-c|-t|--message|--file|--author|--date|--
 const COMMIT_WIDENS = /^(-a|--all|-i|--include|--amend|-[A-Za-z]*[ai][A-Za-z]*)$/;
 
 /**
- * Does this `git commit` name the paths it records?
+ * Judge a `git commit` against the shared index.
  *
- * Returns false for a commit with no pathspec -- the shape that takes whatever
- * is in the index, including another session's staging.
+ * @returns {{ok:boolean, why:'not-a-commit'|'named'|'unnamed'|'widened'}}
+ *
+ * TWO REASONS, NOT ONE, AND THE MESSAGE HAS TO SAY WHICH -- rule 15 asks a
+ * gate to name the half that is still open. The first version returned a bare
+ * boolean, so the rail told a caller that wrote
+ * `git commit --amend README.md` there was "no pathspec". README.md was right
+ * there; the real objection was `--amend`, and the advice was to add something
+ * already present. Found by blind audit.
+ *
+ * THE WALK IS SINGLE-PASS BECAUSE THE TWO-PASS VERSION READ A MESSAGE AS A
+ * FLAG. `COMMIT_WIDENS` was applied to every token before the arity walk knew
+ * that `-m` consumes the next one, so `git commit src/x.mjs -m "-a"` was
+ * refused as if `-a` had been passed. The function's own header warned about
+ * exactly that class for the resolver and then committed it here -- the same
+ * trap the raw-string selectors in shellAllowlist.mjs fell into, one file over
+ * and on the same night. A value is skipped before anything is asked of it.
  */
-export function commitNamesItsPaths(argv) {
-  if (!Array.isArray(argv)) return false;
+export function commitFence(argv) {
+  if (!Array.isArray(argv)) return { ok: false, why: 'not-a-commit' };
   const start = argv[0] === 'git' ? 1 : 0;
   const i = argv.indexOf('commit', start);
-  if (i === -1) return false;
+  if (i === -1) return { ok: false, why: 'not-a-commit' };
   const rest = argv.slice(i + 1).filter((t) => typeof t === 'string');
 
   /*
@@ -171,18 +185,29 @@ export function commitNamesItsPaths(argv) {
    * is a path rather than a sweep.
    */
   const sep = rest.indexOf('--');
-  const flags = sep === -1 ? rest : rest.slice(0, sep);
+  const head = sep === -1 ? rest : rest.slice(0, sep);
 
-  if (flags.some((t) => COMMIT_WIDENS.test(t))) return false;
-  if (sep !== -1) return rest.slice(sep + 1).some((t) => t.trim() !== '');
-
-  for (let j = 0; j < flags.length; j += 1) {
-    const t = flags[j];
-    if (COMMIT_TAKES_VALUE.test(t)) { j += 1; continue; }
-    // `--opt=value` carries its value inline and consumes nothing after it.
-    if (t.startsWith('-')) continue;
-    if (t.trim() === '') continue;
-    return true;                              // a bare operand: a pathspec
+  let widened = false;
+  let named = false;
+  for (let j = 0; j < head.length; j += 1) {
+    const t = head[j];
+    if (COMMIT_TAKES_VALUE.test(t)) { j += 1; continue; }   // a value, not a flag
+    if (t.startsWith('-')) {
+      // `--opt=value` carries its value inline and consumes nothing after it.
+      if (COMMIT_WIDENS.test(t)) widened = true;
+      continue;
+    }
+    if (t.trim() !== '') named = true;                      // a bare operand
   }
-  return false;
+  if (sep !== -1 && rest.slice(sep + 1).some((t) => t.trim() !== '')) named = true;
+
+  /*
+   * WIDENED BEATS NAMED. `-i`/`--include` commits the named paths IN ADDITION
+   * TO whatever is already staged, `-a` commits every tracked modification,
+   * and `--amend` rewrites a commit that already exists. If a pathspec were
+   * enough on its own, the fence would be satisfiable by adding a file name to
+   * the exact command that breaks it.
+   */
+  if (widened) return { ok: false, why: 'widened' };
+  return named ? { ok: true, why: 'named' } : { ok: false, why: 'unnamed' };
 }

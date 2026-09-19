@@ -8,7 +8,7 @@
  * carries no selector at all and is the quiet spelling of the same thing.
  *
  * TWO HALVES, AND THE SECOND IS THE ONE THAT KEEPS BEING MISSING. The decision
- * is `commitNamesItsPaths` in src/gitIndexLease.mjs and is tested here for what
+ * is `commitFence` in src/gitIndexLease.mjs and is tested here for what
  * it decides. The WIRING -- that the rail actually asks it -- is a separate
  * claim with its own tests at the bottom of this file, because a guard nobody
  * consults is the failure rule 17 exists for and it has happened here three
@@ -17,7 +17,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { commitNamesItsPaths, writesIndex, gitSubcommand, INDEX_WRITERS } from '../src/gitIndexLease.mjs';
+import { commitFence, writesIndex, gitSubcommand, INDEX_WRITERS } from '../src/gitIndexLease.mjs';
+
+/**
+ * The old boolean, so the cases below keep reading as "does this name its
+ * paths". `commitFence` returns `{ok, why}` because the rail needs to tell a
+ * caller WHICH objection it hit -- see THE TWO REFUSALS ARE DISTINGUISHABLE
+ * at the bottom of this file, which is the test that reason exists.
+ */
+const commitNamesItsPaths = (a) => commitFence(a).ok;
 import { judgeShellCommand } from '../src/shellAllowlist.mjs';
 
 const argv = (s) => s.split(' ');
@@ -178,6 +186,55 @@ test('THE WIRING NEGATIVE: the rail asks, and refuses an unnamed commit', () => 
       + 'and a refusal from the wrong layer is a hollow gate wearing a pass');
   assert.match(v.reason, /git commit <path>/,
     'the refusal does not tell the caller what to do instead');
+});
+
+test('THE TWO REFUSALS ARE DISTINGUISHABLE, and the message names the right one', () => {
+  /*
+   * FOUND BY BLIND AUDIT, 2026-09-18. One reason string covered two different
+   * objections, so a caller who wrote `git commit --amend README.md` was told
+   * there was "no pathspec". README.md was right there. The advice was to add
+   * something already present, which is the worst kind of refusal: it reads as
+   * the guard being broken, and the reader goes looking for a way around.
+   *
+   * Rule 15 asks a moved gate to name the half that is still open. These are
+   * genuinely different halves -- one is "you named nothing", the other is
+   * "what you named does not bound this".
+   */
+  assert.equal(commitFence(argv('git commit -m message')).why, 'unnamed');
+  assert.equal(commitFence(argv('git commit --amend README.md')).why, 'widened');
+  assert.equal(commitFence(argv('git commit -a README.md -m message')).why, 'widened');
+  assert.equal(commitFence(argv('git commit README.md -m message')).why, 'named');
+  assert.equal(commitFence(argv('git status')).why, 'not-a-commit');
+
+  // And the rail carries the distinction through rather than flattening it.
+  const amend = judge('git commit --amend README.md');
+  assert.equal(amend.allowed, false);
+  assert.doesNotMatch(amend.reason, /no pathspec/,
+    'an --amend refusal still tells the caller to name a path they already named');
+  assert.match(amend.reason, /--amend/, 'the refusal does not name the flag it objects to');
+});
+
+test('A MESSAGE THAT IS EXACTLY A WIDENING FLAG IS STILL A MESSAGE', () => {
+  /*
+   * THE OTHER HALF OF THE SAME AUDIT FINDING, and the sharper one. The widening
+   * test ran over every token BEFORE the arity walk knew that `-m` consumes the
+   * next one, so `git commit src/x.mjs -m "-a"` was refused as though `-a` had
+   * been passed.
+   *
+   * This module's own header warns about exactly that class -- a message token
+   * read as an operand made `git commit -m test` name test/claudeGuard.test.mjs
+   * -- and then committed it in the other direction two functions later. The
+   * identical trap was live in shellAllowlist.mjs's raw-string selectors on the
+   * same night; see test/quotedSelector.test.mjs.
+   */
+  for (const msg of ['-a', '-i', '--all', '--include', '--amend', '-am']) {
+    const v = commitFence(argv(`git commit src/x.mjs -m ${msg}`));
+    assert.equal(v.ok, true, `a commit message of exactly "${msg}" was read as the flag it names`);
+    assert.equal(v.why, 'named');
+  }
+
+  // The control: a REAL widening flag in the same position still wins.
+  assert.equal(commitFence(argv('git commit src/x.mjs -a -m message')).why, 'widened');
 });
 
 test('THE REFUSAL NAMES THE HAZARD, because a rule nobody understands gets worked around', () => {

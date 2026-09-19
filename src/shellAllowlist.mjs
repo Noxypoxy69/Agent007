@@ -1,5 +1,5 @@
 import { isProtectedRelPath } from './guardSession.mjs';
-import { commitNamesItsPaths } from './gitIndexLease.mjs';
+import { commitFence } from './gitIndexLease.mjs';
 
 /**
  * A FAST-FEEDBACK RAIL. NOT A SECURITY BOUNDARY. Read this before trusting it.
@@ -261,6 +261,60 @@ const EMPTY_FLAG_SET = new Set();
  * it is two dashes and amending is not a sweep.
  */
 const GIT_SWEEP_SELECTOR = /(^|\s)(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(\s|$)/;
+
+/*
+ * THE SAME SELECTORS, ANCHORED TO ONE TOKEN, BECAUSE THE RAW-STRING FORM LOST
+ * TO A SINGLE QUOTE CHARACTER.
+ *
+ * Measured through the shipped rail by blind audit, 2026-09-18, and reproduced
+ * by the author before believing it -- two commands, both harmless dry runs:
+ *
+ *   git add --dry-run -A      DENY   "an everything selector reaches every
+ *                                     dirty file, protected ones included"
+ *   git add --dry-run '-A'    ALLOW  exit 0
+ *
+ * The trailing anchor above is `(\s|$)`. In `git add '-A'` the character after
+ * the `A` is a quote, so the pattern simply does not match, and `git add '-A'`
+ * stages every dirty file including every protected control. The tokenizer has
+ * stripped quotes since it was written -- the stripped values were used one
+ * line below for the `=== '.'` comparison and nowhere else, so the two halves
+ * of one check disagreed about quoting for as long as both existed.
+ *
+ * THIS IS THE `git restore :/` LESSON AGAIN, ONE LAYER DOWN. That one was a
+ * spelling of "everything" nobody enumerated; this is a spelling of `-A`
+ * nobody enumerated. The answer is the same: stop pattern-matching the command
+ * TEXT and ask the structure. The tokenizer already owns the question "what
+ * are the arguments", so it is what gets asked.
+ *
+ * AND IT CLOSES THE OTHER DIRECTION AT THE SAME TIME, which is why this is a
+ * repair rather than a tightening. Testing the raw string also matched a
+ * selector inside a quoted COMMIT MESSAGE, so
+ * `git commit src/x.mjs -m "handle --force flag"` was refused for containing
+ * the word it was fixing -- you could not honestly describe a flag change in
+ * its own commit. A flag's VALUE is skipped here using the arity table this
+ * file already maintains, so a message is never mistaken for an option.
+ */
+const GIT_SWEEP_TOKEN = /^(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(=.*)?$/;
+const GIT_FORCE_TOKEN = /^(-f|--force|--discard-changes|--hard|--theirs|--ours)(=.*)?$/;
+
+/**
+ * The tokens a git command presents as OPTIONS: flag values removed, and
+ * everything after `--` removed because git says nothing there is a flag.
+ *
+ * Quotes are already gone -- `tokens` carries `value`, not the spelling -- so
+ * `-A` and `'-A'` and `"-A"` arrive here identically. That is the whole fix.
+ */
+function gitOptionTokens(tokens, verb) {
+  const takesValue = GIT_FLAG_TAKES_VALUE[verb] ?? EMPTY_FLAG_SET;
+  const out = [];
+  for (let i = 2; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (t === '--') break;
+    if (takesValue.has(t)) { i += 1; continue; }
+    out.push(t);
+  }
+  return out;
+}
 
 /*
  * FORCE, IN EVERY SPELLING IT ACTUALLY HAS.
@@ -539,14 +593,37 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * allowed is the documented one.
        */
       if (GIT_SWEEPS_TREE.has(verb)) {
-        if (GIT_FORCE_SELECTOR.test(command)) {
+        /*
+         * OPTIONS, NOT THE COMMAND TEXT. See GIT_SWEEP_TOKEN above.
+         *
+         * THE RAW-STRING TESTS ARE GONE RATHER THAN KEPT AS A FALLBACK, and
+         * that is a deliberate narrowing which has to be argued for rather
+         * than slipped in. The first version of this fix kept them with `||`,
+         * reasoning that a union can only catch more. It does -- and the thing
+         * it kept catching was the FALSE POSITIVE:
+         * `git commit src/x.mjs -m "handle --force flag"` stayed refused,
+         * because the raw string still contained `--force`. A union of a
+         * correct check and a broken one is the broken one's behaviour
+         * wherever the broken one fires, so the fallback had to go for the
+         * repair to be a repair. Watched failing before it was removed.
+         *
+         * WHAT THE NARROWING COSTS, stated plainly: a selector that appears
+         * somewhere other than an option position is no longer refused. The
+         * two such positions are a flag's VALUE and everything after `--`, and
+         * git says neither is an option -- so in both the old behaviour was
+         * wrong, not merely broad. What remains is `.` as a bare operand, kept
+         * below, and the pathspec resolver, which asks git what an operand
+         * covers and is the real backstop for spellings nobody enumerated.
+         */
+        const options = gitOptionTokens(tokens, verb);
+        if (options.some((t) => GIT_FORCE_TOKEN.test(t))) {
           return {
             allowed: false,
             reason: `"git ${verb}" with a force or discard flag overwrites the tree wholesale, `
               + 'including the guard source the hook re-reads on every call',
           };
         }
-        const sweepsEverything = GIT_SWEEP_SELECTOR.test(command)
+        const sweepsEverything = options.some((t) => GIT_SWEEP_TOKEN.test(t))
           || tokens.slice(2).some((t) => t.replace(/^['"]|['"]$/g, '') === '.');
         if (sweepsEverything) {
           return {
@@ -582,14 +659,36 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * session lease over the index was designed and rejected for that
        * reason; see src/gitIndexLease.mjs.
        */
-      if (verb === 'commit' && !commitNamesItsPaths(tokens)) {
-        return {
-          allowed: false,
-          reason: '"git commit" with no pathspec records whatever is staged, and the index is '
-            + 'shared with every other session in this clone -- one can stage between your `add` '
-            + 'and your `commit`, and both halves land in your commit. Name what you are '
-            + 'committing: git commit <path> [<path>...] -m "message"',
-        };
+      if (verb === 'commit') {
+        const fence = commitFence(tokens);
+        if (fence.why === 'unnamed') {
+          return {
+            allowed: false,
+            reason: '"git commit" with no pathspec records whatever is staged, and the index is '
+              + 'shared with every other session in this clone -- one can stage between your `add` '
+              + 'and your `commit`, and both halves land in your commit. Name what you are '
+              + 'committing: git commit <path> [<path>...] -m "message"',
+          };
+        }
+        /*
+         * A SEPARATE REASON, BECAUSE IT IS A SEPARATE OBJECTION -- rule 15
+         * asks a gate to name the half that is actually open.
+         *
+         * One string covered both refusals, so a caller who wrote
+         * `git commit --amend README.md` was told there was "no pathspec".
+         * README.md was right there; the real objection was `--amend`, and
+         * the advice was to add something already present. Found by blind
+         * audit, 2026-09-18.
+         */
+        if (fence.why === 'widened') {
+          return {
+            allowed: false,
+            reason: '"git commit" with -a, --all, -i or --include is not bounded by the paths you '
+              + 'name -- they sweep past them into the shared index -- and --amend rewrites a '
+              + 'commit that already exists rather than recording what you named. Drop the flag '
+              + 'and commit the paths on their own',
+          };
+        }
       }
 
       /*
