@@ -23,9 +23,20 @@
  * So the fix is not derivation, it is making the one unavoidable manual step
  * impossible to get wrong or forget:
  *
- *   npm run agent -- code-a
- *   npm run agent -- code-b --lane agentbridge
- *   npm run agent -- fixer
+ *   agent code-a
+ *   agent code-b agentbridge
+ *   agent fixer
+ *
+ * THERE USED TO BE TWO LAUNCHERS AND ONLY ONE WORKED. This header advertised
+ * `npm run agent -- code-a` as the way to start a session, and package.json
+ * exposed a script called `agent` to match. Neither launches anything: npm
+ * pipes stdin, so claude comes up headless -- which is the bug d0e3f88 fixed
+ * by adding agent.cmd, while leaving the misleading npm entry and this text
+ * in place. Danny hit the broken one first, twice.
+ *
+ * So the npm script is now `agent:check`, which is what it actually does:
+ * validate an id against the local registry and print the environment. The
+ * only thing that starts a session is agent.cmd.
  *
  * It validates the id against the registry, sets the variable, and execs claude
  * in this repository -- which also fixes the OTHER half of the problem, because
@@ -51,7 +62,8 @@ const dryRun = argv.includes('--print');
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 if (!agentId || !SAFE.test(agentId)) {
-  console.error('usage: npm run agent -- <agent-id> [--lane <lane>] [--print]');
+  console.error('usage: npm run agent:check -- <agent-id> [--lane <lane>] [--print]');
+  console.error('       (this VALIDATES and PRINTS; to start a session use:  agent <agent-id>)');
   console.error('');
   console.error('  <agent-id> is the DURABLE agent id the bridge knows, not a session name.');
   known().forEach((a) => console.error(`    ${a}`));

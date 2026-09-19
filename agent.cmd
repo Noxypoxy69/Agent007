@@ -32,7 +32,7 @@ if "%~1"=="" (
   echo.
   echo   The id is the DURABLE agent id the bridge knows -- code-a, code-b, fixer --
   echo   not a session name. A typo does not fail: it creates a SECOND identity on
-  echo   the roster, and work is routed by identity. Run  npm run agent -- %%1 --print
+  echo   the roster, and work is routed by identity. Run  npm run agent:check -- %%1 --print
   echo   first if you want it validated against the local registry.
   exit /b 2
 )
