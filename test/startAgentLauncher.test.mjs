@@ -410,33 +410,6 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
   }
 });
 
-/*
- * A TEST THAT MEASURED THE WRONG LAYER WAS REMOVED FROM HERE.
- *
- * A blind audit reported command injection through the agent id -- that
- * agent.cmd with an id containing an ampersand executed the tail. I wrote a
- * test for it and it went red, which looked like confirmation.
- *
- * It was not. Measured with an INERT control script that does nothing with its
- * argument: the injected text still ran, and it ran BEFORE agent.cmd produced
- * any output, with agent.cmd never executing at all. cmd.exe had split the
- * command line that spawnSync built, before any batch file started. The defect
- * was in the caller, and the "test for agent.cmd" was a test of Node's cmd.exe
- * argument escaping.
- *
- * Re-measured through a wrapper .cmd, which puts the hostile id in as a batch
- * literal and removes the caller from the experiment:
- *
- *   hostile id   executed: NO    claude received the id as data
- *   benign id    executed: NO    received intact
- *   id with a space            received intact
- *
- * So agent.cmd does not execute it. Rule 18: establish WHICH layer, because a
- * refusal -- or an exploit -- from the wrong layer is indistinguishable from
- * the real thing unless you build the control. No test is left behind for this
- * because the property under test turned out to belong to spawnSync.
- */
-
 test('agent.cmd with no argument prints usage and exits 2, rather than launching', () => {
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-noarg-'));
   try {
@@ -454,85 +427,103 @@ test('agent.cmd with no argument prints usage and exits 2, rather than launching
 
 test('agent.cmd does not route through npm, which pipes stdin and starts claude headless', () => {
   /*
-   * The one property that is genuinely about the TEXT rather than the effect:
-   * executing it cannot distinguish "claude" from "npm exec claude" when a
-   * stub answers to both. rem and echo lines are stripped because agent.cmd's
-   * own prose explains why npm was abandoned, and a check matching that
-   * explanation would be hollow gate 13 for the fifth time in this file.
+   * AN echo LINE IS AN EXECUTABLE LINE, AND STRIPPING IT WAS THE HOLE.
+   *
+   * FIFTH VERSION. The four before it argued about the MATCHER; an auditor
+   * showed the matcher was never the weak part -- the INPUT was. Every
+   * version fed on agent.cmd with rem, :: AND echo lines removed, and an
+   * echo line is not a comment. cmd.exe prints the echo payload and then
+   * RUNS whatever follows an unquoted separator on the same line.
+   *
+   * Measured here, one probe file per form, a stub npm.cmd on PATH:
+   *
+   *     rem  A & npm run TAIL        inert     (rem eats the rest of the line)
+   *     :: B & npm run TAIL          inert
+   *     echo C & npm run TAIL        NPM RAN
+   *     @echo D & npm run TAIL       NPM RAN
+   *     echo.& npm run TAIL          NPM RAN
+   *     echo E | npm run TAIL        NPM RAN
+   *     echo F && npm run TAIL       NPM RAN
+   *     echo   see: npm run x        inert     (no separator: printed only)
+   *
+   * So v4's headline -- "ANY MENTION OF npm IN AN EXECUTABLE LINE IS
+   * REFUSED" -- was false, and an agent.cmd carrying
+   * "echo warming up & call npm run agent:check" passed 8/8 while really
+   * running npm and really launching claude. The gate was green on exactly
+   * the thing it exists to stop.
+   *
+   * AND MY "COST TODAY IS ZERO" WAS MEASURED WRONG. I reported agent.cmd's
+   * three npm mentions as "all three in comments". Line 35 is an echo
+   * statement, not a comment. The zero-cost result came from discarding an
+   * executable line and recording it as prose -- the same mistake, inside
+   * the evidence for the claim.
+   *
+   * THE FIX IS IN THE INPUT, NOT THE PATTERN. Split each line into
+   * STATEMENTS on unquoted & && and |, then drop the ones that cannot run
+   * anything: a rem/:: line disappears entirely because it really does eat
+   * its separators, and an echo STATEMENT disappears while the rest of its
+   * line survives. What is left is what cmd would execute, and that is what
+   * the matcher sees.
+   *
+   * The stripping still exists for the reason it always did -- agent.cmd
+   * explains in prose why npm was abandoned, and matching a subject's own
+   * commentary is hollow gate 13. It is now narrowed to the part that is
+   * genuinely inert, which is a property I measured rather than assumed.
    */
   const cmd = readFileSync(path.join(REPO, 'agent.cmd'), 'utf8');
-  const executable = cmd
-    .split(/\r?\n/)
-    .filter((l) => !/^\s*@?\s*(rem\b|::)/i.test(l))
-    .filter((l) => !/^\s*@?\s*echo\b/i.test(l))
-    .join('\n');
+
+  /** What cmd.exe would actually run: statements, minus the inert ones. */
+  const executableStatements = (text) => {
+    const kept = [];
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.replace(/^\s*@?\s*/, '');
+      /* rem and :: swallow the remainder of the line, separators included. */
+      if (/^(?:rem\b|::)/i.test(line)) continue;
+
+      /* Split on unquoted & or |; a separator inside quotes is literal. */
+      const parts = [];
+      let cur = '';
+      let quoted = false;
+      for (const ch of line) {
+        if (ch === '"') { quoted = !quoted; cur += ch; continue; }
+        if (!quoted && (ch === '&' || ch === '|')) { parts.push(cur); cur = ''; continue; }
+        cur += ch;
+      }
+      parts.push(cur);
+
+      for (const part of parts) {
+        const st = part.replace(/^\s*@?\s*/, '').trim();
+        if (st === '') continue;
+        if (/^(?:rem\b|::)/i.test(st)) continue;
+        /* "echo whatever" and "echo." PRINT their payload; they run nothing. */
+        if (/^echo(?:\b|\.)/i.test(st)) continue;
+        kept.push(st);
+      }
+    }
+    return kept.join('\n');
+  };
+
+  const executable = executableStatements(cmd);
 
   /*
-   * ANY MENTION OF npm IN AN EXECUTABLE LINE IS REFUSED. FAIL CLOSED, ON
-   * PURPOSE, AFTER FOUR ATTEMPTS AT PRECISION EACH FAILED.
-   *
-   * THE HISTORY IS THE ARGUMENT. Four versions, three auditors:
-   *
-   *   v1  \bnpm\b                  0 missed, over-blocked 4+ spellings
-   *   v2  command-position anchor   MISSED 8, all caught by v1
-   *   v3  "is it being run" shape   MISSED 7 AND over-blocked 6 -- worse
-   *                                 than v2 in both directions at once
-   *   v4  \bnpm\b again, deliberately
-   *
-   * v3 is the one that settles it. I replaced v2 believing I had found the
-   * property rather than another vocabulary, and wrote two premises into the
-   * commit message. An auditor falsified BOTH:
-   *
-   *   "an npm EXECUTABLE is named ... a full path to it is still running it"
-   *       NAMING IS NOT RUNNING. `if exist "%APPDATA%\npm\npm.cmd" set ...`,
-   *       `set "NPMEXE=...\npm.cmd"` and `del "...\npm.cmd"` all name it and
-   *       execute nothing.
-   *
-   *   "a path component is followed by a separator or a hyphen, never by
-   *    whitespace-then-letter"
-   *       `set "PATH=C:\Program Files\npm tools;%PATH%"` is a path component
-   *       followed by whitespace then a letter.
-   *
-   * And it missed npm's own global flags, which come BEFORE the subcommand
-   * (`npm --silent run`, `npm -s run`), a quoted invocation (`"npm" run` --
-   * which v2 had handled and v3 dropped), a caret line-continuation, and
-   * `npm.ps1`, because rule 1 enumerated .cmd and .exe. A spelling list, in
-   * the same line whose comment cited rule 19 against spelling lists.
-   *
-   * THE REAL LESSON IS NOT "TRY HARDER". Deciding whether a batch file
-   * executes npm is parsing cmd.exe -- quoting, carets, PATHEXT, variable
-   * expansion, `for /f` subshells, `call`, `start`, and indirection through
-   * node running npm-cli.js. A regex cannot do it, and every narrowing that
-   * removes a false positive removes true positives with it. Four data
-   * points, each found by someone who did not write the previous one.
-   *
-   * SO THE GATE STOPS PRETENDING TO BE PRECISE AND FAILS CLOSED. Any npm in
-   * an executable line is refused. The direction matters: a MISS ships a
-   * launcher that brings claude up headless, which is the day-long outage
-   * d0e3f88 fixed. An OVER-BLOCK is a red test, a human reading one line,
-   * and either rewriting it or narrowing this deliberately with evidence.
-   * One of those failures is silent.
-   *
-   * WHAT IT COSTS TODAY: NOTHING, MEASURED. agent.cmd mentions npm three
-   * times and all three are in comments, which the stripping above removes.
-   * The over-blocks below are all hypothetical launchers, not this one.
-   *
-   * THE STRIPPING IS WHAT MAKES THIS LIVABLE, so it is pinned by its own
-   * assertion below. Without it the gate would refuse agent.cmd for
-   * explaining, in prose, why npm was abandoned -- which is hollow gate 13,
-   * a check matching its own subject's commentary.
+   * ONE MATCHER, AND IT IS A SUBSTRING ON PURPOSE. v4 shipped two of
+   * different strength -- a word-boundary RUNS_NPM plus a bare /npm/i
+   * assertion underneath it -- so the documented rule was weaker than the
+   * shipped behaviour, and pnpm was refused by accident rather than by
+   * decision. A substring is the honest version of fail-closed: pnpm and
+   * the other run-script wrappers are the same architecture and the same
+   * headless risk, so catching them is the outcome we want, stated rather
+   * than stumbled into.
    */
-  const RUNS_NPM = /\bnpm\b/i;
+  const RUNS_NPM = /npm/i;
 
   assert.doesNotMatch(executable, RUNS_NPM,
-    'agent.cmd must not mention npm in an executable line: npm pipes stdin and claude comes up '
-    + 'headless, which is the bug d0e3f88 fixed. This gate fails CLOSED -- see the note above.');
+    'agent.cmd must not run npm: npm pipes stdin and claude comes up headless, which is the bug '
+    + 'd0e3f88 fixed. This gate fails CLOSED on the token -- see the note above for what that '
+    + 'does and does not bound.');
 
-  /*
-   * EVERY SPELLING THREE AUDITORS DEMONSTRATED, all refused. Not invented
-   * here: each line defeated some previous version of this matcher.
-   */
-  const RUNS_IT = [
+  /* Every spelling four auditors demonstrated, plus the echo-chained ones. */
+  for (const runsIt of [
     'npm run start-agent',
     'call npm test',
     'a && npm exec claude',
@@ -546,46 +537,51 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     '"C:\\Program Files\\nodejs\\npm.cmd" run start-agent',
     '%APPDATA%\\npm\\npm.cmd run x',
     'npm frobnicate',
-    /* the seven v3 missed */
     'npm --silent run start-agent',
     'npm --prefix "%~dp0" run agent',
     'npm -s run agent',
     '"npm" run start-agent',
     'npm.ps1 run agent',
     'node "%APPDATA%\\npm\\node_modules\\npm\\bin\\npm-cli.js" run agent',
-  ];
-  for (const runsIt of RUNS_IT) {
-    assert.match(runsIt, RUNS_NPM, `"${runsIt}" must be refused`);
-  }
-
-  /*
-   * ACCEPTED OVER-BLOCKS, ASSERTED SO THEY ARE A DECISION AND NOT A
-   * SURPRISE. Each of these executes nothing and is refused anyway. If one
-   * ever needs to be written in agent.cmd, this gate goes red, somebody
-   * reads one line, and narrows it deliberately with the evidence in hand --
-   * which is the review this matcher's history says must not be skipped.
-   */
-  for (const overBlocked of [
-    'if exist "%APPDATA%\\npm\\npm.cmd" set "PATH=%APPDATA%\\npm;%PATH%"',
-    'set "NPMEXE=%APPDATA%\\npm\\npm.cmd"',
-    'set "PATH=%APPDATA%\\npm;%PATH%"',
-    'set "PATH=C:\\Program Files\\npm tools;%PATH%"',
-    'findstr /c:"npm run" package.json',
-    'claude --agent npm-bot',
+    /* the echo-chained forms, each MEASURED above to execute npm */
+    'echo warming up & npm run start-agent',
+    'echo warming up & call npm run agent:check',
+    '@echo off & npm run start-agent',
+    'echo.& npm run start-agent',
+    'echo x | npm run start-agent',
+    'echo x && npm run start-agent',
   ]) {
-    assert.match(overBlocked, RUNS_NPM,
-      `"${overBlocked}" executes nothing but is refused ANYWAY -- fail-closed, by decision`);
+    assert.match(executableStatements(runsIt), RUNS_NPM,
+      `"${runsIt}" RUNS npm and must be refused`);
   }
 
   /*
-   * THE POSITIVE CONTROL, and the reason the whole thing is usable: the real
-   * launcher passes. It mentions npm three times in prose and the stripping
-   * removes all three, so a fail-closed matcher is not a permanently red
-   * gate (rule 16).
+   * INERT BY MEASUREMENT, so they must survive the stripping and NOT match
+   * -- otherwise the gate is red on a launcher that runs nothing, and a
+   * permanently red gate is one people switch off (rule 16).
    */
-  assert.match(readFileSync(path.join(REPO, 'agent.cmd'), 'utf8'), /npm/i,
-    'precondition: agent.cmd DOES discuss npm, so the stripping is load-bearing');
-  assert.doesNotMatch(executable, /npm/i,
-    'and after stripping rem/echo lines there is none left -- if this fails the '
-    + 'launcher gained a real npm line and somebody must look');
+  for (const inert of [
+    'rem  see: npm run agent:check',
+    ':: npm is deliberately not used',
+    'rem  A & npm run TAIL',
+    'echo   Run  npm run agent:check -- %1 --print',
+  ]) {
+    assert.doesNotMatch(executableStatements(inert), RUNS_NPM,
+      `"${inert}" executes nothing and must be allowed`);
+  }
+
+  /*
+   * THE SPLITTER IS THE LOAD-BEARING PART NOW, so it is asserted directly on
+   * fixtures rather than inferred from agent.cmd's current contents. v4
+   * asserted that agent.cmd DOES discuss npm as a precondition, which made
+   * MENTIONING npm a requirement -- so deleting the historical prose, a
+   * legitimate cleanup, turned the gate red. An auditor measured that too.
+   * Nothing here depends on what agent.cmd happens to say today.
+   */
+  assert.equal(executableStatements('echo hello & goodbye'), 'goodbye',
+    'the echo payload is dropped and the chained command survives');
+  assert.equal(executableStatements('rem hello & goodbye'), '',
+    'a rem line disappears entirely, separators included');
+  assert.equal(executableStatements('echo "a & b"'), '',
+    'a separator inside quotes is literal, so this is one echo statement');
 });
