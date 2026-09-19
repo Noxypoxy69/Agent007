@@ -34,7 +34,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { watcherHealth } from '../scripts/bridge-session-poll.mjs';
+import { watcherHealth, darkWatchers } from '../scripts/bridge-session-poll.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POLL = path.join(REPO, 'scripts', 'bridge-session-poll.mjs');
@@ -265,6 +265,56 @@ test('THE SUPERVISOR ACTUALLY WRITES THE MARK watcherHealth READS', async () => 
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+/* ── the automatic half: a starting session reports who has gone dark ───── */
+
+test('darkWatchers names the dead and stalled, and stays silent when all are well', () => {
+  /*
+   * `claude-self` is deliberately given a DEAD pid and an old startedAt, so
+   * that on its own merits it WOULD be reported. Exclusion by session id is
+   * then the only thing that can keep it out of the line, and the assertion
+   * below is load-bearing. An earlier fixture gave self a live pid and a fresh
+   * timestamp, so it read healthy anyway -- the test passed while proving
+   * nothing about exclusion, which mutation caught.
+   */
+  const home = withHome({
+    'claude-self': { pid: 999999, agentId: 'fixer', sessionId: 'claude-self', startedAt: ago(7200) },
+    'claude-gone': { pid: 999999, agentId: 'code-a', sessionId: 'claude-gone', startedAt: ago(7200) },
+    'claude-wedged': { pid: process.pid, agentId: 'code-b', sessionId: 'claude-wedged', startedAt: ago(7200) },
+  });
+  try {
+    const dir = path.join(home, 'polls');
+    const said = darkWatchers(dir, 'claude-self', NOW);
+
+    assert.ok(said, 'two watchers are not watching and it said nothing');
+    assert.match(said, /code-a/, 'the dead one must be named by AGENT, because that is who is invisible');
+    assert.match(said, /code-b/, 'an up-but-never-cycling watcher is stalled and must be named too');
+    assert.match(said, /2 OTHER/, 'it must count');
+
+    /*
+     * The other direction, and the one that decides whether anyone keeps
+     * reading these lines: a starting session must not be told about ITSELF,
+     * which was created moments ago and always reads `starting`.
+     */
+    assert.doesNotMatch(said, /fixer/, 'it reported the starting session as a problem');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('darkWatchers says nothing at all when every other watcher is healthy', () => {
+  const home = withHome({
+    'claude-self': { pid: process.pid, agentId: 'fixer', sessionId: 'claude-self', startedAt: ago(30) },
+    'claude-ok': { pid: process.pid, agentId: 'code-a', sessionId: 'claude-ok', startedAt: ago(1200), lastCycleAt: new Date().toISOString(), cycles: 3 },
+  });
+  try {
+    assert.equal(darkWatchers(path.join(home, 'polls'), 'claude-self'), null,
+      'a healthy machine must produce NO line -- an alarm that fires every session gets ignored (rule 16)');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('darkWatchers survives a missing polls directory rather than failing a session start', () => {
+  assert.equal(darkWatchers(path.join(tmpdir(), 'no-such-polls-dir-xyz'), 'claude-self'), null,
+    'a liveness report must never be the thing that stops a session starting');
 });
 
 test('importing the poll script does not start, stop or register anything', () => {

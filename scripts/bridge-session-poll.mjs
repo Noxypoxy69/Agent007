@@ -688,6 +688,23 @@ async function sessionStart() {
     pid: child.pid, sessionId, agentId, startedAt: new Date().toISOString(), logFile,
   }, null, 2)}\n`);
 
+  /*
+   * AND REPORT ANYBODY ELSE WHO HAS GONE DARK, because a check nobody runs is
+   * a check nobody runs.
+   *
+   * `--status` answers "can I see my agents?" but only when somebody thinks to
+   * ask, and the standing complaint is precisely that the system needs
+   * reminding: on 2026-09-19 two watchers were dead for 81 minutes and 6.4
+   * hours and the fact surfaced only because a message happened to mention it.
+   * SessionStart is the one moment that fires for every session without anyone
+   * remembering, so it is where this belongs.
+   *
+   * It reports OTHER sessions only -- ours was just created and would always
+   * read `starting` -- and it never fails the hook.
+   */
+  const alarm = darkWatchers(dir, sessionId);
+  if (alarm) say(`agentbridge poll: ${alarm}`);
+
   say(`agentbridge poll: ${agentId} / ${sessionId} is polling (pid ${child.pid}); liveness is `
     + 'stamped every cycle and messages arrive without being asked for');
 }
@@ -724,6 +741,42 @@ async function sessionEnd() {
   say(r.status === 0
     ? `agentbridge poll: stopped and deregistered ${sessionId}`
     : `agentbridge poll: poll stopped, but deregistering ${sessionId} exited ${r.status}`);
+}
+
+/**
+ * ONE SENTENCE NAMING EVERY WATCHER THAT IS NOT WATCHING, or null if all are.
+ *
+ * Exported and given its directory, so it can be watched failing against a
+ * planted store. HONEST LIMIT, stated rather than glossed: this function is
+ * tested, and its CALL SITE in sessionStart is not. sessionStart returns early
+ * unless a real registration token exists AND register-session reaches the
+ * hosted bridge, so driving it needs a live credential and a live endpoint,
+ * which the hermetic suite has neither of. That is rule 17's distinction --
+ * the logic and the wiring are separate claims -- and pretending otherwise is
+ * what this file is about. The wiring is one line, directly above the `say`
+ * that already runs there, and is confirmed by a real session start.
+ *
+ * @param {string} dir        the polls directory
+ * @param {string} selfId     this session, excluded: it was created moments
+ *                            ago and would always read `starting`
+ * @param {number} [now]
+ */
+export function darkWatchers(dir, selfId, now = Date.now()) {
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== `${selfId}.json`);
+  } catch { return null; }
+
+  const dark = [];
+  for (const f of files.sort()) {
+    const rec = readRecord(path.join(dir, f));
+    const h = watcherHealth(rec, { now, pidAlive: alive(rec?.pid) });
+    if (h.wrong) dark.push(`${rec?.agentId ?? f.replace(/\.json$/, '')} (${h.state})`);
+  }
+
+  if (dark.length === 0) return null;
+  return `${dark.length} OTHER watcher(s) are not watching -- ${dark.join(', ')}. `
+    + 'Those agents are invisible to every other machine and do not know it.';
 }
 
 /* ── status: answer "can I see my agents?" without a process-table hunt ──── */
