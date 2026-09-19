@@ -25,12 +25,29 @@ import { auditJobsFor, formatAuditJobs } from '../src/auditJob.mjs';
 import { runGit } from '../src/safeGit.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const argv = process.argv.slice(2);
+const flag = (name) => {
+  const i = argv.indexOf(name);
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : null;
+};
+
+/*
+ * `--ledger` EXISTS SO THE STAND-DOWN CAN BE WATCHED WITHOUT FAKING AN AUDIT.
+ *
+ * Rule 16: before trusting a gate that is red, show it can go green -- and the
+ * only honest way to do that here is to hand it a DIFFERENT ledger, never to
+ * write a line into the real one claiming an audit that did not happen. A ledger
+ * entry is a claim by a human or an agent, and typing one to make a gate quiet
+ * is precisely the forgery the ledger's own header warns a reader about.
+ */
+const ledgerPath = flag('--ledger') ?? path.join(root, 'docs', 'audit-ledger.jsonl');
+const range = flag('--range') ?? defaultAuditRange(root);
 
 let ledgerText = '';
-try { ledgerText = readFileSync(path.join(root, 'docs', 'audit-ledger.jsonl'), 'utf8'); } catch { /* none is not clean */ }
+try { ledgerText = readFileSync(ledgerPath, 'utf8'); } catch { /* none is not clean */ }
 
 const started = Date.now();
-const coverage = auditCoverage({ repoRoot: root, range: defaultAuditRange(root), ledgerText });
+const coverage = auditCoverage({ repoRoot: root, range, ledgerText });
 
 let revParses = 0;
 const treeShaFor = (candidate) => {
@@ -48,6 +65,8 @@ const elapsed = Date.now() - started;
 
 console.log(rendered === '' ? '(nothing queued)' : rendered);
 console.log('');
+console.log(`ledger                              : ${ledgerPath}`);
+console.log(`range                               : ${range}`);
 console.log(`commits in range touching a control : ${coverage.commits.length}`);
 console.log(`of those unaudited                  : ${coverage.commits.filter((c) => !c.audited).length}`);
 console.log(`rev-parse calls made                : ${revParses}`);
