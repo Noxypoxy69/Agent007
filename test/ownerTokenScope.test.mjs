@@ -52,9 +52,22 @@ test('THE ORDER IS OWNER, COORDINATOR, READER — each a superset of the next', 
    * owner token that also happened to be in reader_tokens would resolve to the
    * weaker scope and silently lose the ledger.
    */
-  const owner = CODE.indexOf("tokenLabel('owner_tokens'");
-  const coord = CODE.indexOf("tokenLabel('coordinator_tokens'");
-  const reader = CODE.indexOf("tokenLabel('reader_tokens'");
+  /*
+   * SCOPED TO THE RESOLUTION BLOCK, because a file-wide search answers the
+   * wrong question. `coordinator_tokens` also appears in the /task-create
+   * route, which sits EARLIER in the file — so searching the whole source made
+   * this assertion fail against correct code. That is the second time tonight a
+   * matcher of mine has been file-wide when the property is local; a gate that
+   * refuses correct code gets edited until it stops refusing anything.
+   */
+  const start = CODE.indexOf('the MCP surface, at whichever scope');
+  const from = start === -1 ? CODE.indexOf('let scope = null;') : start;
+  assert.notEqual(from, -1, 'could not find the scope resolution block');
+  const block = CODE.slice(from, CODE.indexOf('handleRpc', from));
+
+  const owner = block.indexOf("tokenLabel('owner_tokens'");
+  const coord = block.indexOf("tokenLabel('coordinator_tokens'");
+  const reader = block.indexOf("tokenLabel('reader_tokens'");
   assert.ok(owner !== -1 && coord !== -1 && reader !== -1, 'a token table is missing from resolution');
   assert.ok(owner < coord, 'coordinator is checked before owner — an owner would resolve to the weaker scope');
   assert.ok(coord < reader, 'reader is checked before coordinator');
