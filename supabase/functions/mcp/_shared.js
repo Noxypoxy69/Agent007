@@ -2361,6 +2361,9 @@ const parse = (v) => {
  */
 export function eventsFor({
   tasks = [], messages = [], agent_id, session_id, since = null, actors = undefined,
+  // This session's own registration row, when the caller has it. Optional and
+  // null-defaulting: every existing caller passes nothing and keeps working.
+  session = null,
 }) {
   if (!nonEmpty(session_id)) {
     throw new TypeError('eventsFor requires a session_id: an event feed for nobody is a bug');
@@ -2395,6 +2398,26 @@ export function eventsFor({
   };
 
   const out = [];
+
+  /*
+   * AN OUTSTANDING PROBE IS AN EVENT. Spliced from src/events.mjs — see there
+   * for why this is the only liveness signal that cannot be produced from below
+   * the agent, and why it is filtered by "still outstanding" rather than by the
+   * cursor: a probe is an open question, not a thing that happened, and gating
+   * it behind `since` would let a worker miss it once and then be called silent
+   * for never having been asked.
+   */
+  const probeId = session?.probe_id ?? session?.probeId ?? null;
+  if (nonEmpty(probeId)) {
+    out.push({
+      kind: 'probe',
+      at: session?.probe_sent_at ?? session?.probeSentAt ?? null,
+      probe_id: probeId,
+      answer_with: 'ack_probe',
+      attempt: Number.isFinite(Number(session?.probe_attempts))
+        ? Number(session.probe_attempts) : null,
+    });
+  }
 
   for (const t of arr(tasks)) {
     if (!t || t.assigned_session !== session_id) continue;

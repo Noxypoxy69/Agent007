@@ -83,6 +83,15 @@ const parse = (v) => {
  */
 export function eventsFor({
   tasks = [], messages = [], agent_id, session_id, since = null, actors = undefined,
+  /**
+   * This session's own registration row, when the caller has it.
+   *
+   * Optional and defaulting to null on purpose: every existing caller passes
+   * nothing and must keep working unchanged. Without it there is simply no
+   * probe event, which is the honest answer — a probe nobody recorded is not
+   * one this function can invent.
+   */
+  session = null,
 }) {
   if (!nonEmpty(session_id)) {
     throw new TypeError('eventsFor requires a session_id: an event feed for nobody is a bug');
@@ -108,6 +117,46 @@ export function eventsFor({
   };
 
   const out = [];
+
+  /*
+   * AN OUTSTANDING PROBE IS AN EVENT, AND IT IS WHAT MAKES LIVENESS MEASURABLE.
+   *
+   * Three signals already claim to report whether an agent is alive and every
+   * one measures something adjacent: the watcher proved a DAEMON was running,
+   * touchLiveness proves somebody holding the SHARED worker token spoke for a
+   * session, and the poll proves a SUPERVISOR is re-arming. A wedged or finished
+   * agent polls exactly like a working one, which is why the roster has been
+   * calling agents dead while they were demonstrably committing and messaging.
+   *
+   * This is the one that cannot be faked from below: the agent must read the
+   * probe id out of an event and name it back through a tool. The supervisor
+   * never reads event bodies — deliberately, "a poll that interpreted its own
+   * wake-up would be a dispatcher" — so it cannot answer on the agent's behalf,
+   * and another worker cannot either, because an ack that does not match the
+   * OUTSTANDING id is not an ack.
+   *
+   * DELIVERED ON EVERY POLL WHILE IT IS OUTSTANDING, not once. `since` is a
+   * cursor over things that HAPPENED; a probe is a question that is still open,
+   * and gating it behind the cursor would mean a worker that polled once and
+   * missed it could never answer and would be marked silent for never being
+   * asked. So it is filtered by "is it still outstanding" rather than by "is it
+   * newer than what you have seen".
+   */
+  const probeId = session?.probe_id ?? session?.probeId ?? null;
+  if (nonEmpty(probeId)) {
+    out.push({
+      kind: 'probe',
+      at: session?.probe_sent_at ?? session?.probeSentAt ?? null,
+      probe_id: probeId,
+      /*
+       * The instruction travels with the question. An agent that has never seen
+       * a probe before must be able to answer it without knowing this design.
+       */
+      answer_with: 'ack_probe',
+      attempt: Number.isFinite(Number(session?.probe_attempts))
+        ? Number(session.probe_attempts) : null,
+    });
+  }
 
   for (const t of arr(tasks)) {
     if (!t || t.assigned_session !== session_id) continue;
