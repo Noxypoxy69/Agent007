@@ -315,11 +315,9 @@ const EMPTY_FLAG_SET = new Set();
  * The single-dash cluster is matched so `-am` is caught; `--amend` is not, because
  * it is two dashes and amending is not a sweep.
  */
-const GIT_SWEEP_SELECTOR = /(^|\s)(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(\s|$)/;
-
 /*
- * THE SAME SELECTORS, ANCHORED TO ONE TOKEN, BECAUSE THE RAW-STRING FORM LOST
- * TO A SINGLE QUOTE CHARACTER.
+ * THE SWEEP AND FORCE SELECTORS ARE ANCHORED TO ONE TOKEN, BECAUSE THE RAW-STRING
+ * FORM LOST TO A SINGLE QUOTE CHARACTER.
  *
  * Measured through the shipped rail by blind audit, 2026-09-18, and reproduced
  * by the author before believing it -- two commands, both harmless dry runs:
@@ -468,17 +466,6 @@ function gitOptionTokens(tokens, verb) {
   }
   return out;
 }
-
-/*
- * FORCE, IN EVERY SPELLING IT ACTUALLY HAS.
- *
- * `git checkout -f` denied only by coincidence: WRITE_FLAGS carries -f meaning
- * --file, with no idea it means --force here. `checkout --force`, `switch --force`
- * and `switch --discard-changes` were all ALLOW. If anyone narrows WRITE_FLAGS to
- * the flags it was written for -- a reasonable tidy-up -- that accidental refusal
- * disappears and nobody would know it had been load-bearing.
- */
-const GIT_FORCE_SELECTOR = /(^|\s)(-f|--force|--discard-changes|--hard|--theirs|--ours)(=|\s|$)/;
 
 const NPM_SHAPE = /^(test|install|ci|run|list|ls|view|why|outdated|audit|version)$/;
 
@@ -753,8 +740,8 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * this rail existed, and it was right. Nothing here owns the default branch,
        * and a force push destroys work that is not this session's to destroy.
        *
-       * --force is checked explicitly because WRITE_FLAGS only carries `-f`, and
-       * a leading `+` on a refspec is the same thing spelled differently.
+       * --force is checked explicitly here, and a leading `+` on a refspec is the
+       * same thing spelled differently.
        */
       if (/(^|\s)(--force|--force-with-lease|--mirror|--delete)(=|\s|$)/.test(command)) {
         return { allowed: false, reason: 'a force, mirror or delete push rewrites history that is not this session\'s to rewrite' };
