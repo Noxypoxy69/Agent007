@@ -103,9 +103,40 @@ export const FAILURE_CLASSES = Object.freeze({
   F018: 'WRONG_CANDIDATE_EVIDENCE_REUSE',
   F019: 'BLIND_REVIEW_GUIDED_BY_MAKER',
   F020: 'REPAIR_TEST_ALREADY_GREEN_BEFORE_FIX',
+  /*
+   * ADDED 2026-09-19, AND I FOUND IT BY BEING CAUGHT IN IT.
+   *
+   * §16 ships its twenty as "initial classes" and says the manifest can grow, so
+   * this is the mechanism working rather than a licence to invent one whenever a
+   * finding is awkward. The bar is that the shape has no home and recurs.
+   *
+   * F021 is a refusal that is correct and has no way out. Measured on myself: I
+   * mutated src/guardSession.mjs to prove a test could catch a one-character
+   * change to the grant key. It could. But the mutation IS the key derivation,
+   * so the guard then looked for the operator's grant at a filename that does
+   * not exist, found none, and refused every route back:
+   *
+   *     Edit src/guardSession.mjs          [agentbridge:protected-control]
+   *     git restore src/guardSession.mjs   would OVERWRITE a guard control
+   *     git checkout HEAD -- <same>        same refusal
+   *     git stash                          not an approved shape
+   *
+   * Every one of those refusals is RIGHT on its own terms, and together they
+   * leave a guarded session unable to undo its own change to a protected file --
+   * even holding a wildcard grant, because the change can invalidate the grant
+   * lookup itself. The rail's stated reason for refusing an overwrite is that it
+   * "would discard the very repair a grant is issued for", which is exactly
+   * backwards when the thing to discard is the damage.
+   *
+   * This is distinct from F006. That is a fix that over-blocks; this is a
+   * correct block with no recovery, which is the shape rule 19 says ends with
+   * the hook switched off -- and unlike an over-block, no amount of narrowing
+   * the predicate helps, because each refusal is individually justified.
+   */
+  F021: 'REFUSAL_WITH_NO_RECOVERY_PATH',
 });
 
-export const FAILURE_CLASS_VERSION = '2026-09-19-v1';
+export const FAILURE_CLASS_VERSION = '2026-09-19-v2';
 
 /** §8.1 finding status. */
 export const FINDING = Object.freeze({
