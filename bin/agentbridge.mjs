@@ -176,6 +176,12 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge finding-bind --id <F-..> --task <id> --attempt <n> --lease <tok>
                            --fixer <session> --by <session>
   agentbridge finding-move --id <F-..> --to <status> --by <session>
+  agentbridge repair-record --id <F-..> --before RED --after GREEN [--rev <rev>]
+                                        derive the §12 repair record from git
+                                        rather than from the fixer. Refuses a
+                                        before that was not RED: a fixture
+                                        already green at the base proves the
+                                        repair did nothing (§11.2).
                                         record what a blind audit FOUND, as a
                                         record rather than a sentence in a
                                         commit message. A finding needs a
@@ -3172,9 +3178,10 @@ try {
    * produce repository drift -- which the Stop gate would then block on. Same
    * place the override grants and the poll records live.
    */
-  if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind' || cmd === 'finding-move') {
+  if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind'
+      || cmd === 'finding-move' || cmd === 'repair-record') {
     const {
-      createFinding, openFindings, bindRepair, transition, linkToFamily,
+      createFinding, openFindings, bindRepair, transition, linkToFamily, repairRecord,
       FAILURE_CLASSES, FINDING,
     } = await import('../src/findingRegistry.mjs');
     const { readFileSync: rf, appendFileSync, mkdirSync, existsSync } = await import('node:fs');
@@ -3240,6 +3247,61 @@ try {
       mkdirSync(dirname(store), { recursive: true });
       appendFileSync(store, `${JSON.stringify(rec)}\n`, 'utf8');
     };
+
+    if (cmd === 'repair-record') {
+      /*
+       * §12. THE FIXER SUPPLIES CODE; AGENT007 SUPPLIES THE RECORD.
+       *
+       * Every field except the two verdicts is MEASURED from git here rather
+       * than typed by the party being recorded. `--before` and `--after` cannot
+       * be measured from a repository -- they are results of runs -- so they are
+       * demanded explicitly and checked for direction, which is the §11.2 rule
+       * that a fixture already green at the base proves nothing.
+       */
+      const { rows } = readAll();
+      const id = str_(args.id);
+      const found = rows.find((f) => f.finding_id === id);
+      if (!found) {
+        console.error(`repair-record: no finding ${JSON.stringify(id)} in ${store}`);
+        process.exit(2);
+      }
+
+      const { runGit: rg2 } = await import('../src/safeGit.mjs');
+      const at = str_(args.rev) ?? 'HEAD';
+      const readAt = (spec) => {
+        try { return String(rg2(['rev-parse', spec], { cwd: repo, encoding: 'utf8' })).trim(); }
+        catch { return null; }
+      };
+      /*
+       * THE FILE LIST IS ASKED OF git ACROSS THE RANGE the repair actually
+       * spans -- from the commit the defect was observed on to the candidate --
+       * rather than from the last commit alone. A repair that took three commits
+       * would otherwise report only the third.
+       */
+      const filesChanged = () => {
+        try {
+          const out = String(rg2(['diff', '--name-only', `${found.candidate_sha}..${at}`],
+            { cwd: repo, encoding: 'utf8' }));
+          return out.split('\n').map((s) => s.trim()).filter(Boolean);
+        } catch { return []; }
+      };
+
+      const r = repairRecord(found, {
+        candidate_sha: readAt(at),
+        candidate_tree_sha: readAt(`${at}^{tree}`),
+        files_changed: filesChanged(),
+        before: str_(args.before),
+        after: str_(args.after),
+      });
+
+      if (!r.ok) {
+        console.error('repair-record: this is not yet a repair record');
+        for (const e of r.errors) console.error(`  ${e}`);
+        process.exit(3);
+      }
+      console.log(JSON.stringify(r.record, null, 2));
+      process.exit(0);
+    }
 
     if (cmd === 'finding-bind' || cmd === 'finding-move') {
       /*

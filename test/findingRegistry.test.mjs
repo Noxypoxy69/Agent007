@@ -16,7 +16,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  createFinding, bindRepair, transition, linkToFamily, openFindings,
+  createFinding, bindRepair, transition, linkToFamily, openFindings, repairRecord,
   findingId, FINDING, FAILURE_CLASSES, SEVERITY,
 } from '../src/findingRegistry.mjs';
 
@@ -480,6 +480,82 @@ test('openFindings SURVIVES JUNK rather than throwing', () => {
   for (const junk of [null, undefined, 'nonsense', 42, [null, undefined, 'x']]) {
     assert.equal(openFindings(junk).open.length, 0);
   }
+});
+
+/* ── §12 the repair record ────────────────────────────────────────────── */
+
+const boundFinding = () => bindRepair(make(),
+  { task_id: 't-fix', attempt: 1, lease_token: 'L1', fixer_session: FIXER },
+  { by: THIRD, now: NOW }).finding;
+
+const goodMeasured = {
+  candidate_sha: 'd'.repeat(40),
+  candidate_tree_sha: 'e'.repeat(40),
+  files_changed: ['src/thing.mjs'],
+  before: 'RED',
+  after: 'GREEN',
+};
+
+test('A REPAIR WHOSE FIXTURE WAS ALREADY GREEN IS REFUSED (§11.2)', () => {
+  /*
+   * THE ASSERTION THIS FUNCTION EXISTS FOR. A fixture that passed at the base
+   * proves the repair did nothing -- either the defect was never reproduced or
+   * the fixture does not reach it. Both are the hollow gate this repository is
+   * built around, and both look exactly like success in a report that records
+   * only the AFTER.
+   */
+  const r = repairRecord(boundFinding(), { ...goodMeasured, before: 'GREEN' });
+  assert.equal(r.ok, false, 'a repair was recorded whose fixture was green before it');
+  assert.match(r.errors.join(' '), /not RED at the base/);
+});
+
+test('AND A REPAIR THAT IS STILL RED AFTER IS NOT A REPAIR', () => {
+  const r = repairRecord(boundFinding(), { ...goodMeasured, after: 'RED' });
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(' '), /not a repair/);
+});
+
+test('BOTH VERDICTS ARE REQUIRED, because neither can be read from a repository', () => {
+  for (const missing of ['before', 'after']) {
+    const r = repairRecord(boundFinding(), { ...goodMeasured, [missing]: undefined });
+    assert.equal(r.ok, false, `${missing} was optional`);
+    assert.match(r.errors.join(' '), new RegExp(`${missing}_fix_result is required`));
+  }
+});
+
+test('A REPAIR THAT TOUCHED NO FILE DID NOT HAPPEN', () => {
+  /*
+   * An empty file list with a green after is the shape a mutation harness
+   * produces when the mutation never applied -- rule 2, the most common way to
+   * get a wrong green.
+   */
+  const r = repairRecord(boundFinding(), { ...goodMeasured, files_changed: [] });
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(' '), /mutation-never-applied/);
+});
+
+test('THE CANDIDATE MUST HAVE MOVED off the commit the defect was observed on', () => {
+  const f = boundFinding();
+  const r = repairRecord(f, { ...goodMeasured, candidate_sha: f.candidate_sha });
+  assert.equal(r.ok, false, 'a defect was reported fixed by the commit that has it');
+});
+
+test('AN UNBOUND FINDING HAS NO REPAIR RECORD, because it attributes the work to nobody', () => {
+  const r = repairRecord(make(), goodMeasured);
+  assert.equal(r.ok, false);
+  assert.match(r.errors.join(' '), /not bound to a repair/);
+  assert.equal(repairRecord(null, goodMeasured).ok, false);
+});
+
+test('THE POSITIVE CONTROL: a real repair produces a record carrying the lease identity', () => {
+  const r = repairRecord(boundFinding(), goodMeasured);
+  assert.equal(r.ok, true, `a valid repair was refused: ${r.errors?.join('; ')}`);
+  assert.equal(r.record.task_id, 't-fix');
+  assert.equal(r.record.attempt, 1);
+  assert.equal(r.record.fixer_session, FIXER);
+  assert.equal(r.record.base_sha, CAND, 'the base is the candidate the defect was OBSERVED on');
+  assert.equal(r.record.blind_audit_verdict, null, 'a record must not carry its own verdict');
+  assert.equal(r.record.reproduction, good.reproduction, 'the record lost the reproduction');
 });
 
 test('THE CONTROL: this module distinguishes, in both directions', () => {

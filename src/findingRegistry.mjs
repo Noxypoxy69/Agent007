@@ -473,6 +473,117 @@ export function linkToFamily(finding, prior) {
 }
 
 /**
+ * §12: THE REPAIR RECORD. The fixer supplies code; Agent007 supplies the record.
+ *
+ * WHY THIS IS NOT A FORM THE FIXER FILLS IN. §10 opens by saying fixers are bad
+ * at paperwork, and the conclusion it draws is the important one: the fixer does
+ * not get to decide whether its commit is associated with the finding. Every
+ * field below except the verdicts is MEASURED from git or carried from the
+ * lease, so there is nothing for a fixer to forget and nothing for it to shade.
+ *
+ * PURE, like everything else here: the caller measures and passes the readings
+ * in. That is rule 10, and it is also what makes the interesting case testable --
+ * no test can make a real fixer misreport its own diff, but any test can hand
+ * this a reading that disagrees with the finding.
+ *
+ * REFUSES A RECORD THAT DOES NOT MATCH ITS FINDING, rather than recording a
+ * mismatch. §23 makes evidence inadmissible for the wrong task, the wrong
+ * attempt or the wrong candidate, and a repair record IS evidence -- it is the
+ * thing a reader consults to decide whether a defect is gone.
+ *
+ * @param {object} finding   a finding already bound to a repair
+ * @param {object} measured  { candidate_sha, candidate_tree_sha, files_changed,
+ *                             before, after }
+ * @returns {{ok:true, record:object} | {ok:false, errors:string[]}}
+ */
+export function repairRecord(finding, measured = {}) {
+  const errors = [];
+  if (!finding || typeof finding !== 'object') {
+    return { ok: false, errors: ['there is no finding to build a record for'] };
+  }
+  if (!finding.repair) {
+    errors.push('this finding is not bound to a repair; bind it first (§10.1), '
+      + 'because a record with no task and no lease attributes the work to nobody');
+  }
+
+  const {
+    candidate_sha, candidate_tree_sha, files_changed, before, after,
+  } = measured;
+
+  const record = {
+    finding_id: str(finding.finding_id),
+    failure_class: str(finding.failure_class),
+    task_id: finding.repair ? str(finding.repair.task_id) : null,
+    attempt: finding.repair ? finding.repair.attempt : null,
+    fixer_session: finding.repair ? str(finding.repair.fixer_session) : null,
+    lease_token: finding.repair ? str(finding.repair.lease_token) : null,
+
+    base_sha: sha(finding.candidate_sha),          // what the defect was OBSERVED on
+    candidate_sha: sha(candidate_sha),             // what claims to repair it
+    candidate_tree_sha: sha(candidate_tree_sha),
+    files_changed: list(files_changed) ?? [],
+
+    reproduction: str(finding.reproduction),
+    before_fix_result: str(before),
+    after_fix_result: str(after),
+
+    blind_audit_verdict: null,                     // filled by an audit, never here
+    status: finding.status,
+  };
+
+  if (!record.candidate_sha) errors.push('candidate_sha is required and must be a full 40-hex sha');
+  if (!record.candidate_tree_sha) errors.push('candidate_tree_sha is required and must be a full 40-hex sha');
+
+  /*
+   * ═══ THE ASSERTION §11.2 EXISTS FOR, AND IT IS THE WHOLE POINT ═══
+   *
+   * "Do not accept a test that was already green before the repair as proof of
+   * repair." A fixture that passed at the base proves the repair did nothing --
+   * either the defect was never reproduced, or the test does not reach it. Both
+   * are the hollow gate this repository is built around, and both look exactly
+   * like success in a report that only records the AFTER.
+   *
+   * So BEFORE is required and must be RED, and AFTER is required and must be
+   * GREEN. Recording a repair with a green before is refused rather than stored
+   * with a caveat nobody reads.
+   */
+  if (record.before_fix_result === null) {
+    errors.push('before_fix_result is required: without it nobody can tell the repair did anything');
+  } else if (!/^red$/i.test(record.before_fix_result)) {
+    errors.push(`before_fix_result is ${JSON.stringify(record.before_fix_result)}, and a repair `
+      + 'whose fixture was not RED at the base proves nothing -- either the defect was never '
+      + 'reproduced or the fixture does not reach it (§11.2)');
+  }
+  if (record.after_fix_result === null) {
+    errors.push('after_fix_result is required');
+  } else if (!/^green$/i.test(record.after_fix_result)) {
+    errors.push(`after_fix_result is ${JSON.stringify(record.after_fix_result)}: `
+      + 'this is not a repair, and recording it as one would be the report disagreeing with the run');
+  }
+
+  /*
+   * A REPAIR THAT CHANGED NOTHING IS NOT A REPAIR. An empty file list with a
+   * green after is the shape a mutation harness produces when the mutation never
+   * applied -- CLAUDE.md rule 2, the most common way to get a wrong green.
+   */
+  if (record.files_changed.length === 0) {
+    errors.push('files_changed is empty: a repair that touched no file did not happen, '
+      + 'and a green result against an unchanged tree is the mutation-never-applied shape');
+  }
+
+  /*
+   * THE CANDIDATE MUST HAVE MOVED. If the repair's candidate equals the one the
+   * finding was observed on, the record is claiming a defect was fixed by the
+   * commit that has it.
+   */
+  if (record.candidate_sha && record.base_sha && record.candidate_sha === record.base_sha) {
+    errors.push('the repair candidate is the same commit the defect was observed on');
+  }
+
+  return errors.length ? { ok: false, errors } : { ok: true, record };
+}
+
+/**
  * What is still owed, for a reader or a gate.
  *
  * COUNTS, NOT A BOOLEAN, and open findings are returned rather than summarised,
