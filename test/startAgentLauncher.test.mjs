@@ -198,6 +198,8 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-exec-'));
   const elsewhere = mkdtempSync(path.join(tmpdir(), 'agentcmd-cwd-'));
   const report = path.join(box, 'report.txt');
+  /* Generated here and NEVER exported to the subject. Its presence is the proof. */
+  const nonce = `n-${Math.random().toString(16).slice(2)}-${Date.now()}`;
   try {
     /*
      * THE STUB REPORTS THROUGH A FILE, NOT THROUGH STDOUT, AND THAT IS THE
@@ -216,11 +218,30 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
      * except to pass it through, and it has no reason to write there. If the
      * report is absent, claude did not run -- whatever stdout says.
      */
+    /*
+     * THE REPORT PATH IS BAKED INTO THE STUB, NOT PASSED IN THE ENVIRONMENT.
+     *
+     * v4 passed it as STUB_REPORT in the child env -- which handed it to the
+     * SUBJECT. A blind audit then wrote an agent.cmd with no cd, no set and
+     * no claude that simply redirected three echo lines into %STUB_REPORT%
+     * and exited 0: 8 of 8 GREEN, every assertion defeated at once, including
+     * the existsSync positive control.
+     *
+     * So the channel was never unforgeable; it was a string the subject was
+     * told. Fourth version of this gate, fourth spelling of one mistake --
+     * the evidence was produced by the thing under test.
+     *
+     * Now the path is a literal inside the stub file the TEST writes, and the
+     * stub reports a NONCE the test generates and never exports. agent.cmd
+     * cannot write to a path it is never given, and cannot produce a nonce it
+     * never sees, so a report bearing that nonce is proof the stub ran.
+     */
     writeFileSync(path.join(box, 'claude.cmd'),
       '@echo off\r\n'
-      + '> "%STUB_REPORT%" echo ID=[%AGENTBRIDGE_AGENT_ID%]\r\n'
-      + '>>"%STUB_REPORT%" echo LANE=[%AGENTBRIDGE_LANE%]\r\n'
-      + '>>"%STUB_REPORT%" echo CWD=[%CD%]\r\n');
+      + `> "${report}" echo NONCE=[${nonce}]\r\n`
+      + `>>"${report}" echo ID=[%AGENTBRIDGE_AGENT_ID%]\r\n`
+      + `>>"${report}" echo LANE=[%AGENTBRIDGE_LANE%]\r\n`
+      + `>>"${report}" echo CWD=[%CD%]\r\n`);
 
     const r = spawnSync(process.env.ComSpec || 'cmd.exe',
       ['/c', path.join(REPO, 'agent.cmd'), 'code-a', 'lane7'], {
@@ -236,7 +257,6 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
            * and is a defect this repository has already paid for twice.
            */
           AGENTBRIDGE_HOME: mkdtempSync(path.join(tmpdir(), 'agentcmd-home-')),
-          STUB_REPORT: report,
           PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}`,
         },
       });
