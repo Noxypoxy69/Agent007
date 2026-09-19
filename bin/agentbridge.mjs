@@ -3509,11 +3509,14 @@ try {
        * would otherwise reasonably assume working through them produces
        * clearances; before a genesis tree exists, it cannot.
        */
-      const { regimeOf, REGIME } = await import('../src/trustGenesis.mjs');
+      const {
+        regimeOf, genesisApplies, legacyMarking, REGIME,
+      } = await import('../src/trustGenesis.mjs');
       const gStore = repoStorePath(repo, 'genesis', '.json');
       let genesis = null;
       try { genesis = JSON.parse(rf(gStore, 'utf8')); } catch { genesis = null; }
       const regime = regimeOf({ candidateTree: null, genesis });
+      const marking = legacyMarking(genesis);
 
       console.log(`store    ${qStore}`);
       console.log(`regime   ${regime.regime}`);
@@ -3521,6 +3524,8 @@ try {
         console.log(`         ${regime.why}.`);
         console.log('         Work here is diagnostic: it finds real defects and cannot clear a control.');
       }
+      console.log(`legacy   commits predating genesis are marked ${marking.status}`
+        + `${marking.genesis_tree ? ` (genesis tree ${marking.genesis_tree.slice(0, 12)})` : ''} -- never PASS`);
       console.log(`queued   ${open.length} (${merged.added.length} new this run)`);
       if (merged.stranded.length) {
         console.log(`stranded ${merged.stranded.length} claimed job(s) no longer in range -- kept, not cancelled`);
@@ -3544,7 +3549,20 @@ try {
          * fields by whoever is looking.
          */
         if (j.state === JOB.CLAIMED) {
-          const counts = satisfiesGate(j);
+          /*
+           * THE BOOTSTRAP EXCEPTION IS HONOURED HERE, AND NOWHERE ELSE.
+           *
+           * A boundary nothing consults is decoration. `genesisApplies`
+           * re-validates the record and compares an exact frozen tree hash, so
+           * this can be true for one candidate and can never become true for a
+           * descendant -- the exception cannot spread by being read in more
+           * places, only by the hash matching, which it cannot.
+           */
+          const bootstrap = genesisApplies(j.candidate_tree_sha, genesis);
+          const counts = satisfiesGate(j) || bootstrap;
+          if (bootstrap) {
+            console.log('   GENESIS TREE -- the owner-authorised root of trust, exempt once and only here');
+          }
           if (!counts) diagnosticOnly += 1;
           console.log(`   ${counts ? 'GATE-SATISFYING' : 'DIAGNOSTIC ONLY'}  independence=${j.independence ?? 'unknown'}`
             + ` (author=${j.author_source ?? 'none'}, claimant=${j.claimed_by_source ?? 'asserted'})`);
