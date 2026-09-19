@@ -270,35 +270,114 @@ test('/return REQUIRES a lease token and offers no way around it', () => {
 
 /* ── the two sites with no RPC counterpart keep their predicates ──────── */
 
-test('acceptTask keeps its state predicate', () => {
+/*
+ * THIS GATE MOVED RATHER THAN CLOSING, and it is worth saying why in the file
+ * rather than only in the commit.
+ *
+ * It used to demand exactly `taskWriteFilter(task_id, TASK_WRITE_EXPECTS.accept)`
+ * -- two arguments, no more -- and it was GREEN the whole time a coordinator
+ * that had judged attempt 7 could accept attempt 8. Reproduced at the database
+ * 2026-09-19: `rows_changed: 1`. State alone is not an identity, because
+ * returned -> reassigned -> returned again is an ordinary lifecycle and the
+ * second `returned` is indistinguishable from the first.
+ *
+ * So the demand is now the FENCE, and pinning the state is the part that was
+ * never in doubt. Half a contract landing must move the gate onto the
+ * remaining half with a message naming it -- CLAUDE.md rule 15.
+ */
+
+const fenceGate = (name, expectsKey) => {
+  const body = slice(...ANCHORS[name === 'acceptTask' ? 'accept' : 'cancel']);
+  assert.ok(body, `${name} not found`);
+
+  // The FILTER, not the bare constant: `TASK_WRITE_EXPECTS.<key>` also appears
+  // in the writeLanded call beside it, so asserting the name alone stays green
+  // while the predicate is stripped off the query that actually writes.
+  const call = new RegExp(
+    `taskWriteFilter\\(\\s*task_id,\\s*TASK_WRITE_EXPECTS\\.${expectsKey}\\s*,([\\s\\S]{0,400}?)\\)\\s*,`,
+  ).exec(body);
+  assert.ok(
+    call,
+    `${name} no longer builds its write filter from task_id + TASK_WRITE_EXPECTS.${expectsKey} `
+      + 'plus a fence -- either the state predicate or the attempt fence is gone',
+  );
+
+  const fence = call[1];
+  assert.match(
+    fence, /attempt\s*:\s*task\.attempt/,
+    `${name} does not pin the ATTEMPT it judged. Without it a decision about attempt 7 `
+      + 'lands on attempt 8, which was measured against the live database and returned 1 row.',
+  );
+  assert.match(
+    fence, /lease_token\s*:\s*task\.lease_token/,
+    `${name} does not pin the lease token of the row it read`,
+  );
+  assert.match(
+    fence, /assigned_session\s*:\s*task\.assigned_session/,
+    `${name} does not pin the session holding the row it read`,
+  );
+
+  /*
+   * AND THE FENCE MUST COME FROM THE ROW, NOT FROM THE CALLER. `task` is what
+   * the guard verdict was computed against; a fence read out of the request
+   * body would be supplied by the same party the fence exists to stop, and it
+   * would satisfy every assertion above.
+   */
+  assert.doesNotMatch(
+    fence, /\b(body|args|params|input)\b/,
+    `${name} takes part of its fence from caller-supplied input, so the party being fenced `
+      + 'chooses the fence',
+  );
+
+  assert.match(body, /writeLanded/, `${name} no longer treats an empty result as a lost race`);
+  return fence;
+};
+
+test('acceptTask pins the ROW it judged, not just the state', () => {
   /*
    * There is no accept_with_lease. Removing the predicate here because the
    * other sites lost theirs would take a guard away and replace it with
    * nothing -- the predicate is still the only thing standing between accept
    * and a stale decision.
    */
-  const body = slice(...ANCHORS.accept);
-  assert.ok(body, 'acceptTask not found');
-  // The FILTER, not the bare constant: `TASK_WRITE_EXPECTS.accept` also appears
-  // in the writeLanded call beside it, so asserting the name alone stays green
-  // while the predicate is stripped off the query that actually writes.
-  assert.match(
-    body,
-    /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.accept\s*\)/,
-    'acceptTask lost its state predicate',
-  );
-  assert.match(body, /writeLanded/, 'acceptTask no longer treats an empty result as a lost race');
+  fenceGate('acceptTask', 'accept');
 });
 
-test('cancelTask keeps its state predicate', () => {
-  const body = slice(...ANCHORS.cancel);
-  assert.ok(body, 'cancelTask not found');
-  assert.match(
-    body,
-    /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.cancel\s*\)/,
-    'cancelTask lost its state predicate',
+test('cancelTask pins the ROW it judged, not just the state', () => {
+  fenceGate('cancelTask', 'cancel');
+});
+
+test('THE GATE ITSELF DISCRIMINATES: it is not satisfied by the old two-argument call', () => {
+  /*
+   * Rule 1, held permanently rather than watched once. The two tests above are
+   * exactly the shape that stayed green through the bug they now cover, so the
+   * matcher is pointed at the pre-fix source here and must refuse it.
+   *
+   * The fixture is the real accept body with the fence removed, so it tracks
+   * the shipped code instead of encoding a snapshot of it -- if accept is
+   * rewritten, this rewrites with it.
+   */
+  const real = slice(...ANCHORS.accept);
+  const stripped = real.replace(
+    /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.accept\s*,[\s\S]*?\}\s*\)/,
+    'taskWriteFilter(task_id, TASK_WRITE_EXPECTS.accept)',
   );
-  assert.match(body, /writeLanded/, 'cancelTask no longer treats an empty result as a lost race');
+  assert.notEqual(stripped, real, 'the fence could not be stripped -- this control never ran');
+
+  const call = /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.accept\s*,([\s\S]{0,400}?)\)\s*,/
+    .exec(stripped);
+  assert.equal(call, null, 'the fence matcher accepts the unfenced call it is supposed to refuse');
+
+  // And a fence that names the right keys but sources them from the request
+  // body must fail too -- the keys are the easy half.
+  const forged = real.replace(/task\.attempt/, 'body.attempt');
+  assert.notEqual(forged, real, 'the caller-sourced fixture was not constructed');
+  assert.match(
+    /taskWriteFilter\(\s*task_id,\s*TASK_WRITE_EXPECTS\.accept\s*,([\s\S]{0,400}?)\)\s*,/
+      .exec(forged)[1],
+    /\bbody\b/,
+    'the provenance assertion has nothing to catch',
+  );
 });
 
 test('A MALFORMED TOKEN IS REFUSED, NOT THROWN', () => {

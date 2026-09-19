@@ -28,7 +28,11 @@ const SHA = 'a'.repeat(40);
 
 // ── the predicate ──────────────────────────────────────────────────────────
 test('the filter pins the row to the state the guard judged', () => {
-  const f = taskWriteFilter('t1', ['runnable', 'returned']);
+  // The fence is a separate property with its own file --  see
+  // test/taskWriteFence.test.mjs. It is required here because the state
+  // predicate alone turned out not to identify a row: attempt 7 and attempt 8
+  // of the same task are both legitimately `returned`.
+  const f = taskWriteFilter('t1', ['runnable', 'returned'], { attempt: 0 });
   assert.match(f, /task_id=eq\.t1/);
   assert.match(f, /state=in\.\(runnable,returned\)/,
     'without a state predicate the write cannot refuse a stale decision');
@@ -60,16 +64,17 @@ test('the expectations match what the pure guards actually admit', () => {
 });
 
 test('a write with no expectation THROWS rather than matching everything', () => {
-  assert.throws(() => taskWriteFilter('t1', []), /at least one expected state/);
-  assert.throws(() => taskWriteFilter('t1', undefined), /at least one expected state/);
-  assert.throws(() => taskWriteFilter('', ['runnable']), /requires a task_id/);
+  assert.throws(() => taskWriteFilter('t1', [], { attempt: 0 }), /at least one expected state/);
+  assert.throws(() => taskWriteFilter('t1', undefined, { attempt: 0 }), /at least one expected state/);
+  assert.throws(() => taskWriteFilter('', ['runnable'], { attempt: 0 }), /requires a task_id/);
 });
 
 test('state values are escaped even though they are not caller supplied today', () => {
   // The day one of these becomes a parameter is the day it matters, and that
   // day will not announce itself.
-  assert.match(taskWriteFilter('a b', ['run nable']), /task_id=eq\.a%20b/);
-  assert.match(taskWriteFilter('a b', ['run nable']), /state=in\.\(run%20nable\)/);
+  const f = taskWriteFilter('a b', ['run nable'], { attempt: 0 });
+  assert.match(f, /task_id=eq\.a%20b/);
+  assert.match(f, /state=in\.\(run%20nable\)/);
 });
 
 // ── THE HALF THAT MATTERS MORE ─────────────────────────────────────────────

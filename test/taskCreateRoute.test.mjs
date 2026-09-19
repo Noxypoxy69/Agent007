@@ -31,14 +31,41 @@ const CODE = RAW
   .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
   .replace(/(^|[^:])\/\/[^\n]*/g, (m, p) => p + m.slice(p.length).replace(/./g, ' '));
 
-/** The route body: from its path test to the start of the next route. */
+/**
+ * The route body: from its path test to the start of WHICHEVER route comes
+ * next.
+ *
+ * THIS ANCHOR USED TO NAME `/wait`, AND IT WAS WRONG THE DAY SOMETHING WAS
+ * INSERTED BETWEEN THEM. `/ack` landed in that gap; it authenticates a WORKER
+ * against `registration_tokens`, which is correct for an ack and is exactly
+ * what the coordinator-scope assertion below forbids. So a correct route
+ * failed a gate about a different route — the third over-broad matcher in this
+ * repository in two days, after the `created_by` one and the scope-order one.
+ *
+ * A literal end anchor is a claim that nothing will ever be added in between.
+ * Ask the file where the next route starts instead: that is a property of the
+ * dispatch chain rather than of the file's current running order.
+ */
+const ROUTE_TEST = /if \(path === '\/[^']*'/g;
+
 function routeBody() {
   const start = CODE.indexOf("path === '/task-create'");
   assert.notEqual(start, -1, 'the /task-create route is gone; this gate is measuring nothing');
-  const after = CODE.slice(start);
-  const next = after.indexOf("if (path === '/wait')");
-  assert.notEqual(next, -1, 'could not find the end of the route');
-  return after.slice(0, next);
+
+  ROUTE_TEST.lastIndex = start + 1;
+  const next = ROUTE_TEST.exec(CODE);
+  assert.notEqual(next, null, 'could not find the end of the route');
+  assert.ok(next.index > start, 'the end anchor is before the start');
+
+  const body = CODE.slice(start, next.index);
+  /*
+   * AND THE SLICE MUST NOT REACH THE NEXT ROUTE, asserted rather than assumed.
+   * A silently-too-wide body is the failure above, and it presents as the
+   * SOURCE being wrong.
+   */
+  assert.ok(!/if \(path === '\/(?!task-create)/.test(body),
+    `the /task-create slice reached another route: ${/if \(path === '\/[^']*'/.exec(body)?.[0]}`);
+  return body;
 }
 
 const BODY = routeBody();

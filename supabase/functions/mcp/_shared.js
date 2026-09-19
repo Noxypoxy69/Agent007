@@ -2821,7 +2821,7 @@ export const TASK_WRITE_EXPECTS = Object.freeze({
  * parameter is the day the escaping matters, and that day will not announce
  * itself.
  */
-export function taskWriteFilter(task_id, expected) {
+export function taskWriteFilter(task_id, expected, fence) {
   if (!nonEmpty(task_id)) throw new TypeError('taskWriteFilter requires a task_id');
   const states = arr(expected).filter(nonEmpty);
   if (!states.length) {
@@ -2829,8 +2829,52 @@ export function taskWriteFilter(task_id, expected) {
     // Defaulting to "any state" would reintroduce it quietly.
     throw new TypeError('taskWriteFilter requires at least one expected state');
   }
-  const inList = states.map((x) => encodeURIComponent(x)).join(',');
-  return `tasks?task_id=eq.${encodeURIComponent(task_id)}&state=in.(${inList})`;
+
+  /*
+   * STATE ALONE IS NOT AN IDENTITY, AND THAT WAS A HOLE.
+   *
+   * The predicate pinned task_id and state, so a write judged against one
+   * ATTEMPT landed on another. Reproduced at the database on 2026-09-19: a row
+   * returned by attempt 8 with a different commit was accepted by a coordinator
+   * that had judged attempt 7 — `rows_changed: 1`. The reviewer signed off work
+   * it had never seen, and every surface reported success.
+   *
+   * State could not catch it because the row was legitimately back in the same
+   * state: returned → reassigned → returned again is an ordinary lifecycle, and
+   * the second `returned` is indistinguishable from the first by state alone.
+   *
+   * THE ATTEMPT IS THE FENCE, and it is required rather than optional for the
+   * same reason the expected-state list is: an optional fence is one every
+   * future call site forgets, and the failure is silent. `claim_task` and
+   * `return_with_lease` already fence through their own SQL parameters; this
+   * closes the two paths that went through PostgREST instead, so both halves of
+   * the lifecycle are guarded by the same identity.
+   *
+   * lease_token and assigned_session are pinned WHEN PRESENT rather than
+   * demanded, because a returned task legitimately holds neither — the lease is
+   * released on return. Demanding them would make accept impossible; ignoring
+   * them when they exist would waste a fence we already have.
+   */
+  if (!isPlainObject(fence) || !Number.isInteger(fence.attempt)) {
+    throw new TypeError(
+      'taskWriteFilter requires a fence with the integer attempt the caller judged: '
+      + 'a terminal write pinned only by state lands on whatever attempt happens to be '
+      + 'in that state when it arrives',
+    );
+  }
+
+  const parts = [
+    `tasks?task_id=eq.${encodeURIComponent(task_id)}`,
+    `state=in.(${states.map((x) => encodeURIComponent(x)).join(',')})`,
+    `attempt=eq.${encodeURIComponent(String(fence.attempt))}`,
+  ];
+  if (nonEmpty(fence.lease_token)) {
+    parts.push(`lease_token=eq.${encodeURIComponent(fence.lease_token)}`);
+  }
+  if (nonEmpty(fence.assigned_session)) {
+    parts.push(`assigned_session=eq.${encodeURIComponent(fence.assigned_session)}`);
+  }
+  return parts.join('&');
 }
 
 /**

@@ -934,9 +934,21 @@ function coordinatorStore(label, { owner = false } = {}) {
       const verdict = canAccept(task, { at });
       if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
 
+      /*
+       * FENCED TO THE ROW THAT WAS JUDGED. canAccept ran against `task`, so the
+       * write pins that task's attempt: a row that has since been reassigned,
+       * worked and returned AGAIN is a different candidate wearing the same
+       * state, and accepting it signs off a commit the reviewer never saw.
+       */
       const landed = writeLanded(
-        await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.accept),
-          acceptRecord(task, { by: label, at })),
+        await patch(
+          taskWriteFilter(task_id, TASK_WRITE_EXPECTS.accept, {
+            attempt: task.attempt,
+            lease_token: task.lease_token,
+            assigned_session: task.assigned_session,
+          }),
+          acceptRecord(task, { by: label, at }),
+        ),
         { task_id, expected: TASK_WRITE_EXPECTS.accept },
       );
       if (!landed.ok) return { ok: false, errors: landed.errors };
@@ -965,9 +977,22 @@ function coordinatorStore(label, { owner = false } = {}) {
       if (!verdict.ok) return { ok: false, errors: verdict.errors, state: task.state };
 
       const at = new Date().toISOString();
+      /*
+       * FENCED, AND CANCEL IS THE SHARPER OF THE TWO. Its expected-state list
+       * admits runnable, assigned, returned and blocked — so a cancellation
+       * decided about attempt 7 lands happily on attempt 8, which is a DIFFERENT
+       * WORKER'S LIVE WORK destroyed on a judgement about somebody else's.
+       * State cannot see that; the attempt can.
+       */
       const landed = writeLanded(
-        await patch(taskWriteFilter(task_id, TASK_WRITE_EXPECTS.cancel),
-          cancelRecord(task, { by: label, at, reason })),
+        await patch(
+          taskWriteFilter(task_id, TASK_WRITE_EXPECTS.cancel, {
+            attempt: task.attempt,
+            lease_token: task.lease_token,
+            assigned_session: task.assigned_session,
+          }),
+          cancelRecord(task, { by: label, at, reason }),
+        ),
         { task_id, expected: TASK_WRITE_EXPECTS.cancel },
       );
       if (!landed.ok) return { ok: false, errors: landed.errors };
