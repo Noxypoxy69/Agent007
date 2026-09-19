@@ -174,8 +174,18 @@ export function decideVerify(record, { now = 0, key = null } = {}) {
   }
 
   if (state === VERIFY.RUNNING || state === VERIFY.REQUESTED) {
-    const beat = Number(record.heartbeat_at);
-    const age = Number.isFinite(beat) ? now - beat : Number.POSITIVE_INFINITY;
+    /*
+     * `Number(null)` IS 0, NOT NaN, and my own test caught that. A record whose
+     * heartbeat_at was null coerced to epoch zero, so instead of "nobody has
+     * ever beaten this" the refusal said "last beat 1000000s ago". Both refuse,
+     * so the behaviour was safe -- but the reason is what a reader acts on, and
+     * a wrong reason sends them to diagnose a stalled process that never
+     * existed. Only a finite number is a heartbeat.
+     */
+    const beat = typeof record.heartbeat_at === 'number' && Number.isFinite(record.heartbeat_at)
+      ? record.heartbeat_at
+      : null;
+    const age = beat === null ? Number.POSITIVE_INFINITY : now - beat;
     if (age <= DEAD_AFTER_MS) {
       return {
         action: ACTION.ATTACH,
