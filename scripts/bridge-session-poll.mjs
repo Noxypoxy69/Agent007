@@ -106,6 +106,120 @@ function alive(pid) {
 const readRecord = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 
 /**
+ * Merge fields into the poll record without losing what is already there.
+ *
+ * WHY THE SUPERVISOR WRITES AT ALL. It used to write the record ONCE, at
+ * detach, and then nothing for the life of the session: the happy path is
+ * `continue` and `continue`, both silent, into a log file nobody reads. So a
+ * healthy watcher and a dead one produced BYTE-IDENTICAL evidence -- an empty
+ * log and a startedAt from hours ago. Measured 2026-09-19: two poll logs on
+ * this machine, both 0 bytes, no supervisor process running for either, and
+ * nothing anywhere had noticed. That is the whole of "the watcher dies and I
+ * cannot see the AIs": not that it dies, but that dying looks exactly like
+ * working.
+ *
+ * Absence of output is the one signal that cannot distinguish them, so the
+ * supervisor now leaves a positive mark every cycle. Rule 4: health is
+ * asserted, never inferred from silence.
+ */
+function updateRecord(pidFile, fields) {
+  try {
+    const rec = readRecord(pidFile) ?? {};
+    fs.writeFileSync(pidFile, `${JSON.stringify({ ...rec, ...fields }, null, 2)}\n`);
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * How many cycles may pass with no mark before a watcher is presumed stalled.
+ *
+ * A cycle is bounded by POLL_SECONDS, so one missed mark is normal jitter and
+ * two is not. Generous deliberately: calling a working watcher dead teaches
+ * people to ignore the report, which is rule 16's failure mode.
+ */
+const STALL_AFTER_CYCLES = 2;
+
+/**
+ * WHAT A POLL RECORD MEANS. Pure, exported, no filesystem and no clock of its
+ * own -- so every branch below can be watched failing without a real spawn,
+ * which is the lesson classifyCycle was extracted for.
+ *
+ * @param {object|null} rec       the parsed .json poll record, or null
+ * @param {{now:number, pidAlive:boolean, pollSeconds?:number}} ctx
+ * @returns {{state:string, detail:string, wrong:boolean}}
+ *   healthy   marked a cycle recently and the process is up
+ *   starting  detached, not yet through its first cycle
+ *   stalled   the process is UP but has not marked a cycle in too long
+ *   dead      the process is GONE and never said why   <- the silent case
+ *   stopped   the process is gone and DID say why
+ *   unknown   there is no record to reason about
+ *
+ * `wrong` is the single bit a caller needs to decide whether to shout. It is
+ * separate from `state` on purpose: a reader that switches on a state string
+ * silently stops shouting the day a new state is added, and a liveness report
+ * that quietly narrows is the defect this file is about.
+ */
+export function watcherHealth(rec, { now, pidAlive, pollSeconds = POLL_SECONDS } = {}) {
+  if (!rec || typeof rec !== 'object') {
+    return { state: 'unknown', detail: 'no poll record', wrong: true };
+  }
+
+  const at = (v) => { const t = Date.parse(v ?? ''); return Number.isFinite(t) ? t : null; };
+  const stopped = at(rec.stoppedAt);
+  const last = at(rec.lastCycleAt);
+  const started = at(rec.startedAt);
+  const ageOf = (t) => (t === null ? null : Math.max(0, Math.round((now - t) / 1000)));
+
+  if (stopped !== null || rec.stopReason) {
+    return {
+      state: 'stopped',
+      detail: `stopped ${ageOf(stopped) ?? '?'}s ago: ${rec.stopReason ?? 'no reason recorded'}`,
+      /*
+       * A DELIBERATE STOP IS STILL A SESSION NOBODY IS WATCHING. It is not an
+       * error, but reporting it as fine is how an agent stays invisible for
+       * hours with a tidy explanation on disk.
+       */
+      wrong: true,
+    };
+  }
+
+  if (!pidAlive) {
+    return {
+      state: 'dead',
+      detail: `pid ${rec.pid ?? '?'} is gone and recorded no reason`
+        + `${last === null ? ', and it never completed a cycle' : `; last cycle ${ageOf(last)}s ago`}`,
+      wrong: true,
+    };
+  }
+
+  const limit = pollSeconds * STALL_AFTER_CYCLES;
+
+  if (last === null) {
+    /*
+     * No mark yet. That is correct for a watcher that has just detached and is
+     * sitting in its first long poll, and it is NOT correct an hour later --
+     * which is the shape of a supervisor that started and immediately wedged.
+     */
+    const age = ageOf(started);
+    if (age !== null && age > limit) {
+      return { state: 'stalled', detail: `up ${age}s and has never completed a cycle`, wrong: true };
+    }
+    return { state: 'starting', detail: `detached ${age ?? '?'}s ago, first cycle not finished`, wrong: false };
+  }
+
+  const age = ageOf(last);
+  if (age > limit) {
+    return { state: 'stalled', detail: `process is up but last cycle was ${age}s ago (limit ${limit}s)`, wrong: true };
+  }
+
+  return {
+    state: 'healthy',
+    detail: `last cycle ${age}s ago, ${rec.cycles ?? '?'} cycles`,
+    wrong: false,
+  };
+}
+
+/**
  * ADVANCE PAST WHAT WAS DELIVERED, given the previous cursor and the CLI's
  * stdout. Returns the new cursor, which is `prev` when there is nothing to
  * move to.
@@ -291,6 +405,40 @@ async function supervise({ sessionId, tokenFile }) {
   process.on('SIGTERM', stop);
 
   /*
+   * THE SUPERVISOR MARKS ITS OWN LIVENESS, because nothing else can.
+   *
+   * It is detached with stdio to a log file, its healthy path is silent, and
+   * its pid record was written once at detach and never touched again. So the
+   * only observable difference between "holding a 600s poll exactly as
+   * designed" and "died forty minutes ago" was a process table lookup nobody
+   * performed. Every cycle now stamps the record, and every EXIT records why,
+   * so `--status` can answer the question instead of guessing at it.
+   */
+  const { pidFile } = paths(process.env, sessionId);
+  let cycles = 0;
+  const mark = (fields) => updateRecord(pidFile, {
+    lastCycleAt: new Date().toISOString(), cycles, ...fields,
+  });
+
+  /*
+   * A reason on the way out, whatever the exit. An uncaught throw and a clean
+   * break used to be indistinguishable from a kill -9, all three leaving a
+   * stale pid and an empty log. `dead` in watcherHealth means precisely "gone
+   * with no reason recorded", so anything that CAN leave a reason must.
+   */
+  let stopReason = null;
+  const recordStop = (why) => {
+    if (stopReason) return;
+    stopReason = why;
+    updateRecord(pidFile, { stoppedAt: new Date().toISOString(), stopReason: why, cycles });
+  };
+  process.on('exit', () => recordStop('process exited'));
+  process.on('uncaughtException', (e) => {
+    recordStop(`uncaught: ${String(e?.message ?? e).slice(0, 160)}`);
+    process.exit(1);
+  });
+
+  /*
    * THE CURSOR IS CARRIED, AND NOT CARRYING IT WAS A SELF-INFLICTED REQUEST LOOP.
    *
    * This used to recompute `since` as `now - 600s` on EVERY iteration. The
@@ -362,9 +510,20 @@ async function supervise({ sessionId, tokenFile }) {
      */
     const verdict = classifyCycle(r);
 
+    /*
+     * MARK EVERY CYCLE, INCLUDING THE QUIET ONE. The quiet branch `continue`s
+     * and is by far the most common outcome on a healthy bridge, so a mark
+     * that skipped it would report every working watcher as stalled -- and a
+     * liveness check that cries wolf gets switched off, which loses the whole
+     * layer (rule 16).
+     */
+    cycles += 1;
+    mark({ lastVerdict: verdict });
+
     if (verdict === 'permanent') {
       const line = err.split('\n').find((l) => /^error:/i.test(l)) ?? err.split('\n')[0];
       process.stderr.write(`[poll] stopping, this will not fix itself: ${line.slice(0, 200)}\n`);
+      recordStop(`permanent: ${line.slice(0, 160)}`);
       /*
        * HONEST LIMIT: an unknown session is recoverable in principle — a fresh
        * register-session would fix it — and this loop does not attempt that.
@@ -421,7 +580,7 @@ async function supervise({ sessionId, tokenFile }) {
         ? `could not start: ${r.error.code ?? ''} ${r.error.message ?? r.error}`.trim()
         : `exited ${r.status}: ${err.slice(0, 200)}`;
       process.stderr.write(`[poll] wait-for-work ${why}\n`);
-      if (stopping) break;
+      if (stopping) { recordStop(`signalled to stop after: ${why}`); break; }
       // Back off briefly so a hard failure cannot spin.
       await new Promise((resolve) => { setTimeout(resolve, 15_000); });
     }
@@ -567,6 +726,62 @@ async function sessionEnd() {
     : `agentbridge poll: poll stopped, but deregistering ${sessionId} exited ${r.status}`);
 }
 
+/* ── status: answer "can I see my agents?" without a process-table hunt ──── */
+
+/**
+ * REPORT EVERY WATCHER ON THIS MACHINE, AND EXIT NON-ZERO IF ANY IS WRONG.
+ *
+ * This is the half that was missing. The supervisor could die, and did, and
+ * the only way anyone found out was noticing hours later that the roster said
+ * offline -- or, tonight, because send_message happened to mention it. There
+ * was no command that asked. Diagnosis was: list a directory, observe two
+ * empty log files, query the process table by hand, and infer.
+ *
+ * Exit 1 when anything is wrong, so this is usable from a cron, a hook or a
+ * supervising agent without parsing the text.
+ */
+function status(env, out = process.stdout) {
+  const { dir } = paths(env, 'x');
+  let files = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+  } catch {
+    out.write(`no poll directory at ${dir}\n`);
+    out.write('NOTHING IS WATCHING. No session has ever started a poll on this machine.\n');
+    return 1;
+  }
+
+  if (files.length === 0) {
+    /*
+     * An empty directory next to leftover .log files is the exact state this
+     * machine was in, and it is NOT "nothing to report". Say it plainly.
+     */
+    let logs = 0;
+    try { logs = fs.readdirSync(dir).filter((f) => f.endsWith('.log')).length; } catch { /* counted as zero */ }
+    out.write(`no poll records in ${dir}\n`);
+    out.write('NOTHING IS WATCHING. No session is registered to be polled'
+      + `${logs ? `, though ${logs} log file(s) from earlier sessions remain` : ''}.\n`);
+    return 1;
+  }
+
+  const now = Date.now();
+  let wrong = 0;
+  for (const f of files) {
+    const rec = readRecord(path.join(dir, f));
+    const h = watcherHealth(rec, { now, pidAlive: alive(rec?.pid) });
+    if (h.wrong) wrong += 1;
+    const who = rec?.agentId ? `${rec.agentId} / ${rec.sessionId ?? f}` : (rec?.sessionId ?? f);
+    out.write(`${h.wrong ? '!! ' : '   '}${h.state.toUpperCase().padEnd(8)} ${who}\n`);
+    out.write(`   ${' '.repeat(8)} ${h.detail}\n`);
+  }
+
+  out.write(wrong
+    ? `\n${wrong} of ${files.length} watcher(s) are not watching. Those agents are invisible to `
+      + 'every other machine, and they do not know it.\n'
+    : `\nall ${files.length} watcher(s) healthy\n`);
+  return wrong ? 1 : 0;
+}
+
 /* ── dispatch ────────────────────────────────────────────────────────────── */
 
 const argv = process.argv.slice(2);
@@ -603,8 +818,15 @@ if (RUN_DIRECTLY) try {
     await sessionEnd();
   } else if (argv.includes('--session-start')) {
     await sessionStart();
+  } else if (argv.includes('--status')) {
+    /*
+     * Plain text on stdout, not the {systemMessage} envelope the hook modes
+     * use: this one is run by a person or a cron, and its exit code is the
+     * answer.
+     */
+    process.exit(status(process.env));
   } else {
-    say('agentbridge poll: pass --session-start or --session-end');
+    say('agentbridge poll: pass --session-start, --session-end or --status');
   }
 } catch (e) {
   // A hook never fails a session. Say what broke and leave.
