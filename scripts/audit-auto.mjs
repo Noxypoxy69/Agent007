@@ -71,18 +71,31 @@ const isTest = (f) => /(^|\/)test\/.+\.test\.mjs$/.test(f);
  * reads with new URL(...). A test says what it tests; this reads that rather
  * than guessing from the filename, which would match by coincidence.
  */
-function subjectsOf(testFiles) {
+function subjectsOf(testFiles, root = REPO) {
+  /*
+   * `root` DEFAULTS TO THE LIVE WORKTREE AND THAT IS A KNOWN DEFECT.
+   *
+   * A blind audit found this function reads the test out of whatever the
+   * operator currently has checked out, not out of the commit under audit --
+   * so the SAME COMMIT gets different verdicts depending on the checkout, and
+   * it can resolve a subject the audited commit's test never imported.
+   *
+   * Callers that have a clone pinned at the commit should pass it, and the
+   * collapse check below does. The default is left in place only because the
+   * test-only path still calls it without one; that call site is the
+   * remaining half of the defect and is NOT fixed here.
+   */
   const out = new Set();
   for (const t of testFiles) {
     let src;
-    try { src = readFileSync(path.join(REPO, t), 'utf8'); } catch { continue; }
+    try { src = readFileSync(path.join(root, t), 'utf8'); } catch { continue; }
     const rels = [
       ...[...src.matchAll(/from\s+['"](\.\.?\/[^'"]+)['"]/g)].map((m) => m[1]),
       ...[...src.matchAll(/new URL\(\s*['"](\.\.?\/[^'"]+)['"]/g)].map((m) => m[1]),
     ];
     for (const rel of rels) {
-      const abs = path.resolve(path.dirname(path.join(REPO, t)), rel);
-      const repoRel = path.relative(REPO, abs).split(path.sep).join('/');
+      const abs = path.resolve(path.dirname(path.join(root, t)), rel);
+      const repoRel = path.relative(root, abs).split(path.sep).join('/');
       // Its own siblings are not its subject, and nor is anything outside the repo.
       if (repoRel.startsWith('..') || isTest(repoRel)) continue;
       if (!existsSync(abs)) continue;
@@ -343,10 +356,46 @@ for (const sha of shas) {
       continue;
     }
     if (before.ran && after.tests < before.tests) {
+      /*
+       * A COLLAPSE IS NOT AUTOMATICALLY A NON-GATE. THE FIRST VERSION OF THIS
+       * CHECK OVERCORRECTED AND BROKE HONEST VERDICTS.
+       *
+       * The previous commit read any drop in test count as "the suite stopped
+       * loading rather than the assertions firing" and printed NOT A GATE. A
+       * blind audit showed that is wrong for the COMMONEST HONEST PATTERN in
+       * this repository: a new export plus the test that imports it. Revert
+       * the export and the test cannot load -- the count drops -- and that
+       * collapse IS the gate working. It fired on e53b8c8's own auditEscalation
+       * test, calling a load-bearing gate not-a-gate.
+       *
+       * So the question is not "did the count drop" but "did it drop BECAUSE
+       * the reverted code is what the test imports". The test names its own
+       * subject, so that is answerable rather than guessable: if anything we
+       * reverted is among the modules this test imports, a failure to load is
+       * evidence the test depends on the code -- which is what a gate is.
+       *
+       * If the reverted set and the test's imports are disjoint, the collapse
+       * had some other cause and the assertions never ran. That is the
+       * auditor's original case, and it is reported as a lead, not a verdict.
+       */
+      const imported = new Set(subjectsOf(tests, work));
+      const revertedAndImported = restorable.filter((f) => imported.has(f));
+
+      if (revertedAndImported.length > 0) {
+        console.log(`${short}  GATE   the test cannot even load without the code (${before.tests} -> ${after.tests} tests)  [${tests.join(' ')}]`);
+        console.log(`         reverted and imported by the test: ${revertedAndImported.join(', ')}`);
+        findings.push({
+          sha: short,
+          verdict: 'real-gate',
+          detail: `load-time: ${revertedAndImported.join(', ')} reverted, ${before.tests} -> ${after.tests} tests`,
+        });
+        continue;
+      }
+
       console.log(`${short}  COLLAPSED ${before.tests} tests became ${after.tests} after the revert  [${tests.join(' ')}]`);
-      console.log('         The suite stopped loading rather than the assertions firing.');
-      console.log('         This is NOT a gate: look for an import that the parent version breaks.');
-      findings.push({ sha: short, verdict: 'collapsed', detail: `${before.tests} -> ${after.tests} tests` });
+      console.log('         Nothing the test imports was reverted, so the assertions never ran.');
+      console.log('         A LEAD, not a verdict: look for an import the parent version breaks.');
+      findings.push({ sha: short, verdict: 'collapsed', detail: `${before.tests} -> ${after.tests} tests, no reverted file imported` });
       continue;
     }
 
