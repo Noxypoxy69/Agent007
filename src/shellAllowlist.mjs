@@ -1,4 +1,5 @@
 import { isProtectedRelPath } from './guardSession.mjs';
+import { commitNamesItsPaths } from './gitIndexLease.mjs';
 
 /**
  * A FAST-FEEDBACK RAIL. NOT A SECURITY BOUNDARY. Read this before trusting it.
@@ -555,6 +556,42 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
           };
         }
       }
+      /*
+       * A COMMIT THAT NAMES NOTHING TAKES WHATEVER IS IN THE INDEX, INCLUDING
+       * ANOTHER SESSION'S STAGING.
+       *
+       * The sweep check above closes the selectors -- `-a`, `--all`, `.` --
+       * and it does not close the quiet one, because `git commit -m "msg"`
+       * carries no selector at all. It records the index, and the index is
+       * shared. CLAUDE.md has documented that hazard for as long as two agents
+       * have worked one clone, and documenting it is all anything did: rule 17,
+       * a control that is never consulted is not a control. The measured cost
+       * is in that same file -- two sessions answering one question nine
+       * minutes apart, and a collision guard that compares paths could not see
+       * it because neither had declared any.
+       *
+       * `.git/index.lock` is not the answer and its existence is most of why
+       * nobody looked for one: git holds it for ONE invocation, and the window
+       * that bites spans the `add`, the other session's `add`, and the
+       * `commit`.
+       *
+       * REFUSING THIS DOES NOT REFUSE THE WORKFLOW. The spelling that remains
+       * allowed is the one this repository already mandates, and the
+       * compliant shape never waits for anything -- naming the paths IS the
+       * lock, scoped to those files and held for exactly one command. A
+       * session lease over the index was designed and rejected for that
+       * reason; see src/gitIndexLease.mjs.
+       */
+      if (verb === 'commit' && !commitNamesItsPaths(tokens)) {
+        return {
+          allowed: false,
+          reason: '"git commit" with no pathspec records whatever is staged, and the index is '
+            + 'shared with every other session in this clone -- one can stage between your `add` '
+            + 'and your `commit`, and both halves land in your commit. Name what you are '
+            + 'committing: git commit <path> [<path>...] -m "message"',
+        };
+      }
+
       /*
        * A BARE BRANCH SWITCH STAYS ALLOWED and that is the same documented
        * residual as GIT_IMPORTS_HISTORY: `git checkout other-branch` does

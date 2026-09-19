@@ -47,6 +47,11 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/safeGit.mjs',
   'src/auditLedger.mjs',
   'src/actionAuthority.mjs',
+  // The shared-index commit check, imported by src/shellAllowlist.mjs. Added
+  // 2026-09-18, and the parity gate above caught this side too -- it went into
+  // guardSession.mjs first and the suite went red on the next run, which is the
+  // second time that sentence has been written in this file about this list.
+  'src/gitIndexLease.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

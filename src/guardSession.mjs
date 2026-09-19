@@ -88,6 +88,17 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/safeGit.mjs',
   'src/auditLedger.mjs',
   'src/actionAuthority.mjs',
+  /*
+   * AND THE DERIVED GATE CAUGHT THE VERY NEXT ONE, which is the point of the
+   * paragraph above. src/gitIndexLease.mjs was added as a shellAllowlist import
+   * on 2026-09-18 -- by me, unprotected, exactly as actionAuthority was hours
+   * earlier -- and test/guardDependenciesProtected.test.mjs named it in the
+   * same run that wired it. Nobody had to remember; the closure is computed.
+   * It decides whether a commit is refused, so a rewrite of it silently
+   * reopens the shared index, and deleting it takes the whole rail offline
+   * with ERR_MODULE_NOT_FOUND.
+   */
+  'src/gitIndexLease.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

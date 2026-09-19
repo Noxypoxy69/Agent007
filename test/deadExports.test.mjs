@@ -99,7 +99,13 @@ function fnsByCategory(root) {
  * supabase/functions/mcp/_shared.js as declared, verified copies; counting them
  * as dead was the misclassification the review caught.
  */
-const BASELINE_UNREFERENCED = 7;
+/*
+ * 7 -> 6 on 2026-09-18. THE RATCHET WORKING, not a concession: "both baselines
+ * are honest" failed LOW, which its own comment says means lower the constant.
+ * The seventh was an export that acquired a production caller, and leaving the
+ * baseline above the real count silently permits a regression back to it.
+ */
+const BASELINE_UNREFERENCED = 6;
 const BASELINE_TEST_ONLY = 72;
 
 /*
