@@ -390,8 +390,31 @@ const GIT_SWEEP_SELECTOR = /(^|\s)(-[A-Za-z]*[aAuU][A-Za-z]*|--all|--update)(\s|
 const GIT_SWEEP_LONG = Object.freeze(['--all', '--update', '--no-ignore-removal']);
 const GIT_FORCE_LONG = Object.freeze(['--force', '--discard-changes', '--hard', '--theirs', '--ours']);
 
-const GIT_SWEEP_SHORT = /^-[A-Za-z]*[aAuU][A-Za-z]*$/;
-const GIT_FORCE_SHORT = /^-[A-Za-z]*f[A-Za-z]*$/;
+/*
+ * A SHORT OPTION CAN BE A DIGIT, AND BOTH CLUSTER CLASSES WERE LETTERS ONLY.
+ *
+ * `git checkout -h` and `git restore -h` both print `-2, --ours` and
+ * `-3, --theirs`. So `--ours` -- which IS in the force list, spelled out -- has
+ * a one-character alias that the matcher could not see, and any cluster
+ * containing a digit escaped entirely. Measured through the shipped rail by
+ * blind audit and reproduced here:
+ *
+ *     git checkout -2  -- <path>   ALLOWED  (git then refused the pathspec)
+ *     git checkout -f2 -- <path>   ALLOWED  -- and the refusal came from GIT,
+ *                                  not from us: "--ours/--theirs, --force and
+ *                                  --merge are incompatible"
+ *     git checkout -qf -- <path>   DENY     (control: all-letter cluster works)
+ *
+ * The second is the one that matters. `--force` reached git through a token the
+ * force matcher cannot see, and git happened to reject the combination. A
+ * refusal from the far end is not this rail working.
+ *
+ * Exploitability is limited -- `-2` against a protected path is still caught by
+ * the pathspec resolver -- but the commit that wrote this list called it "force,
+ * in every spelling it actually has", and it was two spellings short.
+ */
+const GIT_SWEEP_SHORT = /^-[A-Za-z0-9]*[aAuU][A-Za-z0-9]*$/;
+const GIT_FORCE_SHORT = /^-[A-Za-z0-9]*[f23][A-Za-z0-9]*$/;
 
 const flagMatches = (token, short, long) => {
   if (typeof token !== 'string') return false;

@@ -68,8 +68,23 @@ const QUOTES = ['', "'", '"'];
  * enumeration mistake on the same two lines in one night.
  */
 const SWEEPS = ['-A', '-a', '-u', '--all', '--update', '-am', '-Av', '--al', '--up', '--upd', '-qa', '-vu'];
+/*
+ * THE DIGIT SPELLINGS ARE HERE BECAUSE git PRINTS THEM AS ALIASES.
+ *
+ * `git checkout -h` and `git restore -h` both list `-2, --ours` and
+ * `-3, --theirs`. `--ours` was in the force list spelled out while its
+ * one-character alias was invisible, and a cluster containing a digit escaped
+ * both matchers entirely -- the classes were `[A-Za-z]` only.
+ *
+ * The sharp one was `-f2`: measured ALLOWED, and the refusal that followed came
+ * from GIT ("--ours/--theirs, --force and --merge are incompatible"), not from
+ * us. `--force` reached git through a token the force matcher could not see,
+ * and git happened to reject the combination. A refusal from the far end is not
+ * this rail working -- rule 18.
+ */
 const FORCES = ['-f', '--force', '--hard', '--theirs', '--ours', '--discard-changes',
-  '--forc', '--har', '--thei', '--discard', '-qf', '-fq'];
+  '--forc', '--har', '--thei', '--discard', '-qf', '-fq',
+  '-2', '-3', '-f2', '-2q', '-q3'];
 
 /* ── the positive, first ──────────────────────────────────────────────── */
 
