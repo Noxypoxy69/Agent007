@@ -365,15 +365,6 @@ const KNOWN = {
    * moment its next slice lands a caller. If one is still here in a week,
    * somebody should be asking why the slice stopped.
    */
-  'src/taskGate.mjs':
-    'SLICE A OF THE TASK GATE, 718847d, another session. The evidence evaluator and the ' +
-    'advancement rule -- the one function that says what a pile of evidence MEANS, so the ' +
-    'UI, CLI, MCP tools, Stop gate and scheduler cannot each answer it differently. It ' +
-    'holds no state, does no IO and owns no tables; the callers are a later slice by ' +
-    'design, and the migration was explicitly deferred. This entry goes when a caller ' +
-    'lands. NOTE FOR WHOEVER TAKES THAT SLICE: the maker rule fails OPEN when ' +
-    'producer_session is absent -- str() returns null, the AND short-circuits, and a ' +
-    'worker can clear its own blind review. Reported, unfixed at the time of writing.',
 
   'src/takeNext.mjs':
     'SAME SESSION, SAME PATTERN. The WIP-slot and block rules as pure functions, landed ' +

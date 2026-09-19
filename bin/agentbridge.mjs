@@ -279,6 +279,98 @@ const done = (code) => { throw new Done(code); };
 try {
   if (!cmd || cmd === 'help' || args.help) { console.log(HELP); process.exit(0); }
 
+  /*
+   * TASK GATE, READ-ONLY: what does the evidence for this task actually
+   * establish?
+   *
+   * THIS IS THE CALLER src/taskGate.mjs DID NOT HAVE, and its absence was not
+   * cosmetic. A blind audit found fifteen defects in that module -- three
+   * critical, including a maker rule that admitted the worker's own blind
+   * review whenever producer_session was absent -- and every one of them was
+   * LATENT precisely because nothing exercised it. test/noOrphanModules.test.mjs
+   * was red for exactly that reason: "a NEW module is reachable from nothing
+   * shipped."
+   *
+   * It is deliberately READ-ONLY. It derives and prints; it writes no state,
+   * stores no verdict and advances nothing. The whole premise of the module is
+   * that a checklist item turns green because evidence says so, never because
+   * anybody -- including this command -- asserted it.
+   *
+   * Evidence and waivers are read from a JSON file rather than invented here,
+   * because the schema that will hold them is a migration behind the shared-DB
+   * lock. A file keeps this honest: the CLI consults the evaluator, and the
+   * evaluator is the single definition every other surface must also use.
+   */
+  if (cmd === 'task-checklist') {
+    const { evaluateTask, canAdvance } = await import('../src/taskGate.mjs');
+    const { readFileSync } = await import('node:fs');
+    const file = args.file ?? args.f;
+    if (!file) {
+      console.error('usage: agentbridge task-checklist --file <state.json> [--advance <phase>]');
+      console.error('');
+      console.error('  The file holds { task, template, evidence, waivers }. This command');
+      console.error('  DERIVES the checklist from that evidence and prints it. It records');
+      console.error('  nothing and advances nothing: a box turns green because a proof says');
+      console.error('  so, never because a command was run.');
+      process.exit(2);
+    }
+
+    let state;
+    try {
+      state = JSON.parse(readFileSync(file, 'utf8'));
+    } catch (e) {
+      console.error(`task-checklist: could not read ${file}: ${e?.message ?? e}`);
+      process.exit(2);
+    }
+
+    const { task, template, evidence = [], waivers = [] } = state ?? {};
+    if (!task || !template) {
+      console.error('task-checklist: the file must carry both "task" and "template".');
+      process.exit(2);
+    }
+
+    const { items, byPhase, blocked } = evaluateTask({ task, template, evidence, waivers });
+    console.log(`task     : ${task.task_id ?? '(unnamed)'}  attempt ${task.attempt ?? '?'}`);
+    console.log(`template : ${template.id ?? '(unnamed)'}`);
+    console.log('');
+
+    for (const item of items) {
+      const mark = { VERIFIED: 'ok  ', WAIVED: 'waiv', FAILED: 'FAIL', RUNNING: '... ', PENDING: '    ' }[item.state] ?? '    ';
+      console.log(`  [${mark}] ${item.item_id}`);
+      if (item.satisfied_by) console.log(`           by ${item.satisfied_by}`);
+      /*
+       * REJECTIONS ARE PRINTED. "No evidence" and "evidence you are not
+       * allowed to count" are different situations for the reader, and
+       * collapsing them is how somebody concludes the board is broken and
+       * works around it.
+       */
+      for (const r of item.rejected ?? []) {
+        console.log(`           refused ${r.evidence_id ?? '(unnamed)'}: ${r.why}`);
+      }
+    }
+
+    console.log('');
+    for (const [phase, p] of Object.entries(byPhase)) {
+      console.log(`  ${p.complete ? 'complete' : 'open    '}  ${phase}  ${p.satisfied}/${p.total}`);
+    }
+
+    if (blocked.length) {
+      console.log('');
+      console.log(`  ${blocked.length} item(s) have a proof that REPORTED FAILURE. A later pass on the`);
+      console.log('  same candidate does not clear them; nothing about the work changed.');
+    }
+
+    if (args.advance) {
+      const verdict = canAdvance({ task, template, evidence, waivers, targetPhase: args.advance });
+      console.log('');
+      console.log(`  advance to ${args.advance}: ${verdict.ok ? 'PERMITTED' : 'REFUSED'}`);
+      console.log(`  ${verdict.why}`);
+      process.exit(verdict.ok ? 0 : 1);
+    }
+
+    process.exit(blocked.length ? 1 : 0);
+  }
+
   if (cmd === 'init') {
     const cfg = await initConfig({ bridgeUrl: args['bridge-url'], secret: args.secret, label: args.label });
     console.log(`machine id  : ${cfg.machineId}`);
