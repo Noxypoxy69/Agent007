@@ -129,7 +129,15 @@ const WRITE_FLAG_LONG = WRITE_FLAG_NAMES.filter((f) => f.startsWith('--'));
  * spelled another way, and the cost of the other direction is a file written
  * where nothing could see the path.
  */
-function isWriteFlagToken(token) {
+/**
+ * Tools whose long write flags are abbreviated in practice AND whose own option
+ * set does not collide with those abbreviations. See the note in
+ * isWriteFlagToken: this is an enumeration, it is named as one, and it exists
+ * because the unscoped rule refused `git diff --raw` for every agent.
+ */
+const PREFIX_RESOLVED_TOOLS = new Set(['sort']);
+
+function isWriteFlagToken(token, argv0) {
   if (typeof token !== 'string') return false;
 
   // The bare short flag, and the separated form `sort -o out.txt`.
@@ -199,6 +207,40 @@ function isWriteFlagToken(token) {
    */
   const name = token.split('=')[0];
   if (name.length <= 2) return false;               // `--` is not an option
+  if (WRITE_FLAG_LONG.includes(name)) return true;
+
+  /*
+   * PREFIX RESOLUTION IS SCOPED TO ONE TOOL, AND THE UNSCOPED VERSION WAS AN
+   * OVER-BLOCK ON THE VERY FUNCTION THAT CAUSED ONE A DAY EARLIER.
+   *
+   * `--out` is a prefix of `--output`, so `sort --out=<path>` writes a file and
+   * had to be caught. But `--raw` is a prefix of `--rawfile`, `--arg` of
+   * `--argfile`, `--slurp` of `--slurpfile` -- and all three are COMPLETE,
+   * documented options in their own right. Measured after I shipped it:
+   *
+   *     git diff --raw      DENY   "writes or reads a side file"
+   *     git log --raw -1    DENY
+   *     jq --arg a b .      DENY
+   *     jq --slurp .        DENY
+   *
+   * None of those writes anything. My stated justification -- "a prefix
+   * ambiguous to the tool is refused by the tool anyway, so matching it costs a
+   * caller nothing they could have run" -- is simply false for them.
+   *
+   * THE REAL DEFECT IS THAT THIS LIST IS A UNION ACROSS TOOLS. `-f` is a file
+   * for grep and jq, a field list for cut, follow for tail; `--raw` is a write
+   * flag's prefix for jq and an output format for git. A union applied to every
+   * command cannot be right in both directions, and both directions have now
+   * failed on it within a day.
+   *
+   * So prefix resolution is restricted to the one tool where the bypass was
+   * MEASURED, and that scoping is an enumeration -- the thing that keeps losing
+   * here. It is deliberately the smallest claim that closes what was measured
+   * without refusing what was measured to work. The durable repair is a per-tool
+   * arity table, the same move the git matchers made, and it is a larger change
+   * than this.
+   */
+  if (!PREFIX_RESOLVED_TOOLS.has(argv0)) return false;
   return WRITE_FLAG_LONG.some((f) => f.startsWith(name));
 }
 
@@ -492,6 +534,15 @@ const EMPTY_FLAG_SET = new Set();
 const PUSH_REWRITE_LONG = Object.freeze([
   '--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete', '--prune',
 ]);
+
+/**
+ * The short spellings of the same, as a CLUSTER -- `-d`, `-qd`, `-fd`.
+ *
+ * `-d` is git's documented short form of `--delete`, and leaving it out is how
+ * the first version of this check shipped: it passed an empty-matching regex as
+ * the short matcher, so nothing short could ever match.
+ */
+const PUSH_REWRITE_SHORT = /^-[A-Za-z0-9]*[df][A-Za-z0-9]*$/;
 
 const GIT_SWEEP_LONG = Object.freeze(['--all', '--update', '--no-ignore-removal']);
 const GIT_FORCE_LONG = Object.freeze(['--force', '--discard-changes', '--hard', '--theirs', '--ours']);
@@ -818,7 +869,7 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
    * an interpreter builds its target at runtime and cannot be judged from the
    * command string at all.
    */
-  const writeFlag = tokens.find(isWriteFlagToken);
+  const writeFlag = tokens.find((t) => isWriteFlagToken(t, tokens[0]));
   if (writeFlag) {
     return {
       allowed: false,
@@ -891,9 +942,25 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
        * The commit that wrote GIT_FORCE_TOKEN is titled "force, in every
        * spelling it actually has". It only touched the sweep branch.
        */
+      /*
+       * THE SHORT FORMS ARE HERE BECAUSE MY OWN FIX LEFT THEM OUT, one flag
+       * over from the one it closed. The first version passed `/^$/` as the
+       * short matcher, which matches only the empty string, so NO short option
+       * could ever match the rewrite list -- and `flagMatches` then kills any
+       * two-character token on its length guard anyway. Measured:
+       *
+       *     git push --dry-run --delete <remote> <branch>   DENY
+       *     git push --dry-run -d       <remote> <branch>   ALLOWED
+       *     git push --dry-run -qd      <remote> <branch>   ALLOWED
+       *
+       * `-d` is git's documented short form of `--delete`. The commit that
+       * introduced this said of the previous round: "a bare -f was denied only
+       * by ACCIDENT... one extra letter and it was gone." That sentence
+       * describes its own replacement.
+       */
       const pushOptions = gitOptionTokens(tokens, 'push');
       const pushRewrites = (t) => GIT_FORCE_TOKEN.test(t)
-        || flagMatches(t, /^$/, PUSH_REWRITE_LONG);
+        || flagMatches(t, PUSH_REWRITE_SHORT, PUSH_REWRITE_LONG);
       if (pushOptions.some(pushRewrites)) {
         return { allowed: false, reason: 'a force, mirror or delete push rewrites history that is not this session\'s to rewrite' };
       }

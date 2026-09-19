@@ -369,6 +369,39 @@ function isIgnored(rel) {
   }
 }
 
+/**
+ * Does this settings file only ADD, declaring nothing that could weaken a
+ * control? See the note at the `landed` predicate for why this is the right
+ * question for an ignored file and `gateConfigArms` is not.
+ *
+ * Fails closed on anything unreadable or unparseable, and on any key it does
+ * not recognise as harmless -- the list of dangerous keys is short and known,
+ * so an unrecognised TOP-LEVEL key is treated as dangerous rather than assumed
+ * safe. A settings file that grows a new capability should cost one line here.
+ */
+const SETTINGS_KEYS_THAT_CANNOT_WEAKEN = new Set([
+  'permissions', 'enabledMcpjsonServers', 'enableAllProjectMcpServers',
+  'model', 'includeCoAuthoredBy', 'cleanupPeriodDays', 'outputStyle',
+]);
+
+function gateConfigAddsOnly(rel) {
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(path.join(root, rel), 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return false;
+
+  const risky = Object.keys(cfg).filter((k) => !SETTINGS_KEYS_THAT_CANNOT_WEAKEN.has(k));
+  if (risky.length) {
+    selfConfigAlarm.push(`  ${rel}: declares ${risky.join(', ')} -- a file that is not in git `
+      + 'may not carry hooks, env or anything else that can take a control away');
+    return false;
+  }
+  return true;
+}
+
 function isCommittedWork(rel) {
   try {
     /*
@@ -504,7 +537,43 @@ const driftDecisions = allDrift.map((d) => {
        * A deletion is still never relieved, above, for the reason already
        * recorded: a committed deletion of a control is the founding incident.
        */
-      && (!isGateSelfConfig(d.file) || gateConfigStillArms(d.file)),
+      /*
+       * A TRACKED SELF-CONFIG MUST ARM. AN IGNORED ONE MUST MERELY NOT WEAKEN,
+       * AND ASKING IT TO ARM WAS WHY THE PREVIOUS FIX FIXED NOTHING.
+       *
+       * gateConfigArms demands that THE FILE ITSELF declare the guard hook, the
+       * Stop hook and the SessionStart hook. `.claude/settings.json` does.
+       * `.claude/settings.local.json` never did -- on this machine it is 163
+       * bytes of permissions and MCP server names, no `hooks` key at all. So it
+       * failed the arming test, stayed in `drift`, and blocked exactly as
+       * before: the availability fix did not reach the file it was written for,
+       * and it printed "THE GATE'S OWN CONFIGURATION NO LONGER ARMS IT" naming
+       * three hooks that file never carried. A cry-wolf alarm on top of the
+       * block. Found by blind audit.
+       *
+       * The right question for a file that ADDS to a merged configuration is
+       * not "does it arm" but "does it take anything away". These are the keys
+       * by which it could:
+       *
+       *   hooks             -- can replace or drop a control's declaration
+       *   disableAllHooks   -- turns every hook off in one field
+       *   env               -- AGENTBRIDGE_HOME points at the override GRANT
+       *                        STORE (src/config.mjs), so redirecting it is an
+       *                        unlimited forged-grant channel. This repository's
+       *                        own worktree test calls that payload "the
+       *                        sharpest of the seven" and says in as many words
+       *                        that "hooks being armed says nothing about where
+       *                        the grant store points" -- which is precisely the
+       *                        proposition an arming test rests on.
+       *
+       * So an ignored self-config is relieved only when it declares NONE of
+       * them. That admits the real file and the permission approvals Claude
+       * Code writes into it, and refuses every payload that could weaken
+       * anything. Anything richer than that blocks, and blocking is survivable
+       * because the operator can delete the file.
+       */
+      && (!isGateSelfConfig(d.file)
+        || (isIgnored(d.file) ? gateConfigAddsOnly(d.file) : gateConfigStillArms(d.file))),
   };
 });
 const granted = driftDecisions.filter((x) => x.granted).map((x) => x.entry);
