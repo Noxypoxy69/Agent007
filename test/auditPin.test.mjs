@@ -1,17 +1,25 @@
 /**
  * AN AUDIT THAT FINISHES IS NOT THEREBY AN AUDIT THAT WAS VALID.
  *
- * REPRODUCED WITHOUT TRYING, while the module this tests was being written.
- * Four audits ran in one session against a branch three sessions were pushing
- * to. Between assigning a piece of work at 8e9908e and starting it, HEAD moved
- * SEVEN commits to 4a5cedb; one auditor reported in its own findings that the
- * shared worktree changed under it mid-pass, and another that the branch went
- * from 15 to 18 commits ahead while it read. Every verdict was returned with no
- * check that the thing judged still existed.
+ * REPRODUCED WITHOUT TRYING, twice, and the second time by this module's own
+ * first version.
  *
- * The verdict looks identical either way, which is what makes this the shape
- * CLAUDE.md is about: not a check that failed, a check that answered a question
- * about something that had moved.
+ * Round one: four audits ran in one session against a branch three sessions
+ * were pushing to. HEAD moved seven commits between assigning a piece of work
+ * and starting it. Every verdict was returned with no check that the thing
+ * judged still existed.
+ *
+ * Round two, which is the interesting one: the fix for that pinned
+ * `git rev-parse HEAD^{tree}` -- the tree of the COMMIT -- and never looked at
+ * `git status`. A blind auditor then used this very tool, pinned a clean tree,
+ * and while it read, another session put 193 changed lines into
+ * scripts/claude-stop-gate.mjs and more into src/auditLedger.mjs, both files
+ * under its audit. It ran `--verify` three times and got
+ * `state OK / the candidate is unchanged since the audit started` every time.
+ *
+ * AN AUDITOR READS FILES, NOT COMMITS. In a shared worktree the files are the
+ * thing that moves, and a pin that certifies the commit certifies something
+ * nobody looked at.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,6 +29,8 @@ import { capturePin, verifyPin, admitVerdict, PIN } from '../src/auditPin.mjs';
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
 const C = 'c'.repeat(40);
+const CLEAN = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const DIRTY = '1'.repeat(64);
 
 const good = {
   audit_id: 'audit-1',
@@ -29,33 +39,73 @@ const good = {
   base_sha: A,
   candidate_sha: B,
   candidate_tree_sha: C,
+  worktree_digest: CLEAN,
 };
+
+/* ── the defect this module shipped with ──────────────────────────────── */
+
+test('A DIRTY WORKING TREE IS STALE EVEN WHEN THE COMMIT HAS NOT MOVED', () => {
+  /*
+   * THE MEASURED FAILURE, as its own test. Same commit, same committed tree,
+   * different files on disk -- which is exactly what an auditor is reading.
+   * The first version compared only the three shas and returned OK here.
+   */
+  const { pin } = capturePin(good);
+  const v = verifyPin(pin, { ...good, worktree_digest: DIRTY });
+  assert.equal(v.state, PIN.STALE, 'files changed under the audit and the verdict was admitted');
+  assert.deepEqual(v.moved, ['worktree_digest']);
+});
+
+test('A PIN WITHOUT A WORKTREE DIGEST IS REFUSED AT CAPTURE', () => {
+  /*
+   * Optional would have been useless: the caller that forgets it is the caller
+   * with the problem, and a pin recording only the commit certifies something
+   * no auditor reads.
+   */
+  const r = capturePin({ ...good, worktree_digest: undefined });
+  assert.equal(r.ok, false, 'a pin with no working-tree reading was accepted');
+  assert.match(r.errors.join('; '), /reads FILES/);
+});
+
+test('DECLARED FIELDS ARE NOT COMPARED, so a pin cannot be OK by restatement', () => {
+  /*
+   * task_id and attempt cannot be read back from a repository. The first
+   * version compared them against whatever the VERIFIER passed in, so a pin
+   * carrying them was UNKNOWN by default and OK only when the caller restated
+   * the pin's own claim -- and could never be STALE for a reason the caller did
+   * not choose. Rule 4: the recheck asserted on a value supplied by the party
+   * being checked.
+   */
+  const { pin } = capturePin(good);
+  assert.equal(pin.declared.task_id, 't-fence');
+  assert.equal(pin.declared.attempt, 7);
+
+  // A reading that says nothing about task or attempt is still OK...
+  assert.equal(verifyPin(pin, {
+    base_sha: A, candidate_sha: B, candidate_tree_sha: C, worktree_digest: CLEAN,
+  }).state, PIN.OK, 'an unmeasurable field made an otherwise-matching audit unverifiable');
+
+  // ...and a reading that CONTRADICTS them changes nothing, because they are
+  // not evidence. The binding is recorded; it is not confirmed.
+  assert.equal(verifyPin(pin, { ...good, task_id: 'someone-else', attempt: 99 }).state, PIN.OK);
+});
 
 /* ── capture ──────────────────────────────────────────────────────────── */
 
 test('THE POSITIVE FIRST: a complete capture is accepted and normalised', () => {
-  /*
-   * Rule 5. Every refusal below is satisfied by a capture that rejects
-   * everything, which would make pinning unusable and get it routed around.
-   */
   const r = capturePin({ ...good, candidate_sha: B.toUpperCase() });
   assert.equal(r.ok, true, `a complete capture was refused: ${r.errors?.join('; ')}`);
   assert.equal(r.pin.candidate_sha, B, 'a sha was not normalised to lower case');
-  assert.equal(r.pin.attempt, 7);
 });
 
 test('AN INCOMPLETE CAPTURE IS REFUSED, not silently partial', () => {
-  /*
-   * A pin missing its candidate cannot detect anything, and one that degrades
-   * to "whatever I could read" is worse than none: it produces an OK at the far
-   * end meaning only that two unknowns matched.
-   */
   for (const [why, patch] of Object.entries({
     'no audit_id': { audit_id: '' },
     'no candidate_sha': { candidate_sha: null },
     'no candidate_tree_sha': { candidate_tree_sha: undefined },
     'a short candidate sha': { candidate_sha: 'abc1234' },
     'a non-hex sha': { candidate_sha: 'z'.repeat(40) },
+    'no worktree digest': { worktree_digest: '' },
   })) {
     const r = capturePin({ ...good, ...patch });
     assert.equal(r.ok, false, `accepted a capture with ${why}`);
@@ -64,16 +114,12 @@ test('AN INCOMPLETE CAPTURE IS REFUSED, not silently partial', () => {
   assert.equal(capturePin().ok, false, 'an empty capture was accepted');
 });
 
-test('task, attempt and base are OPTIONAL, because an honest audit may have none', () => {
-  /*
-   * An audit of a branch range or of a working tree has no single task or
-   * attempt. Demanding them would make the honest cases unpinnable, which is
-   * how a control ends up bypassed by the work it was meant to cover.
-   */
-  const r = capturePin({ audit_id: 'a', candidate_sha: B, candidate_tree_sha: C });
+test('task and attempt are OPTIONAL, because an honest audit may have none', () => {
+  const r = capturePin({
+    audit_id: 'a', candidate_sha: B, candidate_tree_sha: C, worktree_digest: CLEAN,
+  });
   assert.equal(r.ok, true, `a range audit could not be pinned: ${r.errors?.join('; ')}`);
-  assert.equal(r.pin.task_id, null);
-  assert.equal(r.pin.attempt, null);
+  assert.equal(r.pin.declared.task_id, null);
 });
 
 test('BUT A MALFORMED OPTIONAL IS AN ERROR, not a silent drop', () => {
@@ -81,29 +127,20 @@ test('BUT A MALFORMED OPTIONAL IS AN ERROR, not a silent drop', () => {
   assert.equal(capturePin({ ...good, base_sha: 'abc' }).ok, false);
 });
 
-/* ── the STALE case: the whole point ──────────────────────────────────── */
+/* ── the STALE case ───────────────────────────────────────────────────── */
 
-test('A MOVED CANDIDATE IS STALE, and the reason names what moved', () => {
-  const { pin } = capturePin(good);
-  const v = verifyPin(pin, { ...good, candidate_sha: 'd'.repeat(40) });
-  assert.equal(v.state, PIN.STALE);
-  assert.deepEqual(v.moved, ['candidate_sha']);
-  assert.match(v.why, /different candidate/);
-});
-
-test('EVERY PINNED FIELD IS CHECKED, not just the commit', () => {
+test('EVERY MEASURED FIELD IS CHECKED, not just the commit', () => {
   /*
-   * Generated from the pin itself, so a field added to the capture extends this
-   * without anybody remembering -- rule 7. Each is moved on its own, because a
-   * matcher that only ever sees one field changed cannot show it reads the rest.
+   * Generated from the measured set, so a field added to it extends this
+   * without anybody remembering -- rule 7. Each moves alone, because a matcher
+   * that only ever sees one field change cannot show it reads the rest.
    */
   const { pin } = capturePin(good);
   const moves = {
-    task_id: 't-other',
-    attempt: 8,
     base_sha: 'e'.repeat(40),
     candidate_sha: 'f'.repeat(40),
     candidate_tree_sha: '0'.repeat(40),
+    worktree_digest: DIRTY,
   };
   for (const [field, value] of Object.entries(moves)) {
     const v = verifyPin(pin, { ...good, [field]: value });
@@ -112,13 +149,11 @@ test('EVERY PINNED FIELD IS CHECKED, not just the commit', () => {
   }
 });
 
-test('THE TREE AND THE COMMIT ARE SEPARATE, which is why both are pinned', () => {
+test('THE COMMIT AND ITS TREE ARE SEPARATE, which is why both are pinned', () => {
   /*
-   * Two different commits can carry an identical tree -- a rebase, a
-   * cherry-pick, an amend that changed only a message. An audit of the CONTENT
-   * survives those; an audit of the diff does not. Pinning the commit alone
-   * would discard a good verdict, pinning the tree alone would accept one about
-   * different history. Both are recorded and both are checked.
+   * Two commits can carry an identical tree -- a rebase, a cherry-pick, an
+   * amend that changed only a message. An audit of the CONTENT survives those;
+   * an audit of the diff does not.
    */
   const { pin } = capturePin(good);
   assert.equal(verifyPin(pin, { ...good, candidate_sha: 'd'.repeat(40) }).moved[0], 'candidate_sha');
@@ -128,46 +163,30 @@ test('THE TREE AND THE COMMIT ARE SEPARATE, which is why both are pinned', () =>
 /* ── unknown is a third answer ────────────────────────────────────────── */
 
 test('UNKNOWN IS NOT OK AND IS NOT STALE', () => {
-  /*
-   * If the recheck could not be taken, nobody knows. Folding that into OK
-   * admits a verdict on an unverified identity -- the failure this exists to
-   * stop. Folding it into STALE discards good audits whenever a command
-   * hiccups. The same three-way split this repository already makes for a null
-   * heartbeat and a failed check-first lookup.
-   */
   const { pin } = capturePin(good);
   assert.equal(verifyPin(pin, null).state, PIN.UNKNOWN);
   assert.equal(verifyPin(pin, {}).state, PIN.UNKNOWN);
   assert.equal(verifyPin(null, good).state, PIN.UNKNOWN);
-  assert.equal(verifyPin(pin, { ...good, candidate_tree_sha: null }).state, PIN.UNKNOWN);
+  assert.equal(verifyPin(pin, { ...good, worktree_digest: null }).state, PIN.UNKNOWN);
 });
 
 test('MOVED BEATS UNREADABLE: a partial reading that already disagrees still refuses', () => {
   const { pin } = capturePin(good);
-  const v = verifyPin(pin, { ...good, candidate_sha: 'd'.repeat(40), candidate_tree_sha: null });
+  const v = verifyPin(pin, { ...good, candidate_sha: 'd'.repeat(40), worktree_digest: null });
   assert.equal(v.state, PIN.STALE, 'a known move was downgraded to unknown by an unreadable sibling');
 });
 
 test('AN ABSENT PIN FIELD IS NOT A WILDCARD', () => {
-  /*
-   * A range audit pins no task. That must not mean "any task matches" at the
-   * far end -- it means the field was never claimed, so it is not compared. The
-   * distinction matters because the opposite reading turns an unpinned audit
-   * into one that always passes.
-   */
-  const { pin } = capturePin({ audit_id: 'a', candidate_sha: B, candidate_tree_sha: C });
-  assert.equal(verifyPin(pin, { task_id: 'anything', candidate_sha: B, candidate_tree_sha: C }).state, PIN.OK);
-  assert.equal(verifyPin(pin, { task_id: 'anything', candidate_sha: A, candidate_tree_sha: C }).state, PIN.STALE);
+  const { pin } = capturePin({
+    audit_id: 'a', candidate_sha: B, candidate_tree_sha: C, worktree_digest: CLEAN,
+  });
+  assert.equal(verifyPin(pin, { candidate_sha: B, candidate_tree_sha: C, worktree_digest: CLEAN }).state, PIN.OK);
+  assert.equal(verifyPin(pin, { candidate_sha: A, candidate_tree_sha: C, worktree_digest: CLEAN }).state, PIN.STALE);
 });
 
 /* ── the one call a caller makes ──────────────────────────────────────── */
 
 test('admitVerdict FAILS CLOSED and distinguishes the two refusals', () => {
-  /*
-   * They call for opposite responses: STALE means re-run against the new
-   * candidate, UNKNOWN means find out why the recheck failed before spending
-   * another audit. A single "no" would send the reader to the wrong one.
-   */
   const { pin } = capturePin(good);
   assert.equal(admitVerdict(pin, good).ok, true);
   assert.equal(admitVerdict(pin, { ...good, candidate_sha: A }).state, PIN.STALE);
@@ -176,11 +195,7 @@ test('admitVerdict FAILS CLOSED and distinguishes the two refusals', () => {
 });
 
 test('THE CONTROL: this gate can actually fail, and actually pass', () => {
-  /*
-   * Rule 1, held permanently. Every assertion above is satisfied by a verifier
-   * returning a constant. Both verdicts are demanded here from the same call.
-   */
   const { pin } = capturePin(good);
   assert.equal(verifyPin(pin, good).state, PIN.OK);
-  assert.equal(verifyPin(pin, { ...good, candidate_tree_sha: A }).state, PIN.STALE);
+  assert.equal(verifyPin(pin, { ...good, worktree_digest: DIRTY }).state, PIN.STALE);
 });

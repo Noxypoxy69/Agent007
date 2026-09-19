@@ -3026,12 +3026,39 @@ try {
       try { return String(rg(['rev-parse', spec], { cwd: process.cwd(), encoding: 'utf8' })).trim(); }
       catch { return null; }
     };
+    /*
+     * THE WORKING TREE IS MEASURED, NOT JUST THE COMMIT, and the first version
+     * of this command is why that sentence is here. It pinned
+     * `rev-parse HEAD^{tree}` -- the COMMIT's tree -- and never looked at
+     * `git status`. An auditor reads FILES. Demonstrated by a blind audit using
+     * this very tool: it pinned a clean tree, another session put 193 changed
+     * lines into a file under audit while it read, and `--verify` printed OK
+     * three times.
+     *
+     * The porcelain output IS the digest input: it lists every path that
+     * differs from HEAD plus every untracked file, with its status letters. A
+     * clean tree digests the empty string; any edit, add, delete or stage
+     * changes it. Sorted, because git's ordering is not a promise.
+     */
+    const { createHash } = await import('node:crypto');
+    const worktreeDigest = () => {
+      try {
+        const out = String(rg(['status', '--porcelain', '--untracked-files=all'],
+          { cwd: process.cwd(), encoding: 'utf8' }));
+        const lines = out.split('\n').map((s) => s.trimEnd()).filter(Boolean).sort();
+        return createHash('sha256').update(lines.join('\n')).digest('hex');
+      } catch {
+        return null;   // unknown is not clean; capturePin/verifyPin refuse it
+      }
+    };
+
     const reading = {
       task_id: args.task ? String(args.task) : null,
       attempt: args.attempt !== undefined ? args.attempt : null,
       base_sha: read(`${at}^`),
       candidate_sha: read(at),
       candidate_tree_sha: read(`${at}^{tree}`),
+      worktree_digest: worktreeDigest(),
     };
 
     if (args.verify) {
@@ -3045,6 +3072,17 @@ try {
       console.log(`state    ${v.state}`);
       console.log(`why      ${v.why}`);
       if (v.moved.length) console.log(`moved    ${v.moved.join(', ')}`);
+      /*
+       * SAY WHAT WAS NOT CHECKED. task_id and attempt cannot be read back from
+       * a repository, so they are recorded and not compared -- and a verdict
+       * that stayed silent about that would let a reader believe the binding
+       * had been confirmed.
+       */
+      const d = pin?.declared ?? {};
+      if (d.task_id || d.attempt !== null) {
+        console.log(`declared task=${d.task_id ?? '-'} attempt=${d.attempt ?? '-'}`
+          + '  (recorded for binding; NOT rechecked -- nothing can measure them)');
+      }
       /*
        * UNKNOWN EXITS 2, NOT 1. A failed lookup and a real refusal must never
        * render alike -- the same reason check-first prints LOOKUP INCOMPLETE
