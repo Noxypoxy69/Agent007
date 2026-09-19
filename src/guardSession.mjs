@@ -1259,9 +1259,29 @@ function repoRelative(dir, rel) {
   return fromTop === '' || fromTop.startsWith('..') ? asGiven : fromTop;
 }
 
-export function overridePath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
+/**
+ * Where a per-repository store lives, under one key derivation.
+ *
+ * ONE KEY, NOT TWO. The grant store is named
+ * `sha256(canonical git-common-dir)[0:16]`, and that spelling is load-bearing:
+ * for a week nothing printed it and nothing wrote it down, the key was the
+ * DIRECTORY rather than the repository, and across 17 roots on one machine
+ * exactly one had a grant -- not the one anybody was working in. A grant at the
+ * wrong key fails exactly like the guard being strict, which is why it was
+ * re-diagnosed three times.
+ *
+ * So a second store keyed "the same way" by a second copy of that expression is
+ * the defect this file already carries a header about. It is computed once here
+ * and every store asks for it.
+ */
+export function repoStorePath(repoRoot, kind, ext,
+  home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
   const key = sha(overrideKeySource(repoRoot)).slice(0, 16);
-  return path.join(home, 'overrides', `${key}.json`);
+  return path.join(home, kind, `${key}${ext}`);
+}
+
+export function overridePath(repoRoot, home = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge')) {
+  return repoStorePath(repoRoot, 'overrides', '.json', home);
 }
 
 /**

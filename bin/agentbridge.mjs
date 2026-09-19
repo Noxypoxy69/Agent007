@@ -171,6 +171,23 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         admitted. Exit 0 only when the candidate
                                         is unchanged; 1 STALE, 2 UNKNOWN -- a
                                         failed lookup must not look like a pass.
+  agentbridge finding-add --from <finding.json> [--repo <dir>]
+  agentbridge findings [--repo <dir>]
+  agentbridge finding-bind --id <F-..> --task <id> --attempt <n> --lease <tok>
+                           --fixer <session> --by <session>
+  agentbridge finding-move --id <F-..> --to <status> --by <session>
+                                        record what a blind audit FOUND, as a
+                                        record rather than a sentence in a
+                                        commit message. A finding needs a
+                                        reproduction, a candidate identity and
+                                        the session that raised it, or it is
+                                        refused: a defect nobody can re-run
+                                        cannot be confirmed fixed. Stored under
+                                        AGENTBRIDGE_HOME, keyed like the grant.
+                                        Nobody retires their own finding: the
+                                        reporter and the fixer are both refused,
+                                        so --by is a THIRD party. Exit 3 is a
+                                        refusal, 2 is could-not-run.
   agentbridge task-checklist --file <state.json> [--advance <phase>]
                                         derive a task's checklist from its
                                         evidence and print it. READ-ONLY: it
@@ -3098,6 +3115,203 @@ try {
       process.exit(2);
     }
     console.log(JSON.stringify(r.pin, null, 2));
+    process.exit(0);
+  }
+
+  /*
+   * LAYER 0 STEP E. Findings, as records rather than as prose.
+   *
+   * `finding-add --from <f.json>` takes the finding as a FILE rather than as
+   * fifteen flags, and that is not laziness: the required fields are a
+   * reproduction and two behaviour descriptions, which are paragraphs. Flags
+   * would push an auditor towards one-line answers, and a one-line reproduction
+   * is the free-text note this replaces.
+   *
+   * `findings` reads them back, open first, worst first.
+   *
+   * THE STORE IS AGENTBRIDGE_HOME, NOT THE REPOSITORY. A finding is about a
+   * candidate that may never be committed, several sessions raise findings on
+   * one machine at once, and appending to a tracked file would make every audit
+   * produce repository drift -- which the Stop gate would then block on. Same
+   * place the override grants and the poll records live.
+   */
+  if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind' || cmd === 'finding-move') {
+    const {
+      createFinding, openFindings, bindRepair, transition, linkToFamily,
+      FAILURE_CLASSES, FINDING,
+    } = await import('../src/findingRegistry.mjs');
+    const { readFileSync: rf, appendFileSync, mkdirSync, existsSync } = await import('node:fs');
+    const { dirname } = await import('node:path');
+    const { repoStorePath } = await import('../src/guardSession.mjs');
+
+    /*
+     * KEYED EXACTLY LIKE THE GRANT STORE, through the same function rather than
+     * a second copy of the expression. `grant-path` exists because that key was
+     * unprintable and undocumented for a week and resolved differently in every
+     * worktree; a findings file that keyed itself would reproduce it.
+     */
+    const repo = String(args.repo ?? process.cwd());
+    const store = repoStorePath(repo, 'findings', '.jsonl');
+
+    /*
+     * A FLAG THAT WAS NOT PASSED IS ABSENT, NOT THE STRING "undefined".
+     * `String(args.x)` on a missing flag yields "undefined", which is truthy,
+     * non-empty, and would sail straight past a required-field check into the
+     * record. The module's own validators would then accept it.
+     */
+    const str_ = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+
+    /*
+     * APPEND-ONLY, AND THE LAST RECORD FOR AN ID WINS.
+     *
+     * A finding moves -- OPEN, BOUND_TO_REPAIR, RETESTING -- and rewriting the
+     * file in place would let one session's write erase another's, on a machine
+     * where several sessions raise findings at once with nothing between them.
+     * Appending and folding on read is the same choice the audit ledger makes,
+     * and it keeps the history on disk rather than only in the last state.
+     *
+     * A MALFORMED LINE IS COUNTED, NOT SILENTLY DROPPED. A store that reports
+     * "nothing open" because it could not parse its own contents is the
+     * failed-lookup-looks-like-success shape this repository already refuses for
+     * check-first and for liveness.
+     */
+    const readAll = () => {
+      if (!existsSync(store)) return { rows: [], malformed: 0 };
+      let malformed = 0;
+      const byId = new Map();
+      for (const line of String(rf(store, 'utf8')).split('\n')) {
+        if (line.trim() === '') continue;
+        let rec;
+        try { rec = JSON.parse(line); } catch { malformed += 1; continue; }
+        if (!rec || typeof rec !== 'object' || !rec.finding_id) { malformed += 1; continue; }
+        byId.set(rec.finding_id, rec);
+      }
+      return { rows: [...byId.values()], malformed };
+    };
+
+    const append = (rec) => {
+      mkdirSync(dirname(store), { recursive: true });
+      appendFileSync(store, `${JSON.stringify(rec)}\n`, 'utf8');
+    };
+
+    if (cmd === 'finding-bind' || cmd === 'finding-move') {
+      const { rows, malformed } = readAll();
+      const id = str_(args.id);
+      const found = rows.find((f) => f.finding_id === id);
+      if (!found) {
+        console.error(`${cmd}: no finding ${JSON.stringify(id)} in ${store}`);
+        if (malformed) console.error(`  (${malformed} unreadable line(s) in the store -- that is not the same as absent)`);
+        process.exit(2);
+      }
+
+      const by = str_(args.by);
+      if (cmd === 'finding-move' && !str_(args.to)) {
+        console.error(`finding-move: --to is required, one of ${Object.keys(FINDING).join(', ')}`);
+        process.exit(2);
+      }
+      const r = cmd === 'finding-bind'
+        ? bindRepair(found, {
+          task_id: str_(args.task),
+          attempt: args.attempt === undefined ? null : Number(args.attempt),
+          lease_token: str_(args.lease),
+          fixer_session: str_(args.fixer),
+        }, { by, now: new Date().toISOString() })
+        : transition(found, str_(args.to), { by, now: new Date().toISOString() });
+
+      if (!r.ok) {
+        console.error(`${cmd}: refused`);
+        for (const e of r.errors) console.error(`  ${e}`);
+        /*
+         * EXIT 3 FOR A REFUSAL, not 1. A refusal is this working; a crash is
+         * not; and a caller that cannot tell them apart will retry the one it
+         * should escalate.
+         */
+        process.exit(3);
+      }
+      append(r.finding);
+      console.log(`${r.finding.finding_id}  ${r.finding.status}`);
+      process.exit(0);
+    }
+
+    if (cmd === 'findings') {
+      const { rows, malformed } = readAll();
+      if (malformed) console.log(`WARNING  ${malformed} unreadable line(s) in the store; this list is incomplete`);
+      const v = openFindings(rows);
+      console.log(`store    ${store}`);
+      console.log(`total    ${v.total}`);
+      console.log(`byStatus ${Object.entries(v.byStatus).map(([k, n]) => `${k}=${n}`).join(' ')}`);
+      if (v.open.length === 0) {
+        /*
+         * "NOTHING OPEN" AND "NOTHING RECORDED" ARE DIFFERENT, and printing one
+         * sentence for both is how a store nobody is writing to reads as a clean
+         * bill of health. check-first makes the same distinction when a lookup
+         * fails rather than finding nothing.
+         */
+        console.log(v.total === 0
+          ? '\nNO FINDINGS RECORDED AT ALL. That is not the same as nothing being wrong -- '
+            + 'it means no audit has written here yet.'
+          : '\nnothing open.');
+        process.exit(0);
+      }
+      console.log('');
+      for (const f of v.open) {
+        console.log(`${f.finding_id}  ${f.severity.padEnd(8)} ${f.status.padEnd(16)} ${f.failure_class}  ${f.title}`);
+        console.log(`             candidate ${String(f.candidate_sha).slice(0, 12)} tree ${String(f.candidate_tree_sha).slice(0, 12)}`);
+        if (f.repair) console.log(`             repair ${f.repair.task_id} attempt ${f.repair.attempt} by ${f.repair.fixer_session}`);
+      }
+      process.exit(0);
+    }
+
+    if (!args.from) {
+      console.error('finding-add: --from <file.json> is required.');
+      console.error('  The file carries the finding. Required fields:');
+      console.error('    audit_id, candidate_sha, candidate_tree_sha, failure_class, title,');
+      console.error('    reproduction, expected_behavior, observed_behavior, severity,');
+      console.error('    created_by_reviewer_session');
+      console.error(`  failure_class is one of: ${Object.keys(FAILURE_CLASSES).join(', ')}`);
+      process.exit(2);
+    }
+
+    let input;
+    try { input = JSON.parse(rf(String(args.from), 'utf8')); }
+    catch (e) {
+      console.error(`finding-add: could not read ${args.from}: ${e?.message ?? e}`);
+      process.exit(2);
+    }
+
+    const created = createFinding(input, { now: new Date().toISOString() });
+    if (!created.ok) {
+      /*
+       * EVERY REASON AT ONCE. An auditor fixing one field at a time across four
+       * runs is an auditor that stops using this.
+       */
+      console.error('finding-add: this is not yet a finding, it is a description');
+      for (const e of created.errors) console.error(`  ${e}`);
+      process.exit(2);
+    }
+
+    /*
+     * §9.2, APPLIED HERE RATHER THAN LEFT TO WHOEVER REMEMBERS.
+     *
+     * The same failure class seen on a different candidate is a NEW finding with
+     * a family link, never a merge -- the two were observed against different
+     * code and only one of them may still be true. Doing this at the point of
+     * capture is the whole difference between a registry and a list: "we already
+     * know about that" is how a defect on a second candidate gets closed by
+     * evidence from the first.
+     */
+    const prior = readAll().rows
+      .filter((f) => f.failure_class === created.finding.failure_class)
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))[0] ?? null;
+    const finding = linkToFamily(created.finding, prior);
+
+    append(finding);
+    console.log(finding.finding_id);
+    if (finding.linked_to_prior_family) {
+      console.log(`same failure class as ${finding.linked_to_prior_family}, on a different candidate: `
+        + 'linked as a family, NOT merged -- each needs its own proof');
+    }
+    console.log(`recorded in ${store}`);
     process.exit(0);
   }
 
