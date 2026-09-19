@@ -3357,19 +3357,48 @@ try {
         const bySource = resolved ? 'resolved' : 'asserted';
 
         /*
-         * THE CANDIDATE'S OWN AUTHOR, READ FROM THE CANDIDATE. Not from git's
-         * author field -- every commit here carries one git identity, so it
-         * cannot separate three agents -- but from the Claude-Session trailer
-         * the authoring session wrote at commit time.
+         * ═══ THE AUTHORITATIVE RECORD FIRST, THE TRAILER ONLY AS A FALLBACK ═══
+         *
+         * P0-1. Agent007 binds a candidate to the session and principal that
+         * produced it, at creation, from the active authenticated session --
+         * something the author does not get to type. That record is the author
+         * identity an independence check must use.
+         *
+         * The Claude-Session trailer is consulted ONLY when no such record
+         * exists, and it can never reach `enforced`: the author writes it, so
+         * it cannot establish that a reviewer is not the author. It is kept
+         * because it catches the honest mistake and because its absence is
+         * visible.
          */
-        let authorSession = null;
-        try {
-          authorSession = authorSessionFrom(String(rgA(['-C', repo, 'log', '-1', '--format=%B', job?.candidate_sha ?? ''], {
-            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-          })));
-        } catch { authorSession = null; }
+        const { authorOf } = await import('../src/candidateAuthorship.mjs');
+        const cStore = repoStorePath(repo, 'candidates', '.jsonl');
+        let bound = null;
+        if (existsSync(cStore)) {
+          for (const line of String(rf(cStore, 'utf8')).split('\n')) {
+            if (line.trim() === '') continue;
+            try {
+              const rec = JSON.parse(line);
+              if (rec?.candidate_sha === job?.candidate_sha) bound = rec;
+            } catch { /* a malformed line is not a binding */ }
+          }
+        }
 
-        const r = claimJob(job, { by, bySource, authorSession, now: Date.now() });
+        let authorSession = null;
+        let authorSource = null;
+        const authoritative = authorOf(bound);
+        if (authoritative) {
+          authorSession = authoritative.id;
+          authorSource = authoritative.source === 'authoritative' ? 'authoritative' : 'observed';
+        } else {
+          try {
+            authorSession = authorSessionFrom(String(rgA(['-C', repo, 'log', '-1', '--format=%B', job?.candidate_sha ?? ''], {
+              encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+            })));
+          } catch { authorSession = null; }
+          if (authorSession) authorSource = 'trailer';
+        }
+
+        const r = claimJob(job, { by, bySource, authorSession, authorSource, now: Date.now() });
         if (!r.ok) {
           console.error(`audit-claim: ${r.why}`);
           process.exit(3);
