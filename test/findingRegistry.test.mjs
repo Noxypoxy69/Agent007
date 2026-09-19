@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 
 import {
   createFinding, bindRepair, transition, linkToFamily, openFindings, repairRecord,
-  findingId, FINDING, FAILURE_CLASSES, SEVERITY,
+  requiredRegressions, findingId, FINDING, FAILURE_CLASSES, SEVERITY,
 } from '../src/findingRegistry.mjs';
 
 const CAND = 'a'.repeat(40);
@@ -556,6 +556,78 @@ test('THE POSITIVE CONTROL: a real repair produces a record carrying the lease i
   assert.equal(r.record.base_sha, CAND, 'the base is the candidate the defect was OBSERVED on');
   assert.equal(r.record.blind_audit_verdict, null, 'a record must not carry its own verdict');
   assert.equal(r.record.reproduction, good.reproduction, 'the record lost the reproduction');
+});
+
+/* ── §15 regression injection ─────────────────────────────────────────── */
+
+const verified = (patch = {}) => {
+  const f = make({ affected_paths: ['src/shellAllowlist.mjs'], ...patch });
+  const bound = bindRepair(f, { task_id: 't', attempt: 1, lease_token: 'L', fixer_session: FIXER },
+    { by: THIRD, now: NOW }).finding;
+  return transition(transition(bound, FINDING.RETESTING, { by: THIRD }).finding,
+    FINDING.VERIFIED_FIXED, { by: THIRD }).finding;
+};
+
+test('A CANDIDATE TOUCHING A HEALED SCOPE INHERITS ITS REGRESSION', () => {
+  /*
+   * "The fixer does not need to remember prior bugs. Agent007 remembers
+   * mechanically." The demand carries the REPRODUCTION, not a description of
+   * one, so the checklist item is executable by whoever receives it.
+   */
+  const v = requiredRegressions([verified()], ['src/shellAllowlist.mjs', 'README.md']);
+  assert.equal(v.required.length, 1);
+  assert.equal(v.required[0].reproduction, good.reproduction, 'the demand lost its reproduction');
+  assert.deepEqual(v.families, ['F002']);
+  assert.match(v.required[0].why, /same scope/);
+});
+
+test('AN UNVERIFIED FINDING DEMANDS NOTHING -- a claim is not a family', () => {
+  /*
+   * Injecting from OPEN findings would make every unconfirmed suspicion a
+   * permanent tax on everyone who touches the file, and a checklist demanding
+   * work nobody can justify is one people route around (rule 16).
+   */
+  const open = make({ affected_paths: ['src/shellAllowlist.mjs'] });
+  assert.equal(requiredRegressions([open], ['src/shellAllowlist.mjs']).required.length, 0);
+
+  const rejected = transition(open, FINDING.REJECTED, { by: THIRD }).finding;
+  assert.equal(requiredRegressions([rejected], ['src/shellAllowlist.mjs']).required.length, 0,
+    'a finding somebody looked at and rejected still demanded proof');
+});
+
+test('AN UNTOUCHED SCOPE DEMANDS NOTHING -- the negative that keeps it usable', () => {
+  assert.equal(requiredRegressions([verified()], ['docs/notes.md']).required.length, 0);
+  assert.equal(requiredRegressions([verified()], []).required.length, 0);
+});
+
+test('THE SCOPE MATCH SURVIVES SPELLING', () => {
+  /*
+   * git reports forward slashes, a Windows caller hands back backslashes, and
+   * NTFS resolves both cases to one file. A scope match that misses on a
+   * spelling is a regression nobody is asked to prove -- the silent direction,
+   * and the exact bypass class this repository has shipped before.
+   */
+  for (const spelling of ['src\\shellAllowlist.mjs', 'SRC/SHELLALLOWLIST.MJS', './src/shellAllowlist.mjs']) {
+    assert.equal(requiredRegressions([verified()], [spelling]).required.length, 1,
+      `${spelling} did not match the recorded scope`);
+  }
+});
+
+test('SEVERAL FAMILIES ARE REPORTED ONCE EACH, so a reader gets the classes not the rows', () => {
+  const a = verified();
+  const b = verified({ title: 'another defect', failure_class: 'F011' });
+  const c = verified({ title: 'a third', failure_class: 'F002' });
+  const v = requiredRegressions([a, b, c], ['src/shellAllowlist.mjs']);
+  assert.equal(v.required.length, 3);
+  assert.deepEqual(v.families, ['F002', 'F011']);
+});
+
+test('requiredRegressions SURVIVES JUNK rather than throwing', () => {
+  // A gate that crashes demands nothing, and nothing looks like all-clear.
+  for (const junk of [null, undefined, 'nonsense', 42, [null, 'x']]) {
+    assert.equal(requiredRegressions(junk, ['src/shellAllowlist.mjs']).required.length, 0);
+    assert.equal(requiredRegressions([verified()], junk).required.length, 0);
+  }
 });
 
 test('THE CONTROL: this module distinguishes, in both directions', () => {

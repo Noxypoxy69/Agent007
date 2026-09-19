@@ -182,6 +182,13 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         before that was not RED: a fixture
                                         already green at the base proves the
                                         repair did nothing (§11.2).
+  agentbridge regressions-due [--range <a..b>]
+                                        what this candidate must prove because
+                                        of what broke in the same scope before.
+                                        Only VERIFIED findings inject; an open
+                                        claim is not a family. Exit 1 means DUE,
+                                        2 means the scope could not be read --
+                                        which is UNKNOWN, not "nothing due".
                                         record what a blind audit FOUND, as a
                                         record rather than a sentence in a
                                         commit message. A finding needs a
@@ -3179,10 +3186,10 @@ try {
    * place the override grants and the poll records live.
    */
   if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind'
-      || cmd === 'finding-move' || cmd === 'repair-record') {
+      || cmd === 'finding-move' || cmd === 'repair-record' || cmd === 'regressions-due') {
     const {
       createFinding, openFindings, bindRepair, transition, linkToFamily, repairRecord,
-      FAILURE_CLASSES, FINDING,
+      requiredRegressions, FAILURE_CLASSES, FINDING,
     } = await import('../src/findingRegistry.mjs');
     const { readFileSync: rf, appendFileSync, mkdirSync, existsSync } = await import('node:fs');
     const { dirname } = await import('node:path');
@@ -3247,6 +3254,57 @@ try {
       mkdirSync(dirname(store), { recursive: true });
       appendFileSync(store, `${JSON.stringify(rec)}\n`, 'utf8');
     };
+
+    if (cmd === 'regressions-due') {
+      /*
+       * §15. WHAT THIS CANDIDATE MUST PROVE BECAUSE OF WHAT BROKE HERE BEFORE.
+       *
+       * The scope is measured from git rather than asked for: a caller who has
+       * to list what they changed will list what they MEANT to change, which is
+       * the self-report this whole layer exists to stop taking on trust.
+       */
+      const { runGit: rg3 } = await import('../src/safeGit.mjs');
+      const range = str_(args.range) ?? 'HEAD~1..HEAD';
+      let changed = [];
+      let measured = true;
+      try {
+        changed = String(rg3(['diff', '--name-only', range], { cwd: repo, encoding: 'utf8' }))
+          .split('\n').map((s) => s.trim()).filter(Boolean);
+      } catch { measured = false; }
+
+      if (!measured) {
+        /*
+         * A FAILED LOOKUP IS NOT AN ABSENCE OF DEMANDS. Exit 2, not 0 -- the
+         * same judgement check-first makes when it prints LOOKUP INCOMPLETE
+         * rather than "nothing found", and the reason this reports UNKNOWN
+         * instead of an empty list.
+         */
+        console.error(`regressions-due: could not read what changed in ${range}.`);
+        console.error('  That is UNKNOWN, not "nothing is due".');
+        process.exit(2);
+      }
+
+      const { required, families } = requiredRegressions(readAll().rows, changed);
+      console.log(`range    ${range}`);
+      console.log(`changed  ${changed.length} file(s)`);
+      if (required.length === 0) {
+        console.log('\nnothing due: no verified finding names a scope this candidate touches.');
+        process.exit(0);
+      }
+      console.log(`families ${families.join(', ')}`);
+      console.log('');
+      for (const r of required) {
+        console.log(`${r.finding_id}  ${r.failure_class}  ${r.title}`);
+        console.log(`   why   ${r.why}`);
+        console.log(`   prove ${r.reproduction}`);
+      }
+      /*
+       * EXIT 1: these are DUE, not satisfied. Nothing here can tell whether the
+       * candidate proves them -- that is the checklist's job -- so this reports
+       * a demand and says so with its status rather than implying a verdict.
+       */
+      process.exit(1);
+    }
 
     if (cmd === 'repair-record') {
       /*

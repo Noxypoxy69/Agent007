@@ -584,6 +584,84 @@ export function repairRecord(finding, measured = {}) {
 }
 
 /**
+ * §15: WHICH REGRESSIONS A CANDIDATE MUST SATISFY, BECAUSE OF WHAT BROKE HERE
+ * BEFORE.
+ *
+ * "The fixer does not need to remember prior bugs. Agent007 remembers
+ * mechanically." That sentence is the whole of Layer 0's last step, and the
+ * reason it is last is that it needs everything above it: a finding bound to a
+ * candidate, a reproduction that can be re-run, and a verified repair to prove
+ * the family is real rather than suspected.
+ *
+ * ═══ ONLY VERIFIED FINDINGS INJECT ═══
+ *
+ * An OPEN finding is a claim; a VERIFIED_FIXED one has been through a repair and
+ * an independent audit. Injecting from claims would make every unconfirmed
+ * suspicion a permanent tax on everyone who touches the file, and a checklist
+ * that demands work nobody can justify is one people route around -- rule 16,
+ * and the reason the escalation gate blocks at the push rather than the commit.
+ *
+ * A REJECTED finding injects nothing, deliberately: somebody looked and said it
+ * was not a defect, and re-demanding proof of it is how a gate loses its
+ * credibility (rule 14).
+ *
+ * ═══ MATCHED ON SCOPE, NOT ON THE FILE THAT HAPPENED TO BE EDITED ═══
+ *
+ * A finding names affected_paths. A later candidate that touches any of them is
+ * in the same scope and inherits the demand. This is a path match and it is
+ * deliberately coarse: the alternative is guessing at symbols, and a regression
+ * demanded too often is an annoyance where one demanded too rarely is the
+ * repeat this exists to stop.
+ *
+ * DERIVED, NOT STORED. Nothing here writes a checklist; the caller composes one.
+ * A stored "required regressions" list would be a second truth that drifts from
+ * the findings it came from -- §30, and the defect src/policy.mjs has a header
+ * about.
+ *
+ * @param {object[]} findings      every finding known
+ * @param {string[]} changedPaths  what the candidate touches
+ * @returns {{required: object[], families: string[]}}
+ */
+export function requiredRegressions(findings, changedPaths) {
+  const all = Array.isArray(findings) ? findings.filter((f) => f && typeof f === 'object') : [];
+  const touched = new Set(
+    (Array.isArray(changedPaths) ? changedPaths : [])
+      .map((p) => str(p))
+      .filter(Boolean)
+      /*
+       * FOLDED AND SEPARATOR-NORMALISED. git reports forward slashes, a Windows
+       * caller may hand back backslashes, and NTFS resolves both cases to one
+       * file. A scope match that misses because of a spelling is a regression
+       * nobody is asked to prove -- the silent direction.
+       */
+      .map((p) => p.split('\\').join('/').replace(/^\.\//, '').toLowerCase()),
+  );
+
+  const required = all
+    .filter((f) => f.status === FINDING.VERIFIED_FIXED)
+    .filter((f) => (Array.isArray(f.affected_paths) ? f.affected_paths : [])
+      .some((p) => touched.has(String(p).split('\\').join('/').replace(/^\.\//, '').toLowerCase())))
+    .map((f) => ({
+      finding_id: f.finding_id,
+      failure_class: f.failure_class,
+      title: f.title,
+      /*
+       * THE REPRODUCTION IS THE DEMAND. Not a description of one -- the actual
+       * steps, carried from the finding, so the checklist item is executable by
+       * whoever receives it rather than a reminder to go and look something up.
+       */
+      reproduction: f.reproduction,
+      why: `${f.failure_class} was verified fixed on ${String(f.candidate_sha).slice(0, 8)} `
+        + 'and this candidate touches the same scope',
+    }));
+
+  return {
+    required,
+    families: [...new Set(required.map((r) => r.failure_class))].sort(),
+  };
+}
+
+/**
  * What is still owed, for a reader or a gate.
  *
  * COUNTS, NOT A BOOLEAN, and open findings are returned rather than summarised,
