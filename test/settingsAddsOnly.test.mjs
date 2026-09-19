@@ -36,17 +36,31 @@ const verdict = (o) => settingsAddsOnly(j(o));
  * not contain. Every one of these is a setting an operator can flip from
  * /config, and every one of them blocked the session permanently.
  */
+/*
+ * CORRECTED AFTER A BLIND AUDIT CHECKED THEM AGAINST THE REAL REFERENCE. Six of
+ * the ten keys here did not exist: `theme`, `verbose`, `autoUpdates`,
+ * `messageIdleNotifThresholdMs`, `todoFeatureEnabled` and `checkpointingEnabled`
+ * were invented or misremembered -- the real names are `autoUpdatesChannel` and
+ * `fileCheckpointingEnabled`, and there is no `theme` or `verbose` at all.
+ *
+ * The comment above them claimed "REAL KEYS FROM CLAUDE CODE'S SETTINGS
+ * REFERENCE" and "generated from the list above rather than spot-checked ...
+ * rule 7". Neither was true: they were ten literals I typed, all given inert
+ * values, so the list structurally could not express the over-block the audit
+ * went on to find. A fixture that cannot construct the real case cannot fail for
+ * it -- hollow gate 9, in the test written to prove there was no outage.
+ */
 const ORDINARY_TOGGLES = Object.freeze({
-  theme: 'dark',
-  verbose: true,
-  autoUpdates: false,
+  autoUpdatesChannel: 'stable',
   autoCompactEnabled: true,
   alwaysThinkingEnabled: false,
   spinnerTipsEnabled: false,
-  messageIdleNotifThresholdMs: 60000,
-  todoFeatureEnabled: true,
+  fileCheckpointingEnabled: true,
   forceLoginMethod: 'claudeai',
-  checkpointingEnabled: true,
+  outputStyle: 'Explanatory',
+  cleanupPeriodDays: 20,
+  model: 'claude-opus-5',
+  includeCoAuthoredBy: true,
 });
 
 test('AN ORDINARY /config TOGGLE DOES NOT BLOCK THE SESSION', () => {
@@ -220,6 +234,128 @@ test('THE REFUSAL NAMES THE KEY, because a refusal nobody can act on is an outag
   assert.match(v.weakens.join(' '), /hooks/);
   assert.match(v.weakens.join(' '), /somethingNew/);
   assert.doesNotMatch(v.weakens.join(' '), /theme/, 'a harmless key was named in the refusal');
+});
+
+/* ── what a blind audit measured admitted, generated from the real reference ── */
+
+/*
+ * EVERY ONE OF THESE WAS MEASURED `addsOnly: true` BY A BLIND AUDIT that
+ * generated payloads from Claude Code's real 145-key settings reference rather
+ * than from keys I thought of. They are kept as data, in the auditor's own
+ * groupings, so a future reader can see the corpus rather than take my word.
+ */
+const COMMAND_CARRYING = Object.freeze({
+  gcpAuthRefresh: 'gcloud',            // the twin of awsAuthRefresh, which WAS on the list
+  processWrapper: 'sudo',              // wraps every process
+  policyHelper: { command: 'helper' }, // runs a helper executable
+});
+
+const CONTROL_OFF = Object.freeze({
+  'sandbox.enabled': { sandbox: { enabled: false } },
+  skipDangerousModePermissionPrompt: { skipDangerousModePermissionPrompt: true },
+  skipAutoPermissionPrompt: { skipAutoPermissionPrompt: true },
+  allowManagedHooksOnly: { allowManagedHooksOnly: false },
+  allowManagedPermissionRulesOnly: { allowManagedPermissionRulesOnly: false },
+  allowAllClaudeAiMcps: { allowAllClaudeAiMcps: true },
+  respectGitignore: { respectGitignore: false },
+  blockedMarketplaces: { blockedMarketplaces: [] },
+  strictKnownMarketplaces: { strictKnownMarketplaces: [] },
+  allowedMcpServers: { allowedMcpServers: [] },
+  enabledPlugins: { enabledPlugins: { 'pwn@evilmarket': true } },
+  'permissions.defaultMode': { permissions: { defaultMode: 'bypassPermissions' } },
+  'permissions.disableBypassPermissionsMode': { permissions: { disableBypassPermissionsMode: false } },
+});
+
+test('A KEY NAMED FOR AN EXECUTABLE IS REFUSED WHATEVER IT CONTAINS', () => {
+  /*
+   * `gcpAuthRefresh` was admitted while awsAuthRefresh and awsCredentialExport
+   * were both refused -- a list missing one member of its own family, which is
+   * rule 19's first failure direction. Adding the three measured names alone
+   * would be rule 8's mistake (fix the strings, not the matcher), so the NAME is
+   * asked as a shape too, and this asserts the shape rather than the names.
+   */
+  for (const [key, value] of Object.entries(COMMAND_CARRYING)) {
+    const v = verdict({ [key]: value });
+    assert.equal(v.addsOnly, false, `${key} was admitted, and it runs something`);
+    assert.match(v.weakens.join(' '), new RegExp(key));
+  }
+  // The shape, not the three names: a key following the same convention.
+  for (const invented of ['telemetryHelper', 'buildWrapper', 'tokenRefresh', 'secretExport', 'preflightCommand']) {
+    assert.equal(verdict({ [invented]: 'x' }).addsOnly, false, `${invented} follows the convention and was admitted`);
+  }
+});
+
+test('A CONTROL TURNED OFF BY A BOOLEAN OR AN EMPTIED LIST IS REFUSED', () => {
+  /*
+   * The design sentence promised a settings file takes a control away in two
+   * ways and that both are visible in the shape. Only the first was: thirteen
+   * control-off keys were measured admitted, every one a boolean or an emptied
+   * array, against exactly ONE such key on the never-additive list.
+   */
+  for (const [name, payload] of Object.entries(CONTROL_OFF)) {
+    assert.equal(verdict(payload).addsOnly, false, `${name} was admitted, and it disarms something`);
+  }
+});
+
+test('BUT TURNING NOTHING OFF IS THE SAFEST FILE THERE IS', () => {
+  /*
+   * The other direction, and the one that makes this a rule rather than a
+   * denylist of key names: `skipX: false` LEAVES the protection on. Refusing it
+   * would be the unrecoverable over-block again, wearing a security fix.
+   */
+  for (const payload of [
+    { skipDangerousModePermissionPrompt: false },
+    { skipAutoPermissionPrompt: false },
+    { allowManagedHooksOnly: true },
+    { respectGitignore: true },
+    { sandbox: { enabled: true } },
+    { blockedMarketplaces: ['evilmarket'] },
+    { allowedMcpServers: ['agentbridge'] },
+    { permissions: { defaultMode: 'default' } },
+  ]) {
+    assert.equal(verdict(payload).addsOnly, true,
+      `${JSON.stringify(payload)} tightens or restricts and was refused`);
+  }
+});
+
+/* ── the over-block, which was the other half of the audit ────────────── */
+
+test('A VALUE CONTAINING A SPACE IS NOT A COMMAND', () => {
+  /*
+   * MEASURED BY BLIND AUDIT, and it falsified this file's central safety claim.
+   * The commit said "STRICTLY NARROWER than what it replaces, so it cannot
+   * introduce its own outage". `outputStyle` was admitted UNCONDITIONALLY by the
+   * old list and `{"outputStyle":"Table First"}` was refused by the new rule --
+   * in a GITIGNORED file, so the drift could never be relieved and the only
+   * recovery traced was a human deleting the file at a terminal.
+   */
+  for (const [why, payload] of Object.entries({
+    'a custom output style': { outputStyle: 'Table First' },
+    'a localised language name': { language: 'Portugues (Brasil)' },
+    'a Bedrock model ARN is a path, but a plain model name is not': { model: 'claude opus 5' },
+    'an announcement': { companyAnnouncements: { message: 'Deploys are frozen this week' } },
+    'a trust message': { pluginTrustMessage: 'Ask before installing' },
+  })) {
+    assert.equal(verdict(payload).addsOnly, true, `refused ${why}: ${JSON.stringify(payload)}`);
+  }
+});
+
+test('AND A COMMAND WITH ARGUMENTS IS STILL A COMMAND', () => {
+  /*
+   * Rule 5: the negative above passes against an implementation that admits
+   * everything. The first token is checked, so a space no longer decides but it
+   * no longer hides anything either.
+   */
+  for (const payload of [
+    { somethingNew: 'node build.mjs' },
+    { somethingNew: 'sudo rm -rf' },
+    { somethingNew: 'bash -c ls' },
+    { somethingNew: 'git push --force' },
+    { somethingNew: 'npx evil' },
+    { somethingNew: 'gcloud auth print-access-token' },
+  ]) {
+    assert.equal(verdict(payload).addsOnly, false, `${JSON.stringify(payload)} was admitted`);
+  }
 });
 
 test('THE CONTROL: this distinguishes, in both directions', () => {

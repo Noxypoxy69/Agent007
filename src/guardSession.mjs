@@ -1680,9 +1680,107 @@ const NEVER_ADDITIVE = Object.freeze([
   'awsAuthRefresh',               // carries a command
   'awsCredentialExport',          // carries a command
   'otelHeadersHelper',            // carries a command
+  'gcpAuthRefresh',               // carries a command -- MISSED, see NAMES_AN_EXECUTABLE
+  'processWrapper',               // wraps every process this session spawns
+  'policyHelper',                 // runs a helper executable
+  'enabledPlugins',               // a plugin carries hooks; enabling one arms them
+  'pluginConfigs',                // the same, one level down
   // NOT enabledMcpjsonServers / enableAllProjectMcpServers -- see the header.
   // .mcp.json is protected instead, which closes the hole without the outage.
 ]);
+
+/*
+ * ═══ AND THE LIST ABOVE IS A LIST, WHICH IS WHY IT MISSED THREE ═══
+ *
+ * A blind audit generated payloads from the real 145-key settings reference and
+ * found `gcpAuthRefresh` admitted -- the direct twin of `awsAuthRefresh` and
+ * `awsCredentialExport`, which were both on the list. Also `processWrapper`
+ * ("Run through launcher") and `policyHelper` ("Run helper executable"). Adding
+ * those three by name fixes the three it measured and nothing else, which is
+ * CLAUDE.md rule 8 in the direction the rule warns about: fix the matcher, not
+ * the strings the prober happened to try.
+ *
+ * So the names are ALSO asked as a shape. Claude Code's settings vocabulary is
+ * consistent about this: a key that runs something is named for it -- Helper,
+ * Wrapper, Refresh, Export, Command, Script, Exec. A key added next release
+ * following that convention is covered on the day it ships, with nobody
+ * remembering to extend anything.
+ *
+ * The explicit list stays because not every dangerous key follows the
+ * convention (`hooks`, `env`), and because a name somebody can read beats a
+ * regex somebody has to decode.
+ */
+const NAMES_AN_EXECUTABLE = /(?:helper|wrapper|refresh|export|command|script|exec)$/i;
+
+/*
+ * ═══ AND A CONTROL TURNED OFF BY A BOOLEAN IS INVISIBLE TO A VALUE TEST ═══
+ *
+ * The design sentence said a settings file takes a control away in exactly two
+ * ways -- it names something to RUN, or it turns a control off -- and that both
+ * are visible in the shape. Only the first was. The audit measured THIRTEEN
+ * control-off keys admitted, every one of them a boolean or an emptied array:
+ *
+ *   sandbox.enabled:false            skipDangerousModePermissionPrompt:true
+ *   allowManagedHooksOnly:false      skipAutoPermissionPrompt:true
+ *   respectGitignore:false           allowAllClaudeAiMcps:true
+ *   blockedMarketplaces:[]           strictKnownMarketplaces:[]
+ *   allowedMcpServers:[]             permissions.defaultMode:'bypassPermissions'
+ *
+ * NEVER_ADDITIVE carried exactly ONE boolean control-off key against a roster of
+ * 145. So this asks the second question the sentence promised, and asks it as a
+ * shape over the key name for the same reason as above: skip-, disable-,
+ * bypass-, allowAll-, and anything named Dangerous, are how this vocabulary
+ * spells "turn a protection off".
+ */
+/*
+ * A key phrased as a PERMISSION or a REQUIREMENT loosens when it is false or
+ * emptied; one phrased as a SUPPRESSION loosens when it is true. Reading the
+ * direction from the name is what lets one rule cover `skipX: true` and
+ * `allowManagedHooksOnly: false` without refusing `skipX: false`, which is a
+ * settings file explicitly turning nothing off -- the safest kind there is.
+ */
+const RESTRICTIVE_KEY = /^(?:allow|strict|trusted|require|respect|enforce|block)/i;
+const SUPPRESSIVE_KEY = /^(?:skip|disable|bypass|unsafe|ignore|omit)|dangerous/i;
+
+/** A value that reads as "no protection", wherever it appears. */
+const PERMISSIVE_VALUE = /^(?:bypass|dangerous|none|off|never|acceptEdits|plan)/i;
+
+/**
+ * Does this key/value pair take a protection away?
+ *
+ * APPLIED TO EVERY KEY, NOT ONLY TO KEYS THAT LOOK LIKE CONTROLS. `sandbox`,
+ * `permissions` and `enabledPlugins` are ordinary nouns, and the thing that
+ * disarms them sits one level in -- `{"sandbox":{"enabled":false}}` was measured
+ * admitted. A name-keyed rule cannot see that, which is the same reason the
+ * value test could not see a boolean: each rule was blind to exactly what the
+ * other was looking at.
+ */
+function loosens(key, value, depth = 0) {
+  if (depth > 6) return false;                       // malformed or hostile nesting
+
+  if (typeof value === 'boolean') {
+    if (RESTRICTIVE_KEY.test(key)) return value === false;
+    if (SUPPRESSIVE_KEY.test(key)) return value === true;
+    if (/^enabled$/i.test(key)) return value === false;   // sandbox.enabled, etc.
+    return false;
+  }
+  if (typeof value === 'string') {
+    return (/mode$/i.test(key) || SUPPRESSIVE_KEY.test(key)) && PERMISSIVE_VALUE.test(value.trim());
+  }
+  if (Array.isArray(value)) {
+    /*
+     * AN EMPTIED DENYLIST PERMITS EVERYTHING IT EXISTED TO RESTRICT, and an
+     * emptied allowlist is the same move spelled the other way -- both were
+     * measured admitted (blockedMarketplaces:[], allowedMcpServers:[]).
+     */
+    if (RESTRICTIVE_KEY.test(key) && value.length === 0) return true;
+    return value.some((v) => loosens(key, v, depth + 1));
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value).some(([k, v]) => loosens(k, v, depth + 1));
+  }
+  return false;
+}
 
 /**
  * Could this string name something to execute?
@@ -1705,11 +1803,61 @@ const NEVER_ADDITIVE = Object.freeze([
 function namesSomethingRunnable(s) {
   if (typeof s !== 'string' || s === '') return false;
   if (/[/\\]/.test(s)) return true;                      // any path separator
-  if (/\s/.test(s)) return true;                         // a command and its arguments
   if (/[$`|&;><*(){}]/.test(s)) return true;             // shell metacharacters
   if (/\.(mjs|cjs|js|ts|sh|bash|ps1|bat|cmd|exe|py|rb|pl)$/i.test(s)) return true;
+
+  /*
+   * ═══ "CONTAINS A SPACE" WAS HERE AND IT WAS AN UNRECOVERABLE OVER-BLOCK ═══
+   *
+   * The claim this shipped with -- "STRICTLY NARROWER than what it replaces, so
+   * it cannot introduce its own outage" -- was FALSE, and a blind audit
+   * falsified it with realistic values, all in a GITIGNORED file:
+   *
+   *     outputStyle: "Table First"          <- admitted UNCONDITIONALLY before
+   *     language: "Portugues (Brasil)"
+   *     model: "arn:aws:...inference-profile/..."
+   *     autoMemoryDirectory: "~/notes"
+   *
+   * Any value carrying a space refused, which is a large share of the
+   * reference's string-valued keys. And the cost is not an annoyance: the file
+   * is gitignored, so it can never be committed, so the drift can never be
+   * relieved, and the auditor traced the recovery path to a human deleting the
+   * file at a terminal. Rule 19: an outage gets the hook switched off, which
+   * loses every layer at once.
+   *
+   * A SPACE IS NOT A COMMAND. `node x.mjs` is caught by the extension rule and
+   * by the separator rule; `sudo rm -rf` is caught by the separator in its
+   * argument. What a bare space adds over those is prose -- which is most of
+   * what these keys actually hold.
+   *
+   * What a space DOES indicate is a command WITH ARGUMENTS, so the first token
+   * is checked against the same executable shapes rather than the whole string.
+   * That keeps `git push --force` refused and lets `Table First` through.
+   */
+  const first = s.trim().split(/\s+/)[0];
+  if (first !== s && first !== '') {
+    if (/[/\\]/.test(first)) return true;
+    if (/\.(mjs|cjs|js|ts|sh|bash|ps1|bat|cmd|exe|py|rb|pl)$/i.test(first)) return true;
+    if (KNOWN_INTERPRETERS.has(first.toLowerCase())) return true;
+  }
   return false;
 }
+
+/*
+ * Bare command names that take arguments, so `<name> <something>` is a command
+ * rather than prose. An ENUMERATION, named as one: it cannot be complete, and it
+ * is not load-bearing on its own -- anything with a path, an extension or a
+ * metacharacter is already refused above, and a key NAMED for an executable is
+ * refused whatever it contains.
+ */
+const KNOWN_INTERPRETERS = new Set([
+  'node', 'npm', 'npx', 'pnpm', 'yarn', 'deno', 'bun',
+  'python', 'python3', 'py', 'ruby', 'perl', 'php',
+  'sh', 'bash', 'zsh', 'dash', 'powershell', 'pwsh', 'cmd',
+  'sudo', 'doas', 'env', 'nohup', 'xargs', 'eval', 'exec',
+  'git', 'curl', 'wget', 'ssh', 'scp', 'docker', 'make',
+  'gcloud', 'aws', 'az', 'kubectl',
+]);
 
 /**
  * Does a never-additive key appear anywhere under this value?
@@ -1760,10 +1908,36 @@ export function settingsAddsOnly(text) {
       weakens.push(`${key} (runs a command or turns a control off, whatever it contains)`);
       continue;
     }
+    if (NAMES_AN_EXECUTABLE.test(key)) {
+      weakens.push(`${key} (its name says it runs something, whatever it contains)`);
+      continue;
+    }
+    if (loosens(key, value)) {
+      weakens.push(`${key} (turns a protection off; a boolean or an emptied list is invisible to a value test)`);
+      continue;
+    }
     if (key === 'permissions') {
-      // Exempt from the executable-string test only; see subtreeHasControlKey.
+      /*
+       * EXEMPT FROM THE EXECUTABLE-STRING TEST ONLY, and that is now two
+       * separate exclusions rather than one.
+       *
+       * `permissions.allow` entries ARE command strings by their nature, which
+       * is the whole reason for the carve-out. `permissions.defaultMode:
+       * "bypassPermissions"` is not a command and is not an allow entry -- it is
+       * the permission system being switched off -- and the audit measured it
+       * admitted straight through this branch. The header's stated trade covers
+       * "broadening permissions.allow" and nothing else; this is the rest.
+       */
       if (subtreeHasControlKey(value)) {
         weakens.push('permissions (a control-bearing key is hiding inside the one exemption)');
+      } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const off = Object.entries(value)
+          .filter(([k]) => k !== 'allow' && k !== 'deny' && k !== 'ask' && k !== 'additionalDirectories')
+          .filter(([k, v]) => loosens(k, v));
+        if (off.length) {
+          weakens.push(`permissions.${off.map(([k]) => k).join(', permissions.')} `
+            + '(the carve-out covers allow/deny entries, not switching the permission system off)');
+        }
       }
       continue;
     }
