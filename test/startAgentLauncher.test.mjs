@@ -38,7 +38,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -197,48 +197,68 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
    */
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-exec-'));
   const elsewhere = mkdtempSync(path.join(tmpdir(), 'agentcmd-cwd-'));
+  const report = path.join(box, 'report.txt');
   try {
     /*
-     * The stub shadows the real claude via PATH. It must be .cmd so cmd.exe
-     * resolves a bare `claude` to it, and it echoes the three things the
-     * launcher exists to deliver.
+     * THE STUB REPORTS THROUGH A FILE, NOT THROUGH STDOUT, AND THAT IS THE
+     * WHOLE POINT OF THIS VERSION.
+     *
+     * v3 ran agent.cmd and matched its combined stdout for STUB_ID=[code-a].
+     * A blind audit then replaced the cd, both set lines and the claude
+     * invocation with three `echo STUB_...` lines and an `exit /b 0` -- no
+     * cd, no variable, no launch -- and the file stayed 8 of 8 GREEN. The
+     * subject was printing the words the gate was looking for. Executing it
+     * had narrowed the blind spot and not removed it, because the verdict was
+     * still a regex over a string the subject controls.
+     *
+     * A file at a path the TEST invents and passes in by env is not a string
+     * the launcher can produce by talking. agent.cmd never sees %STUB_REPORT%
+     * except to pass it through, and it has no reason to write there. If the
+     * report is absent, claude did not run -- whatever stdout says.
      */
     writeFileSync(path.join(box, 'claude.cmd'),
       '@echo off\r\n'
-      + 'echo STUB_ID=[%AGENTBRIDGE_AGENT_ID%]\r\n'
-      + 'echo STUB_LANE=[%AGENTBRIDGE_LANE%]\r\n'
-      + 'echo STUB_CWD=[%CD%]\r\n');
+      + '> "%STUB_REPORT%" echo ID=[%AGENTBRIDGE_AGENT_ID%]\r\n'
+      + '>>"%STUB_REPORT%" echo LANE=[%AGENTBRIDGE_LANE%]\r\n'
+      + '>>"%STUB_REPORT%" echo CWD=[%CD%]\r\n');
 
     const r = spawnSync(process.env.ComSpec || 'cmd.exe',
       ['/c', path.join(REPO, 'agent.cmd'), 'code-a', 'lane7'], {
         cwd: elsewhere,
         encoding: 'utf8',
         timeout: 30_000,
-        env: { ...process.env, PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}` },
+        env: {
+          ...process.env,
+          /*
+           * AGENTBRIDGE_HOME is isolated here even though agent.cmd touches no
+           * store today. The moment it gains a register-session call these two
+           * tests would write into the operator's live store, which is rule 21
+           * and is a defect this repository has already paid for twice.
+           */
+          AGENTBRIDGE_HOME: mkdtempSync(path.join(tmpdir(), 'agentcmd-home-')),
+          STUB_REPORT: report,
+          PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}`,
+        },
       });
     const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
 
     /*
-     * A NEGATIVE NEEDS THE POSITIVE FIRST (rule 5): prove claude was reached at
-     * all before asserting anything about what it saw, or a script that
-     * launches nothing satisfies every "must equal" below by vacuous absence.
+     * A NEGATIVE NEEDS THE POSITIVE FIRST (rule 5). The report's EXISTENCE is
+     * the proof claude ran at all; every assertion after it would pass
+     * vacuously against a launcher that started nothing.
      */
-    assert.match(out, /STUB_ID=\[/,
-      `agent.cmd never reached claude at all -- it launched nothing. Output:\n${out}`);
+    assert.ok(existsSync(report),
+      `agent.cmd never reached claude -- no stub report was written. stdout was:\n${out}`);
+    const said = readFileSync(report, 'utf8');
 
-    assert.match(out, /STUB_ID=\[code-a\]/,
+    assert.match(said, /ID=\[code-a\]/,
       'AGENTBRIDGE_AGENT_ID did not reach claude. Without it the SessionStart poll hook '
       + 'declines and exits 0: the watcher never runs and the roster shows this agent offline.');
-    assert.match(out, /STUB_LANE=\[lane7\]/,
+    assert.match(said, /LANE=\[lane7\]/,
       'the second argument must reach claude as AGENTBRIDGE_LANE');
 
-    /*
-     * The cwd is the other half of b00d96e. Compared with realpath on both
-     * sides because the temp dir and the repo can differ by 8.3 alias or case,
-     * which is a property of this machine rather than of the launcher (rule 21).
-     */
-    const seen = /STUB_CWD=\[([^\]]*)\]/.exec(out);
-    assert.ok(seen, `the stub did not report a cwd. Output:\n${out}`);
+    const seen = /CWD=\[([^\]]*)\]/.exec(said);
+    assert.ok(seen, `the stub reported no cwd. Report was:\n${said}`);
     assert.equal(
       realpathSync.native(seen[1]).toLowerCase(),
       realpathSync.native(REPO).toLowerCase(),
@@ -246,12 +266,45 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
       + `therefore no guard, no Stop gate and no poll hook. Started in: ${seen[1]}`,
     );
 
-    assert.notEqual(r.status, 2, 'a valid id must not hit the usage path');
+    /*
+     * EXACTLY 0, NOT MERELY "NOT 2". The previous version asserted !== 2, so
+     * appending `exit /b 1` after claude -- a launcher that reports failure on
+     * every successful session -- survived. So did `exit /b 0`, which SWALLOWS
+     * claude's status and makes every session look successful.
+     */
+    assert.equal(r.status, 0, `a successful launch must exit 0, got ${r.status}. Output:\n${out}`);
   } finally {
     rmSync(box, { recursive: true, force: true });
     rmSync(elsewhere, { recursive: true, force: true });
   }
 });
+
+/*
+ * A TEST THAT MEASURED THE WRONG LAYER WAS REMOVED FROM HERE.
+ *
+ * A blind audit reported command injection through the agent id -- that
+ * agent.cmd with an id containing an ampersand executed the tail. I wrote a
+ * test for it and it went red, which looked like confirmation.
+ *
+ * It was not. Measured with an INERT control script that does nothing with its
+ * argument: the injected text still ran, and it ran BEFORE agent.cmd produced
+ * any output, with agent.cmd never executing at all. cmd.exe had split the
+ * command line that spawnSync built, before any batch file started. The defect
+ * was in the caller, and the "test for agent.cmd" was a test of Node's cmd.exe
+ * argument escaping.
+ *
+ * Re-measured through a wrapper .cmd, which puts the hostile id in as a batch
+ * literal and removes the caller from the experiment:
+ *
+ *   hostile id   executed: NO    claude received the id as data
+ *   benign id    executed: NO    received intact
+ *   id with a space            received intact
+ *
+ * So agent.cmd does not execute it. Rule 18: establish WHICH layer, because a
+ * refusal -- or an exploit -- from the wrong layer is indistinguishable from
+ * the real thing unless you build the control. No test is left behind for this
+ * because the property under test turned out to belong to spawnSync.
+ */
 
 test('agent.cmd with no argument prints usage and exits 2, rather than launching', () => {
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-noarg-'));

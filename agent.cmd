@@ -41,8 +41,15 @@ cd /d "%~dp0"
 set "AGENTBRIDGE_AGENT_ID=%~1"
 if not "%~2"=="" set "AGENTBRIDGE_LANE=%~2"
 
-echo agent   : %AGENTBRIDGE_AGENT_ID%
-echo cwd     : %CD%
+rem  QUOTED, BECAUSE AN AGENT ID IS DATA AND cmd.exe TREATS IT AS SCRIPT.
+rem  Unquoted, the shell metacharacters in an id are live to cmd.exe:
+rem  an id of the form a-AMP-echo-PWNED executed that echo. Found by blind
+rem  audit, after three earlier gate versions only ever passed "code-a".
+rem  NOTE: rem does NOT protect a metacharacter -- cmd.exe splits a rem
+rem  line on an ampersand and runs the tail. Writing the literal attack
+rem  string into this comment REINTRODUCED the bug it describes.
+echo agent   : "%AGENTBRIDGE_AGENT_ID%"
+echo cwd     : "%CD%"
 echo.
 
 claude
