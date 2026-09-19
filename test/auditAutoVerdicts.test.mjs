@@ -430,7 +430,14 @@ test('A MERGE CARRYING A SUBJECT AND ITS TEST IS NOT SKIPPED', (t) => {
   env.git('merge', '--no-ff', '-q', 'side', '-m', 'Merge side');
   const merge = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: env.root, encoding: 'utf8' }).trim();
 
-  const out = runAuto(env, merge);
+  /*
+   * RANGE MODE, NOT A BARE SHA. The first version of this test passed the
+   * merge sha directly -- which is the single-rev branch, the one line the
+   * fix touched. An auditor pointed out it therefore exercised none of the
+   * path the tool is documented and invoked on, where --no-merges dropped
+   * the merge before it could reach the fixed call site at all.
+   */
+  const out = runAuto(env, `${merge}^..${merge}`);
   assert.doesNotMatch(out, /SKIP/,
     `the merge carried src/merged.mjs and its test, and the tool saw neither.\n${out}`);
   assert.match(out, /merged\.test\.mjs/,

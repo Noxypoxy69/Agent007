@@ -118,7 +118,23 @@ function loadCommits(sinceISO) {
     const [sha, cIso] = rec.split(SEP);
     let files = [];
     try {
-      files = runGit(['show', '--name-only', '--format=', sha], { encoding: 'utf8' })
+      /*
+       * --diff-merges=first-parent: THE THIRD CALL SITE OF ONE DEFECT.
+       *
+       * `git show --name-only` prints no file list for a merge, so files=[]
+       * and classifyCommit returns 'other'. This script's whole output is
+       * "verified work per token", and its own header calls code_commits
+       * "the honest first-order proxy for verified engineering output" --
+       * so every merge in the history was silently subtracted from the
+       * numerator.
+       *
+       * Found by audit after I fixed src/auditLedger.mjs, then fixed
+       * scripts/audit-auto.mjs and wrote that the class was closed. It was
+       * not; this was the third site. Measured on the same merge:
+       *   without the flag -> []                              => 'other'
+       *   with it          -> ["test/leakRegression.test.mjs"] => 'test'
+       */
+      files = runGit(['show', '--diff-merges=first-parent', '--name-only', '--format=', sha], { encoding: 'utf8' })
         .split('\n').map((s) => s.trim()).filter(Boolean);
     } catch { /* empty */ }
     return { sha, cIso, class: classifyCommit(files) };

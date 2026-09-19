@@ -54,8 +54,27 @@ const git = (args, cwd = REPO) =>
 
 function commitsIn(rev) {
   try {
+    /*
+     * MERGES ARE ENUMERATED. `--no-merges` meant a merge never reached
+     * filesOf at all, so the --diff-merges fix one function below could not
+     * help it -- and in RANGE mode, which is how this tool is documented and
+     * actually invoked, a merge was not even reported as SKIP. It was
+     * silently absent.
+     *
+     * Found by the audit OF that fix: I fixed the call site and left the
+     * enumeration, then wrote that the class was closed. The test I added
+     * passed a bare sha, which is the single-rev branch -- it exercised the
+     * one line I changed and none of the path the tool is run on.
+     *
+     * 39 merges in this history were invisible this way, including 0c05d25,
+     * which carries the guard binary, the Stop gate, guardSession and
+     * safeGit and reports tests=5 sources=10 once it is enumerated.
+     *
+     * An evil merge's conflict resolution exists in no other commit, so this
+     * is not staleness that ages out; it is permanent for that content.
+     */
     const out = rev.includes('..')
-      ? git(['rev-list', '--reverse', '--no-merges', rev])
+      ? git(['rev-list', '--reverse', rev])
       : git(['rev-list', '-n', '1', rev]);
     return out.split('\n').map((s) => s.trim()).filter(Boolean);
   } catch {
