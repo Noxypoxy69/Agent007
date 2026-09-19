@@ -13,10 +13,13 @@
  * not "nothing changed".
  */
 /*
- * NO CHILD PROCESSES. This gate reads state and prints a verdict; it does not
- * run the suite and does not start anything that does. See the verify-absent
- * branch for why the detached-spawn version was withdrawn.
+ * NOTHING DETACHED. The gate runs the verifier SYNCHRONOUSLY, and only when no
+ * result exists and none is in flight -- see the START branch. A detached child
+ * inherited the gate's cwd and held it open, which failed cleanup in every test
+ * that runs the gate against a temp fixture and would leave a suite running in
+ * a worktree somebody is about to delete.
  */
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -1021,7 +1024,7 @@ let record = null;
 try { record = JSON.parse(readFileSync(verifyRecordPath(keyed.key), 'utf8')); } catch { record = null; }
 
 const decision = decideVerify(record, { now: Date.now(), key: keyed.key });
-const admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
+let admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
 
 if (decision.action === ACTION.START) {
   /*
@@ -1051,14 +1054,69 @@ if (decision.action === ACTION.START) {
    * printed. Making production automatic belongs to the launcher or a watcher,
    * which can own a process without owning a verdict.
    */
-  out('[agentbridge:verify-absent] Nothing has verified this exact tree, so NOTHING WAS VERIFIED and this '
-    + 'turn is not approved. This gate no longer runs the suite itself: it used to spawn one at every turn '
-    + 'end, which collided with any suite a session or a second agent was already running and made both miss '
-    + 'the deadline.\n'
-    + '  Produce a result with:  npm run verify\n'
-    + '  Then read it with:      npm run verify -- --status\n'
-    + '  A result is keyed to this exact working tree, so it is reused until something changes and is never '
-    + 'reused across an edit.');
+  /*
+   * ═══ NOTHING IS RUNNING AND NOTHING IS CACHED, SO THIS GATE RUNS IT ═══
+   *
+   * I got the diagnosis one step too wide and a test caught it. The bug was
+   * never "the gate runs the suite" -- it was "the gate runs a SECOND one".
+   * Refusing to run at all made every turn block until somebody ran the
+   * verifier by hand, and `AN ORDINARY DOCS COMMIT MUST NOT STOP THE TURN`
+   * went red immediately. That is rule 19's outage, introduced by the fix for
+   * a collision, which is the pairing this repository keeps producing.
+   *
+   * So the single-flight decision above does the actual work: when a run is
+   * already in flight we ATTACH and start nothing, and when one has finished
+   * for this exact tree we REUSE it. Only when there is neither does the gate
+   * run a suite -- which is the status quo, and the status quo was survivable
+   * at ~185s. The 420s failures were every time TWO copies were running.
+   *
+   * IT RUNS THE VERIFIER, NOT `node --test` DIRECTLY, so the result is written
+   * to the store and the NEXT turn reuses it instead of running a third. That
+   * is the other half of the saving: without it, a turn that blocks for any
+   * other reason throws away a perfectly good suite run.
+   */
+  const left = budget === null ? UNDECLARED_SUITE_MS : budget.ms - Math.round(performance.now()) - OUTPUT_RESERVE_MS;
+  if (left < MIN_SUITE_MS) {
+    out(`[agentbridge:stop-deadline] The work before verification spent ${Math.round(performance.now())}ms of a `
+      + `${budget === null ? UNDECLARED_SUITE_MS : budget.ms}ms budget, leaving ${left}ms -- less than the `
+      + `${MIN_SUITE_MS}ms a run needs. NOTHING WAS VERIFIED, so this turn is not approved. Produce a result `
+      + 'out of band with: npm run verify');
+  }
+
+  const produced = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify-run.mjs')], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: left,
+    maxBuffer: 32 * 1024 * 1024,
+    /*
+     * SIGKILL, NOT SIGTERM. spawnSync sends killSignal and then WAITS; it never
+     * escalates, so a child that traps SIGTERM holds this call open past the
+     * deadline -- the silent allow rebuilt through a different door, and
+     * unbounded rather than merely tight.
+     */
+    killSignal: 'SIGKILL',
+  });
+
+  if (produced.error?.code === 'ETIMEDOUT') {
+    out(`[agentbridge:stop-deadline] Verification was still running after ${left}ms and was stopped so this gate `
+      + 'could answer. NOTHING WAS VERIFIED, so this turn is not approved. Its partial record is left behind with '
+      + 'a stale heartbeat, so the next turn treats it as dead and starts a fresh one rather than waiting on it. '
+      + 'A healthy run finishes far inside this; one that does not is a machine to fix.');
+  }
+
+  /*
+   * RE-READ RATHER THAN TRUST THE EXIT CODE. The record is the evidence; an
+   * exit code is a proxy, and rule 4 is explicit that a proxy agrees with the
+   * truth right up until something unusual happens.
+   */
+  try { record = JSON.parse(readFileSync(verifyRecordPath(keyed.key), 'utf8')); } catch { record = null; }
+  admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
+
+  if (!record) {
+    out('[agentbridge:verify-absent] The verifier produced no record for this tree, so NOTHING WAS VERIFIED '
+      + `and this turn is not approved. Verifier exit ${String(produced.status)}; `
+      + `${String(produced.stderr || '').slice(-400)}`);
+  }
 }
 
 if (decision.action === ACTION.ATTACH) {
