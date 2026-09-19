@@ -38,7 +38,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -148,57 +148,140 @@ test('no id, and an id that would escape the polls directory, are both refused',
     for (const bad of ['../escape', 'a/b', '.hidden', '']) {
       const r = runLauncher([bad], home);
       assert.equal(r.status, 2, `"${bad}" must be refused: it becomes a filename in the poll store`);
+
+      /*
+       * WITH --new, OR THIS MEASURES THE WRONG GATE. Found by blind audit:
+       * delete the SAFE shape check entirely and all six tests stayed green,
+       * because a malformed id was being refused by the REGISTRY-MEMBERSHIP
+       * check instead -- which this test cannot tell apart, since both exit 2.
+       *
+       * --new is what makes the difference observable: it stands the
+       * membership check down, so SAFE is the only thing left between
+       * "../escape" and a filename in the poll store. Without SAFE this line
+       * exits 0 and prints `agent : ../escape`.
+       */
+      const forced = runLauncher([bad, '--new'], home);
+      assert.equal(forced.status, 2,
+        `"${bad}" must be refused by the SHAPE check even with --new, which stands the registry check down`);
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('agent.cmd assigns the variable and invokes claude -- the construct, not a mention', () => {
+test('agent.cmd IS EXECUTED, and must really set the id and really land in the repo', () => {
+  /*
+   * THIS TEST RUNS agent.cmd. THE TWO VERSIONS BEFORE IT READ agent.cmd AS TEXT,
+   * AND BOTH WERE HOLLOW.
+   *
+   * v1 matched against every non-`rem` line, so agent.cmd could ECHO the words
+   * instead of doing them and the gate stayed green. v2 stripped `echo` lines
+   * too -- and a blind audit then walked through it THIRTEEN more ways:
+   *
+   *     @echo / @rem prefixes      one character from the spelling v2 closed
+   *     exit /b 0 after setlocal   the script runs NOTHING and the gate passes
+   *     goto :eof / goto :label    same
+   *     endlocal before claude     reverts the cd AND the variable
+   *     if "1"=="2" ( ... )        both block and single-line forms
+   *     caret line continuation    swallows the next line
+   *     claude moved above the setup
+   *
+   * That is rule 8 exactly: an adversarial probe bounds nothing. v2 fixed the
+   * five strings the prober happened to try. A batch file's meaning is its
+   * CONTROL FLOW -- early exit, scope, labels, continuation -- and no amount of
+   * pattern-matching source text can see it.
+   *
+   * So stop reading it and run it. A stub `claude` first on PATH reports what
+   * it actually received; agent.cmd is invoked from a directory OUTSIDE the
+   * repository, so a missing `cd /d "%~dp0"` cannot be masked by already being
+   * in the right place. Every one of those eighteen mutations fails this by
+   * construction, because each one changes what the stub prints.
+   */
+  const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-exec-'));
+  const elsewhere = mkdtempSync(path.join(tmpdir(), 'agentcmd-cwd-'));
+  try {
+    /*
+     * The stub shadows the real claude via PATH. It must be .cmd so cmd.exe
+     * resolves a bare `claude` to it, and it echoes the three things the
+     * launcher exists to deliver.
+     */
+    writeFileSync(path.join(box, 'claude.cmd'),
+      '@echo off\r\n'
+      + 'echo STUB_ID=[%AGENTBRIDGE_AGENT_ID%]\r\n'
+      + 'echo STUB_LANE=[%AGENTBRIDGE_LANE%]\r\n'
+      + 'echo STUB_CWD=[%CD%]\r\n');
+
+    const r = spawnSync(process.env.ComSpec || 'cmd.exe',
+      ['/c', path.join(REPO, 'agent.cmd'), 'code-a', 'lane7'], {
+        cwd: elsewhere,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { ...process.env, PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}` },
+      });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+
+    /*
+     * A NEGATIVE NEEDS THE POSITIVE FIRST (rule 5): prove claude was reached at
+     * all before asserting anything about what it saw, or a script that
+     * launches nothing satisfies every "must equal" below by vacuous absence.
+     */
+    assert.match(out, /STUB_ID=\[/,
+      `agent.cmd never reached claude at all -- it launched nothing. Output:\n${out}`);
+
+    assert.match(out, /STUB_ID=\[code-a\]/,
+      'AGENTBRIDGE_AGENT_ID did not reach claude. Without it the SessionStart poll hook '
+      + 'declines and exits 0: the watcher never runs and the roster shows this agent offline.');
+    assert.match(out, /STUB_LANE=\[lane7\]/,
+      'the second argument must reach claude as AGENTBRIDGE_LANE');
+
+    /*
+     * The cwd is the other half of b00d96e. Compared with realpath on both
+     * sides because the temp dir and the repo can differ by 8.3 alias or case,
+     * which is a property of this machine rather than of the launcher (rule 21).
+     */
+    const seen = /STUB_CWD=\[([^\]]*)\]/.exec(out);
+    assert.ok(seen, `the stub did not report a cwd. Output:\n${out}`);
+    assert.equal(
+      realpathSync.native(seen[1]).toLowerCase(),
+      realpathSync.native(REPO).toLowerCase(),
+      'claude must start IN THE REPOSITORY, or it loads no .claude/settings.json and '
+      + `therefore no guard, no Stop gate and no poll hook. Started in: ${seen[1]}`,
+    );
+
+    assert.notEqual(r.status, 2, 'a valid id must not hit the usage path');
+  } finally {
+    rmSync(box, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('agent.cmd with no argument prints usage and exits 2, rather than launching', () => {
+  const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-noarg-'));
+  try {
+    writeFileSync(path.join(box, 'claude.cmd'), '@echo off\r\necho STUB_LAUNCHED\r\n');
+    const r = spawnSync(process.env.ComSpec || 'cmd.exe', ['/c', path.join(REPO, 'agent.cmd')], {
+      cwd: box, encoding: 'utf8', timeout: 30_000,
+      env: { ...process.env, PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}` },
+    });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.equal(r.status, 2, `no agent id must exit 2, got ${r.status}. Output:\n${out}`);
+    assert.doesNotMatch(out, /STUB_LAUNCHED/,
+      'it must not start a session with no identity -- that is how a second roster identity gets minted');
+  } finally { rmSync(box, { recursive: true, force: true }); }
+});
+
+test('agent.cmd does not route through npm, which pipes stdin and starts claude headless', () => {
+  /*
+   * The one property that is genuinely about the TEXT rather than the effect:
+   * executing it cannot distinguish "claude" from "npm exec claude" when a
+   * stub answers to both. rem and echo lines are stripped because agent.cmd's
+   * own prose explains why npm was abandoned, and a check matching that
+   * explanation would be hollow gate 13 for the fifth time in this file.
+   */
   const cmd = readFileSync(path.join(REPO, 'agent.cmd'), 'utf8');
-
-  /*
-   * Everything below must match OUTSIDE a rem line. agent.cmd explains itself
-   * at length and every string here also appears in that prose, so a check
-   * that did not strip comments would pass against the explanation of a
-   * launcher that no longer launches. Hollow gate 13, three rediscoveries.
-   */
-  const lines = cmd.split(/\r?\n/).filter((l) => !/^\s*(rem\b|::)/i.test(l));
-
-  /*
-   * `echo` lines are prose too. agent.cmd's usage block legitimately POINTS AT
-   * `npm run agent -- <id> --print`, which is the validator and does not
-   * launch anything -- so the no-npm assertion below must look at lines that
-   * EXECUTE, not at lines that print. The first version of this test did not
-   * make that distinction and failed on correct advice.
-   */
-  const executable = lines.filter((l) => !/^\s*echo\b/i.test(l)).join('\n');
-
-  /*
-   * ALL FOUR ASSERTIONS USE `executable`, AND THE FIRST VERSION USED IT FOR ONE.
-   *
-   * Found by blind audit. This file built `executable`, wrote the paragraph
-   * above explaining precisely why an echoed line proves nothing, and then
-   * checked three of its four properties against `live` -- which still
-   * contains the echo lines. So the gate could be satisfied by agent.cmd
-   * PRINTING the words instead of doing them.
-   *
-   * Demonstrated, not theorised: prefixing `echo ` to the real lines and
-   * moving the claude invocation into an unreachable if-block left this file
-   * 6 of 6 GREEN, while the script set no AGENTBRIDGE_AGENT_ID, never cd'd to
-   * the repository, and launched nothing -- reintroducing BOTH defects the
-   * launcher exists to prevent (b00d96e's unset variable that made the poll
-   * hook decline and exit 0, and the wrong cwd that loads no
-   * .claude/settings.json). The assertion messages below name those exact
-   * consequences, and could not see them.
-   *
-   * `live` is now used for nothing. A view that only prose can satisfy has no
-   * business in a gate.
-   */
-  assert.match(executable, /set\s+"?AGENTBRIDGE_AGENT_ID=%~1"?/i,
-    'agent.cmd must ASSIGN AGENTBRIDGE_AGENT_ID from its first argument');
-  assert.match(executable, /cd\s+\/d\s+"%~dp0"/i,
-    'it must cd to the repository, or the session loads no .claude/settings.json and runs unguarded');
-  assert.match(executable, /^\s*claude\s*$/m,
-    'it must invoke claude as a bare command in this shell, not through a pipe');
+  const executable = cmd
+    .split(/\r?\n/)
+    .filter((l) => !/^\s*@?\s*(rem\b|::)/i.test(l))
+    .filter((l) => !/^\s*@?\s*echo\b/i.test(l))
+    .join('\n');
 
   assert.doesNotMatch(executable, /\bnpm\b/i,
     'agent.cmd must not EXECUTE npm: npm pipes stdin and claude comes up headless, which is the bug d0e3f88 fixed');
