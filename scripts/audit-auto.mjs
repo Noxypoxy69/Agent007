@@ -163,7 +163,26 @@ function linkModules(work) {
 }
 
 function filesOf(sha) {
-  const out = git(['show', '--name-only', '--format=', sha]);
+  /*
+   * --diff-merges=first-parent, OR A MERGE HAS NO FILES AND IS SKIPPED.
+   *
+   * The same defect a3f3fa6 fixed in src/auditLedger.mjs, still here, found
+   * by the audit of that commit: `git show --name-only` prints nothing for a
+   * merge because git declines to pick a side. files=[] then means tests=[]
+   * and sources=[], and the consumer below prints
+   *
+   *     SKIP   no test files touched (0 source file(s))
+   *
+   * -- so a merge carrying a control AND its test is reported as having
+   * touched nothing, by the tool this project runs as its automatic rule-20
+   * pass. Fixing one of two call sites and announcing the class closed is
+   * the mistake this branch keeps making; this is the second site.
+   *
+   * Measured on the same merge a3f3fa6 used:
+   *   git show --name-only --format= cbbe34c          -> 0 lines
+   *   git show -m --first-parent --name-only cbbe34c  -> test/leakRegression.test.mjs
+   */
+  const out = git(['show', '--diff-merges=first-parent', '--name-only', '--format=', sha]);
   const files = out.split('\n').map((s) => s.trim()).filter(Boolean);
   /*
    * ANYTHING UNDER test/ IS TEST-SIDE AND IS NEVER REVERTED.

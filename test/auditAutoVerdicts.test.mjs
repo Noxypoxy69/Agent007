@@ -383,3 +383,56 @@ test('A GATE REACHED BY A DYNAMIC import() IS A GATE, NOT A COLLAPSE', (t) => {
   assert.match(out, /GATE/, out);
   assert.match(out, /dyn\.mjs/, out);
 });
+
+test('A MERGE CARRYING A SUBJECT AND ITS TEST IS NOT SKIPPED', (t) => {
+  /*
+   * The same defect a3f3fa6 fixed in src/auditLedger.mjs, still present
+   * here, found by the audit OF that commit. `git show --name-only` prints
+   * nothing for a merge, so filesOf returned [], tests and sources were both
+   * empty, and this tool -- the project's automatic rule-20 pass -- printed
+   *
+   *     SKIP   no test files touched (0 source file(s))
+   *
+   * for a merge that carried a subject AND its test. Fixing one of two call
+   * sites and calling the class closed is the mistake this branch keeps
+   * making, so this pins the second site.
+   */
+  const env = probeRepo(t);
+
+  writeFileSync(path.join(env.root, 'src', 'merged.mjs'), 'export const answer = () => 1;\n');
+  writeFileSync(path.join(env.root, 'test', 'merged.test.mjs'), [
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import { answer } from "../src/merged.mjs";',
+    'test("answers 2", () => { assert.equal(answer(), 2); });',
+    '',
+  ].join('\n'));
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'base for the merge');
+
+  const main = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'],
+    { cwd: env.root, encoding: 'utf8' }).trim();
+  env.git('branch', 'side');
+
+  /* Mainline moves, so the merge is real rather than a fast-forward. */
+  writeFileSync(path.join(env.root, 'README.md'), 'moved\n');
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'mainline');
+
+  env.git('checkout', '-q', 'side');
+  writeFileSync(path.join(env.root, 'src', 'merged.mjs'), 'export const answer = () => 2;\n');
+  writeFileSync(path.join(env.root, 'test', 'merged.test.mjs'),
+    `${readFileSync(path.join(env.root, 'test', 'merged.test.mjs'), 'utf8')}/* touched */\n`);
+  env.git('add', '-A');
+  env.git('commit', '-qm', 'the behaviour, on a side branch');
+
+  env.git('checkout', '-q', main);
+  env.git('merge', '--no-ff', '-q', 'side', '-m', 'Merge side');
+  const merge = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: env.root, encoding: 'utf8' }).trim();
+
+  const out = runAuto(env, merge);
+  assert.doesNotMatch(out, /SKIP/,
+    `the merge carried src/merged.mjs and its test, and the tool saw neither.\n${out}`);
+  assert.match(out, /merged\.test\.mjs/,
+    `the test the merge carried must be named.\n${out}`);
+});

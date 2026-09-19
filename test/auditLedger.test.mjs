@@ -360,6 +360,14 @@ test('A MERGE COMMIT THAT CARRIES A CONTROL IS NOT INVISIBLE', async (t) => {
 
   writeFileSync(path.join(dir, 'README.md'), 'base\n');
   g('add', '-A'); g('commit', '-qm', 'base');
+  /*
+   * THE DEFAULT BRANCH NAME IS DERIVED, NOT TYPED. An auditor caught this
+   * hard-coded as 'master': git init uses init.defaultBranch, which is 'main'
+   * on most machines and only 'master' on this one. The test failed with
+   * 'Command failed: git checkout -q master' -- rule 21, a property of the
+   * author's checkout wearing the shape of a property of git.
+   */
+  const mainBranch = g('rev-parse', '--abbrev-ref', 'HEAD').trim();
   g('branch', 'side');
 
   /* Mainline moves, so the merge is a real one rather than a fast-forward. */
@@ -370,7 +378,7 @@ test('A MERGE COMMIT THAT CARRIES A CONTROL IS NOT INVISIBLE', async (t) => {
   writeFileSync(path.join(dir, 'src', 'claudeGuard.mjs'), '// changed on the side branch\n');
   g('add', '-A'); g('commit', '-qm', 'touch the guard on a side branch');
 
-  g('checkout', '-q', 'master');
+  g('checkout', '-q', mainBranch);
   g('merge', '--no-ff', '-q', 'side', '-m', 'Merge side');
   const merge = g('rev-parse', 'HEAD').trim();
 
