@@ -182,6 +182,15 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         before that was not RED: a fixture
                                         already green at the base proves the
                                         repair did nothing (§11.2).
+  agentbridge audits [--repo <dir>]     the blind-audit queue: every commit that
+  agentbridge audit-claim --id <audit-..> --by <session>
+                                        changed a control and has no recorded
+                                        audit. Persisted, so another session can
+                                        take one -- the trigger used to print
+                                        them into one session's Stop message and
+                                        nowhere else. A claim is one auditor per
+                                        candidate; a stale claim is reclaimable.
+                                        Exit 1 means audits are DUE.
   agentbridge regressions-due [--range <a..b>]
                                         what this candidate must prove because
                                         of what broke in the same scope before.
@@ -3206,7 +3215,8 @@ try {
    * place the override grants and the poll records live.
    */
   if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind'
-      || cmd === 'finding-move' || cmd === 'repair-record' || cmd === 'regressions-due') {
+      || cmd === 'finding-move' || cmd === 'repair-record' || cmd === 'regressions-due'
+      || cmd === 'audits' || cmd === 'audit-claim') {
     const {
       createFinding, openFindings, bindRepair, transition, linkToFamily, repairRecord,
       requiredRegressions, FAILURE_CLASSES, FINDING,
@@ -3274,6 +3284,100 @@ try {
       mkdirSync(dirname(store), { recursive: true });
       appendFileSync(store, `${JSON.stringify(rec)}\n`, 'utf8');
     };
+
+    if (cmd === 'audits' || cmd === 'audit-claim') {
+      /*
+       * THE QUEUE, PERSISTED. Until now the §7.1 trigger computed the blind
+       * packets and printed them into whichever session ended a turn, so
+       * nothing else could see them -- which is why a second session that
+       * committed and looked saw nothing and reported the trigger had not
+       * fired. It had not fired FOR THEM.
+       *
+       * Keyed like every other store, so a grant, a finding and an audit queue
+       * for one repository share one derivation (see repoStorePath).
+       */
+      const { auditJobsFor, mergeQueue, claimJob, JOB } = await import('../src/auditJob.mjs');
+      const { auditCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
+      const { runGit: rgA } = await import('../src/safeGit.mjs');
+      const qStore = repoStorePath(repo, 'audits', '.jsonl');
+
+      const readQueue = () => {
+        if (!existsSync(qStore)) return [];
+        const byId = new Map();
+        for (const line of String(rf(qStore, 'utf8')).split('\n')) {
+          if (line.trim() === '') continue;
+          try {
+            const rec = JSON.parse(line);
+            if (rec?.audit_id) byId.set(rec.audit_id, rec);
+          } catch { /* a malformed line is skipped; readAll's counter covers findings, not this */ }
+        }
+        return [...byId.values()];
+      };
+      const writeQueue = (rows) => {
+        mkdirSync(dirname(qStore), { recursive: true });
+        appendFileSync(qStore, `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8');
+      };
+
+      let ledgerText = '';
+      try { ledgerText = rf(`${repo}/docs/audit-ledger.jsonl`, 'utf8'); } catch { ledgerText = ''; }
+      const coverage = auditCoverage({ repoRoot: repo, range: defaultAuditRange(repo), ledgerText });
+      const treeShaFor = (c) => {
+        try {
+          return String(rgA(['-C', repo, 'rev-parse', `${c}^{tree}`], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+          })).trim();
+        } catch { return null; }
+      };
+      const computed = auditJobsFor(coverage, { treeShaFor, now: new Date().toISOString() });
+      if (computed.error) {
+        console.error(`${cmd}: could not compute the queue: ${computed.error}`);
+        console.error('  That is UNKNOWN, not "no audits are due".');
+        process.exit(2);
+      }
+      const merged = mergeQueue(readQueue(), computed.jobs, { now: new Date().toISOString() });
+      if (merged.added.length || merged.stranded.length) writeQueue(merged.queue);
+
+      if (cmd === 'audit-claim') {
+        const id = str_(args.id);
+        const job = merged.queue.find((j) => j.audit_id === id);
+        const r = claimJob(job, { by: str_(args.by), now: Date.now() });
+        if (!r.ok) {
+          console.error(`audit-claim: ${r.why}`);
+          process.exit(3);
+        }
+        writeQueue(merged.queue.map((j) => (j.audit_id === id ? r.job : j)));
+        console.log(JSON.stringify(r.job, null, 2));
+        console.log('');
+        console.log('That is the whole brief. It carries the identity and the §7.4 proofs and NOT the');
+        console.log('commit subject, because a subject is the maker\'s own account of the work.');
+        process.exit(0);
+      }
+
+      const open = merged.queue.filter((j) => j.state !== JOB.DONE);
+      console.log(`store    ${qStore}`);
+      console.log(`queued   ${open.length} (${merged.added.length} new this run)`);
+      if (merged.stranded.length) {
+        console.log(`stranded ${merged.stranded.length} claimed job(s) no longer in range -- kept, not cancelled`);
+      }
+      if (open.length === 0) {
+        console.log('\nnothing due. That is not the same as "nothing needs auditing" if the range could');
+        console.log('not be read -- this run read it.');
+        process.exit(0);
+      }
+      console.log('');
+      for (const j of open) {
+        console.log(`${j.audit_id}  ${String(j.candidate_sha).slice(0, 8)}  ${j.state}${j.claimed_by ? ` by ${j.claimed_by}` : ''}`);
+        console.log(`   touched ${(j.touched ?? []).slice(0, 4).join(', ')}`);
+      }
+      console.log('');
+      console.log('Claim one with: agentbridge audit-claim --id <audit-...> --by <your session>');
+      /*
+       * EXIT 1 WHEN AUDITS ARE DUE. A queue command that exits 0 with work
+       * outstanding is the hollow shape audit-auto already shipped once: a run
+       * that proved nothing indistinguishable from one that proved everything.
+       */
+      process.exit(1);
+    }
 
     if (cmd === 'regressions-due') {
       /*
