@@ -146,16 +146,68 @@ test('THE SCOPE IS commit ALONE, and the residual is asserted rather than assume
    * SO THIS TEST PINS THE GAP RATHER THAN CLOSING IT. If somebody widens the
    * fence, this goes red and points them at the header paragraph that has to
    * change with it. A residual nothing asserts is a residual nobody will find.
+   *
+   * AND THE FIRST VERSION OF THIS TEST WAS ITSELF HOLLOW, found by blind audit.
+   * It asserted only that the refusal reason did NOT match two phrases, which
+   * meant: it passed if somebody widened the fence using any other wording; it
+   * had no positive, so it also passed if the command was never judged at all;
+   * and it tested `git stash --continue`, which is not a thing, while never
+   * testing BARE `git stash` -- the case the commit message singles out as "the
+   * same hazard, and louder". A gate asserting the absence of a string, with no
+   * positive beside it, is rule 5 in one line.
    */
-  for (const verb of ['rebase', 'cherry-pick', 'revert', 'stash', 'merge', 'am']) {
-    const v = judge(`git ${verb} --continue`);
-    assert.ok(
-      !(v.allowed === false && /pathspec|not bounded by the paths/.test(v.reason ?? '')),
-      `git ${verb} is now refused by the shared-index fence. That may be right -- but the `
-        + 'header of src/gitIndexLease.mjs says these are deliberately unfenced and why. '
-        + 'Update it, and this test, together.',
+  const RESIDUAL = [
+    'git rebase --continue', 'git cherry-pick --continue', 'git revert --continue',
+    'git stash', 'git stash push', 'git merge --continue', 'git am --continue',
+  ];
+
+  for (const cmd of RESIDUAL) {
+    const v = judge(cmd);
+    /*
+     * THE POSITIVE FIRST: the command must actually reach a verdict. Without
+     * this, a `judge` that threw or returned undefined would satisfy every
+     * "does not match" assertion below.
+     */
+    assert.equal(typeof v?.allowed, 'boolean', `${cmd} was not judged at all`);
+
+    /*
+     * Then the residual itself, stated as the property rather than as two
+     * phrases: if the SHARED-INDEX fence starts refusing these, the module
+     * header's argument for leaving them alone has to change with it. The
+     * fence's own two reasons are the only ones that count -- a refusal from
+     * the sweep check or the protected-path walk is a different mechanism and
+     * is not what this pins (rule 18).
+     */
+    const fenceRefused = v.allowed === false
+      && /no pathspec|not bounded by the paths you name/.test(v.reason ?? '');
+    assert.equal(
+      fenceRefused, false,
+      `"${cmd}" is now refused by the shared-index fence, reason: ${v.reason}\n`
+        + 'That may well be right -- but src/gitIndexLease.mjs argues these are '
+        + 'deliberately unfenced because a refusal with no compliant spelling is an '
+        + 'outage. Update that paragraph and this test together, or the code and its '
+        + 'stated reasoning have parted company.',
     );
   }
+});
+
+test('THE RESIDUAL CONTROL: this pin can actually fire', () => {
+  /*
+   * Rule 1, and rule 16 -- a gate nobody has shown can go red is a decoration.
+   * `git commit` IS fenced, with both of the reasons the test above watches
+   * for, so pointing the same predicate at it must produce the failure. If this
+   * ever passes, the matcher in the test above has stopped recognising the
+   * fence's own refusals and the residual is being pinned by nothing.
+   */
+  const unnamed = judge('git commit -m msg');
+  assert.equal(unnamed.allowed, false);
+  assert.match(unnamed.reason, /no pathspec/,
+    'the fence no longer produces the reason the residual test watches for');
+
+  const widened = judge('git commit --amend README.md');
+  assert.equal(widened.allowed, false);
+  assert.match(widened.reason, /not bounded by the paths you name/,
+    'the fence no longer produces the second reason the residual test watches for');
 });
 
 test('garbage in is a refusal, not a throw', () => {
