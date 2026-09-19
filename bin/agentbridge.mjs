@@ -3296,7 +3296,9 @@ try {
        * Keyed like every other store, so a grant, a finding and an audit queue
        * for one repository share one derivation (see repoStorePath).
        */
-      const { auditJobsFor, mergeQueue, claimJob, JOB } = await import('../src/auditJob.mjs');
+      const {
+        auditJobsFor, mergeQueue, claimJob, authorSessionFrom, JOB,
+      } = await import('../src/auditJob.mjs');
       const { auditCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
       const { runGit: rgA } = await import('../src/safeGit.mjs');
       const qStore = repoStorePath(repo, 'audits', '.jsonl');
@@ -3340,7 +3342,34 @@ try {
       if (cmd === 'audit-claim') {
         const id = str_(args.id);
         const job = merged.queue.find((j) => j.audit_id === id);
-        const r = claimJob(job, { by: str_(args.by), now: Date.now() });
+
+        /*
+         * THE CLAIMANT IS RESOLVED FROM THE ENVIRONMENT WHERE POSSIBLE, and
+         * the record says which. A typed --by is a caller's assertion about
+         * its own identity, which is the weakest possible basis for an
+         * independence check -- Danny's words: the claim needs to bind a real
+         * principal, not a typed name. The launcher sets AGENTBRIDGE_AGENT_ID;
+         * a session started outside it has none, which is the known gap and
+         * the reason the fallback exists rather than a refusal.
+         */
+        const resolved = str_(process.env.AGENTBRIDGE_SESSION_ID) ?? str_(process.env.AGENTBRIDGE_AGENT_ID);
+        const by = resolved ?? str_(args.by);
+        const bySource = resolved ? 'resolved' : 'asserted';
+
+        /*
+         * THE CANDIDATE'S OWN AUTHOR, READ FROM THE CANDIDATE. Not from git's
+         * author field -- every commit here carries one git identity, so it
+         * cannot separate three agents -- but from the Claude-Session trailer
+         * the authoring session wrote at commit time.
+         */
+        let authorSession = null;
+        try {
+          authorSession = authorSessionFrom(String(rgA(['-C', repo, 'log', '-1', '--format=%B', job?.candidate_sha ?? ''], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+          })));
+        } catch { authorSession = null; }
+
+        const r = claimJob(job, { by, bySource, authorSession, now: Date.now() });
         if (!r.ok) {
           console.error(`audit-claim: ${r.why}`);
           process.exit(3);

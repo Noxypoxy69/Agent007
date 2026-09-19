@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   auditJobsFor, assertBlind, auditIdFor, formatAuditJobs, REQUIRED_PROOFS,
+  mergeQueue, claimJob, authorSessionFrom,
 } from '../src/auditJob.mjs';
 
 const A = 'a'.repeat(40);
@@ -159,6 +160,110 @@ test('JUNK IN THE COVERAGE OBJECT DOES NOT THROW', () => {
 test('THE CONTROL: this distinguishes, in both directions', () => {
   assert.equal(run().jobs.length, 1);
   assert.equal(run({ commits: [] }).jobs.length, 0);
+});
+
+/* ── the queue, and independence as a machine predicate ──────────────── */
+
+const job = (over = {}) => ({
+  audit_id: 'audit-1', candidate_sha: A, candidate_tree_sha: TREE_A,
+  touched: ['src/guardSession.mjs'], state: 'PENDING', claimed_by: null, claimed_at: null, ...over,
+});
+
+test('THE AUTHOR OF A CANDIDATE CANNOT AUDIT IT -- machine-enforced', () => {
+  /*
+   * Danny's correction, and the difference between a queue and a control: "the
+   * author being ineligible must be a machine-enforced predicate, not reviewer
+   * etiquette." The first version compared the typed claimant against nothing,
+   * so an author could close its own candidate.
+   *
+   * The queue's own first entry audits the commit that created the queue. That
+   * one in particular must not be closable by whoever wrote it.
+   */
+  const r = claimJob(job(), { by: 'session_AAA', authorSession: 'session_AAA', now: 1000 });
+  assert.equal(r.ok, false);
+  assert.match(r.why, /authored this candidate/);
+
+  const ok = claimJob(job(), { by: 'session_BBB', authorSession: 'session_AAA', now: 1000 });
+  assert.equal(ok.ok, true, 'an independent claimant was refused too, so the rule bars everyone');
+});
+
+test('THE AUTHOR IS READ FROM THE CANDIDATE, not from git\'s author field', () => {
+  /*
+   * Every commit in this repository carries one git identity, so `%an` cannot
+   * separate three agents. The Claude-Session trailer can, and the authoring
+   * session writes it at commit time.
+   */
+  assert.equal(
+    authorSessionFrom('a subject\n\nbody\n\nClaude-Session: https://claude.ai/code/session_01Js46oMDbKpQSxM2JhKitUp'),
+    'session_01Js46oMDbKpQSxM2JhKitUp',
+  );
+  assert.equal(authorSessionFrom('no trailer at all'), null);
+  assert.equal(authorSessionFrom(''), null);
+  assert.equal(authorSessionFrom(null), null);
+});
+
+test('AN UNSIGNED CANDIDATE IS UNVERIFIABLE, and the record says so', () => {
+  /*
+   * An author who omits the trailer is not thereby cleared. The claim succeeds
+   * -- refusing would block every commit that predates the convention -- but it
+   * records `unverifiable` rather than claiming independence it did not check.
+   * A record that said "independent" for all three cases would be the proxy
+   * rule 4 is about: right until the one case where it matters.
+   */
+  assert.equal(claimJob(job(), { by: 'x', authorSession: null, now: 1 }).job.independence, 'unverifiable');
+});
+
+test('A RESOLVED IDENTITY AND AN ASSERTED ONE ARE RECORDED DIFFERENTLY', () => {
+  /*
+   * Danny: a claim binds whatever string the caller supplies unless the
+   * identity is resolved against live session authority. Resolving it belongs
+   * to the dispatcher; until then the record must not pretend it was.
+   */
+  const asserted = claimJob(job(), { by: 'b', authorSession: 'a', bySource: 'asserted', now: 1 });
+  const resolved = claimJob(job(), { by: 'b', authorSession: 'a', bySource: 'resolved', now: 1 });
+  assert.equal(asserted.job.independence, 'asserted');
+  assert.equal(resolved.job.independence, 'enforced');
+  assert.equal(resolved.job.claimed_by_source, 'resolved');
+});
+
+test('ONE AUDITOR PER CANDIDATE, but a stale claim is reclaimable', () => {
+  const held = job({ state: 'CLAIMED', claimed_by: 'first', claimed_at: 1000 });
+  assert.equal(claimJob(held, { by: 'second', now: 1000 + 60_000 }).ok, false,
+    'a live claim was taken from under its holder');
+  assert.equal(claimJob(held, { by: 'second', now: 1000 + 2 * 60 * 60_000 }).ok, true,
+    'an auditor that died holding a job parked it forever');
+  assert.equal(claimJob(held, { by: 'first', now: 1000 + 60_000 }).ok, true,
+    'the holder could not re-enter its own claim');
+});
+
+test('A CLAIM NEEDS A NAME, and a DONE job is not reclaimable', () => {
+  assert.equal(claimJob(job(), { by: null, now: 1 }).ok, false);
+  assert.equal(claimJob(job({ state: 'DONE' }), { by: 'x', now: 1 }).ok, false);
+  assert.equal(claimJob(null, { by: 'x', now: 1 }).ok, false);
+});
+
+test('mergeQueue DEDUPES, PRESERVES A CLAIM, AND DROPS WHAT IS RESOLVED', () => {
+  const stored = [job({ state: 'CLAIMED', claimed_by: 'someone', claimed_at: 5 })];
+  const again = mergeQueue(stored, [job()], { now: 'now' });
+  assert.equal(again.queue.length, 1, 'the same candidate was enqueued twice');
+  assert.equal(again.queue[0].state, 'CLAIMED', 'the trigger reset a claimed job to PENDING');
+  assert.equal(again.added.length, 0);
+
+  /* Resolved: gone from the computed set, and it was only PENDING. */
+  assert.equal(mergeQueue([job()], [], { now: 'now' }).queue.length, 0);
+});
+
+test('A CLAIMED JOB THAT FALLS OUT OF RANGE IS KEPT AND FLAGGED', () => {
+  /*
+   * The computed set is a 50-commit window. Dropping a claimed job because the
+   * candidate scrolled past it would silently cancel an audit somebody is
+   * running.
+   */
+  const held = job({ state: 'CLAIMED', claimed_by: 'someone', claimed_at: 5 });
+  const m = mergeQueue([held], [], { now: 'now' });
+  assert.equal(m.queue.length, 1);
+  assert.equal(m.queue[0].no_longer_in_range, true);
+  assert.deepEqual(m.stranded, ['audit-1']);
 });
 
 /* ── the regression this feature introduced, found by blind audit ─────── */
