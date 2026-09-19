@@ -3187,7 +3187,17 @@ try {
      * unprintable and undocumented for a week and resolved differently in every
      * worktree; a findings file that keyed itself would reproduce it.
      */
-    const repo = String(args.repo ?? process.cwd());
+    /*
+     * A BARE `--repo` BECOMES BOOLEAN true, AND String(true) IS "true".
+     *
+     * Found by blind audit. `String(args.repo ?? process.cwd())` turned
+     * `--repo` with no value into the relative path "true", silently keying the
+     * store off a different repository -- a findings file nobody would look in,
+     * reported as success. Only a STRING is a path; anything else falls back.
+     */
+    const repo = typeof args.repo === 'string' && args.repo.trim() !== ''
+      ? args.repo.trim()
+      : process.cwd();
     const store = repoStorePath(repo, 'findings', '.jsonl');
 
     /*
@@ -3232,6 +3242,16 @@ try {
     };
 
     if (cmd === 'finding-bind' || cmd === 'finding-move') {
+      /*
+       * ARGUMENT CHECKS BEFORE THE LOOKUP. `finding-move --id F-nope` with no
+       * --to reported only "no finding F-nope" and never mentioned the missing
+       * flag, so a caller who got BOTH wrong fixed one and ran again. Found by
+       * blind audit; name every reason at once, as finding-add already does.
+       */
+      if (cmd === 'finding-move' && !str_(args.to)) {
+        console.error(`finding-move: --to is required, one of ${Object.keys(FINDING).join(', ')}`);
+        process.exit(2);
+      }
       const { rows, malformed } = readAll();
       const id = str_(args.id);
       const found = rows.find((f) => f.finding_id === id);
@@ -3242,10 +3262,6 @@ try {
       }
 
       const by = str_(args.by);
-      if (cmd === 'finding-move' && !str_(args.to)) {
-        console.error(`finding-move: --to is required, one of ${Object.keys(FINDING).join(', ')}`);
-        process.exit(2);
-      }
       const r = cmd === 'finding-bind'
         ? bindRepair(found, {
           task_id: str_(args.task),
@@ -3337,6 +3353,48 @@ try {
      * know about that" is how a defect on a second candidate gets closed by
      * evidence from the first.
      */
+    /*
+     * RE-CAPTURE MAY NOT OVERWRITE AN EXISTING FINDING.
+     *
+     * MEASURED BY BLIND AUDIT. The store is append-only and folds last-wins per
+     * id, and this never checked whether the id already existed. So re-adding a
+     * finding with the same candidate, class and title -- which is exactly what
+     * makes the id idempotent -- REPLACED the stored record. The audit resurrected
+     * a SUPERSEDED finding as OPEN, rewrote its reporter to "impostor" and
+     * downgraded its severity from CRITICAL to LOW, keeping the same id.
+     *
+     * That defeats the reporter half of the independence rule exactly as the
+     * re-binding defeated the fixer half: `transition` reads
+     * `created_by_reviewer_session` off the folded record, and this let anybody
+     * rewrite it. It also falsified "a finding does not reopen" at the CLI layer,
+     * one call below a state machine that refuses it.
+     *
+     * So idempotent means IDEMPOTENT: re-capturing the identical finding is a
+     * no-op that succeeds, and re-capturing a DIFFERENT finding under the same id
+     * is refused with the fields that differ named. Refusing outright would break
+     * the honest re-run the derived id exists to allow.
+     */
+    const existing = readAll().rows.find((f) => f.finding_id === created.finding.finding_id);
+    if (existing) {
+      const COMPARED = ['created_by_reviewer_session', 'severity', 'reproduction',
+        'expected_behavior', 'observed_behavior', 'task_id', 'audit_id', 'base_sha'];
+      const differs = COMPARED.filter((k) => String(existing[k] ?? '') !== String(created.finding[k] ?? ''));
+      if (differs.length === 0) {
+        console.log(created.finding.finding_id);
+        console.log(`already recorded, unchanged (status ${existing.status}); nothing appended`);
+        process.exit(0);
+      }
+      console.error(`finding-add: ${created.finding.finding_id} already exists and this differs from it`);
+      for (const k of differs) {
+        console.error(`  ${k}: stored ${JSON.stringify(existing[k] ?? null)} -> given ${JSON.stringify(created.finding[k] ?? null)}`);
+      }
+      console.error('  A finding is the record of what was observed on one candidate. Re-capturing it');
+      console.error('  cannot rewrite it -- that would let anyone reset its status, its severity or');
+      console.error('  the reporter the independence check reads. Raise a new finding, or move this');
+      console.error('  one with finding-move.');
+      process.exit(3);
+    }
+
     const prior = readAll().rows
       .filter((f) => f.failure_class === created.finding.failure_class)
       .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))[0] ?? null;

@@ -254,6 +254,129 @@ test('AND THE FIXER CHECK IS NOT HOLLOW: bindRepair MUST record who fixed it', (
   assert.match(r.errors.join(' '), /fixer_session/);
 });
 
+test('SUPERSEDED RETIRES A FINDING, SO IT NEEDS AN INDEPENDENT PARTY TOO', () => {
+  /*
+   * THE DEFECT A BLIND AUDIT MEASURED, AND IT WAS THE CHEAPEST OF THE THREE.
+   * NEEDS_INDEPENDENCE listed VERIFIED_FIXED and REJECTED and not SUPERSEDED,
+   * which is terminal and which openFindings does not count as open. Through the
+   * shipped CLI, in two commands and with NO --by at all, a finding went
+   * terminal and vanished from the open list.
+   *
+   * The list is derived from LEGAL now -- terminal IS the property that matters
+   * -- so this also pins that a terminal state added later is covered.
+   */
+  assert.equal(transition(make(), FINDING.SUPERSEDED, { by: null }).ok, false,
+    'an unnamed actor retired a finding');
+  assert.equal(transition(make(), FINDING.SUPERSEDED, { by: REVIEWER }).ok, false,
+    'the reporter superseded its own finding');
+  assert.equal(transition(make(), FINDING.SUPERSEDED, { by: THIRD }).ok, true,
+    'an independent party could not supersede it either');
+
+  const openF = make();
+  assert.equal(openFindings([openF]).open.length, 1);
+  const gone = transition(openF, FINDING.SUPERSEDED, { by: THIRD }).finding;
+  assert.equal(openFindings([gone]).open.length, 0,
+    'the premise fails: SUPERSEDED does not actually hide a finding');
+});
+
+test('EVERY TERMINAL STATE DEMANDS INDEPENDENCE -- generated, not listed', () => {
+  /*
+   * Rule 7. The previous version was three names typed by hand and one was
+   * missing. Derive the expectation from the same shape the subject derives it
+   * from, and a fourth terminal state is covered on the day it is added.
+   */
+  const terminal = Object.values(FINDING).filter(
+    (s) => transition({ ...make(), status: s }, FINDING.SUPERSEDED, { by: THIRD }).ok === false
+      && transition(make(), s, { by: THIRD }).ok === true,
+  );
+  assert.ok(terminal.length >= 3, `expected at least three terminal states, found ${terminal.join(', ')}`);
+  for (const s of terminal) {
+    assert.equal(transition(make(), s, { by: null }).ok, false, `${s} accepted an unnamed actor`);
+    assert.equal(transition(make(), s, { by: REVIEWER }).ok, false, `${s} accepted the reporter`);
+  }
+});
+
+test('A FIXER CANNOT LAUNDER ITSELF OUT BY RE-BINDING UNDER ANOTHER NAME', () => {
+  /*
+   * MEASURED BY BLIND AUDIT, four commands, one actor, every one exit 0. The
+   * direct refusal worked; the fixer walked the finding back to OPEN, re-bound
+   * it naming somebody else, and then cleared it -- because `transition`
+   * compared against the CURRENT repair.fixer_session and `bindRepair` takes
+   * that from a flag the same actor types.
+   */
+  const bound = bindRepair(make(), { task_id: 't', attempt: 1, lease_token: 'L', fixer_session: FIXER },
+    { by: THIRD, now: NOW }).finding;
+  const reopened = transition(bound, FINDING.OPEN, { by: FIXER, now: NOW }).finding;
+  const rebound = bindRepair(reopened, {
+    task_id: 't', attempt: 2, lease_token: 'L2', fixer_session: 'nobody-in-particular',
+  }, { by: FIXER, now: NOW }).finding;
+  const retesting = transition(rebound, FINDING.RETESTING, { by: FIXER, now: NOW }).finding;
+
+  const laundered = transition(retesting, FINDING.VERIFIED_FIXED, { by: FIXER, now: NOW });
+  assert.equal(laundered.ok, false, 'the fixer cleared its own repair by re-binding under another name');
+  assert.match(laundered.errors.join(' '), /wrote a repair/);
+
+  // And the name it hid behind is barred too, and a third party still works.
+  assert.equal(transition(retesting, FINDING.VERIFIED_FIXED, { by: 'nobody-in-particular' }).ok, false);
+  assert.equal(transition(retesting, FINDING.VERIFIED_FIXED, { by: THIRD }).ok, true);
+});
+
+test('THE FIXER HISTORY ONLY GROWS: re-binding can add a name, never remove one', () => {
+  const a = bindRepair(make(), { task_id: 't', attempt: 1, lease_token: 'L', fixer_session: 'fix-one' },
+    { by: THIRD, now: NOW }).finding;
+  const b = bindRepair(transition(a, FINDING.OPEN, { by: THIRD }).finding,
+    { task_id: 't', attempt: 2, lease_token: 'L2', fixer_session: 'fix-two' }, { by: THIRD, now: NOW }).finding;
+  assert.deepEqual(b.repair_history, ['fix-one', 'fix-two']);
+  const rt = transition(b, FINDING.RETESTING, { by: THIRD }).finding;
+  for (const who of ['fix-one', 'fix-two']) {
+    assert.equal(transition(rt, FINDING.VERIFIED_FIXED, { by: who }).ok, false, `${who} cleared its own repair`);
+  }
+});
+
+test('A RECORD WRITTEN BEFORE repair_history EXISTED IS STILL CHECKED', () => {
+  /*
+   * The stored findings on disk predate the field. Falling back to the current
+   * binding alone would silently exempt every one of them -- a fix that is
+   * correct only for records created after it is not a fix.
+   */
+  const legacy = {
+    ...make(),
+    status: FINDING.RETESTING,
+    repair: { task_id: 't', attempt: 1, lease_token: 'L', fixer_session: FIXER, bound_at: NOW },
+  };
+  assert.equal(transition(legacy, FINDING.VERIFIED_FIXED, { by: FIXER }).ok, false);
+  assert.equal(transition(legacy, FINDING.VERIFIED_FIXED, { by: THIRD }).ok, true);
+});
+
+test('AN ACTOR IS THE SAME PARTY IN ANY CASE', () => {
+  /*
+   * MEASURED BY BLIND AUDIT: `--by code-a` was refused as the reporter and
+   * `--by Code-A` exited 0 on the same finding. `str` trims and does not fold,
+   * so a capital letter defeated the whole rule. CLAUDE.md hollow gate #8 --
+   * a hostile property checked with three lower-case strings -- and the same
+   * case-variant bypass already shipped once for `.Claude/settings.json`.
+   *
+   * Generated from the real identities rather than three spellings typed here.
+   */
+  const variants = (s) => [s.toUpperCase(), s.toLowerCase(),
+    s.replace(/^./, (c) => c.toUpperCase()), ` ${s.toUpperCase()} `];
+
+  for (const spelling of variants(REVIEWER)) {
+    assert.equal(transition(make(), FINDING.REJECTED, { by: spelling }).ok, false,
+      `the reporter retired its own finding spelled ${JSON.stringify(spelling)}`);
+  }
+
+  const rt = transition(bindRepair(make(), { task_id: 't', attempt: 1, lease_token: 'L', fixer_session: FIXER },
+    { by: THIRD, now: NOW }).finding, FINDING.RETESTING, { by: THIRD }).finding;
+  for (const spelling of variants(FIXER)) {
+    assert.equal(transition(rt, FINDING.VERIFIED_FIXED, { by: spelling }).ok, false,
+      `the fixer cleared its own repair spelled ${JSON.stringify(spelling)}`);
+  }
+
+  // The positive control: a genuinely different party is still allowed.
+  assert.equal(transition(rt, FINDING.VERIFIED_FIXED, { by: THIRD.toUpperCase() }).ok, true);
+});
+
 test('AN UNNAMED ACTOR CANNOT RETIRE A FINDING', () => {
   /*
    * Fail closed on a missing field. "Who did this?" going unanswered is
