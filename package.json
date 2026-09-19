@@ -18,7 +18,8 @@
     "audit:workspace": "node scripts/audit-workspace.mjs",
     "bridge": "node bridge/server.mjs",
     "mcp:stdio": "node mcp/stdio.mjs",
-    "agent": "node scripts/start-agent.mjs"
+    "agent": "node scripts/start-agent.mjs",
+    "audit:auto": "node scripts/audit-auto.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
