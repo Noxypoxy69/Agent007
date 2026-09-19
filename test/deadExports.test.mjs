@@ -124,12 +124,26 @@ const BASELINE_UNREFERENCED = 5;
  * which the reader should weigh rather than take on trust, is that the gate
  * has not been able to catch anything since it went below reality, so nothing
  * is being let through that was being stopped. What IS lost is the record of
- * how the debt got here, so:
+ * how the debt got here.
  *
- *   78 before the night of 2026-09-18 (measured by audit)
- *   81 after two sessions added to it -- mine were livenessProbe and seatReaper
- *      exports with no production caller, and three in gitIndexLease.mjs
- *   80 now; the gitIndexLease three were deleted in aa07ca2
+ * AND THE RECONSTRUCTION I OFFERED HERE DID NOT ADD UP, which an audit caught
+ * and which matters more than it looks, because the RAISE was defended on that
+ * narrative. It read:
+ *
+ *   78 before the night of 2026-09-18, 81 after two sessions added to it,
+ *   80 now that three were deleted in aa07ca2
+ *
+ * 81 minus 3 is 78, not 80. So at least one of those figures is wrong and I do
+ * not know which -- I measured 81 and 80 directly and took 78 from an audit
+ * report, then wrote a story connecting them without checking that it closed.
+ * That is the shape this whole file exists to catch, committed in the comment
+ * justifying a ratchet raise.
+ *
+ * WHAT IS ACTUALLY MEASURED, and all this constant rests on: **80 is the true
+ * count at this revision**, verified by "both baselines are honest" below, which
+ * fails on any drift in either direction and was confirmed independently in a
+ * clean clone. The intermediate history is not reconstructed here any more,
+ * because a number nobody can reproduce is worse than no number.
  *
  * IT MAY ONLY GO DOWN FROM HERE, and the next person to touch this constant
  * should be lowering it. The debt behind it is real: livenessProbe's six
