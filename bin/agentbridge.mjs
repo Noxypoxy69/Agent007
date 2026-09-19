@@ -3411,7 +3411,10 @@ try {
         process.exit(0);
       }
 
-      const open = merged.queue.filter((j) => j.state !== JOB.DONE);
+      /* Terminal states are asked of the enum, not named -- see claimJob. */
+      const open = merged.queue.filter(
+        (j) => j.state !== JOB.COMPLETED_PASS && j.state !== JOB.COMPLETED_FAIL,
+      );
       console.log(`store    ${qStore}`);
       console.log(`queued   ${open.length} (${merged.added.length} new this run)`);
       if (merged.stranded.length) {

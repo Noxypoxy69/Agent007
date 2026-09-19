@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   auditJobsFor, assertBlind, auditIdFor, formatAuditJobs, REQUIRED_PROOFS,
-  mergeQueue, claimJob, authorSessionFrom, independenceOf, satisfiesGate, recordAudit,
+  mergeQueue, claimJob, authorSessionFrom, independenceOf, satisfiesGate, recordAudit, JOB,
 } from '../src/auditJob.mjs';
 
 const A = 'a'.repeat(40);
@@ -414,10 +414,22 @@ test('ONE AUDITOR PER CANDIDATE, but a stale claim is reclaimable', () => {
     'the holder could not re-enter its own claim');
 });
 
-test('A CLAIM NEEDS A NAME, and a DONE job is not reclaimable', () => {
+test('A CLAIM NEEDS A NAME, and a RECORDED audit is not reclaimable', () => {
   assert.equal(claimJob(job(), { by: null, now: 1 }).ok, false);
-  assert.equal(claimJob(job({ state: 'DONE' }), { by: 'x', now: 1 }).ok, false);
   assert.equal(claimJob(null, { by: 'x', now: 1 }).ok, false);
+
+  /*
+   * BOTH TERMINAL STATES, from the enum. The previous version named a single
+   * 'DONE' string; splitting the terminal state deleted that constant and the
+   * guard silently stopped matching, so a recorded audit could be re-claimed
+   * and re-decided. Asking the enum means a third terminal state is covered on
+   * the day it is added.
+   */
+  for (const state of Object.values(JOB).filter((s) => s.startsWith('COMPLETED'))) {
+    const r = claimJob(job({ state }), { by: 'x', now: 1 });
+    assert.equal(r.ok, false, `${state} was re-claimable`);
+    assert.match(r.why, /not re-openable/);
+  }
 });
 
 test('mergeQueue DEDUPES, PRESERVES A CLAIM, AND DROPS WHAT IS RESOLVED', () => {
