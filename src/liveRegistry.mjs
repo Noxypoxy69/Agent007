@@ -109,8 +109,6 @@ export function observedCapacity(row, { now, staleAfterMs = STALE_AFTER_MS } = {
     : 'offline';
 }
 
-
-
 export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
   if (!Array.isArray(rows)) throw new TypeError('registryFromSessions requires an array');
   if (!str(now)) throw new TypeError('registryFromSessions requires a `now` timestamp');

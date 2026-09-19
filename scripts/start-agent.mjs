@@ -38,11 +38,19 @@
  * validate an id against the local registry and print the environment. The
  * only thing that starts a session is agent.cmd.
  *
- * It validates the id against the registry, sets the variable, and execs claude
- * in this repository -- which also fixes the OTHER half of the problem, because
- * a session started from here loads .claude/settings.json and therefore the
- * guard, the Stop gate and the poll hook. A session started from the home
- * directory loads none of them; that is how one agent ran unguarded all night.
+ * WHICH HALF DOES WHAT, because a surviving sentence here claimed both halves
+ * did everything and was false about either referent:
+ *
+ *   this script   validates the id against the local registry and PRINTS the
+ *                 environment. It starts nothing (see `void spawn` below).
+ *   agent.cmd     sets the variable and runs claude from this repository. It
+ *                 does NO validation -- run this script first if you want the
+ *                 id checked.
+ *
+ * agent.cmd's cd is the OTHER half of the original problem: a session started
+ * from this repository loads .claude/settings.json and therefore the guard,
+ * the Stop gate and the poll hook. A session started from the home directory
+ * loads none of them; that is how one agent ran unguarded all night.
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -53,10 +61,27 @@ import { HOME } from '../src/config.mjs';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const argv = process.argv.slice(2);
-const agentId = argv.find((a) => !a.startsWith('--'));
 const laneFlag = argv.indexOf('--lane');
 const lane = laneFlag !== -1 ? argv[laneFlag + 1] : null;
 const dryRun = argv.includes('--print');
+
+/*
+ * A FLAG'S VALUE IS NOT A POSITIONAL, and the first version treated it as one.
+ *
+ * `argv.find((a) => !a.startsWith('--'))` takes the first non-flag token, so
+ *   agent:check --lane agentbridge code-a
+ * read "agentbridge" as the agent id and refused a perfectly good "code-a"
+ * with "has never registered on this machine". Found by blind audit. An
+ * over-block on a legitimate id is a real defect: the usage line shows
+ * id-first, but nothing enforces that order and nothing should.
+ *
+ * `--lane` is the only value-taking flag here, so its argument is skipped by
+ * INDEX rather than by guessing from the token's shape -- a lane legitimately
+ * looks exactly like an agent id, so no amount of inspecting "agentbridge"
+ * could tell the two apart. Ask the position, not the string.
+ */
+const valueIndices = new Set(laneFlag !== -1 ? [laneFlag + 1] : []);
+const agentId = argv.find((a, i) => !a.startsWith('--') && !valueIndices.has(i));
 
 /** Same shape the poll runner enforces, because this value becomes a filename there. */
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -94,13 +119,25 @@ function known() {
 
 const seen = known();
 if (seen.length && !seen.includes(agentId)) {
+  /*
+   * SAY WHAT IS ABOUT TO HAPPEN, NOT THE OPPOSITE OF IT.
+   *
+   * The first version printed the whole refusal -- "Refusing by default..." --
+   * and THEN checked --new, so `agent:check brand-new --new` emitted a refusal
+   * and proceeded to exit 0. The behaviour was right and the output said the
+   * reverse, which is worse than either alone: a reader who trusts the text
+   * believes a session was refused when it was not. Found by blind audit.
+   */
   console.error(`agent id "${agentId}" has never registered on this machine.`);
   console.error(`known here: ${seen.join(', ')}`);
-  console.error('');
-  console.error('If that is deliberate, pass it again with --new to confirm.');
-  console.error('Refusing by default because a typo here does not fail -- it creates a');
-  console.error('SECOND identity on the roster, and work gets routed by that identity.');
-  if (!argv.includes('--new')) process.exit(2);
+  if (!argv.includes('--new')) {
+    console.error('');
+    console.error('If that is deliberate, pass it again with --new to confirm.');
+    console.error('Refusing by default because a typo here does not fail -- it creates a');
+    console.error('SECOND identity on the roster, and work gets routed by that identity.');
+    process.exit(2);
+  }
+  console.error('--new given: accepting it as a genuinely new agent id.');
 }
 
 const env = { ...process.env, AGENTBRIDGE_AGENT_ID: agentId };
@@ -147,6 +184,12 @@ console.log('To start the session, from this directory:');
 console.log('');
 console.log(`    agent ${agentId}${lane ? ` ${lane}` : ''}`);
 console.log('');
-console.log('(agent.cmd sets the variable in your shell and starts claude there.');
+/*
+ * "in your shell" was wrong: agent.cmd opens with `setlocal`, so the
+ * assignment reaches the claude it starts and is discarded when the script
+ * ends. That is the correct behaviour -- it is what stops one launch leaking
+ * an agent id into the next -- but the sentence described a different thing.
+ */
+console.log('(agent.cmd sets the variable for the claude it starts, in this repository.');
 console.log(' npm run cannot: it pipes stdin, so claude comes up headless.)');
 void spawn; // kept out of the launch path deliberately; see the comment above
