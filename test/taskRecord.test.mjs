@@ -119,6 +119,61 @@ test('A TASK ID MUST BE FILE-SAFE, because it becomes a path and a predicate', (
   }
 });
 
+test('A TASK CANNOT BE CREATED IN A STATE THE DATABASE WILL REFUSE', () => {
+  /*
+   * CLAIMABLE AND CREATABLE ARE DIFFERENT SETS, and conflating them produced
+   * exactly the failure this module says it prevents. `returned` is claimable;
+   * the table's `returned_carries_evidence` CHECK also requires returned_by and
+   * returned_head_sha, which no create path writes. So the record passed every
+   * check here, passed the duplicate and collision checks in the route, and
+   * failed the INSERT with a 400 that reaches the caller as a 500.
+   */
+  assert.equal(validateTask(good({ state: 'runnable' })).ok, true, 'runnable was refused');
+  const v = validateTask(good({ state: 'returned' }));
+  assert.equal(v.ok, false,
+    'a task was created in `returned`, which the database refuses for want of returned_by');
+  assert.match(v.errors.join(' '), /returned_by/, `the refusal does not explain why: ${v.errors.join('; ')}`);
+});
+
+test('base_sha IS CHECKED AGAINST THE CONSTRAINT THE TABLE CARRIES', () => {
+  /*
+   * `tasks_base_sha_check` is `base_sha IS NULL OR base_sha ~ '^[0-9a-f]{40}$'`.
+   * Unvalidated, every one of these passed here and was rejected by the INSERT.
+   */
+  assert.equal(validateTask(good({ base_sha: null })).ok, true, 'null base_sha was refused');
+  assert.equal(validateTask(good({ base_sha: 'a'.repeat(40) })).ok, true, 'a real sha was refused');
+  for (const bad of ['HEAD', 'main', 'abc123', 'A'.repeat(40), 'g'.repeat(40), 'a'.repeat(41), '', 42]) {
+    assert.equal(validateTask(good({ base_sha: bad })).ok, false,
+      `base_sha ${JSON.stringify(bad)} was accepted and the database would refuse it`);
+  }
+});
+
+test('A TASK ID IS STORED AS IT WAS VALIDATED', () => {
+  /*
+   * It was validated trimmed and stored raw, so "  abc  " and "abc" both
+   * validated and became two rows a human reads as one id — and the route's
+   * duplicate check compares the stored value, so it would not catch the second.
+   */
+  assert.equal(createTask({ ...good(), task_id: '  t-spaced  ' }).task_id, 't-spaced',
+    'the id was stored with the whitespace the validator ignored');
+});
+
+test('AN ALIAS OF THE SAME PATH STILL COLLIDES', () => {
+  /*
+   * Five spellings defeated this, and validateTask accepted every one, so two
+   * coordinator-created tasks could claim the same file with the gate silent.
+   * On NTFS the case one is literally the same file. Fixed at the matcher, not
+   * by listing the five that were tried (rule 8).
+   */
+  for (const alias of ['./src/a', 'src//a', 'SRC/a', 'src/./a', 'src/a ', 'src\\a', 'src/A']) {
+    assert.equal(pathsCollide(['src/a'], [alias]).length, 1,
+      `"${alias}" did not collide with "src/a" — two tasks can claim the same file`);
+  }
+  // And the discrimination survives: a genuinely different path still does not collide.
+  assert.deepEqual(pathsCollide(['src/a'], ['src/ab']), [], 'the normalisation swallowed a distinct path');
+  assert.deepEqual(pathsCollide(['src/a'], ['']), [], 'an empty path collided with something');
+});
+
 test('COLLIDING PATHS ARE FOUND AT CREATION, not hours later at assignment', () => {
   /*
    * assign_task refuses "a path collides with another assignment" — at ASSIGN

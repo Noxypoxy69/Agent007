@@ -123,6 +123,17 @@ test('THE CONSTRUCTORS PRODUCE THE SAME RECORD', () => {
 });
 
 test('THE COLLISION CHECK AGREES, including on segment boundaries', () => {
+  /*
+   * THE FIXTURE COULD NOT REACH THE BRANCH THAT DIVERGED — hollow gate 10, in
+   * the gate written to catch a splice drifting.
+   *
+   * The six pairs below the audit found were all lowercase, single-slash and
+   * dot-free, so making the hosted copy case-insensitive while leaving src/
+   * alone was a MISSED mutation: parity green, deployed copy drifted. Every
+   * alias the matcher now normalises is therefore in the corpus, because a
+   * normalisation the fixture never exercises is one the parity gate cannot
+   * pin.
+   */
   const pairs = [
     [['src/'], ['src/a.mjs']],
     [['src'], ['src/a.mjs']],
@@ -130,6 +141,17 @@ test('THE COLLISION CHECK AGREES, including on segment boundaries', () => {
     [['a/b/c'], ['a/b']],
     [['x'], ['y']],
     [[], ['x']],
+    // the aliases — each must agree across the splice, whatever the answer is
+    [['src/a'], ['./src/a']],
+    [['src/a'], ['src//a']],
+    [['src/a'], ['SRC/a']],
+    [['src/a'], ['src/./a']],
+    [['src/a'], ['src/a ']],
+    [['src/a'], ['src\\a']],
+    [['SRC/'], ['src/a.mjs']],
+    [['src/a'], ['src/A']],
+    [[null], ['src/a']],
+    [['', '  '], ['src/a']],
   ];
   for (const [a, b] of pairs) {
     assert.deepEqual(pathsCollide(a, b), hostedCollide(a, b),

@@ -38,6 +38,34 @@ const isNonEmptyString = (v) => typeof v === 'string' && v.trim().length > 0;
 export const RUNNABLE_STATES = Object.freeze(['runnable', 'returned']);
 
 /**
+ * The states a task may be CREATED in, which is not the same set.
+ *
+ * `returned` is claimable and not creatable. The table carries
+ * `returned_carries_evidence CHECK (state <> 'returned' OR (returned_by IS NOT
+ * NULL AND returned_head_sha IS NOT NULL))`, and a create path writes neither —
+ * so a record with `state: 'returned'` passed every check here, passed the
+ * duplicate and collision checks in the route, and then failed the INSERT with
+ * a 400 that surfaces to the caller as a 500.
+ *
+ * That is precisely the failure this module's header says it exists to prevent:
+ * a permanent silent failure discovered hours later instead of a message at the
+ * moment somebody typed it. Conflating "claimable" with "creatable" is how it
+ * got in — the two sets overlap and are not the same, and only the database
+ * knew.
+ */
+export const CREATABLE_STATES = Object.freeze(['runnable']);
+
+/**
+ * A commit sha, matching the table's own `tasks_base_sha_check`:
+ * `base_sha IS NULL OR base_sha ~ '^[0-9a-f]{40}$'`.
+ *
+ * LOWERCASE ONLY, because that is what the constraint says. `HEAD`, a short
+ * sha, a branch name and a 40-character UPPERCASE sha were all accepted here
+ * and all rejected by the database.
+ */
+export const BASE_SHA = /^[0-9a-f]{40}$/;
+
+/**
  * A task id is a file-name-safe token, for the same reason a session id is:
  * it ends up in paths, in URLs and in query predicates.
  */
@@ -80,9 +108,22 @@ export function validateTask(t) {
   if (!isNonEmptyString(t.lane_id)) errors.push('lane_id is required — assign_task refuses a lane mismatch');
   if (!isNonEmptyString(t.repo_id)) errors.push('repo_id is required — assign_task refuses a repo mismatch');
 
-  if (!RUNNABLE_STATES.includes(t.state)) {
-    errors.push(`state must be one of ${RUNNABLE_STATES.join(', ')} — claim_task admits no others, `
-      + 'so any other value is a task that can never be picked up');
+  if (!CREATABLE_STATES.includes(t.state)) {
+    errors.push(`state must be one of ${CREATABLE_STATES.join(', ')} at creation — `
+      + `${RUNNABLE_STATES.join(' and ')} are both CLAIMABLE, but "returned" additionally requires `
+      + 'returned_by and returned_head_sha, which nothing sets at creation, so the database refuses it');
+  }
+
+  /*
+   * base_sha IS CHECKED AGAINST THE CONSTRAINT THE TABLE ACTUALLY CARRIES.
+   * Unvalidated, "HEAD", a branch name, a short sha and an uppercase sha all
+   * passed here and were rejected by the INSERT — a 400 the caller sees as 500.
+   */
+  if (t.base_sha !== null && t.base_sha !== undefined) {
+    if (!isNonEmptyString(t.base_sha) || !BASE_SHA.test(t.base_sha)) {
+      errors.push(`base_sha "${t.base_sha}" must be a full lowercase 40-character commit sha, `
+        + 'or null — the table refuses anything else');
+    }
   }
 
   /*
@@ -156,8 +197,20 @@ export function createTask({
    */
   const copy = (v) => (Array.isArray(v) ? [...v] : v);
 
+  /*
+   * TRIMMED HERE, BECAUSE IT WAS VALIDATED TRIMMED AND STORED RAW.
+   *
+   * `validateTask` tests `task_id.trim()` and the record kept the original, so
+   * `"  abc  "` and `"abc"` both validated and became two rows a human reads as
+   * one id — and the route's duplicate check compares the stored value, so it
+   * would not catch the second. No injection (encodeURIComponent holds), but
+   * TASK_ID's stated purpose is that this value is file-name-safe because it
+   * ends up in paths and predicates, and a leading space defeats that.
+   */
+  const id = typeof task_id === 'string' ? task_id.trim() : task_id;
+
   return {
-    task_id, title, lane_id, repo_id, state,
+    task_id: id, title, lane_id, repo_id, state,
     allowed_paths: copy(allowed_paths),
     forbidden_paths: copy(forbidden_paths),
     shared_paths: copy(shared_paths),
@@ -188,12 +241,42 @@ export function createTask({
  * `src/ab` do not — the same judgement `segmentSuffixes` already makes in the
  * permission matcher, for the same reason.
  */
+/**
+ * One spelling of a repo-relative path.
+ *
+ * FIVE TRIVIAL ALIASES DEFEATED THE COLLISION CHECK, and every one of them was
+ * accepted by `validateTask`, so two coordinator-created tasks could claim the
+ * same file with the gate silent:
+ *
+ *   ./src/a   src//a   SRC/a   src/./a   "src/a "
+ *
+ * On Windows and macOS the case one is literally the same file. Fixed at the
+ * MATCHER rather than by listing the five the audit happened to try (rule 8) —
+ * an adversarial probe is evidence that a specific attack works, never evidence
+ * that the remaining ones do not.
+ *
+ * CASE IS FOLDED, and that is a judgement rather than an oversight. This
+ * project runs on NTFS, where `SRC/a` and `src/a` are one file, and the cost of
+ * folding is a false collision on a case-sensitive filesystem holding two paths
+ * differing only in case — which would be a trap for humans long before it was
+ * a problem for this check.
+ */
+const canonPath = (p) => String(p ?? '')
+  .trim()
+  .replace(/\\/g, '/')        // a backslash is a separator on the platform this runs on
+  .replace(/\/{2,}/g, '/')    // src//a is src/a
+  .replace(/(^|\/)\.(?=\/)/g, '$1') // drop interior "./" segments
+  .replace(/^\.\//, '')       // and a leading one
+  .replace(/\/+$/, '')        // a trailing slash names the same directory
+  .toLowerCase();
+
 export function pathsCollide(a = [], b = []) {
-  const norm = (p) => String(p).replace(/\/+$/, '');
   const covers = (x, y) => x === y || y.startsWith(`${x}/`);
   const hits = [];
-  for (const p of a.map(norm)) {
-    for (const q of b.map(norm)) {
+  for (const p of (Array.isArray(a) ? a : []).map(canonPath)) {
+    if (!p) continue;
+    for (const q of (Array.isArray(b) ? b : []).map(canonPath)) {
+      if (!q) continue;
       if (covers(p, q) || covers(q, p)) hits.push([p, q]);
     }
   }

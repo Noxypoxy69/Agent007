@@ -365,6 +365,18 @@ export function createDecision({
  * CLAUDE.md about fixtures that cannot reach the branch that diverged.
  */
 export const RUNNABLE_STATES = Object.freeze(['runnable', 'returned']);
+
+/**
+ * CLAIMABLE AND CREATABLE ARE NOT THE SAME SET. `returned` is claimable and not
+ * creatable: the table's `returned_carries_evidence` CHECK requires returned_by
+ * and returned_head_sha, which no create path writes, so such a record passed
+ * every check and failed the INSERT with a 400 the caller sees as a 500.
+ */
+export const CREATABLE_STATES = Object.freeze(['runnable']);
+
+/** Matches the table's own tasks_base_sha_check. Lowercase, full length, or null. */
+export const BASE_SHA = /^[0-9a-f]{40}$/;
+
 export const TASK_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 export const REPO_PATH = /^(?!\/)(?![A-Za-z]:)[^\\\0]+$/;
 
@@ -386,9 +398,17 @@ export function validateTask(t) {
   if (!isNonEmptyString(t.lane_id)) errors.push('lane_id is required — assign_task refuses a lane mismatch');
   if (!isNonEmptyString(t.repo_id)) errors.push('repo_id is required — assign_task refuses a repo mismatch');
 
-  if (!RUNNABLE_STATES.includes(t.state)) {
-    errors.push(`state must be one of ${RUNNABLE_STATES.join(', ')} — claim_task admits no others, `
-      + 'so any other value is a task that can never be picked up');
+  if (!CREATABLE_STATES.includes(t.state)) {
+    errors.push(`state must be one of ${CREATABLE_STATES.join(', ')} at creation — `
+      + `${RUNNABLE_STATES.join(' and ')} are both CLAIMABLE, but "returned" additionally requires `
+      + 'returned_by and returned_head_sha, which nothing sets at creation, so the database refuses it');
+  }
+
+  if (t.base_sha !== null && t.base_sha !== undefined) {
+    if (!isNonEmptyString(t.base_sha) || !BASE_SHA.test(t.base_sha)) {
+      errors.push(`base_sha "${t.base_sha}" must be a full lowercase 40-character commit sha, `
+        + 'or null — the table refuses anything else');
+    }
   }
 
   if (!Array.isArray(t.allowed_paths) || t.allowed_paths.length === 0) {
@@ -433,8 +453,11 @@ export function createTask({
   notes = null,
 }) {
   const copy = (v) => (Array.isArray(v) ? [...v] : v);
+  // Validated trimmed, so stored trimmed: otherwise "  abc  " and "abc" are two
+  // rows a human reads as one id, and the duplicate check compares the raw value.
+  const id = typeof task_id === 'string' ? task_id.trim() : task_id;
   return {
-    task_id, title, lane_id, repo_id, state,
+    task_id: id, title, lane_id, repo_id, state,
     allowed_paths: copy(allowed_paths),
     forbidden_paths: copy(forbidden_paths),
     shared_paths: copy(shared_paths),
@@ -453,12 +476,28 @@ export function createTask({
   };
 }
 
+/*
+ * FIVE TRIVIAL ALIASES DEFEATED THIS, and validateTask accepted all of them:
+ * ./src/a, src//a, SRC/a, src/./a and a trailing space. Two tasks could claim
+ * the same file with the gate silent. Fixed at the matcher rather than by
+ * listing the five somebody happened to try. See src/taskRecord.mjs.
+ */
+const canonPath = (p) => String(p ?? '')
+  .trim()
+  .replace(/\\/g, '/')
+  .replace(/\/{2,}/g, '/')
+  .replace(/(^|\/)\.(?=\/)/g, '$1')
+  .replace(/^\.\//, '')
+  .replace(/\/+$/, '')
+  .toLowerCase();
+
 export function pathsCollide(a = [], b = []) {
-  const norm = (p) => String(p).replace(/\/+$/, '');
   const covers = (x, y) => x === y || y.startsWith(`${x}/`);
   const hits = [];
-  for (const p of a.map(norm)) {
-    for (const q of b.map(norm)) {
+  for (const p of (Array.isArray(a) ? a : []).map(canonPath)) {
+    if (!p) continue;
+    for (const q of (Array.isArray(b) ? b : []).map(canonPath)) {
+      if (!q) continue;
       if (covers(p, q) || covers(q, p)) hits.push([p, q]);
     }
   }

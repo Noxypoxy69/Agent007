@@ -56,3 +56,28 @@ as select
   review_decision, review_reasons, reviewed_by, reviewed_at,
   fix_of, fix_task_id
 from agentbridge.tasks;
+
+-- DROP DISCARDS THE ACL, AND THE DEFAULT PRIVILEGES PUT IT BACK WRONG.
+--
+-- This is the only tasks-view migration that uses drop+create rather than
+-- `create or replace` -- it has to, because created_by is inserted mid-list and
+-- replace cannot reorder columns. The cost is that DROP takes the object's
+-- grants with it, and `pg_default_acl` for schema public on this project grants
+-- ALL to anon and authenticated on every new relation. So without these two
+-- lines the view comes back with anon and authenticated holding
+-- SELECT/INSERT/UPDATE/DELETE/TRUNCATE/TRIGGER/REFERENCES, silently undoing a
+-- revoke that 20260915133357 and 20260916180034 both issued deliberately.
+--
+-- MEASURED LIVE, READ-ONLY, BY A BLIND AUDIT: public.attempts is a view created
+-- without these lines, and it carries exactly that grant today. Not a
+-- hypothesis about what the defaults do -- an observation of what they did.
+--
+-- NOT EXPLOITABLE THE MOMENT IT LANDS, and that is not a reason to omit it:
+-- security_invoker = true holds, the agentbridge schema ACL is {postgres=UC,
+-- service_role=U}, and agentbridge.tasks has RLS, so anon still hits
+-- "permission denied for schema agentbridge". It becomes data exposure the
+-- moment anything grants usage on that schema or a later recreate loses
+-- security_invoker. Defence in depth is exactly the thing whose erosion is
+-- invisible until the layer in front of it fails.
+revoke all on public.tasks from anon, authenticated;
+grant select, insert, update on public.tasks to service_role;
