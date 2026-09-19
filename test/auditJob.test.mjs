@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   auditJobsFor, assertBlind, auditIdFor, formatAuditJobs, REQUIRED_PROOFS,
-  mergeQueue, claimJob, authorSessionFrom,
+  mergeQueue, claimJob, authorSessionFrom, independenceOf, satisfiesGate,
 } from '../src/auditJob.mjs';
 
 const A = 'a'.repeat(40);
@@ -213,17 +213,72 @@ test('AN UNSIGNED CANDIDATE IS UNVERIFIABLE, and the record says so', () => {
   assert.equal(claimJob(job(), { by: 'x', authorSession: null, now: 1 }).job.independence, 'unverifiable');
 });
 
-test('A RESOLVED IDENTITY AND AN ASSERTED ONE ARE RECORDED DIFFERENTLY', () => {
+test('THE TRAILER CANNOT PRODUCE `enforced`, BECAUSE THE AUTHOR WRITES IT', () => {
   /*
-   * Danny: a claim binds whatever string the caller supplies unless the
-   * identity is resolved against live session authority. Resolving it belongs
-   * to the dispatcher; until then the record must not pretend it was.
+   * THE HOLE I SHIPPED AND DANNY CAUGHT. I introduced the Claude-Session
+   * trailer as the machine-enforced independence predicate. The author writes
+   * that trailer: it can carry any session string, including another agent's,
+   * and the comparison would then pass. Author-controlled evidence cannot
+   * establish that the reviewer is not the author.
+   *
+   * It stays as corroboration -- cheap, and it catches the honest case -- but
+   * it is capped at `asserted` however the claimant was identified.
    */
-  const asserted = claimJob(job(), { by: 'b', authorSession: 'a', bySource: 'asserted', now: 1 });
-  const resolved = claimJob(job(), { by: 'b', authorSession: 'a', bySource: 'resolved', now: 1 });
-  assert.equal(asserted.job.independence, 'asserted');
-  assert.equal(resolved.job.independence, 'enforced');
-  assert.equal(resolved.job.claimed_by_source, 'resolved');
+  const trailerOnly = claimJob(job(), {
+    by: 'b', authorSession: 'a', authorSource: 'trailer', bySource: 'resolved', now: 1,
+  });
+  assert.equal(trailerOnly.job.independence, 'asserted',
+    'author-written provenance was treated as authority');
+  assert.equal(trailerOnly.job.satisfies_gate, false);
+
+  /* And a defaulted authorSource is treated as the trailer, not as authority. */
+  assert.equal(claimJob(job(), { by: 'b', authorSession: 'a', bySource: 'resolved', now: 1 })
+    .job.independence, 'asserted');
+});
+
+test('ONLY AN AUTHORITATIVE AUTHOR PLUS A RESOLVED CLAIMANT IS `enforced`', () => {
+  /*
+   * Generated over the whole matrix, because the interesting property is which
+   * combinations DO NOT qualify -- and a test naming only the passing one
+   * cannot show that.
+   */
+  for (const authorSource of [null, 'trailer', 'authoritative']) {
+    for (const claimantSource of ['asserted', 'resolved']) {
+      const v = independenceOf({ authorSource, claimantSource });
+      const expected = authorSource === null
+        ? 'unverifiable'
+        : (authorSource === 'authoritative' && claimantSource === 'resolved' ? 'enforced' : 'asserted');
+      assert.equal(v, expected, `${authorSource} + ${claimantSource}`);
+    }
+  }
+});
+
+test('ONLY `enforced` MAY SATISFY A GATE', () => {
+  /*
+   * The mechanical failure this closes: pass --by a string that is not the
+   * author, get ASSERTED, record a PASS, satisfy the control. The gate would
+   * be cleared by whoever typed the most convenient name -- the trust problem
+   * Layer 0 exists to remove, rebuilt one layer down.
+   */
+  assert.equal(satisfiesGate({ independence: 'enforced' }), true);
+  assert.equal(satisfiesGate({ independence: 'asserted' }), false);
+  assert.equal(satisfiesGate({ independence: 'unverifiable' }), false);
+  assert.equal(satisfiesGate({}), false);
+  assert.equal(satisfiesGate(null), false);
+});
+
+test('NOTHING THIS QUEUE PRODUCES TODAY SATISFIES A GATE, and it says so', () => {
+  /*
+   * Rule 9: a fixture must be a shape the system really produces. There is no
+   * authoritative attempt record yet and no session resolves a principal, so
+   * every claim available today is diagnostic. Asserting it here means the day
+   * that changes, this test changes with it deliberately rather than silently.
+   */
+  const real = claimJob(job(), { by: 'session_B', authorSession: 'session_A', now: 1 });
+  assert.equal(real.ok, true);
+  assert.equal(real.job.independence, 'asserted');
+  assert.equal(real.job.satisfies_gate, false,
+    'an audit that cannot prove independence was allowed to satisfy a control');
 });
 
 test('ONE AUDITOR PER CANDIDATE, but a stale claim is reclaimable', () => {
