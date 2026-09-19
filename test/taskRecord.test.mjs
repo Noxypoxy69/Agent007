@@ -13,7 +13,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  createTask, validateTask, pathsCollide, RUNNABLE_STATES, TASK_ID,
+  createTask, validateTask, pathsCollide,
+  RUNNABLE_STATES, CREATABLE_STATES, TASK_ID,
 } from '../src/taskRecord.mjs';
 
 const AT = '2026-09-18T22:45:00.000Z';
@@ -47,10 +48,21 @@ test('A TASK IS BORN CLAIMABLE, or it can never be picked up', () => {
    * lease, which reconcile_leases could never reclaim, until somebody cancelled
    * it by hand.
    */
+  /*
+   * CREATABLE, NOT CLAIMABLE — the distinction this test originally missed.
+   *
+   * It looped over RUNNABLE_STATES and asserted each one validates, which
+   * pinned the conflation a blind audit later found: `returned` is claimable
+   * and NOT creatable, because the table's returned_carries_evidence CHECK
+   * demands returned_by and returned_head_sha that no create path writes. The
+   * loop asserted the bug. The `returned` case now has its own test below.
+   */
   assert.equal(validateTask(good()).ok, true);
-  for (const state of RUNNABLE_STATES) {
+  for (const state of CREATABLE_STATES) {
     assert.equal(validateTask(good({ state })).ok, true, `${state} was refused`);
   }
+  assert.ok(RUNNABLE_STATES.includes('returned') && !CREATABLE_STATES.includes('returned'),
+    'the two sets have stopped differing; if returned became creatable, say why');
   /*
    * `undefined` is NOT in this list, and that is deliberate: it triggers the
    * parameter default, which is `runnable`. Asserting it should be refused
