@@ -116,7 +116,64 @@
  * `git commit -S <key> -m x` reads <key> as a pathspec and is permitted; a
  * permitted commit is not the failure this module exists to stop.
  */
-const COMMIT_TAKES_VALUE = /^(-m|-F|-C|-c|-t|--message|--file|--author|--date|--cleanup|--template|--reuse-message|--reedit-message|--squash|--fixup|--pathspec-from-file|--trailer)$/;
+const COMMIT_VALUE_SHORT = Object.freeze(['-m', '-F', '-C', '-c', '-t']);
+const COMMIT_VALUE_LONG = Object.freeze([
+  '--message', '--file', '--author', '--date', '--cleanup', '--template',
+  '--reuse-message', '--reedit-message', '--squash', '--fixup',
+  '--pathspec-from-file', '--trailer',
+]);
+
+/**
+ * Does this token consume the one after it?
+ *
+ * PREFIXES RESOLVE HERE TOO, AND LEAVING THEM OUT WAS A MEASURED HOLE. The
+ * commit that gave prefix resolution to `commitWidens` left this table an exact
+ * alternation five lines above it, in the same function's support code -- so
+ * git resolved `--messag` and ate the next token as the message, while this
+ * did not and counted that token as a PATHSPEC. Measured through the shipped
+ * rail by blind audit:
+ *
+ *     git commit --messag wip     ALLOWED, and it commits the whole index
+ *     git commit --autho nobody   ALLOWED
+ *     git commit -m wip           DENY, "no pathspec" -- the same command
+ *
+ * Every value-taking long option was affected: --messag, --autho, --dat, --fil,
+ * --templat, --cleanu, --squas, --traile, --fixu and both --re*-message forms.
+ *
+ * THE ERROR DIRECTION IS DELIBERATE AND IS THE OPPOSITE OF commitWidens'. Over-
+ * matching here SWALLOWS a token that might have been a pathspec, which refuses
+ * a commit that named something -- an over-block with a compliant alternative.
+ * Under-matching turns a flag's VALUE into a pathspec and lets the whole shared
+ * index through, which is the hole this module exists to close. So a prefix
+ * resolves, and the ambiguous ones resolve too, exactly as git would refuse
+ * them.
+ *
+ * A GLUED VALUE CONSUMES NOTHING EXTRA. `-mfix` and `--message=x` carry their
+ * value inside the token; only the separated form eats the next one.
+ */
+function commitTakesValue(token) {
+  if (typeof token !== 'string') return false;
+  if (token.includes('=')) return false;            // --opt=value is self-contained
+  if (COMMIT_VALUE_SHORT.includes(token)) return true;
+  if (token.length <= 2) return false;
+  if (COMMIT_VALUE_LONG.some((f) => f.startsWith(token))) return true;
+  return false;
+}
+
+/**
+ * A short option with its value glued on, POSIX style: `-mfix` is `-m fix`.
+ *
+ * Measured as a FALSE REFUSAL introduced by the prefix commit: `-mfix` matched
+ * the rail's force-cluster matcher and `-mguard` matched its sweep matcher, so
+ * a glued one-word commit message was refused as a force flag -- and
+ * `git commit` has no force flag at all. That is "you cannot honestly describe
+ * a flag fix in its own commit" returning in a different spelling, inside the
+ * commit that claimed to repair it, with a refusal naming the wrong mechanism.
+ */
+function commitGluesValue(token) {
+  return typeof token === 'string'
+    && COMMIT_VALUE_SHORT.some((f) => token.startsWith(f) && token.length > f.length);
+}
 
 /**
  * Flags that re-open the window a pathspec would have closed.
@@ -198,27 +255,47 @@ export function commitFence(argv) {
   const rest = argv.slice(i + 1).filter((t) => typeof t === 'string');
 
   /*
-   * EVERYTHING AFTER `--` IS A PATHSPEC AND NOTHING BEFORE IT IS WIDENED BY
-   * ACCIDENT. git's own rule, and the rail already applies it elsewhere: after
-   * the separator nothing is a flag at all, so a file legitimately named `-a`
-   * is a path rather than a sweep.
+   * THE SEPARATOR IS FOUND DURING THE WALK, NEVER BEFORE IT, AND THE PRE-PASS
+   * THAT USED TO FIND IT DEFEATED THIS ENTIRE FENCE IN THREE TOKENS.
+   *
+   * `rest.indexOf('--')` cannot tell a pathspec separator from a `--` that is
+   * some option's VALUE. A commit message of exactly `--` is legal, so:
+   *
+   *     git commit -m -- --amend        ALLOWED, and git ran it as an amend
+   *     git commit -m -- -i README.md   ALLOWED, include mode
+   *
+   * Measured through the shipped rail by blind audit and reproduced here: the
+   * second token pair sets the "separator", everything after it is counted as a
+   * pathspec, and no token is ever examined for widening. The function header
+   * above claims the walk is single-pass precisely to avoid reading a value as
+   * a flag -- and the pre-pass was a second pass doing exactly that, in the
+   * opposite direction. shellAllowlist's two loops already consult the arity
+   * table before honouring `--`; this one did not.
+   *
+   * So the arity table is asked FIRST, every time. A token that is some
+   * option's value is consumed and never inspected -- not as a flag, not as a
+   * separator, not as a pathspec. Only a `--` the walk actually reaches is the
+   * separator, and after it git says nothing is an option, so a file named
+   * `-a` is a path rather than a sweep.
    */
-  const sep = rest.indexOf('--');
-  const head = sep === -1 ? rest : rest.slice(0, sep);
-
   let widened = false;
   let named = false;
-  for (let j = 0; j < head.length; j += 1) {
-    const t = head[j];
-    if (COMMIT_TAKES_VALUE.test(t)) { j += 1; continue; }   // a value, not a flag
+  let j = 0;
+  for (; j < rest.length; j += 1) {
+    const t = rest[j];
+    if (commitTakesValue(t)) { j += 1; continue; }   // its value is not anything else
+    if (commitGluesValue(t)) continue;               // `-mfix`: flag and value in one token
+    if (t === '--') { j += 1; break; }               // the real separator
     if (t.startsWith('-')) {
-      // `--opt=value` carries its value inline and consumes nothing after it.
+      // `--opt=value` and `-mfix` carry their value inside the token.
       if (commitWidens(t)) widened = true;
       continue;
     }
-    if (t.trim() !== '') named = true;                      // a bare operand
+    if (t.trim() !== '') named = true;               // a bare operand
   }
-  if (sep !== -1 && rest.slice(sep + 1).some((t) => t.trim() !== '')) named = true;
+  for (; j < rest.length; j += 1) {
+    if (rest[j].trim() !== '') named = true;         // past the separator: all pathspec
+  }
 
   /*
    * WIDENED BEATS NAMED. `-i`/`--include` commits the named paths IN ADDITION

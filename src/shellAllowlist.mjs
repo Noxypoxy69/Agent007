@@ -359,11 +359,34 @@ const GIT_FORCE_TOKEN = { test: (t) => flagMatches(t, GIT_FORCE_SHORT, GIT_FORCE
  */
 function gitOptionTokens(tokens, verb) {
   const takesValue = GIT_FLAG_TAKES_VALUE[verb] ?? EMPTY_FLAG_SET;
+  /*
+   * A SHORT OPTION CAN CARRY ITS VALUE GLUED ON, AND MISSING THAT MADE THIS
+   * RAIL REFUSE ORDINARY COMMITS.
+   *
+   * `-mfix` is `-m fix`. The arity table only recognised the separated form, so
+   * the glued message reached the cluster matchers -- and `-mfix` contains an
+   * `f`, so it was refused as a FORCE flag on a subcommand that has no force
+   * flag at all. Measured by blind audit:
+   *
+   *     git commit README.md -mfix      DENY "with a force or discard flag"
+   *     git commit README.md -mguard    DENY "with an everything selector"
+   *     git commit README.md -mtest     ALLOW
+   *
+   * That is "you cannot honestly describe a flag fix in its own commit"
+   * returning in a different spelling, in the commit that claimed to repair it,
+   * and the refusal named the wrong mechanism -- rule 18, from the inside.
+   *
+   * The short flags are DERIVED from the same arity table rather than listed
+   * again, so a flag added there is handled in both spellings at once.
+   */
+  const shortValueFlags = [...takesValue].filter((f) => /^-[A-Za-z]$/.test(f));
   const out = [];
   for (let i = 2; i < tokens.length; i += 1) {
     const t = tokens[i];
     if (t === '--') break;
     if (takesValue.has(t)) { i += 1; continue; }
+    // `-mfix`: the flag and its value in one token, so nothing follows to skip.
+    if (shortValueFlags.some((f) => t.startsWith(f) && t.length > f.length)) continue;
     out.push(t);
   }
   return out;
