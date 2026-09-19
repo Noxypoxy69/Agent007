@@ -1,103 +1,52 @@
 #!/usr/bin/env node
 /**
- * THE VERIFIER. ONE SUITE PER IDENTITY, SHARDED, PERSISTED.
+ * THE VERIFIER, AS A COMMAND. ONE SUITE PER IDENTITY, SHARDED, PERSISTED.
  *
- * The Stop gate has been spawning `npm test` at every turn end. A session that
- * also runs the suite makes that two copies on one machine: a solo run here is
- * ~185s, a pair is ~400-430s, and the budget is 420s. The gate then killed its
- * own suite and reported NOTHING WAS VERIFIED -- five times in one session, and
- * again once a SECOND AGENT started running suites, which is the same collision
- * with a different second party.
- *
- * So the gate stops running tests and starts consuming a result. This produces
- * the result.
+ * The Stop gate used to spawn `npm test` at every turn end. A session that also
+ * ran the suite made that two copies on one machine; a second AGENT made it
+ * three. Measured here: a solo run is ~185s, a pair is ~400-430s, and the
+ * budget is 420s -- so the gate killed its own suite and reported NOTHING WAS
+ * VERIFIED six times in one session, every time over a duplicate of work
+ * already in flight.
  *
  *   1. a completed result for this exact identity  -> print it, exit its verdict
  *   2. one already running for this identity       -> ATTACH: poll, never spawn
  *   3. otherwise                                    -> run exactly one, sharded
  *
- * Every decision above is `src/verifyCache.mjs`, pure and tested. This file is
- * I/O: it measures the identity, spawns, heartbeats and writes. That split is
- * rule 10, and it is the only reason the interesting cases -- a stale heartbeat,
- * a missing shard, a green run that executed nothing -- are testable at all.
+ * ALL THE JUDGEMENT IS ELSEWHERE. `src/verifyCache.mjs` decides (pure, tested),
+ * `src/verifyIdentity.mjs` measures the key that the Stop gate looks results up
+ * by -- one derivation, imported by both, because two would drift and the gate
+ * would silently start another run -- and `src/verifyRunner.mjs` does the
+ * running. This file is argv and printing.
  *
  * USAGE
- *   node scripts/verify-run.mjs [--shards <n>] [--concurrency <n>] [--json]
- *   node scripts/verify-run.mjs --status      read the result, run nothing
+ *   npm run verify
+ *   npm run verify -- --status            read the result, run nothing
+ *   npm run verify -- --shards 4 --concurrency 2 [--json]
  *
  * EXIT
  *   0  VERIFY_PASSED for this exact tree
  *   1  VERIFY_FAILED
- *   2  could not run, or could not tell -- NEVER conflated with 1, because a
- *      caller that cannot distinguish a refusal from a crash will retry the one
- *      it should escalate
- *   3  VERIFY_RUNNING elsewhere; this process started nothing
+ *   2  could not run, or could not tell -- NEVER folded into 1, because a
+ *      caller that cannot tell a refusal from a crash retries the one it should
+ *      escalate
+ *   3  a run is in flight elsewhere; this process started nothing
  */
-import { spawn } from 'node:child_process';
-import {
-  mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync,
-} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import {
-  verifyKey, decideVerify, aggregateShards, shardPlan,
-  VERIFY, ACTION, HEARTBEAT_MS,
-} from '../src/verifyCache.mjs';
-/*
- * THE IDENTITY IS IMPORTED, NOT RECOMPUTED HERE. The Stop gate looks a result
- * up by the same key this writes it under; two derivations would drift and the
- * gate would silently find nothing and start another run -- the duplicate-suite
- * problem returning wearing a cache. Same lesson as repoStorePath.
- */
+import { verifyKey, decideVerify, VERIFY, ACTION } from '../src/verifyCache.mjs';
 import { verificationIdentity, verifyRecordPath } from '../src/verifyIdentity.mjs';
+import { runVerification, readRecord } from '../src/verifyRunner.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
-const flag = (name, fallback = null) => {
+const flag = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : fallback;
 };
 const asJson = argv.includes('--json');
 const statusOnly = argv.includes('--status');
-
-/* ── the store ────────────────────────────────────────────────────────── */
-
-const fileFor = (key) => verifyRecordPath(key);
-const storeDir = path.dirname(fileFor('x'));
-
-function readRecord(key) {
-  try { return JSON.parse(readFileSync(fileFor(key), 'utf8')); } catch { return null; }
-}
-
-/**
- * ATOMIC. Two sessions can reach this at once, and a half-written record read by
- * the other is a record whose state field may be absent -- which decideVerify
- * would treat as unrecognised and answer START, quietly making two suites again.
- * Write beside, then rename.
- */
-function writeRecord(key, record) {
-  mkdirSync(storeDir, { recursive: true });
-  const tmp = `${fileFor(key)}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(record, null, 2), 'utf8');
-  renameSync(tmp, fileFor(key));
-}
-
-/* ── reporting ────────────────────────────────────────────────────────── */
-
-function report(record, extra = {}) {
-  if (asJson) {
-    console.log(JSON.stringify({ ...record, ...extra }, null, 2));
-    return;
-  }
-  console.log(`state     ${record.state}`);
-  console.log(`key       ${record.key}`);
-  console.log(`why       ${record.why ?? ''}`);
-  if (record.tests != null) console.log(`tests     ${record.tests} (fail ${record.fail ?? 0})`);
-  if (record.shards) console.log(`shards    ${record.shards.length}`);
-  if (record.duration_ms != null) console.log(`duration  ${Math.round(record.duration_ms / 1000)}s`);
-  for (const [k, v] of Object.entries(extra)) console.log(`${k.padEnd(9)} ${v}`);
-}
 
 const EXIT = {
   [VERIFY.PASSED]: 0,
@@ -107,150 +56,79 @@ const EXIT = {
   [VERIFY.RUNNING]: 3,
 };
 
-/* ── main ─────────────────────────────────────────────────────────────── */
+function report(record, extra = {}) {
+  if (asJson) { console.log(JSON.stringify({ ...record, ...extra }, null, 2)); return; }
+  console.log(`state     ${record?.state ?? '(none)'}`);
+  console.log(`key       ${record?.key ?? ''}`);
+  if (record?.why) console.log(`why       ${record.why}`);
+  if (record?.tests != null) console.log(`tests     ${record.tests} (fail ${record.fail ?? 0})`);
+  if (record?.duration_ms != null) console.log(`duration  ${Math.round(record.duration_ms / 1000)}s`);
+  if (record?.shards) {
+    for (const s of record.shards) {
+      console.log(`  shard ${s.index}  exit ${s.exitCode ?? '-'}  tests ${s.tests ?? '-'}  fail ${s.fail ?? '-'}`);
+    }
+  }
+  for (const [k, v] of Object.entries(extra)) console.log(`${k.padEnd(9)} ${v}`);
+}
 
 const identity = verificationIdentity(root, process.env);
-
-const k = verifyKey(identity);
-if (!k.ok) {
-  console.error('verify-run: cannot form an identity for this tree, so no result could be trusted');
-  for (const e of k.errors) console.error(`  ${e}`);
+const keyed = verifyKey(identity);
+if (!keyed.ok) {
+  console.error('verify: cannot form an identity for this tree, so no result could be trusted');
+  for (const e of keyed.errors) console.error(`  ${e}`);
   process.exit(2);
 }
-const key = k.key;
+const key = keyed.key;
 
 const existing = readRecord(key);
 const decision = decideVerify(existing, { now: Date.now(), key });
 
 if (decision.action === ACTION.REUSE) {
-  report(existing, { source: 'cached for this exact tree' });
+  report(existing, { source: 'cached for this exact tree', file: verifyRecordPath(key) });
   process.exit(EXIT[existing.state] ?? 2);
 }
 
 if (decision.action === ACTION.ATTACH) {
-  if (statusOnly) {
-    report({ ...existing, why: decision.why });
-    process.exit(3);
-  }
+  if (statusOnly) { report(existing, { why2: decision.why }); process.exit(3); }
   /*
-   * POLL, DO NOT SPAWN. This is the entire point of the exercise: the second
-   * caller waits for the first rather than doubling the load that made both
-   * of them slow. It gives up on the heartbeat going stale, never on a clock,
-   * because a slow suite and a dead one are different and only the heartbeat
-   * can tell them apart.
+   * POLL, DO NOT SPAWN. This is the whole point: the second caller waits for
+   * the first rather than doubling the load that made both slow. It gives up on
+   * the HEARTBEAT going stale, never on a wall clock, because a slow run and a
+   * dead one are different and only the heartbeat distinguishes them.
    */
-  console.error(`verify-run: ${decision.why}`);
+  console.error(`verify: ${decision.why}`);
   const deadline = Date.now() + 30 * 60_000;
-  /* eslint-disable no-await-in-loop */
   while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
     await new Promise((r) => { setTimeout(r, 5_000); });
     const now = readRecord(key);
     const d = decideVerify(now, { now: Date.now(), key });
-    if (d.action === ACTION.REUSE) { report(now, { source: 'waited for the run already in flight' }); process.exit(EXIT[now.state] ?? 2); }
+    if (d.action === ACTION.REUSE) {
+      report(now, { source: 'waited for the run already in flight' });
+      process.exit(EXIT[now.state] ?? 2);
+    }
     if (d.action === ACTION.START) {
-      console.error(`verify-run: the run we attached to ${d.why}`);
+      console.error(`verify: the run we attached to ${d.why}`);
       process.exit(2);
     }
   }
-  console.error('verify-run: gave up waiting; the other run is still beating but has not finished');
+  console.error('verify: gave up waiting; the other run is still beating but has not finished');
   process.exit(3);
 }
 
 if (statusOnly) {
-  console.log(`state     (none)`);
+  console.log('state     (none)');
   console.log(`key       ${key}`);
   console.log('why       no verification exists for this tree');
   process.exit(2);
 }
 
-/* ── START: exactly one run, sharded ──────────────────────────────────── */
-
-const testFiles = (() => {
-  try {
-    return readdirSync(path.join(root, 'test')).filter((f) => f.endsWith('.test.mjs')).length;
-  } catch { return 0; }
-})();
-
-const shardCount = Number(flag('--shards', '4'));
-const plan = shardPlan({ total: shardCount, files: testFiles });
-if (!plan.ok) {
-  console.error('verify-run: refusing this shard plan');
-  for (const e of plan.errors) console.error(`  ${e}`);
-  process.exit(2);
-}
-
-const started = Date.now();
-let beat = null;
-const base = {
+const final = await runVerification({
+  root,
   key,
   identity,
-  state: VERIFY.RUNNING,
-  pid: process.pid,
-  started_at: started,
-  heartbeat_at: started,
-  shards: plan.shards.map((s) => ({ index: s.index, total: s.total })),
-};
-writeRecord(key, base);
-beat = setInterval(() => {
-  writeRecord(key, { ...base, heartbeat_at: Date.now() });
-}, HEARTBEAT_MS / 3);
-
-const runShard = (shard) => new Promise((resolve) => {
-  const child = spawn(process.execPath,
-    ['--test', shard.arg, 'test/**/*.test.mjs'],
-    { cwd: root, encoding: 'utf8' });
-  let out = '';
-  child.stdout.on('data', (d) => { out += d; });
-  child.stderr.on('data', (d) => { out += d; });
-  child.on('close', (code) => {
-    /*
-     * THE COUNTS COME FROM THE REPORTER, NOT FROM THE EXIT CODE. A non-zero exit
-     * is evidence a process was unhappy, not that a test ran -- rule 3 -- and a
-     * zero exit with no tests is what a broken glob looks like. aggregateShards
-     * refuses that case, but only if it is given the number.
-     */
-    const num = (label) => {
-      const m = out.match(new RegExp(`^# ${label} (\\d+)$`, 'm'))
-        ?? out.match(new RegExp(`ℹ ${label} (\\d+)`));
-      return m ? Number(m[1]) : 0;
-    };
-    resolve({
-      index: shard.index, exitCode: code, tests: num('tests'), fail: num('fail'), output: out.slice(-4000),
-    });
-  });
+  shards: Number(flag('--shards', 4)),
+  concurrency: Number(flag('--concurrency', 2)),
 });
-
-const concurrency = Math.max(1, Number(flag('--concurrency', '2')));
-const queue = [...plan.shards];
-const results = [];
-async function worker() {
-  while (queue.length) {
-    const shard = queue.shift();
-    results.push(await runShard(shard));
-  }
-}
-await Promise.all(Array.from({ length: Math.min(concurrency, plan.shards.length) }, worker));
-
-clearInterval(beat);
-
-const verdict = aggregateShards(results, { total: plan.shards.length });
-const final = {
-  ...base,
-  state: verdict.state,
-  why: verdict.why,
-  tests: verdict.tests,
-  fail: verdict.fail,
-  finished_at: Date.now(),
-  duration_ms: Date.now() - started,
-  heartbeat_at: Date.now(),
-  shards: results.map((r) => ({
-    index: r.index, exitCode: r.exitCode, tests: r.tests, fail: r.fail,
-  })),
-  failing_output: verdict.state === VERIFY.PASSED
-    ? null
-    : results.filter((r) => r.exitCode !== 0).map((r) => r.output).join('\n---\n').slice(-12000),
-};
-writeRecord(key, final);
-
-report(final, { source: 'ran now' });
+report(final, { source: 'ran now', file: verifyRecordPath(key) });
 process.exit(EXIT[final.state] ?? 2);

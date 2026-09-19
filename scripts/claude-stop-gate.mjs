@@ -13,13 +13,13 @@
  * not "nothing changed".
  */
 /*
- * NOTHING DETACHED. The gate runs the verifier SYNCHRONOUSLY, and only when no
- * result exists and none is in flight -- see the START branch. A detached child
- * inherited the gate's cwd and held it open, which failed cleanup in every test
- * that runs the gate against a temp fixture and would leave a suite running in
- * a worktree somebody is about to delete.
+ * NOTHING DETACHED, AND NOTHING SPAWNED BY PATH. When no result exists and none
+ * is in flight the gate awaits `runVerification` from src/, which the import
+ * closure can see. A detached child inherited the gate's cwd and held it open,
+ * failing cleanup in every test that runs the gate against a temp fixture; a
+ * child spawned by filename was invisible to the fixtures that build a repo
+ * from the hooks' imports. See the START branch.
  */
-import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -1083,39 +1083,52 @@ if (decision.action === ACTION.START) {
       + 'out of band with: npm run verify');
   }
 
-  const produced = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify-run.mjs')], {
-    cwd: root,
-    encoding: 'utf8',
-    timeout: left,
-    maxBuffer: 32 * 1024 * 1024,
-    /*
-     * SIGKILL, NOT SIGTERM. spawnSync sends killSignal and then WAITS; it never
-     * escalates, so a child that traps SIGTERM holds this call open past the
-     * deadline -- the silent allow rebuilt through a different door, and
-     * unbounded rather than merely tight.
-     */
-    killSignal: 'SIGKILL',
-  });
+  /*
+   * IMPORTED, NOT SPAWNED BY PATH. The first version ran
+   * `scripts/verify-run.mjs` as a child, which made the dependency a string no
+   * static analysis could follow -- and three test fixtures that build a repo
+   * by walking the hooks' IMPORT CLOSURE produced one without the verifier in
+   * it. An invisible dependency is what `noOrphanModules` and
+   * `guardDependenciesProtected` exist to prevent; a spawn by filename is
+   * outside both.
+   */
+  const { runVerification } = await import('../src/verifyRunner.mjs');
 
-  if (produced.error?.code === 'ETIMEDOUT') {
-    out(`[agentbridge:stop-deadline] Verification was still running after ${left}ms and was stopped so this gate `
-      + 'could answer. NOTHING WAS VERIFIED, so this turn is not approved. Its partial record is left behind with '
-      + 'a stale heartbeat, so the next turn treats it as dead and starts a fresh one rather than waiting on it. '
-      + 'A healthy run finishes far inside this; one that does not is a machine to fix.');
+  /*
+   * A DEADLINE HERE IS A REFUSAL, NOT A PASS. The run is awaited against the
+   * remaining budget; whichever settles first decides, and a timeout leaves the
+   * RUNNING record behind with a heartbeat that goes stale, so the next turn
+   * treats it as dead and starts fresh rather than waiting on a corpse.
+   */
+  const timedOut = Symbol('timed-out');
+  let produced = null;
+  try {
+    produced = await Promise.race([
+      runVerification({ root, key: keyed.key, identity: ident }),
+      new Promise((resolve) => { setTimeout(() => resolve(timedOut), left).unref?.(); }),
+    ]);
+  } catch (e) {
+    out(`[agentbridge:verify-threw] Verification could not be produced (${e?.message ?? e}). NOTHING WAS VERIFIED.`);
+  }
+
+  if (produced === timedOut) {
+    out(`[agentbridge:stop-deadline] Verification was still running after ${left}ms and this gate answered so its `
+      + 'verdict is not discarded. NOTHING WAS VERIFIED, so this turn is not approved. A healthy run finishes far '
+      + 'inside this; one that does not is a machine to fix, not a reason to approve unverified work.');
   }
 
   /*
-   * RE-READ RATHER THAN TRUST THE EXIT CODE. The record is the evidence; an
-   * exit code is a proxy, and rule 4 is explicit that a proxy agrees with the
-   * truth right up until something unusual happens.
+   * RE-READ THE RECORD RATHER THAN TRUST THE RETURN VALUE. The record is the
+   * evidence every other reader will consult, and a return value that
+   * disagreed with it would be a proxy -- rule 4, which agrees with the truth
+   * right up until something unusual happens.
    */
   try { record = JSON.parse(readFileSync(verifyRecordPath(keyed.key), 'utf8')); } catch { record = null; }
   admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
 
   if (!record) {
-    out('[agentbridge:verify-absent] The verifier produced no record for this tree, so NOTHING WAS VERIFIED '
-      + `and this turn is not approved. Verifier exit ${String(produced.status)}; `
-      + `${String(produced.stderr || '').slice(-400)}`);
+    out('[agentbridge:verify-absent] Verification produced no record for this tree, so NOTHING WAS VERIFIED '
+      + 'and this turn is not approved.');
   }
 }
 
