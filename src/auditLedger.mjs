@@ -328,9 +328,21 @@ export function formatCoverage({ commits, malformed, error }) {
    */
   if (commits.some((c) => (Array.isArray(c?.touched) ? c.touched : [])
     .some((f) => normalisePath(f) === 'package.json'))) {
-    lines.push(`  NOTE: a package.json change above was judged on its executable surface only. `
-      + `${UNWATCHED_EXECUTION_KEYS.join(', ')} are NOT examined, and they execute -- `
-      + 'npm install runs postinstall with no script present. Neither is package-lock.json.');
+    /*
+     * BOUND OUTSIDE THE TEMPLATE, AND NOT FOR STYLE. `classifyExports` runs
+     * `stripNonCode` before looking for a name, and that strips STRING BODIES
+     * as well as comments -- so an export used only inside a template literal
+     * is invisible to it and still reports as test-only. Measured: this exact
+     * line, interpolated, left UNWATCHED_EXECUTION_KEYS unwired at 102.
+     *
+     * Worth knowing generally: the dead-export gate cannot see a name that
+     * appears only in a string, which is a blind spot rather than a false
+     * positive -- it under-reports wiring, never over-reports it.
+     */
+    const unwatched = UNWATCHED_EXECUTION_KEYS.join(', ');
+    lines.push('  NOTE: a package.json change above was judged on its executable surface only. '
+      + `${unwatched} are NOT examined, and they execute -- npm install runs postinstall with `
+      + 'no script present. Neither is package-lock.json.');
   }
 
   for (const m of malformed) {
