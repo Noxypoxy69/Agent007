@@ -1748,6 +1748,17 @@ const RESTRICTIVE_KEY = /^(?:allow|strict|trusted|require|respect|enforce|block)
  * run -- caught by the corpus the audit supplied, not by me.
  */
 const PERMIT_EVERYTHING_KEY = /^(?:allowAll|enableAll|trustAll)/i;
+/*
+ * AND A DOUBLE NEGATIVE: `disableBypassPermissionsMode` DISABLES A DANGER, so it
+ * is a RESTRICTION and `false` is what loosens it. `disableAllHooks` disables a
+ * protection and `true` is what loosens that. Same prefix, opposite direction,
+ * decided by whether the thing being disabled is itself dangerous.
+ *
+ * Narrow on purpose: it does not catch `skipDangerousModePermissionPrompt`,
+ * where the object is a PROMPT -- a protection -- and `true` loosens correctly.
+ * The prefix set is the tell, not the word "dangerous" alone.
+ */
+const DISABLES_A_DANGER = /^(?:disable|block|prevent)\w*(?:bypass|dangerous|unsafe)/i;
 const SUPPRESSIVE_KEY = /^(?:skip|disable|bypass|unsafe|ignore|omit)|dangerous/i;
 
 /** A value that reads as "no protection", wherever it appears. */
@@ -1768,6 +1779,7 @@ function loosens(key, value, depth = 0) {
 
   if (typeof value === 'boolean') {
     if (PERMIT_EVERYTHING_KEY.test(key)) return value === true;
+    if (DISABLES_A_DANGER.test(key)) return value === false;
     if (RESTRICTIVE_KEY.test(key)) return value === false;
     if (SUPPRESSIVE_KEY.test(key)) return value === true;
     if (/^enabled$/i.test(key)) return value === false;   // sandbox.enabled, etc.
