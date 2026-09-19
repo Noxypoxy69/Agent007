@@ -382,12 +382,55 @@ for (const sha of shas) {
       const revertedAndImported = restorable.filter((f) => imported.has(f));
 
       if (revertedAndImported.length > 0) {
-        console.log(`${short}  GATE   the test cannot even load without the code (${before.tests} -> ${after.tests} tests)  [${tests.join(' ')}]`);
+        /*
+         * "CANNOT EVEN LOAD" IS A CLAIM, AND IT HAS TO BE CHECKED.
+         *
+         * Found by blind audit of the commit that added this branch -- mine.
+         * It fired on a shrinking count plus an import overlap and never
+         * looked at after.fail, so it announced "the test cannot even load"
+         * about runs that loaded perfectly and passed.
+         *
+         * The case is not exotic, it is this repo's commonest generated-test
+         * shape:
+         *
+         *     for (const x of IMPORTED_LIST) test(`...${x}`, () => {});
+         *
+         * Revert the subject, the list gets shorter, FEWER TESTS ARE
+         * GENERATED, and every one of them passes. Count drops, imports
+         * overlap, the branch fires, `gates proven: 1`.
+         *
+         * That is worse than the COLLAPSED under-claim it replaced. This is
+         * the repo's cheap automatic rule-20 pass, the one that runs first
+         * and every time, and a tool that manufactures false positives in
+         * the "this is covered" direction is more dangerous than one that
+         * admits ignorance. An honest UNKNOWN sends a reader to look; a
+         * false GATE tells them not to bother.
+         *
+         * A test that genuinely cannot load is REPORTED BY THE RUNNER as a
+         * failure, so the evidence already existed and simply was not read.
+         */
+        if (after.fail > 0) {
+          console.log(`${short}  GATE   the test cannot even load without the code (${before.tests} -> ${after.tests} tests, fail ${after.fail})  [${tests.join(' ')}]`);
+          console.log(`         reverted and imported by the test: ${revertedAndImported.join(', ')}`);
+          findings.push({
+            sha: short,
+            verdict: 'real-gate',
+            detail: `load-time: ${revertedAndImported.join(', ')} reverted, ${before.tests} -> ${after.tests} tests, fail ${after.fail}`,
+          });
+          continue;
+        }
+
+        console.log(`${short}  HOLLOW the test COUNT shrank with the code and NOTHING FAILED (${before.tests} -> ${after.tests} tests, fail 0)  [${tests.join(' ')}]`);
         console.log(`         reverted and imported by the test: ${revertedAndImported.join(', ')}`);
+        console.log('         The tests were not caught out, they stopped being GENERATED -- a count');
+        console.log('         derived from the reverted code. Whatever the commit added is unproven.');
         findings.push({
           sha: short,
-          verdict: 'real-gate',
-          detail: `load-time: ${revertedAndImported.join(', ')} reverted, ${before.tests} -> ${after.tests} tests`,
+          /* 'HOLLOW', not 'hollow': the summary counters match on the
+           * upper-case spelling, and the lower-case one printed a HOLLOW line
+           * while reporting "hollow: 0" underneath it. */
+          verdict: 'HOLLOW',
+          detail: `count derived from reverted code: ${before.tests} -> ${after.tests} tests, fail 0`,
         });
         continue;
       }
