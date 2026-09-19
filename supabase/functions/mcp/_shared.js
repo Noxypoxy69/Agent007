@@ -3304,7 +3304,8 @@ export function toolDefs(store) {
   }
 
   const {
-    listTasks, assignTask, sendMessage, recordOwnerDecision, acceptTask, cancelTask,
+    listTasks, assignTask, createTask: createTaskFn, sendMessage, recordOwnerDecision,
+    acceptTask, cancelTask,
     listProposals, confirmProposal, supervisoryReport: report,
   } = store;
 
@@ -3450,6 +3451,38 @@ export function toolDefs(store) {
         + 'nothing.',
       input: obj(),
       run: async () => jsonResult(await report()),
+    });
+  }
+
+  if (typeof createTaskFn === 'function') {
+    defs.push({
+      name: 'create_task',
+      title: 'Create task',
+      description:
+        'Put a new task in the queue. THIS IS NOT ASSIGNMENT — creating work and handing it out '
+        + 'are separate acts, and a task is born unassigned. REFUSES, rather than writing a row '
+        + 'that can never be used, when: the id is not file-safe or already exists; lane, repo, '
+        + 'title or allowed_paths are missing; allowed_paths is empty (which means "unrestricted" '
+        + 'to a reader and "nothing" to a collision check); a path escapes the repository; '
+        + 'base_sha is not a full lowercase commit sha; the task depends on itself; or the paths '
+        + 'overlap a task still in play. The author is taken from your token, never from this '
+        + 'call — an author you can type is a claim, not a record.',
+      input: obj({
+        task_id: { type: 'string', description: 'file-safe id, e.g. "t-fix-the-cursor"' },
+        title: { type: 'string', description: 'what this task is, readable on a roster' },
+        lane_id: { type: 'string', description: 'the lane it belongs to' },
+        repo_id: { type: 'string', description: 'the repo it belongs to' },
+        allowed_paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'repo-relative paths this task may touch. Non-empty: this is the collision guard.',
+        },
+        forbidden_paths: { type: 'array', items: { type: 'string' } },
+        shared_paths: { type: 'array', items: { type: 'string' } },
+        depends_on: { type: 'array', items: { type: 'string' }, description: 'task ids that must finish first' },
+        base_sha: { type: 'string', description: 'full lowercase 40-character commit sha, or omit' },
+      }, ['task_id', 'title', 'lane_id', 'repo_id', 'allowed_paths']),
+      run: async (args) => jsonResult(await createTaskFn(args)),
     });
   }
 

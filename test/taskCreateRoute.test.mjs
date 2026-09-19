@@ -138,6 +138,29 @@ test('COLLISIONS ARE CHECKED ONLY AGAINST WORK STILL IN PLAY', () => {
   }
 });
 
+test('THE ROUTE IS REACHABLE: a coordinator store exposes createTask', () => {
+  /*
+   * A ROUTE NOTHING CAN CALL IS NOT A FEATURE. An audit found /task-create had
+   * no caller at all — no MCP tool, no CLI command, reachable only by a
+   * hand-made HTTP POST with a coordinator bearer. The stated purpose, that the
+   * tasks table "held four rows because nobody could add a fifth", was not met
+   * for anyone using MCP or the CLI. Rule 17: wiring is a separate claim from
+   * logic, and only the logic had tests.
+   *
+   * toolDefs registers create_task only when the store provides the method, so
+   * the method existing on coordinatorStore IS the wiring.
+   */
+  assert.match(CODE, /async createTask\s*\(/,
+    'coordinatorStore does not expose createTask, so the create_task tool can never be built');
+
+  const storeBlock = CODE.slice(CODE.indexOf('function coordinatorStore'));
+  const createBlock = storeBlock.slice(storeBlock.indexOf('async createTask'));
+  assert.match(createBlock.slice(0, 2000), /created_by:\s*label\b/,
+    'the store method does not bind created_by to the authenticated label');
+  assert.match(createBlock.slice(0, 2000), /validateTask\s*\(/,
+    'the store method writes without validating — the route and the tool would disagree');
+});
+
 test('THE CONTROL: comment-blanking really removed the prose', () => {
   /*
    * The route's own comment says "created_by IS THE AUTHENTICATED LABEL, NEVER

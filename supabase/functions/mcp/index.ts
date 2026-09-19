@@ -739,6 +739,70 @@ function coordinatorStore(label) {
 
     async listTasks() { return get('tasks?select=*'); },
 
+    /*
+     * CREATE A TASK. The tool that makes the /task-create route reachable.
+     *
+     * Without it the route existed and nothing could call it: no MCP tool, no
+     * CLI command, reachable only by a hand-made HTTP POST with a coordinator
+     * bearer. So the table CLAUDE.md names as the one mechanism that would have
+     * caught two duplications still could not be added to by anybody actually
+     * coordinating work. Found by blind audit, which is also where the sixteen
+     * tasks-as-prose came from.
+     *
+     * SHARES THE ROUTE'S REFUSALS by calling the same spliced validator, so a
+     * caller gets the same answer whichever door it comes through. The author
+     * is the authenticated LABEL — never an argument — for the reason
+     * record_owner_decision learned the hard way: a caller-supplied author is a
+     * claim, and this is a record.
+     */
+    async createTask(args) {
+      const rec = createTask({
+        ...args,
+        created_at: new Date().toISOString(),
+        created_by: label,
+      });
+
+      const v = validateTask(rec);
+      if (!v.ok) return { ok: false, errors: v.errors };
+
+      const already = await get(
+        `tasks?select=task_id&task_id=eq.${encodeURIComponent(rec.task_id)}&limit=1`,
+      );
+      if (already.length) {
+        return { ok: false, errors: [`task "${rec.task_id}" already exists`] };
+      }
+
+      const rows = await get('tasks?select=task_id,state,allowed_paths');
+      const inPlay = rows.filter((r) => r?.state === 'runnable'
+        || r?.state === 'returned' || r?.state === 'assigned');
+      const clashes = inPlay
+        .filter((r) => pathsCollide(rec.allowed_paths, r?.allowed_paths ?? []).length > 0)
+        .map((r) => r.task_id);
+      if (clashes.length) {
+        return {
+          ok: false,
+          errors: [`allowed_paths overlap tasks still in play: ${clashes.join(', ')}`],
+        };
+      }
+
+      const [created] = await write('tasks', {
+        task_id: rec.task_id,
+        title: rec.title,
+        state: rec.state,
+        lane_id: rec.lane_id,
+        repo_id: rec.repo_id,
+        base_sha: rec.base_sha,
+        allowed_paths: rec.allowed_paths,
+        forbidden_paths: rec.forbidden_paths,
+        shared_paths: rec.shared_paths,
+        depends_on: rec.depends_on,
+        created_at: rec.created_at,
+        created_by: rec.created_by,
+      });
+
+      return { ok: true, task: created ?? rec };
+    },
+
     async assignTask({ task_id, agent_id }) {
       const [tasks, regs] = await Promise.all([
         get('tasks?select=*'),
