@@ -320,17 +320,37 @@ test('a reformat of package.json is not a decision', async (t) => {
     'same script names, same commands, different order -- nothing was decided');
 });
 
-test('scriptsChanged FAILS CLOSED when it cannot read either side', async (t) => {
+test('scriptsChanged separates CANNOT READ from HAS NO PARENT', async (t) => {
   /*
-   * A root commit has no parent, and a malformed manifest cannot be parsed.
-   * Unreadable is UNKNOWN, and unknown must not render as "nothing happened"
-   * -- that is the direction that loses a finding.
+   * ═══ THIS TEST USED TO PIN THE DEFECT, AND A BLIND AUDIT SHOWED THE COST ═══
+   *
+   * It asserted `scriptsChanged(root) === true` with the reason "the root
+   * commit has no parent to compare against, so it cannot be cleared". That IS
+   * the finding: every repository with fewer commits than the default window,
+   * and every `git clone --depth 1`, blocked unconditionally on every turn --
+   * and the ONLY thing that cleared it was a ledger line claiming "a reader who
+   * did NOT write the commit has actually looked at it" for a root commit
+   * nobody audited. A gate whose false positives are cleared by fabricating an
+   * audit record corrupts the artefact rule 20 rests on.
+   *
+   * THE SECURITY PROPERTY IS UNCHANGED, which is why this is a correction and
+   * not a weakening: a root commit that INTRODUCES an executable key still
+   * blocks. What stopped is blocking one that introduces none.
+   *
+   * Three answers now, because these are three different questions and
+   * collapsing them is what produced the over-block.
    */
   const r = repoWithPackageJson(t);
-  assert.equal(scriptsChanged(r.dir, r.base), true,
-    'the root commit has no parent to compare against, so it cannot be cleared');
-  assert.equal(scriptsChanged(r.dir, 'not-a-sha'), true,
-    'an unreadable revision is unknown, not unchanged');
+
+  /* A real root: nothing to compare against, and this fixture's root defines
+   * scripts, so it IS an addition and must still be reported as one. */
+  assert.equal(scriptsChanged(r.dir, r.base), 'changed',
+    'a root commit that introduces scripts is still introducing scripts');
+
+  /* Unreadable is UNKNOWN. Not "changed" -- that was the over-block -- and
+   * emphatically not "same", which is the direction that loses a finding. */
+  assert.equal(scriptsChanged(r.dir, 'not-a-sha'), 'unknown',
+    'an unresolvable revision was given a definite answer');
 });
 
 test('A MERGE COMMIT THAT CARRIES A CONTROL IS NOT INVISIBLE', async (t) => {
