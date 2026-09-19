@@ -129,11 +129,87 @@ test('A MATCHER THAT IS NOT "*" IS A DISARM WEARING A CONFIGURATION', () => {
    * So a config naming the guard correctly, on an event that never reaches it
    * for half the tools, is not armed.
    */
-  for (const matcher of ['Bash|Edit|MultiEdit|Write|NotebookEdit', 'Bash', '', undefined, '.*']) {
+  for (const matcher of ['Bash|Edit|MultiEdit|Write|NotebookEdit', 'Bash', '.*', 'Read']) {
     const text = withHooks((c) => { c.hooks.PreToolUse[0].matcher = matcher; });
     const v = gateConfigArms(text);
     assert.equal(v.armed, false, `matcher ${JSON.stringify(matcher)} was accepted as armed`);
-    assert.match(v.missing.join('; '), /matcher/, 'the refusal does not name the matcher');
+    assert.match(v.missing.join('; '), /matches all tools/,
+      'the refusal does not say what is wrong with the matcher');
+  }
+});
+
+test('BUT "" AND OMITTED ARE MATCH-ALL, and calling them a disarm was an OVER-BLOCK', () => {
+  /*
+   * THIS TEST PINNED THE WRONG BEHAVIOUR UNTIL A BLIND AUDIT SAID SO. It
+   * iterated ['Bash|Edit|...', 'Bash', '', undefined, '.*'] and asserted all
+   * five were NOT armed. Two of those five are documented match-all spellings:
+   * Claude Code's hooks reference lists `"*"`, `""` and an omitted matcher
+   * together as "Match all", and THIS REPOSITORY'S OWN settings.json uses `""`
+   * for Stop, SessionStart and SessionEnd.
+   *
+   * So a correctly armed config committed with `""` on the guard entry would
+   * have been called a disarm: relief refused, every session with an older
+   * snapshot Stop-blocked with no recovery but a restart, plus a false alarm
+   * announcing the gate was no longer armed. That is the deadlock the whole
+   * change exists to end, rebuilt on a wrong premise -- and it was pinned by an
+   * assertion that read like a security assertion, so fixing the code meant
+   * deleting test lines, which is exactly how a wrong belief survives.
+   */
+  for (const matcher of ['*', '', undefined]) {
+    const text = withHooks((c) => {
+      if (matcher === undefined) delete c.hooks.PreToolUse[0].matcher;
+      else c.hooks.PreToolUse[0].matcher = matcher;
+    });
+    const v = gateConfigArms(text);
+    assert.equal(v.armed, true,
+      `matcher ${JSON.stringify(matcher)} is match-all and was called a disarm: ${v.missing.join('; ')}`);
+  }
+});
+
+test('A DECOY MATCH-ALL ENTRY DOES NOT ARM A GUARD SCOPED TO ONE TOOL', () => {
+  /*
+   * The matcher and the command have to be the SAME hook entry. Checking them
+   * with two independent .some() calls let this pass: a match-all entry running
+   * a commented string, beside a real guard entry scoped to Read. The guard
+   * then runs for Read alone -- which is the 2026-09-17 incident this check
+   * exists for, where the matcher listed tool names, the PowerShell tool was
+   * not among them, and a session deleted src/claudeGuard.mjs with no refusal.
+   */
+  const text = withHooks((c) => {
+    c.hooks.PreToolUse = [
+      { matcher: '*', hooks: [{ type: 'command', command: '# node bin/agentbridge-claude-guard.mjs' }] },
+      { matcher: 'Read', hooks: [{ type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs"' }] },
+    ];
+  });
+  assert.equal(gateConfigArms(text).armed, false,
+    'a decoy match-all entry armed a guard that only runs for one tool');
+});
+
+test('THE SCRIPT MUST BE RUN, NOT MENTIONED -- rule 13 inside the disarm check', () => {
+  /*
+   * `command.includes(script)` read every one of these as ARMED while running
+   * no control at all. Found by blind audit, in a header that defended the
+   * substring as "routing on the shape". A substring is not a shape.
+   */
+  const neutered = {
+    'commented out': '# node "$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs"',
+    'echoed': 'echo skipping bin/agentbridge-claude-guard.mjs',
+    'a relocated copy': 'node "$CLAUDE_PROJECT_DIR/tmp/agentbridge-claude-guard.mjs"',
+    'named in an argument': 'node other.mjs --gate bin/agentbridge-claude-guard.mjs',
+  };
+  for (const [why, command] of Object.entries(neutered)) {
+    const text = withHooks((c) => { c.hooks.PreToolUse[0].hooks = [{ type: 'command', command }]; });
+    assert.equal(gateConfigArms(text).armed, false, `ARMED by a command that is ${why}: ${command}`);
+  }
+
+  // And the real spellings still arm, or this is just a refusal of everything.
+  for (const command of [
+    'node "$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs"',
+    'node $CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs',
+    'node.exe "C:/repo/bin/agentbridge-claude-guard.mjs" --flag',
+  ]) {
+    const text = withHooks((c) => { c.hooks.PreToolUse[0].hooks = [{ type: 'command', command }]; });
+    assert.equal(gateConfigArms(text).armed, true, `a real invocation was refused: ${command}`);
   }
 });
 

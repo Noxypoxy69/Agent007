@@ -354,6 +354,38 @@ const allDrift = protectedDrift(root, snapshot);
  */
 function isCommittedWork(rel) {
   try {
+    /*
+     * TRACKED FIRST, AND THE VERSION WITHOUT THIS CLAUSE WAS A CRITICAL HOLE I
+     * SHIPPED.
+     *
+     * `git status --porcelain` reports nothing for a file it does not track --
+     * and it does not track an IGNORED one even with --untracked-files=all. So
+     * for any ignored path this returned CLEAN, meaning "committed", for a file
+     * git has never contained. Measured in this repository:
+     *
+     *     git ls-files .claude/                     -> .claude/settings.json only
+     *     ls .claude/                               -> settings.local.json is THERE
+     *     git status --porcelain -uall -- .claude/settings.local.json
+     *                                               -> empty, so this said true
+     *
+     * `.gitignore` names `.claude/settings.local.json`, and that file is a
+     * SETTINGS FILE FOR THIS GATE. Once 803aba3 let GATE_SELF_CONFIG reach the
+     * `landed` branch, a hostile settings.local.json was relieved and announced
+     * with the words "a committed change is attributable and diffable" -- every
+     * one of which is false for a file that is not in history, cannot be
+     * diffed, cannot be reverted and is invisible to every audit. Found by
+     * blind audit; I reproduced both halves before believing it.
+     *
+     * The premise of the whole branch is that the change is IN GIT HISTORY. So
+     * ask that directly instead of inferring it from silence. This closes the
+     * hole for every ignored path, not just the two settings files, and an
+     * untracked-and-visible file is unaffected because git reports it as `??`.
+     *
+     * UNKNOWN IS NOT CLEAN, in both calls: a throw from either keeps blocking.
+     */
+    const tracked = runGit(['ls-files', '--', rel], { cwd: root, encoding: 'utf8' });
+    if (String(tracked).trim() === '') return false;
+
     const out = runGit(['status', '--porcelain', '--untracked-files=all', '--', rel],
       { cwd: root, encoding: 'utf8' });
     return String(out).trim() === '';
@@ -497,12 +529,29 @@ function announceGranted(marker, headline, entries) {
 }
 
 if (granted.length) {
-  // RECORDED, NOT RETURNED. This must not call out() -- see its definition.
-  carriedNotice = announceGranted(
+  /*
+   * RECORDED, NOT RETURNED. This must not call out() -- see its definition.
+   *
+   * AND IT APPENDS, BECAUSE ASSIGNING HERE DESTROYED THE OTHER NOTICE. This was
+   * a bare `carriedNotice = ...`, six lines above a sibling block whose comment
+   * says exactly why that is wrong: "assigning over it would silently drop one
+   * of two announcements." The landed notice is set FIRST, so with both present
+   * the committed-control line was built and then overwritten, every time.
+   *
+   * NOT A RARE INTERLEAVING -- it is the default shape on this machine. A file
+   * is either granted or landed, never both, and GATE_SELF_CONFIG excludes the
+   * two settings files from `granted`. So under the wildcard grant the owner
+   * actually issues, everything else lands in `granted` and the ONLY thing that
+   * can be in `landed` is a settings file -- which is to say the single line
+   * this gate most needs to print was the one reliably destroyed. Found by
+   * blind audit, in a function I had rewritten without noticing the assignment.
+   */
+  const note = announceGranted(
     'protected-control-overridden',
     'Protected controls changed under an active override. Permitted, and recorded anyway:',
     granted,
   );
+  carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
 }
 if (drift.length) {
   /*

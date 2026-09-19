@@ -1478,7 +1478,38 @@ export function gateConfigArms(text) {
    * edit and teach people to route around this. Rule 19 -- the property is
    * "this event still reaches that program".
    */
-  const runs = (event, script) => commandsFor(event).some((h) => h.command.includes(script));
+  /*
+   * THE SCRIPT MUST BE THE THING BEING RUN, NOT A SUBSTRING OF THE LINE.
+   *
+   * This was `h.command.includes(script)`, and every one of these read as ARMED
+   * while running no control at all:
+   *
+   *   echo skipping scripts/claude-stop-gate.mjs
+   *   # node "$CLAUDE_PROJECT_DIR/bin/agentbridge-claude-guard.mjs"
+   *   node "$CLAUDE_PROJECT_DIR/tmp/claude-stop-gate.mjs"      <- a different file
+   *
+   * CLAUDE.md rule 13, committed inside the check written to catch disarms, and
+   * defended in my own header as "route on the shape". A substring is not a
+   * shape. Found by blind audit.
+   *
+   * So: the line must start with node (after any leading whitespace), and the
+   * script must appear as a PATH SEGMENT under the repo's own directories --
+   * `bin/` or `scripts/` -- rather than anywhere in the string. A leading `#`
+   * or another program fails the first test; a relocated copy fails the second.
+   *
+   * STILL NOT A PROOF THAT IT EXECUTES, and that residual is named rather than
+   * implied: this reads a declaration, not a process. A command that reaches
+   * node and the right path can still be neutered by a wrapper this cannot see.
+   * What it now refuses is the class where the string is present and nothing
+   * runs, which is what was measured.
+   */
+  const invokes = (command, script) => {
+    const cmd = String(command ?? '').trim();
+    if (!/^node(\.exe)?\b/i.test(cmd) && !/^"[^"]*node(\.exe)?"/i.test(cmd)) return false;
+    return new RegExp(`[/\\\\](bin|scripts)[/\\\\]${script.replace(/\./g, '\\.')}(["'\\s]|$)`)
+      .test(cmd);
+  };
+  const runs = (event, script) => commandsFor(event).some((h) => invokes(h.command, script));
 
   if (!runs('PreToolUse', 'agentbridge-claude-guard.mjs')) {
     missing.push('PreToolUse no longer runs the guard');
@@ -1490,9 +1521,31 @@ export function gateConfigArms(text) {
      * and a real session deleted the guard's own source with no refusal from
      * anywhere. The guard's unit tests were green throughout.
      */
+    /*
+     * `*`, `""` AND OMITTED ARE ALL MATCH-ALL, and demanding `*` alone was an
+     * over-block I shipped. Claude Code's hooks reference lists all three as
+     * "Match all" -- and this repository's own settings.json uses `""` for
+     * Stop, SessionStart and SessionEnd. So a perfectly armed config committed
+     * with `""` on the guard entry would have been called a DISARM: relief
+     * refused, every session with an older snapshot Stop-blocked with no
+     * recovery but a restart, and a false alarm printed saying the gate was no
+     * longer armed. That is the exact deadlock this whole change exists to end,
+     * re-armed on a wrong premise. Found by blind audit.
+     *
+     * THE MATCHER AND THE COMMAND MUST BE THE SAME HOOK ENTRY. `.some()` across
+     * all entries let a decoy satisfy it: a match-all entry running a commented
+     * string, plus a real guard entry scoped to `Read`, and the guard then runs
+     * for Read alone. That is the 2026-09-17 shape this check exists to catch --
+     * the matcher listed tool names, PowerShell was not among them, and a
+     * session deleted the guard's own source with no refusal from anywhere.
+     */
+    const matchAll = (m) => m === '*' || m === '' || m === undefined || m === null;
     const wild = commandsFor('PreToolUse')
-      .some((h) => h.command.includes('agentbridge-claude-guard.mjs') && h.matcher === '*');
-    if (!wild) missing.push('the PreToolUse matcher is not "*", so some tools bypass the guard');
+      .some((h) => invokes(h.command, 'agentbridge-claude-guard.mjs') && matchAll(h.matcher));
+    if (!wild) {
+      missing.push('no PreToolUse entry both runs the guard and matches all tools, '
+        + 'so some tools bypass it');
+    }
   }
 
   if (!runs('Stop', 'claude-stop-gate.mjs')) missing.push('Stop no longer runs the stop gate');
