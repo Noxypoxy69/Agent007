@@ -91,8 +91,31 @@ export function treeDigest(root) {
  * live store must not be reused by a run pointed at a temp directory, or the
  * reverse.
  */
+/*
+ * ═══ ONLY WHAT CHANGES WHAT THE SUITE DOES. A CALLER'S OWN CONTEXT IS NOT
+ *     PART OF THE IDENTITY, AND INCLUDING IT SPLIT THE CACHE IN TWO ═══
+ *
+ * MEASURED. `CLAUDE_PROJECT_DIR` and `AGENTBRIDGE_AGENT_ID` were in this list.
+ * Claude Code sets the first in a hook's environment and an interactive shell
+ * does not, so the Stop gate and `npm run verify` derived DIFFERENT keys for
+ * the same tree. The gate reported VERIFY_FAILED with 2658 tests while the CLI
+ * said "no verification exists", one second apart, and two records sat in the
+ * store describing one working tree.
+ *
+ * That is the two-derivations failure this file's own header is about, arriving
+ * through the ENVIRONMENT rather than through a second copy of the code -- and
+ * it costs exactly what the grant key cost: a result written where the reader
+ * does not look, failing indistinguishably from having no result at all.
+ *
+ * The test is whether a variable changes WHAT THE SUITE EXECUTES OR OBSERVES.
+ * AGENTBRIDGE_HOME does: tests read the store, so a run pointed at the live one
+ * answers a different question from a run pointed at a temp dir. NODE_OPTIONS
+ * can change the runtime itself. CI changes which tests skip. Where the caller
+ * happens to think the project root is, and which agent is asking, change
+ * neither.
+ */
 export function envDigest(env = process.env) {
-  const READS = ['AGENTBRIDGE_HOME', 'AGENTBRIDGE_AGENT_ID', 'CLAUDE_PROJECT_DIR', 'CI', 'NODE_OPTIONS'];
+  const READS = ['AGENTBRIDGE_HOME', 'CI', 'NODE_OPTIONS'];
   const NUL = String.fromCharCode(0);
   return createHash('sha256')
     .update(READS.map((k) => `${k}=${env[k] ?? ''}`).join(NUL))
