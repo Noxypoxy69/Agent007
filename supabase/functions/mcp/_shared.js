@@ -348,6 +348,63 @@ export function createDecision({
   };
 }
 
+/* ── liveness: spliced from src/livenessProbe.mjs ────────────────────────── */
+
+/**
+ * SPLICED SO THE /ack ROUTE CAN DECIDE WITHOUT REIMPLEMENTING.
+ *
+ * The full module — four states, the attempt budget, the probe schedule — lives
+ * in src/livenessProbe.mjs with its own tests. Only what the route needs is
+ * here: is this ack the answer to the probe we actually sent, and what does the
+ * row look like afterwards.
+ *
+ * test/livenessAckSplice.test.mjs compares the two copies BEHAVIOURALLY, which
+ * is the only comparison that catches a splice drifting.
+ */
+const PROBE_CLOCK_SKEW_MS = 2 * 60 * 1000;
+
+/**
+ * THE WHOLE ANTI-PROXY ARGUMENT IS IN THIS FUNCTION.
+ *
+ * An ack counts only when it names the OUTSTANDING probe id and is not dated
+ * before that probe or meaningfully after now. If any ack counted, a supervisor
+ * could close the loop by replaying an old id and a second worker could answer
+ * for a dead one — and the probe would join the three signals that already
+ * measure something adjacent to what the roster claims.
+ *
+ * Exact string match, deliberately: a probe id is opaque, and any normalising
+ * is a widening nobody asked for.
+ */
+export function ackMatches(session, ack, now = Date.now()) {
+  if (!isPlainObject(session) || !isPlainObject(ack)) return false;
+  if (!nonEmpty(session.probe_id) || !nonEmpty(ack.probe_id)) return false;
+  if (session.probe_id !== ack.probe_id) return false;
+
+  const sentAt = Date.parse(session.probe_sent_at);
+  const ackedAt = Date.parse(ack.at);
+  if (Number.isNaN(sentAt) || Number.isNaN(ackedAt)) return false;
+  // Before its own probe is a replay; far ahead of our clock is the measured
+  // party minting time, which is worth more to a liar than the id is.
+  if (ackedAt < sentAt) return false;
+  return ackedAt <= now + PROBE_CLOCK_SKEW_MS;
+}
+
+/**
+ * The row after a valid ack. Returns it UNCHANGED when the ack does not answer
+ * the outstanding probe, so a caller that forgets to check cannot mark a dead
+ * session live — the refusal is the default rather than a step to remember.
+ */
+export function applyAck(session, ack, now = Date.now()) {
+  if (!ackMatches(session, ack, now)) return session;
+  return {
+    ...session,
+    last_ack_at: ack.at,
+    probe_id: null,
+    probe_sent_at: null,
+    probe_attempts: 0,   // the budget is CONSECUTIVE failures, so an answer clears it
+  };
+}
+
 /* ── tasks: spliced from src/taskRecord.mjs ──────────────────────────────── */
 
 /**

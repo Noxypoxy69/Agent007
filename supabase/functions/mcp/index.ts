@@ -12,6 +12,7 @@ import {
   classifyRequest, pendingRequests, pausedTasks, canDecidePermission, DECIDER,
   ownTask, ownTasks, validateSessionId,
   createTask, validateTask, pathsCollide,
+  applyAck,
 } from './_shared.js';
 
 /**
@@ -2380,6 +2381,101 @@ Deno.serve(async (request) => {
     });
 
     return json({ ok: true, task: created ?? rec });
+  }
+
+  /*
+   * ANSWER A LIVENESS PROBE. The half that makes the measurement real.
+   *
+   * WHY THIS IS A ROUTE AND NOT AN MCP TOOL, which is the load-bearing design
+   * decision and not a convenience. The MCP surface authenticates with a
+   * COORDINATOR token, which does not identify a session — 1d2401a already
+   * established where that leads: "a coordinator token names any agent it
+   * likes, so stamping there would let the command centre forge liveness for a
+   * worker that died hours ago." An ack taking its session from an argument is
+   * a fourth proxy wearing a new name. This route takes the session from the
+   * same evidence /register and /task act on: a registration token plus a
+   * session that is actually in the registry.
+   *
+   * WHAT IT PROVES, STATED HONESTLY BECAUSE THE OVERCLAIM IS THE FAILURE MODE
+   * HERE. It proves SOMETHING THAT COULD READ THIS SESSION'S EVENT FEED
+   * answered a question only that feed carried. That is strictly stronger than
+   * the three signals we have — a running daemon, a token-holder speaking, a
+   * supervisor re-arming — because the supervisor never reads event bodies and
+   * therefore cannot answer. It is NOT proof that this agent is alive: the
+   * registration token is SHARED between workers, so one worker could read
+   * another's feed and answer for it. 1d2401a names the fix — per-agent tokens
+   * — and this does not deliver it. Recorded rather than glossed.
+   */
+  if (path === '/ack') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405);
+
+    let ackLabel = null;
+    try {
+      ackLabel = await tokenLabel('registration_tokens', bearer);
+    } catch (e) {
+      return json({ error: 'upstream-unavailable', detail: String(e?.message ?? e) }, 502);
+    }
+    if (!ackLabel) return json({ error: 'unauthorized' }, 401);
+
+    let ackBody;
+    try { ackBody = await request.json(); }
+    catch { return json({ error: 'invalid_request', detail: 'body must be JSON' }, 400); }
+
+    const ackSession = typeof ackBody?.session_id === 'string' ? ackBody.session_id.trim() : '';
+    const ackProbe = typeof ackBody?.probe_id === 'string' ? ackBody.probe_id.trim() : '';
+    if (!ackSession) return json({ error: 'invalid_request', detail: 'session_id is required' }, 400);
+    if (!ackProbe) return json({ error: 'invalid_request', detail: 'probe_id is required' }, 400);
+
+    const ackRegs = await get(
+      `session_registrations?session_id=eq.${encodeURIComponent(ackSession)}&limit=1`,
+    );
+    const ackRow = ackRegs[0];
+    if (!ackRow) {
+      return json({
+        error: 'unknown-session',
+        detail: `session "${ackSession}" is not registered; register before answering a probe`,
+      }, 409);
+    }
+
+    const at = new Date().toISOString();
+    const next = applyAck(ackRow, { probe_id: ackProbe, at });
+
+    /*
+     * UNCHANGED MEANS REFUSED, and it is reported as a refusal rather than a
+     * cheerful no-op. An ack naming a probe nobody is waiting on is either a
+     * replay or a mistake, and answering "ok" to it is how a dead session keeps
+     * looking alive.
+     */
+    if (next === ackRow) {
+      return json({
+        error: 'no-such-probe',
+        detail: ackRow.probe_id
+          ? `the outstanding probe is "${ackRow.probe_id}", not "${ackProbe}"`
+          : 'no probe is outstanding for this session',
+      }, 409);
+    }
+
+    const patched = await patch(
+      `session_registrations?session_id=eq.${encodeURIComponent(ackSession)}`,
+      {
+        last_ack_at: next.last_ack_at,
+        probe_id: null,
+        probe_sent_at: null,
+        probe_attempts: 0,
+      },
+    );
+
+    /*
+     * A LOST RACE IS NOT A SUCCESS. PostgREST answers a PATCH whose predicate
+     * matched nothing with 200 and an empty array, so an empty result here
+     * means somebody else moved the row — report it rather than claiming the
+     * ack landed.
+     */
+    if (!Array.isArray(patched) || patched.length === 0) {
+      return json({ error: 'conflict', detail: 'the registration moved while the ack was landing' }, 409);
+    }
+
+    return json({ ok: true, session_id: ackSession, acked_at: next.last_ack_at });
   }
 
   if (path === '/wait') {
