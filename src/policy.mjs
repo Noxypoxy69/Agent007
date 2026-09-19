@@ -52,6 +52,12 @@ export const PROTECTED_PATHS = Object.freeze([
   // guardSession.mjs first and the suite went red on the next run, which is the
   // second time that sentence has been written in this file about this list.
   'src/gitIndexLease.mjs',
+  // `.mcp.json` defines server COMMANDS to spawn and was unprotected. Full
+  // reasoning in guardSession.mjs, including why the fix went here rather than
+  // refusing the settings key that enables it -- that route was an outage with
+  // no recovery. Added 2026-09-19; put in BOTH lists in the same edit, which is
+  // the third time this file's own comments ask for.
+  '.mcp.json',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

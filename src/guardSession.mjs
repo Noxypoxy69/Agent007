@@ -99,6 +99,29 @@ export const PROTECTED_PATHS = Object.freeze([
    * with ERR_MODULE_NOT_FOUND.
    */
   'src/gitIndexLease.mjs',
+  /*
+   * `.mcp.json` DEFINES COMMANDS AND WAS NOT PROTECTED.
+   *
+   * A blind audit raised this from the other end: the Stop gate admitted
+   * `enabledMcpjsonServers` and `enableAllProjectMcpServers` as harmless keys in
+   * an ignored settings file, and they are not harmless, because the file they
+   * turn on is a list of server COMMANDS to spawn and nothing guarded it.
+   *
+   * THE FIRST FIX WAS THE WRONG END, AND IT WOULD HAVE TAKEN THIS MACHINE DOWN.
+   * I refused the two keys. `.claude/settings.local.json` on this machine
+   * carries both of them, that file is GITIGNORED so it can never be committed,
+   * and the relief branch for an ignored file is "declares nothing dangerous" --
+   * so the next time the operator approved a permission mid-turn and Claude Code
+   * rewrote that file, the session would have blocked permanently with no
+   * recovery available to it. Rule 19's outage, introduced by a fix for a leak,
+   * which is the pairing two audits caught on this surface on 2026-09-18.
+   *
+   * So the key stays admitted and the FILE gets protected. It is tracked, so
+   * drift in it is attributable and recoverable by committing -- the property
+   * the whole `landed` branch rests on, and the one an ignored file can never
+   * have. Rule 8: fix the matcher, not the five strings the prober tried.
+   */
+  '.mcp.json',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
@@ -1554,6 +1577,244 @@ export function gateConfigArms(text) {
   }
 
   return { armed: missing.length === 0, missing };
+}
+
+/**
+ * Does an IGNORED settings file declare anything that could take a control away?
+ *
+ * ═══ WHY THIS IS NOT A LIST OF SAFE KEY NAMES ANY MORE ═══
+ *
+ * It was one: seven names, admitted, everything else refused. Blind audit,
+ * 2026-09-19: Claude Code documents on the order of 145 top-level settings keys,
+ * so the operator flipping ANY ordinary one in /config -- a theme, a verbosity,
+ * an update preference -- wrote a key this did not recognise into
+ * `.claude/settings.local.json`, which is GITIGNORED and therefore can never be
+ * committed, and the session blocked with no recovery at all.
+ *
+ * That is CLAUDE.md rule 19 exactly, in the direction the rule says is worse:
+ * "allowing by known name leaks; denying by unknown name is an outage; and an
+ * outage gets the hook switched off, which loses every layer at once." The
+ * first attempt at the shell rail default-DENIED 25 of a real 54-tool roster and
+ * had to be rewritten for the same reason.
+ *
+ * SO IT ASKS ABOUT THE VALUE, WHICH IS A PROPERTY OF THE OPERATION, RATHER THAN
+ * ABOUT THE KEY, WHICH IS A PROPERTY OF THE VOCABULARY. A settings file takes a
+ * control away in exactly two ways: it names something to RUN, or it turns a
+ * control off. Both are visible in the shape.
+ *
+ *   NEVER_ADDITIVE   keys that carry an executable or disable a control no
+ *                    matter what they contain. Named, because their danger is
+ *                    not visible in the value -- `disableAllHooks: true` is a
+ *                    boolean.
+ *   inert subtree    any other key is admitted only if nothing anywhere under
+ *                    it looks like a command or a path. `theme: "dark"` and
+ *                    `cleanupPeriodDays: 20` pass; a statusLine running
+ *                    `node ~/x.mjs` does not.
+ *
+ * THIS IS STRICTLY NARROWER THAN WHAT IT REPLACES, which is the only reason it
+ * can ship without its own outage: every key the old list admitted is still
+ * admitted except the two named below, and keys it refused are now admitted only
+ * when their values are inert.
+ *
+ * ═══ THE MCP KEYS: THE AUDIT WAS RIGHT AND MY FIRST FIX WAS THE WRONG END ═══
+ *
+ * The same audit found that `enabledMcpjsonServers` and
+ * `enableAllProjectMcpServers` were admitted as harmless, and they were not:
+ * `.mcp.json` was NOT a protected path and it DEFINES COMMANDS, so admitting the
+ * key that turns it on granted execution through an unguarded file.
+ *
+ * I refused the two keys, and that would have taken this machine down.
+ * `.claude/settings.local.json` here carries BOTH of them; it is gitignored, so
+ * it can never be committed; so the next time Claude Code rewrote it -- which it
+ * does whenever the operator approves a permission mid-turn -- the session would
+ * have blocked permanently with no recovery. An outage introduced by a fix for a
+ * leak, on the surface where that pairing has already happened twice.
+ *
+ * `.mcp.json` IS PROTECTED NOW INSTEAD, in PROTECTED_PATHS, where the reasoning
+ * is written out. It is tracked, so drift in it is attributable and recoverable
+ * by committing -- which is the property an ignored file can never have, and the
+ * reason moving the fix to that end costs nothing. Rule 8: fix the matcher, not
+ * the strings. The keys stay admitted.
+ *
+ * ═══ AND THE ONE THAT STAYS FOR A DIFFERENT REASON ═══
+ *
+ * `permissions` is admitted. Claude Code writes it into settings.local.json
+ * when the operator approves a permission mid-turn, so refusing it would block
+ * every session in which the owner said yes to anything -- and that specific
+ * file's unrecoverability is a hole this gate already shipped once. Broadening
+ * `permissions.allow` genuinely does weaken; it is admitted anyway because the
+ * alternative is the outage, and that trade is written down here rather than
+ * left as an unexplained name on a list.
+ *
+ * FAILS CLOSED on anything unreadable, unparseable or not an object.
+ *
+ * @param {string} text  the settings file's contents
+ * @returns {{addsOnly:boolean, weakens:string[]}}  weakens names dotted paths
+ */
+const NEVER_ADDITIVE = Object.freeze([
+  'hooks',                        // runs commands; the whole point of the guard
+  'env',                          // AGENTBRIDGE_HOME redirects the grant store itself
+  'disableAllHooks',              // turns every layer off in one boolean
+  'statusLine',                   // carries a command
+  'apiKeyHelper',                 // carries a command
+  'awsAuthRefresh',               // carries a command
+  'awsCredentialExport',          // carries a command
+  'otelHeadersHelper',            // carries a command
+  // NOT enabledMcpjsonServers / enableAllProjectMcpServers -- see the header.
+  // .mcp.json is protected instead, which closes the hole without the outage.
+]);
+
+/**
+ * Could this string name something to execute?
+ *
+ * DELIBERATELY BROAD, and the cost of a false positive is bounded: one extra key
+ * named in a refusal the operator can act on. The cost of a false NEGATIVE is a
+ * command running out of a file nobody can diff.
+ *
+ * NOT CALLED `looksExecutable`, WHICH IS WHAT I FIRST CALLED IT, AND THE NAME
+ * ALONE BROKE A RATCHET. `src/coordination.mjs` exports a `looksExecutable` that
+ * is genuinely test-only debt. `classifyExports` decides production use by
+ * matching the NAME across every file under src/bin/bridge/mcp/scripts, not by
+ * resolving the binding -- so a private helper here, in a file that export has
+ * never been imported into, made it read as wired and the test-only floor fell
+ * 80 -> 79. The gate caught it ("both baselines are honest", failing LOW) and
+ * the tempting fix was to lower the constant, which would have written off a
+ * real orphan as called. A distinct name keeps the count measuring what it
+ * claims to.
+ */
+function namesSomethingRunnable(s) {
+  if (typeof s !== 'string' || s === '') return false;
+  if (/[/\\]/.test(s)) return true;                      // any path separator
+  if (/\s/.test(s)) return true;                         // a command and its arguments
+  if (/[$`|&;><*(){}]/.test(s)) return true;             // shell metacharacters
+  if (/\.(mjs|cjs|js|ts|sh|bash|ps1|bat|cmd|exe|py|rb|pl)$/i.test(s)) return true;
+  return false;
+}
+
+/**
+ * Does a never-additive key appear anywhere under this value?
+ *
+ * Used for the `permissions` exemption, which skips the executable-string test
+ * because its entries ARE command strings. Skipping the whole walk would have
+ * made `permissions` a place to hide a `hooks` or `env` declaration -- a
+ * carve-out that swallows the thing it was carved out of, which is precisely how
+ * the worktree exemption opened seven payloads on 2026-09-18.
+ */
+function subtreeHasControlKey(v) {
+  if (Array.isArray(v)) return v.some(subtreeHasControlKey);
+  if (v && typeof v === 'object') {
+    return Object.entries(v).some(([k, val]) => (
+      NEVER_ADDITIVE.includes(k) || subtreeHasControlKey(val)
+    ));
+  }
+  return false;
+}
+
+/** Is everything under this value inert? Walks arrays and objects to the leaves. */
+function subtreeIsInert(v) {
+  if (v === null || typeof v === 'boolean' || typeof v === 'number') return true;
+  if (typeof v === 'string') return !namesSomethingRunnable(v);
+  if (Array.isArray(v)) return v.every(subtreeIsInert);
+  if (typeof v === 'object') {
+    return Object.entries(v).every(([k, val]) => (
+      !NEVER_ADDITIVE.includes(k) && subtreeIsInert(val)
+    ));
+  }
+  return false;   // undefined, a function, anything unexpected: not inert
+}
+
+export function settingsAddsOnly(text) {
+  let cfg;
+  try {
+    cfg = JSON.parse(text);
+  } catch {
+    return { addsOnly: false, weakens: ['the file could not be parsed, and an unreadable config is not a safe one'] };
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return { addsOnly: false, weakens: ['the file is not a settings object'] };
+  }
+
+  const weakens = [];
+  for (const [key, value] of Object.entries(cfg)) {
+    if (NEVER_ADDITIVE.includes(key)) {
+      weakens.push(`${key} (runs a command or turns a control off, whatever it contains)`);
+      continue;
+    }
+    if (key === 'permissions') {
+      // Exempt from the executable-string test only; see subtreeHasControlKey.
+      if (subtreeHasControlKey(value)) {
+        weakens.push('permissions (a control-bearing key is hiding inside the one exemption)');
+      }
+      continue;
+    }
+    if (!subtreeIsInert(value)) {
+      weakens.push(`${key} (its value names something that looks executable)`);
+    }
+  }
+  return { addsOnly: weakens.length === 0, weakens };
+}
+
+/**
+ * Turn the Stop gate's self-config alarms into a headline that MATCHES THEM.
+ *
+ * A HEADLINE THAT CONTRADICTS ITS OWN EVIDENCE, found by blind audit. The gate
+ * collected two different findings into one list and printed one sentence over
+ * both:
+ *
+ *   disarmed        `gateConfigArms` read the file and a control is genuinely
+ *                   gone. "NO LONGER ARMS IT" is exactly right.
+ *   unattributable  an IGNORED settings file declares a key that could weaken
+ *                   something. The file may still arm every control perfectly;
+ *                   what is wrong is that it is not in git, so nobody can read,
+ *                   diff or revert what it says.
+ *
+ * The second printed the first's sentence. So the gate asserted a control was
+ * off while the lines beneath it said nothing of the kind -- and a reader who
+ * checks finds the config armed, concludes the gate is crying wolf, and learns
+ * to skip it. That is CLAUDE.md rule 16 arriving by a different road: a control
+ * nobody believes is a control nobody has.
+ *
+ * Both together get both sentences, in severity order, because collapsing them
+ * would reintroduce the same defect pointing the other way.
+ *
+ * PURE, and separated from the printing for the reason rule 10 gives: the Stop
+ * gate runs its work at import, so nothing inside it can be exercised by the
+ * suite. This can.
+ *
+ * @param {Array<{kind?:string, line?:string}|string>} alarms
+ * @returns {string} '' when there is nothing to say
+ */
+export function selfConfigHeadline(alarms) {
+  const list = Array.isArray(alarms) ? alarms : [];
+  const entries = list
+    .map((a) => (typeof a === 'string' ? { kind: 'disarmed', line: a } : a))
+    .filter((a) => a && typeof a === 'object' && typeof a.line === 'string' && a.line.trim() !== '');
+  if (entries.length === 0) return '';
+
+  const of = (kind) => entries.filter((a) => a.kind === kind);
+  /*
+   * AN UNRECOGNISED KIND IS REPORTED, NOT DROPPED. A future caller pushing a
+   * third kind would otherwise have its finding silently vanish from the
+   * headline while still blocking the turn -- a refusal with no stated reason,
+   * which is the hardest kind to act on.
+   */
+  const known = new Set(['disarmed', 'unattributable']);
+  const other = entries.filter((a) => !known.has(a.kind));
+
+  const parts = [];
+  if (of('disarmed').length) {
+    parts.push('AND THE GATE\'S OWN CONFIGURATION NO LONGER ARMS IT, which is why committing it '
+      + `bought nothing:\n${of('disarmed').map((a) => a.line).join('\n')}`);
+  }
+  if (of('unattributable').length) {
+    parts.push('AND THE GATE\'S OWN CONFIGURATION IS NOT IN GIT, so what it declares cannot be '
+      + `read, diffed or reverted by anyone else:\n${of('unattributable').map((a) => a.line).join('\n')}`);
+  }
+  if (other.length) {
+    parts.push('AND THE GATE\'S OWN CONFIGURATION WAS FAULTED FOR A REASON THIS MESSAGE DOES NOT '
+      + `RECOGNISE:\n${other.map((a) => a.line).join('\n')}`);
+  }
+  return `\n${parts.join('\n')}`;
 }
 
 export function overrideCovers(repoRoot, rel, now = Date.now()) {

@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot, overrideCovers,
-  isGateSelfConfig, gateConfigArms,
+  isGateSelfConfig, gateConfigArms, selfConfigHeadline, settingsAddsOnly,
 } from '../src/guardSession.mjs';
 // git is asked whether a drifted control is committed; see isCommittedWork.
 // Through safeGit, because this gate shells out inside a repository whose own
@@ -518,29 +518,28 @@ function isIgnored(rel) {
  * control? See the note at the `landed` predicate for why this is the right
  * question for an ignored file and `gateConfigArms` is not.
  *
- * Fails closed on anything unreadable or unparseable, and on any key it does
- * not recognise as harmless -- the list of dangerous keys is short and known,
- * so an unrecognised TOP-LEVEL key is treated as dangerous rather than assumed
- * safe. A settings file that grows a new capability should cost one line here.
+ * THE DECISION IS IN src/, NOT HERE. This script does its work at import, so
+ * nothing defined in it can be exercised by the suite -- rule 10. It reads the
+ * file and `settingsAddsOnly` judges the contents, which is where the seven-name
+ * allowlist that used to live here was replaced after a blind audit found it
+ * blocked the session on any unrecognised /config toggle. The reasoning is
+ * written up there.
  */
-const SETTINGS_KEYS_THAT_CANNOT_WEAKEN = new Set([
-  'permissions', 'enabledMcpjsonServers', 'enableAllProjectMcpServers',
-  'model', 'includeCoAuthoredBy', 'cleanupPeriodDays', 'outputStyle',
-]);
-
 function gateConfigAddsOnly(rel) {
-  let cfg;
+  let text;
   try {
-    cfg = JSON.parse(readFileSync(path.join(root, rel), 'utf8'));
+    text = readFileSync(path.join(root, rel), 'utf8');
   } catch {
-    return false;
+    return false;   // unreadable is not safe
   }
-  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return false;
 
-  const risky = Object.keys(cfg).filter((k) => !SETTINGS_KEYS_THAT_CANNOT_WEAKEN.has(k));
-  if (risky.length) {
-    selfConfigAlarm.push(`  ${rel}: declares ${risky.join(', ')} -- a file that is not in git `
-      + 'may not carry hooks, env or anything else that can take a control away');
+  const { addsOnly, weakens } = settingsAddsOnly(text);
+  if (!addsOnly) {
+    selfConfigAlarm.push({
+      kind: 'unattributable',
+      line: `  ${rel}: declares ${weakens.join(', ')} -- a file that is not in git `
+        + 'may not carry hooks, env or anything else that can take a control away',
+    });
     return false;
   }
   return true;
@@ -609,7 +608,7 @@ function gateConfigStillArms(rel) {
     return false;
   }
   if (!verdict.armed) {
-    selfConfigAlarm.push(`  ${rel}: ${verdict.missing.join('; ')}`);
+    selfConfigAlarm.push({ kind: 'disarmed', line: `  ${rel}: ${verdict.missing.join('; ')}` });
   }
   return verdict.armed;
 }
@@ -839,10 +838,7 @@ if (drift.length) {
    * louder fact than "this differs from your snapshot", and it is the one case
    * where "commit it" was trying to buy silence.
    */
-  const why = selfConfigAlarm.length
-    ? '\nAND THE GATE\'S OWN CONFIGURATION NO LONGER ARMS IT, which is why committing it '
-      + `bought nothing:\n${selfConfigAlarm.join('\n')}`
-    : '';
+  const why = selfConfigHeadline(selfConfigAlarm);
   out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}${why}`);
 }
 

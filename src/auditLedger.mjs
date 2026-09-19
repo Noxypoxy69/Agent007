@@ -367,6 +367,74 @@ export function formatCoverage({ commits, malformed, error }) {
  */
 const PROSE_OR_DEPENDENCY = /(?:\.md$)|(?:^package(?:-lock)?\.json$)/;
 
+/*
+ * ═══ AND THE PROSE EXEMPTION STOPS AT `.claude/`, WHICH THE PARAGRAPH ABOVE
+ *     ALREADY SAID AND THE REGEX DID NOT DO ═══
+ *
+ * Read the last sentence of that comment: ".claude/** is decision CONFIGURATION
+ * -- settings.json decides whether the hooks arm at all ... Weakening either is
+ * the cheapest way to disable a control without touching it." Then read the
+ * regex: `\.md$` matches `.claude/agents/auditor.md` and
+ * `.claude/commands/deploy.md` as readily as it matches CLAUDE.md. So every
+ * markdown file under the one directory the comment singles out was silently
+ * back on the exempt list. Found by blind audit, 2026-09-19.
+ *
+ * MARKDOWN UNDER `.claude/` IS NOT PROSE. An agent definition is a system prompt
+ * plus a tool roster; a slash-command file is a body of instructions that runs
+ * when somebody types its name. Both change what an agent DOES, which is the
+ * definition of decision configuration this module uses everywhere else. The
+ * extension describes the encoding, not the role -- and this repository has
+ * already been caught once assuming a file's name told it what the file was.
+ *
+ * ASKED AS A SHAPE, not as a list of the agent and command files that happen to
+ * exist today: anything under `.claude/` blocks, so a directory added there next
+ * month is covered without anybody remembering. Case-folded by normalisePath,
+ * for the reason PROTECTED_PATHS is: NTFS resolves `.Claude` to the same
+ * directory.
+ *
+ * ═══ AND `.claude/worktrees/` IS EXCLUDED HERE, EXPLICITLY, BECAUSE I ASSERTED
+ *     IT WAS EXCLUDED UPSTREAM AND IT IS NOT ═══
+ *
+ * The first draft of this comment said the worktree carve-out was applied before
+ * this function ever ran. It is not: `isAuditBearing` walks PROTECTED_PATHS
+ * directly rather than going through `isProtectedRelPath`, so
+ * PROTECTION_EXEMPT_PREFIXES never reaches it and
+ * `.claude/worktrees/<id>/notes.md` is audit-bearing. Without this clause the
+ * change above would have started BLOCKING every markdown file in every agent
+ * worktree -- an over-block introduced by a fix, which is the shape two audits
+ * caught on this surface on 2026-09-18, and rule 19's stated reason a gate ends
+ * up switched off.
+ *
+ * What stays protected is the thing the carve-out was always narrow about: a
+ * `.claude/` directory nested INSIDE a worktree is the directory that decides
+ * whether that agent's guard runs, and pre-planting it is the whole attack. So
+ * the exclusion stops at the next `.claude/` down, exactly as the prefix rule in
+ * guardSession does.
+ */
+const CONFIG_DIR = /(?:^|\/)\.claude\//;
+/*
+ * THE LOOKAHEAD IS ANCHORED TO THE REMAINDER, NOT TO THE WHOLE STRING, AND MY
+ * FIRST SPELLING OF IT WAS WRONG IN THE DANGEROUS DIRECTION.
+ *
+ * It read `(?!.*(?:^|\/)\.claude\/)`. Inside a lookahead `^` still means index 0
+ * of the whole string, so the alternation collapsed to "a slash then .claude/" --
+ * and a `.claude/` sitting IMMEDIATELY after the worktree directory has no slash
+ * before it. `.claude/worktrees/audit-1/.claude/agents/x.md` therefore read as
+ * ordinary worktree content and stopped blocking: the exact pre-plant target the
+ * clause exists to protect, waved through by the clause protecting it.
+ *
+ * Caught by the test written in the same commit, which is the only reason it is
+ * a footnote rather than a finding. `(?:.*\/)?` says "any number of leading path
+ * segments, including none", which is what was meant.
+ */
+const WORKTREE_CONTENT = /(?:^|\/)\.claude\/worktrees\/[^/]+\/(?!(?:.*\/)?\.claude\/)/;
+
+/** Is this path decision configuration rather than prose, by where it lives? */
+function isConfigDirPath(p) {
+  if (!CONFIG_DIR.test(p)) return false;
+  return !WORKTREE_CONTENT.test(p);
+}
+
 /**
  * Normalise a git-reported path: either separator, no leading ./, folded.
  *
@@ -383,7 +451,9 @@ function normalisePath(rel) {
 /** Does changing this path stop a turn, as opposed to merely being reported? */
 export function isBlockingControl(rel) {
   if (!isAuditBearing(rel)) return false;
-  return !PROSE_OR_DEPENDENCY.test(normalisePath(rel));
+  const p = normalisePath(rel);
+  if (isConfigDirPath(p)) return true;   // see CONFIG_DIR: markdown there is not prose
+  return !PROSE_OR_DEPENDENCY.test(p);
 }
 
 /** Does this commit touch decision logic, as opposed to prose or dependencies? */
