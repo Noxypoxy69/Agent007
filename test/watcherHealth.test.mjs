@@ -157,12 +157,47 @@ function withHome(records) {
   return home;
 }
 
+/*
+ * THE TIMEOUT IS A MACHINE-SPEED ASSUMPTION, AND AT 30s IT WAS THE AUTHOR'S
+ * MACHINE ON A QUIET DAY. CLAUDE.md RULE 21.
+ *
+ * Measured 2026-09-19, same commit, two runs an hour apart: the suite took 185s
+ * and every test here passed, then took 403s under load and BOTH of these failed
+ * with `status: null` at 30082ms and 30085ms -- a child killed at its timeout,
+ * not an assertion that disagreed. The failure renders as `null !== 1`, which
+ * reads like the script returning the wrong code, so it costs a reader a real
+ * diagnosis before they reach "the box was busy". That is the phantom rule 21
+ * warns an environment failure spends an auditor's budget on.
+ *
+ * RAISING IT CANNOT HIDE A HANG. A script that never exits still produces
+ * `status: null` and still fails, just later. What the old value did was fail a
+ * WORKING script, and a gate that goes red on a busy machine is one people learn
+ * to rerun until it is green -- which is how a real red gets waved through.
+ *
+ * Every assertion below is untouched: exit 1, DEAD, the agent id, HEALTHY, and
+ * the "1 of 2" count all still have to hold.
+ */
+const SPAWN_TIMEOUT_MS = 120_000;
+
 function runStatus(home) {
   const r = spawnSync(process.execPath, [POLL, '--status'], {
-    cwd: REPO, encoding: 'utf8', timeout: 30_000,
+    cwd: REPO, encoding: 'utf8', timeout: SPAWN_TIMEOUT_MS,
     env: { ...process.env, AGENTBRIDGE_HOME: home },
   });
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  /*
+   * A TIMEOUT IS NAMED, NOT LEFT AS A BARE null. spawnSync sets `error` to
+   * ETIMEDOUT and `signal` when it kills the child, so the two causes of
+   * `status === null` are distinguishable -- and "could not tell" must never
+   * render the same as "answered wrongly", which is the distinction this
+   * repository makes for liveness, for heartbeats and for check-first.
+   */
+  const timedOut = r.error?.code === 'ETIMEDOUT' || r.signal !== null;
+  const detail = timedOut
+    ? `\n[environment] the script was KILLED after ${SPAWN_TIMEOUT_MS}ms `
+      + `(signal=${r.signal}, error=${r.error?.code ?? 'none'}); this is a machine-speed `
+      + 'failure, not a wrong exit code -- see the note above runStatus'
+    : '';
+  return { status: r.status, timedOut, out: `${r.stdout ?? ''}${r.stderr ?? ''}${detail}` };
 }
 
 test('--status exits non-zero and names the dead watcher, through the real script', () => {
@@ -173,7 +208,8 @@ test('--status exits non-zero and names the dead watcher, through the real scrip
   try {
     const r = runStatus(home);
 
-    assert.equal(r.status, 1, 'a dead watcher must set a non-zero exit so a cron can act on it');
+    assert.equal(r.timedOut, false, r.out);
+    assert.equal(r.status, 1, `a dead watcher must set a non-zero exit so a cron can act on it${r.out}`);
     assert.match(r.out, /DEAD/, 'the dead watcher must be named as dead');
     assert.match(r.out, /code-a/, 'and attributed to its agent, because that is who is invisible');
     assert.match(r.out, /HEALTHY/, 'the live one must still read healthy -- this is not an all-red report');
@@ -187,6 +223,7 @@ test('--status exits 0 only when every watcher is healthy', () => {
   });
   try {
     const r = runStatus(home);
+    assert.equal(r.timedOut, false, r.out);
     assert.equal(r.status, 0, r.out);
     assert.match(r.out, /all 1 watcher\(s\) healthy/);
   } finally { rmSync(home, { recursive: true, force: true }); }
