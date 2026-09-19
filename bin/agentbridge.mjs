@@ -182,6 +182,15 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         before that was not RED: a fixture
                                         already green at the base proves the
                                         repair did nothing (§11.2).
+  agentbridge candidate-record [--rev <rev>] [--task <id>] [--attempt <n>] [--lease <tok>]
+                                        bind a candidate to the party that
+                                        produced it, from the ENVIRONMENT --
+                                        there is deliberately no --session or
+                                        --principal flag, because an author must
+                                        not be able to type who it is. Without
+                                        an authenticated principal the record is
+                                        `observed` and an audit of that
+                                        candidate can never satisfy a gate.
   agentbridge audits [--repo <dir>]     the blind-audit queue: every commit that
   agentbridge audit-claim --id <audit-..> --by <session>
                                         changed a control and has no recorded
@@ -3216,7 +3225,7 @@ try {
    */
   if (cmd === 'finding-add' || cmd === 'findings' || cmd === 'finding-bind'
       || cmd === 'finding-move' || cmd === 'repair-record' || cmd === 'regressions-due'
-      || cmd === 'audits' || cmd === 'audit-claim') {
+      || cmd === 'audits' || cmd === 'audit-claim' || cmd === 'candidate-record') {
     const {
       createFinding, openFindings, bindRepair, transition, linkToFamily, repairRecord,
       requiredRegressions, FAILURE_CLASSES, FINDING,
@@ -3284,6 +3293,84 @@ try {
       mkdirSync(dirname(store), { recursive: true });
       appendFileSync(store, `${JSON.stringify(rec)}\n`, 'utf8');
     };
+
+    if (cmd === 'candidate-record') {
+      /*
+       * P0-1's WRITER. The module defined the record and nothing produced one,
+       * which the orphan ratchet caught -- a binding nobody writes is a
+       * contract, not a control.
+       *
+       * THE IDENTITY COMES FROM THE ENVIRONMENT, NEVER FROM A FLAG. That is the
+       * whole point: an author must not be able to type who it is. There is no
+       * --session or --principal option and there will not be one. When the
+       * environment carries nothing, the record says `observed` and can never
+       * make a later audit gate-satisfying.
+       */
+      const { bindAuthorship, IDENTITY } = await import('../src/candidateAuthorship.mjs');
+      const { runGit: rgC } = await import('../src/safeGit.mjs');
+      const at = str_(args.rev) ?? 'HEAD';
+      const read = (spec) => {
+        try {
+          return String(rgC(['-C', repo, 'rev-parse', spec], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+          })).trim();
+        } catch { return null; }
+      };
+
+      const principal = str_(process.env.AGENTBRIDGE_PRINCIPAL_ID);
+      const session = str_(process.env.AGENTBRIDGE_SESSION_ID) ?? str_(process.env.AGENTBRIDGE_AGENT_ID);
+      const store = repoStorePath(repo, 'candidates', '.jsonl');
+
+      const candidate = read(at);
+      let existing = null;
+      if (existsSync(store)) {
+        for (const line of String(rf(store, 'utf8')).split('\n')) {
+          if (line.trim() === '') continue;
+          try {
+            const rec = JSON.parse(line);
+            if (rec?.candidate_sha === candidate) existing = rec;
+          } catch { /* a malformed line is not a binding */ }
+        }
+      }
+
+      const r = bindAuthorship({
+        candidate_sha: candidate,
+        candidate_tree_sha: read(`${at}^{tree}`),
+        base_sha: read(`${at}^`),
+        session_id: session,
+        principal_id: principal,
+        worker_id: str_(process.env.AGENTBRIDGE_WORKER_ID),
+        task_id: str_(args.task),
+        attempt: args.attempt === undefined ? null : Number(args.attempt),
+        lease_token: str_(args.lease),
+        /*
+         * ONLY A RESOLVED PRINCIPAL EARNS THE CREDENTIAL MARKER. A session id
+         * alone is where the process thinks it is running, not proof of who is
+         * running it.
+         */
+        identity_source: principal ? IDENTITY.CREDENTIAL : IDENTITY.OBSERVED,
+      }, { existing, now: new Date().toISOString() });
+
+      if (!r.ok) {
+        console.error('candidate-record: refused');
+        for (const e of r.errors) console.error(`  ${e}`);
+        process.exit(3);
+      }
+      if (r.unchanged) {
+        console.log(`${r.record.candidate_sha.slice(0, 12)}  already bound, unchanged`);
+        process.exit(0);
+      }
+      mkdirSync(dirname(store), { recursive: true });
+      appendFileSync(store, `${JSON.stringify(r.record)}\n`, 'utf8');
+      console.log(`${r.record.candidate_sha.slice(0, 12)}  bound to ${r.record.principal_id ?? r.record.session_id}`
+        + `  (${r.record.identity_source})`);
+      if (r.record.identity_source !== IDENTITY.CREDENTIAL) {
+        console.log('  OBSERVED, not credential-resolved: no authenticated principal was available, so an');
+        console.log('  audit of this candidate cannot become gate-satisfying. That is the honest state,');
+        console.log('  not a flag to override.');
+      }
+      process.exit(0);
+    }
 
     if (cmd === 'audits' || cmd === 'audit-claim') {
       /*
@@ -3415,7 +3502,25 @@ try {
       const open = merged.queue.filter(
         (j) => j.state !== JOB.COMPLETED_PASS && j.state !== JOB.COMPLETED_FAIL,
       );
+
+      /*
+       * THE TRUST REGIME IS STATED FIRST, because it decides whether anything
+       * below it can ever count. A reader looking at a queue of PENDING audits
+       * would otherwise reasonably assume working through them produces
+       * clearances; before a genesis tree exists, it cannot.
+       */
+      const { regimeOf, REGIME } = await import('../src/trustGenesis.mjs');
+      const gStore = repoStorePath(repo, 'genesis', '.json');
+      let genesis = null;
+      try { genesis = JSON.parse(rf(gStore, 'utf8')); } catch { genesis = null; }
+      const regime = regimeOf({ candidateTree: null, genesis });
+
       console.log(`store    ${qStore}`);
+      console.log(`regime   ${regime.regime}`);
+      if (regime.regime === REGIME.PRE_GENESIS) {
+        console.log(`         ${regime.why}.`);
+        console.log('         Work here is diagnostic: it finds real defects and cannot clear a control.');
+      }
       console.log(`queued   ${open.length} (${merged.added.length} new this run)`);
       if (merged.stranded.length) {
         console.log(`stranded ${merged.stranded.length} claimed job(s) no longer in range -- kept, not cancelled`);
