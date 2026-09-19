@@ -1740,6 +1740,14 @@ const NAMES_AN_EXECUTABLE = /(?:helper|wrapper|refresh|export|command|script|exe
  * settings file explicitly turning nothing off -- the safest kind there is.
  */
 const RESTRICTIVE_KEY = /^(?:allow|strict|trusted|require|respect|enforce|block)/i;
+/*
+ * `allowAll` AND `enableAll` READ AS RESTRICTIVE AND ARE THE OPPOSITE, so they
+ * are matched FIRST. `allowManagedHooksOnly: false` loosens; `allowAllClaudeAiMcps:
+ * true` also loosens, and the same prefix carries both. The "All" is the tell,
+ * and reading the direction off `allow` alone got this backwards on the first
+ * run -- caught by the corpus the audit supplied, not by me.
+ */
+const PERMIT_EVERYTHING_KEY = /^(?:allowAll|enableAll|trustAll)/i;
 const SUPPRESSIVE_KEY = /^(?:skip|disable|bypass|unsafe|ignore|omit)|dangerous/i;
 
 /** A value that reads as "no protection", wherever it appears. */
@@ -1759,6 +1767,7 @@ function loosens(key, value, depth = 0) {
   if (depth > 6) return false;                       // malformed or hostile nesting
 
   if (typeof value === 'boolean') {
+    if (PERMIT_EVERYTHING_KEY.test(key)) return value === true;
     if (RESTRICTIVE_KEY.test(key)) return value === false;
     if (SUPPRESSIVE_KEY.test(key)) return value === true;
     if (/^enabled$/i.test(key)) return value === false;   // sandbox.enabled, etc.
@@ -1803,7 +1812,14 @@ function loosens(key, value, depth = 0) {
 function namesSomethingRunnable(s) {
   if (typeof s !== 'string' || s === '') return false;
   if (/[/\\]/.test(s)) return true;                      // any path separator
-  if (/[$`|&;><*(){}]/.test(s)) return true;             // shell metacharacters
+  /*
+   * PARENTHESES AND BRACES ARE NOT ON THIS LIST, and putting them there was an
+   * over-block the audit's corpus caught: `language: "Portugues (Brasil)"` is
+   * prose, and a settings file carrying it could never be committed to clear the
+   * drift. Substitution still refuses -- `$(...)` on the `$`, backticks on the
+   * backtick -- so nothing executable is admitted by dropping them.
+   */
+  if (/[$`|&;><*]/.test(s)) return true;                 // shell metacharacters
   if (/\.(mjs|cjs|js|ts|sh|bash|ps1|bat|cmd|exe|py|rb|pl)$/i.test(s)) return true;
 
   /*
