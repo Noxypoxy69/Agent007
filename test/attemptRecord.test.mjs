@@ -134,6 +134,40 @@ test('a verdict vocabulary is not interchangeable with another', () => {
   assert.throws(() => finishAttempt({ ...base, finalState: 'accept' }), /finalState/);
 });
 
+/* ── four provider token dimensions, independently recoverable, null != 0 ── */
+
+test('the four token dimensions are persisted separately, and null is not zero', () => {
+  const base = { record: started(), finishedAt: T1, ending: 'exited', exitCode: 0 };
+  const row = finishAttempt({
+    ...base,
+    tokensPrompt: 100,
+    tokensCompletion: 20,
+    tokensCacheRead: 900,
+    tokensCacheCreation: 0,
+    usageObserved: true,
+    usageSource: 'test-provider',
+  });
+  assert.equal(row.tokensPrompt, 100);
+  assert.equal(row.tokensCompletion, 20);
+  assert.equal(row.tokensCacheRead, 900);
+  assert.equal(row.tokensCacheCreation, 0, 'an observed zero is 0, kept distinct from unobserved');
+  assert.equal(row.usageObserved, true);
+  assert.equal(row.usageSource, 'test-provider');
+
+  // Unobserved usage stays null on every dimension, never 0.
+  const none = finishAttempt(base);
+  for (const f of ['tokensPrompt', 'tokensCompletion', 'tokensCacheRead', 'tokensCacheCreation', 'usageSource', 'usageObserved']) {
+    assert.equal(none[f], null, `${f} must be null when usage was not observed, not 0`);
+  }
+});
+
+test('a negative or non-integer token count is refused, and usageObserved must be boolean', () => {
+  const base = { record: started(), finishedAt: T1, ending: 'exited', exitCode: 0 };
+  assert.throws(() => finishAttempt({ ...base, tokensCacheRead: -1 }), /non-negative/);
+  assert.throws(() => finishAttempt({ ...base, tokensPrompt: 1.5 }), /non-negative/);
+  assert.throws(() => finishAttempt({ ...base, usageObserved: 'yes' }), /usageObserved/);
+});
+
 /* ── a killed run must not wear the shape of a clean finish ───────────── */
 
 test('an ending that is not a normal exit cannot carry an exit code', () => {

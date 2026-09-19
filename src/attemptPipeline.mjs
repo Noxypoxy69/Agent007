@@ -361,9 +361,18 @@ export async function runAttempt({
             attempt,
             input: io.usage?.input ?? 0,
             output: io.usage?.output ?? 0,
-            cachedInput: io.usage?.cachedInput ?? 0,
+            cacheRead: io.usage?.cacheRead ?? 0,
+            cacheCreation: io.usage?.cacheCreation ?? 0,
           }),
         );
+
+  /*
+   * WAS USAGE OBSERVED AT ALL. The four token columns are bound into the durable
+   * record below, but a value nobody reported must persist as null, not 0 -- so
+   * the token fields are written only when io.usage was actually present. null =
+   * not observed, 0 = a real observed zero. usageObserved records which.
+   */
+  const usageObserved = ledger !== null && io.usage != null;
 
   /*
    * ALL FOUR VERDICTS, STORED SEPARATELY. The agent's claim, the machine's
@@ -394,6 +403,18 @@ export async function runAttempt({
       finalState: accepted ? 'done' : 'failed',
       failureCode: accepted ? null : (verdict.reasons[0] ?? null),
       failureFingerprint: fingerprint ?? null,
+      /*
+       * THE AGGREGATE, BOUND INTO THE DURABLE ROW. It was computed as `spent`
+       * and returned but never persisted -- so the row carried null tokens for
+       * an attempt whose cost was known. Written only when usage was observed;
+       * null otherwise, never 0.
+       */
+      tokensPrompt: usageObserved ? spent.input : null,
+      tokensCompletion: usageObserved ? spent.output : null,
+      tokensCacheRead: usageObserved ? spent.cacheRead : null,
+      tokensCacheCreation: usageObserved ? spent.cacheCreation : null,
+      usageObserved,
+      usageSource: usageObserved ? (io.usage.source ?? null) : null,
     });
     await io.records.finish(attemptRow);
   }

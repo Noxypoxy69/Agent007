@@ -164,6 +164,17 @@ function optionalDigest(value, name) {
   return value === null || value === undefined ? null : requireDigest(value, name);
 }
 
+/**
+ * A token count. null means NOT OBSERVED; 0 means a real observed zero. The
+ * distinction is the point -- a provider value that did not arrive must not read
+ * as free, so it is null, never 0. A negative or non-integer is neither.
+ */
+function optionalCount(value, name) {
+  if (value === null || value === undefined) return null;
+  if (!Number.isInteger(value) || value < 0) fail(`${name} must be a non-negative integer or null`);
+  return value;
+}
+
 function requireIso(value, name) {
   if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
     fail(`${name} must be an ISO timestamp`);
@@ -263,6 +274,10 @@ export function startAttempt(input) {
     pathViolations: null,
     tokensPrompt: null,
     tokensCompletion: null,
+    tokensCacheRead: null,
+    tokensCacheCreation: null,
+    usageObserved: null,
+    usageSource: null,
     filesChangedCount: null,
     testsPassed: null,
     testsFailed: null,
@@ -289,6 +304,10 @@ const FINISH_KEYS = [
   'pathViolations',
   'tokensPrompt',
   'tokensCompletion',
+  'tokensCacheRead',
+  'tokensCacheCreation',
+  'usageObserved',
+  'usageSource',
   'filesChangedCount',
   'testsPassed',
   'testsFailed',
@@ -362,6 +381,11 @@ export function finishAttempt(input) {
     fail(`finalState must be one of ${FINAL_STATES.join(', ')} or null`);
   }
 
+  const usageObserved = input.usageObserved ?? null;
+  if (usageObserved !== null && typeof usageObserved !== 'boolean') {
+    fail('usageObserved must be a boolean or null');
+  }
+
   return Object.freeze({
     ...record,
     state: 'finished',
@@ -385,8 +409,20 @@ export function finishAttempt(input) {
     loopVerdict: optionalString(input.loopVerdict, 'loopVerdict'),
     workspaceClean: input.workspaceClean ?? null,
     pathViolations: input.pathViolations ?? null,
-    tokensPrompt: input.tokensPrompt ?? null,
-    tokensCompletion: input.tokensCompletion ?? null,
+    /*
+     * FOUR PROVIDER DIMENSIONS, INDEPENDENTLY RECOVERABLE. tokensPrompt and
+     * tokensCompletion are input and output; cache read and cache creation are
+     * their own columns and are never merged into input. null is not observed,
+     * 0 is a real observed zero. usageObserved records whether the provider
+     * reported anything at all, so a row of nulls reads as "no usage seen", not
+     * "free". usageSource names where the numbers came from.
+     */
+    tokensPrompt: optionalCount(input.tokensPrompt, 'tokensPrompt'),
+    tokensCompletion: optionalCount(input.tokensCompletion, 'tokensCompletion'),
+    tokensCacheRead: optionalCount(input.tokensCacheRead, 'tokensCacheRead'),
+    tokensCacheCreation: optionalCount(input.tokensCacheCreation, 'tokensCacheCreation'),
+    usageObserved,
+    usageSource: optionalString(input.usageSource, 'usageSource'),
     filesChangedCount: input.filesChangedCount ?? null,
     testsPassed: input.testsPassed ?? null,
     testsFailed: input.testsFailed ?? null,

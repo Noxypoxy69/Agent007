@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createLedger, overBudget, record, totals } from '../src/tokenTelemetry.mjs';
 
-const event = (id, phase, input, output, cachedInput = 0) => ({
+const event = (id, phase, input, output, cacheRead = 0, cacheCreation = 0) => ({
   id,
   phase,
   input,
   output,
-  cachedInput,
+  cacheRead,
+  cacheCreation,
 });
 
 test('records and totals by phase', () => {
@@ -20,13 +21,14 @@ test('records and totals by phase', () => {
   assert.equal(t.byPhase.review.billed, 60);
 });
 
-test('CACHED INPUT IS NOT INPUT', () => {
+test('CACHED INPUT IS NOT INPUT, and read is separate from creation', () => {
   let ledger = createLedger();
-  ledger = record(ledger, event('e1', 'execute', 100, 20, 900));
+  ledger = record(ledger, event('e1', 'execute', 100, 20, 900, 40));
   const t = totals(ledger);
   assert.equal(t.input, 100, 'cached input must not inflate input');
-  assert.equal(t.cachedInput, 900);
-  assert.equal(t.billed, 120, 'and must not be billed');
+  assert.equal(t.cacheRead, 900, 'cache read is its own dimension');
+  assert.equal(t.cacheCreation, 40, 'cache creation is its own dimension, never merged with read');
+  assert.equal(t.billed, 120, 'and neither cache dimension is billed');
 });
 
 test('A RETRIED REPORT IS NOT A SECOND COST', () => {

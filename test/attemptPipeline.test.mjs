@@ -290,7 +290,7 @@ test('telemetry records the attempt once, and a repeat report does not double it
       task,
       contract,
       workspaces: fakeWorkspaces(),
-      io: { ...io(), usage: { input: 100, output: 20, cachedInput: 900 } },
+      io: { ...io(), usage: { input: 100, output: 20, cacheRead: 900, cacheCreation: 40 } },
       executor: executorThat(GREEN),
       reviewer: createFakeReviewer(),
       ledger,
@@ -298,6 +298,8 @@ test('telemetry records the attempt once, and a repeat report does not double it
   const first = await run();
   assert.equal(first.spent.billed, 120);
   assert.equal(first.spent.input, 100, 'cached input is not input');
+  assert.equal(first.spent.cacheRead, 900, 'cache read is preserved as its own dimension');
+  assert.equal(first.spent.cacheCreation, 40, 'cache creation is preserved, separate from read');
 });
 
 test('A RUN MAY NOT OUTLIVE THE LEASE THAT AUTHORISES IT', async () => {

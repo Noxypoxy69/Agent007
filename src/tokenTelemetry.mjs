@@ -40,13 +40,14 @@ export function createLedger({ budget = null } = {}) {
 
 export function record(ledger, event) {
   if (event === null || typeof event !== 'object') fail('event must be an object');
-  const { id, phase, input = 0, output = 0, cachedInput = 0, attempt = 0 } = event;
+  const { id, phase, input = 0, output = 0, cacheRead = 0, cacheCreation = 0, attempt = 0 } = event;
   if (typeof id !== 'string' || id === '') fail('event.id required for idempotency');
   if (!PHASES.includes(phase)) fail(`unknown phase ${JSON.stringify(phase)}`);
   for (const [name, value] of [
     ['input', input],
     ['output', output],
-    ['cachedInput', cachedInput],
+    ['cacheRead', cacheRead],
+    ['cacheCreation', cacheCreation],
   ]) {
     if (!Number.isInteger(value) || value < 0) fail(`${name} must be a non-negative integer`);
   }
@@ -59,22 +60,24 @@ export function record(ledger, event) {
     seen: Object.freeze([...ledger.seen, id]),
     events: Object.freeze([
       ...ledger.events,
-      Object.freeze({ id, phase, attempt, input, output, cachedInput }),
+      Object.freeze({ id, phase, attempt, input, output, cacheRead, cacheCreation }),
     ]),
   });
 }
 
 export function totals(ledger) {
-  const sum = { input: 0, output: 0, cachedInput: 0 };
+  const sum = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   const byPhase = {};
   for (const event of ledger.events) {
     sum.input += event.input;
     sum.output += event.output;
-    sum.cachedInput += event.cachedInput;
-    const phase = (byPhase[event.phase] ??= { input: 0, output: 0, cachedInput: 0, billed: 0 });
+    sum.cacheRead += event.cacheRead;
+    sum.cacheCreation += event.cacheCreation;
+    const phase = (byPhase[event.phase] ??= { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, billed: 0 });
     phase.input += event.input;
     phase.output += event.output;
-    phase.cachedInput += event.cachedInput;
+    phase.cacheRead += event.cacheRead;
+    phase.cacheCreation += event.cacheCreation;
     phase.billed += event.input + event.output;
   }
   return Object.freeze({
