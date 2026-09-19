@@ -329,8 +329,19 @@ test('THE WORKFLOW IS NOT REFUSED, because an over-block is how a rail gets swit
    * This repository has paid for two over-blocks already. Closing the sweep must
    * not close committing by pathspec, which is the shape CLAUDE.md requires.
    */
+  /*
+   * THE FIRST THREE WERE PATHSPEC-LESS UNTIL 2026-09-18, and they are the
+   * shape that takes another session's staging along with yours. The shared
+   * index fence refuses them now, by owner decision, and this list was rewritten
+   * to the compliant spelling rather than weakened -- the sentence above is
+   * about closing the sweep not closing the WORKFLOW, and committing by pathspec
+   * IS the workflow. Its counterpart lives in test/sharedIndexCommit.test.mjs.
+   *
+   * `--amend` is deliberately gone rather than given a path: it rewrites a
+   * commit that already exists, so naming paths does not bound what it touches.
+   */
   for (const command of [
-    'git commit -m x', 'git commit -F -', 'git commit --amend --no-edit',
+    'git commit src/collect.mjs -m x', 'git commit -F - src/collect.mjs',
     'git add src/collect.mjs', 'git checkout -b newbranch',
     'git status', 'git fetch origin master',
   ]) {
@@ -637,7 +648,10 @@ test('and a spelling this test never lists is refused too, because git answers i
 test('ORDINARY WORK SURVIVES: an operand covering nothing protected is allowed', () => {
   for (const cmd of [
     'git add src/collect.mjs', 'git add notes.md', 'git status',
-    'git commit -m msg', 'git diff --stat',
+    // Pathspec-less until 2026-09-18; the shared index fence refuses that shape
+    // now and this list is about operands covering nothing protected, which the
+    // compliant spelling exercises just as well.
+    'git commit notes.md -m msg', 'git diff --stat',
   ]) {
     assert.equal(railVerdict(cmd), true, `newly REFUSED: ${cmd}`);
   }
@@ -1187,7 +1201,17 @@ test('a flag VALUE is not a pathspec, so one-word commit messages work again', (
    * stub-disagrees-with-reality shape the audit found in the node tests.
    */
   const covers = (t) => (['test', 'docs', 'bin', 'src', 'package.json', ':/', '.', '*'].includes(t) ? ['CLAUDE.md'] : []);
-  for (const cmd of ['git commit -m test', 'git commit -m docs', 'git commit -m bin', 'git commit -m src']) {
+  /*
+   * A PATHSPEC WAS ADDED TO EACH ON 2026-09-18 and the property under test is
+   * untouched: `notes.md` covers nothing protected, so the only way any of
+   * these can be refused is if the MESSAGE was fed to the resolver -- which is
+   * exactly what this test exists to catch. The shared index fence refuses a
+   * commit that names no path at all, and without the pathspec every case here
+   * would fail for that reason instead and this gate would stop measuring
+   * anything.
+   */
+  for (const cmd of ['git commit notes.md -m test', 'git commit notes.md -m docs',
+    'git commit notes.md -m bin', 'git commit notes.md -m src']) {
     assert.equal(judgeShellCommand(cmd, { pathspecCovers: covers }).allowed, true, `refused: ${cmd}`);
   }
   assert.equal(judgeShellCommand('git commit :/ -m msg', { pathspecCovers: covers }).allowed, false,

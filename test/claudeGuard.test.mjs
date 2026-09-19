@@ -418,12 +418,46 @@ test('REGRESSION: known writers are refused by exact shape', async () => {
 test('ordinary writes are allowed, because a rail that blocks Tuesday gets switched off', async () => {
   const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
   for (const command of [
-    'git fetch origin', 'git pull origin main', 'git commit -m msg', 'git checkout a-branch',
+    'git fetch origin', 'git pull origin main', 'git commit src/a.mjs -m msg',
+    'git checkout a-branch',
     'npm ci', 'npm run build', 'node scripts/anything.mjs',
     'git status ; ls', 'git status && ls -la', 'npm test 2>&1',
   ]) {
     assert.equal(judgeShellCommand(command).allowed, true, `REFUSED: ${command}`);
   }
+});
+
+/*
+ * THIS LIST SAID `git commit -m msg` UNTIL 2026-09-18, AND THE CONTRACT MOVED.
+ *
+ * Recorded here rather than silently swapped, because editing an inherited test
+ * to make a change look clean is the thing the comment forty lines below warns
+ * about, and the distinction between that and this one is the point.
+ *
+ * WHAT CHANGED IS THE CONTRACT, BY OWNER DECISION, not the evidence. A commit
+ * with no pathspec records whatever is in the index, and the index is shared
+ * with every other session in this clone -- one can stage between your `add`
+ * and your `commit`, and both halves land in your commit. CLAUDE.md has
+ * documented that hazard for as long as two agents have worked one clone and
+ * nothing enforced it.
+ *
+ * THE TEST'S OWN PURPOSE SURVIVES INTACT, which is the test of whether a moved
+ * gate is honest. It exists so a rail that blocks ordinary Tuesday work gets
+ * caught before it is switched off -- and the compliant spelling above is still
+ * ALLOWED, is the spelling this repository already mandates, and waits for
+ * nothing. Only the shape that silently takes another session's staging moved.
+ *
+ * So the gate MOVED rather than closing, and this is the half that proves it
+ * did not simply open: the refusal must still exist, and it must come from the
+ * shared-index check rather than from some other layer that happens to say no.
+ */
+test('AND THE ONE THAT MOVED: a commit with no pathspec is refused, by name', async () => {
+  const { judgeShellCommand } = await import('../src/shellAllowlist.mjs');
+  const v = judgeShellCommand('git commit -m msg');
+  assert.equal(v.allowed, false, 'a commit that names nothing is allowed again');
+  assert.match(v.reason, /no pathspec/,
+    'something other than the shared-index check refused it, and a refusal from the wrong '
+      + 'layer is a hollow gate wearing a pass');
 });
 
 /*
