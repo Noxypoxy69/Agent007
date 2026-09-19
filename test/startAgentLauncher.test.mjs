@@ -468,39 +468,92 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     .join('\n');
 
   /*
-   * npm IN COMMAND POSITION, NOT THE THREE LETTERS ANYWHERE.
+   * IS npm BEING RUN? ASK THE SHAPE, NOT THE POSITION, AND NOT THE SPELLING.
    *
-   * `\bnpm\b` refused a legitimate launcher, found by blind audit: `\b`
-   * matches after a backslash, so
+   * THIS MATCHER HAS NOW FAILED IN BOTH DIRECTIONS, ONCE EACH, AND BOTH
+   * FAILURES WERE FOUND BY BLIND AUDIT. The history is the argument for the
+   * version below, so it is written down rather than summarised.
+   *
+   * v1 was \bnpm\b. It OVER-BLOCKED: \b matches after a backslash, so
    *
    *     set "PATH=%APPDATA%\npm;%PATH%"
    *
-   * -- an ordinary way to make `claude` findable, which EXECUTES nothing --
-   * failed with "agent.cmd must not EXECUTE npm". That is rule 19 in the
-   * small: the assertion was about a vocabulary rather than about the
-   * operation, so it caught a directory name and would equally have caught
-   * a path, a comment inside a quoted string, or an agent called npm-bot.
+   * -- an ordinary way to make claude findable, which executes nothing --
+   * failed with "agent.cmd must not EXECUTE npm". Four such spellings.
    *
-   * The claim is that agent.cmd must not RUN npm, so the match is on
-   * command position: start of line, or after a `&`/`|`/`(` separator, or
-   * after `call`/`start`. A backslash before it means it is part of a path,
-   * which is the whole point.
+   * v2 (mine) anchored on COMMAND POSITION: start of line, after & | (, or
+   * after call/start. It removed the over-block and opened EIGHT
+   * under-blocks, every one of which v1 caught:
+   *
+   *     cmd /c npm run start-agent        start /b npm run agent
+   *     cmd.exe /c npm test               if exist claude.cmd npm run x
+   *     powershell -c "npm run x"         for /f %%i in ('npm run x') do ...
+   *     "C:\Program Files\nodejs\npm.cmd" run x
+   *     %APPDATA%\npm\npm.cmd run x
+   *
+   * That is the shape CLAUDE.md warns about twice over. Rule 19: a list of
+   * names fails in both directions, and "command position" turned out to be
+   * a list of the separators I happened to think of. Rule 8: my commit
+   * message quoted "fix the matcher, not the five strings the prober tried"
+   * and then pinned exactly the four spellings the matcher matched.
+   *
+   * v3 asks the question the assertion actually makes -- is npm being RUN --
+   * as a property of the text rather than of its surroundings:
+   *
+   *   1. an npm EXECUTABLE is named: npm.cmd or npm.exe, however it is
+   *      reached. A full path to it is still running it.
+   *   2. bare npm is followed by whitespace and a letter, i.e. a subcommand.
+   *
+   * A path component is what the false positives all were, and a path
+   * component is followed by a separator or a hyphen -- `\npm;`, `npm-shim`,
+   * `npm-bot` -- never by whitespace-then-letter. No separator vocabulary,
+   * no subcommand vocabulary: `npm frobnicate` is caught without anyone
+   * adding "frobnicate" to a list.
+   *
+   * Measured against all twelve running spellings and all four
+   * non-running ones: 0 missed, 0 over-blocked. v1 was 0 missed / 4
+   * over-blocked; v2 was 8 missed / 0 over-blocked.
    */
-  /* `@` suppresses echo and may prefix a command, so it is part of the position. */
-  const RUNS_NPM = /(?:^|[&|(]|\b(?:call|start)\s+)\s*@?\s*"?npm(?:\.cmd|\.exe)?\b/im;
+  const RUNS_NPM = /\bnpm(?:\.cmd|\.exe)\b|\bnpm\b[ \t]+[A-Za-z]/i;
 
   assert.doesNotMatch(executable, RUNS_NPM,
     'agent.cmd must not EXECUTE npm: npm pipes stdin and claude comes up headless, which is the bug d0e3f88 fixed');
 
   /*
-   * BOTH DIRECTIONS, because a matcher that refuses nothing is as useless as
-   * one that refuses everything, and this one has now failed in each
-   * direction once.
+   * THE ADVERSARIAL SET IS PINNED, BOTH DIRECTIONS, AND IT IS THE REAL ONE.
+   *
+   * Every entry below was produced by an auditor defeating a previous
+   * version of this line, not invented here. Rule 8's actual instruction is
+   * that a probe bounds nothing -- so the answer is the shape rule above,
+   * and this table exists to stop the NEXT narrowing silently dropping a
+   * spelling somebody already demonstrated.
    */
-  for (const runsIt of ['npm run start-agent', 'call npm test', 'a && npm exec claude', '@npm.cmd run x']) {
+  const RUNS_IT = [
+    'npm run start-agent',
+    'call npm test',
+    'a && npm exec claude',
+    '@npm.cmd run x',
+    'cmd /c npm run start-agent',
+    'cmd.exe /c npm test',
+    'start /b npm run agent',
+    'if exist claude.cmd npm run x',
+    'powershell -c "npm run x"',
+    "for /f %%i in ('npm run x') do echo %%i",
+    '"C:\\Program Files\\nodejs\\npm.cmd" run start-agent',
+    '%APPDATA%\\npm\\npm.cmd run x',
+    'npm frobnicate',
+  ];
+  const DOES_NOT = [
+    'set "PATH=%APPDATA%\\npm;%PATH%"',
+    'set "PATH=%APPDATA%\\npm"',
+    'set "X=C:\\tools\\npm-shim"',
+    'claude --agent npm-bot',
+  ];
+
+  for (const runsIt of RUNS_IT) {
     assert.match(runsIt, RUNS_NPM, `"${runsIt}" RUNS npm and must be refused`);
   }
-  for (const doesNot of ['set "PATH=%APPDATA%\\npm;%PATH%"', 'set "X=C:\\tools\\npm-shim"', 'claude --agent npm-bot']) {
+  for (const doesNot of DOES_NOT) {
     assert.doesNotMatch(doesNot, RUNS_NPM, `"${doesNot}" does not execute npm and must be allowed`);
   }
 });
