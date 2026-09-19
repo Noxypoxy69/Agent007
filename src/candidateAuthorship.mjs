@@ -158,10 +158,18 @@ export function authorOf(record) {
   if (!record || typeof record !== 'object') return null;
   const id = str(record.principal_id) ?? str(record.session_id);
   if (!id) return null;
-  return {
-    id,
-    source: record.identity_source === IDENTITY.CREDENTIAL ? 'authoritative' : 'observed',
-  };
+  /*
+   * ONE RULE, ASKED ONCE. This read `identity_source === CREDENTIAL` and
+   * `isAuthoritative` additionally required a principal -- so a record carrying
+   * the credential marker with NO principal was `observed` to one function and
+   * `authoritative` to the other, and it is the second that feeds `enforced`
+   * into an audit claim. My own test caught it.
+   *
+   * Two predicates over one property drift the moment either is edited; this
+   * repository has a header about that in src/policy.mjs. So the weaker caller
+   * asks the stronger one.
+   */
+  return { id, source: isAuthoritative(record) ? 'authoritative' : 'observed' };
 }
 
 /**
