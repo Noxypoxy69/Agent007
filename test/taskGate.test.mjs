@@ -151,11 +151,12 @@ test('the maker rule covers owner_decision too, and does NOT cover ordinary proo
 /* ── waivers ────────────────────────────────────────────────────────────── */
 
 test('a worker cannot waive its own required item', () => {
-  const selfWaiver = [{ item_id: 'blind-review:blind_review_result', reason: 'busy', granted_by: 'sess-worker' }];
+  const bound = { task_id: 't-1', attempt: 3, candidate_sha: 'cafe1234' };
+  const selfWaiver = [{ item_id: 'blind-review:blind_review_result', reason: 'busy', granted_by: 'sess-worker', ...bound }];
   const r = evaluateTask({ task: TASK, template: TEMPLATE, waivers: selfWaiver });
   assert.equal(r.items.find((i) => i.phase === 'blind-review').state, ITEM_STATES.PENDING);
 
-  const byWorkerId = [{ item_id: 'blind-review:blind_review_result', reason: 'busy', granted_by: 'fixer' }];
+  const byWorkerId = [{ item_id: 'blind-review:blind_review_result', reason: 'busy', granted_by: 'fixer', ...bound }];
   assert.equal(
     evaluateTask({ task: TASK, template: TEMPLATE, waivers: byWorkerId })
       .items.find((i) => i.phase === 'blind-review').state,
@@ -165,14 +166,15 @@ test('a worker cannot waive its own required item', () => {
 });
 
 test('an owner waiver with a reason WAIVES the item, and one without a reason does not', () => {
-  const good = [{ item_id: 'blind-review:blind_review_result', reason: 'deploy frozen', granted_by: 'danny' }];
+  const bound = { task_id: 't-1', attempt: 3, candidate_sha: 'cafe1234' };
+  const good = [{ item_id: 'blind-review:blind_review_result', reason: 'deploy frozen', granted_by: 'danny', ...bound }];
   assert.equal(
     evaluateTask({ task: TASK, template: TEMPLATE, waivers: good })
       .items.find((i) => i.phase === 'blind-review').state,
     ITEM_STATES.WAIVED,
   );
 
-  const noReason = [{ item_id: 'blind-review:blind_review_result', granted_by: 'danny' }];
+  const noReason = [{ item_id: 'blind-review:blind_review_result', granted_by: 'danny', ...bound }];
   assert.equal(
     evaluateTask({ task: TASK, template: TEMPLATE, waivers: noReason })
       .items.find((i) => i.phase === 'blind-review').state,
@@ -257,4 +259,233 @@ test('an unknown target phase is refused rather than treated as reachable', () =
   const r = canAdvance({ task: TASK, template: TEMPLATE, evidence: [], targetPhase: 'SHIPPED' });
   assert.equal(r.ok, false);
   assert.match(r.why, /not a phase of template normal-bug-v1/);
+});
+
+/* ══ the fifteen defects a blind audit found in the first version ══════════
+ *
+ * Every test below fails against 718847d. Each carries its positive control,
+ * because half of these fixes TIGHTEN a rule, and a tightened rule that
+ * refuses legitimate work is the thing people route around.
+ */
+
+test('CRITICAL: the maker rule FAILS CLOSED when either side is missing', () => {
+  /*
+   * The worst of the fifteen. The check was
+   * `MAKER_MAY_NOT_PRODUCE.includes(type) && str(record.producer_session) && ...`
+   * so an ABSENT producer short-circuited it and the worker's own blind
+   * review was admitted -- with `rejected` EMPTY, so the board showed a clean
+   * green review of the author's own work and no trace anything was skipped.
+   *
+   * Independence is a POSITIVE claim: we must be able to see two different
+   * parties. If either side is absent we cannot see it, so it does not count.
+   */
+  for (const missing of [undefined, null, '', '   ']) {
+    const r = admissibleEvidence('blind_review_result', TASK,
+      [ev({ type: 'blind_review_result', producer_session: missing })]);
+    assert.equal(r.admitted.length, 0,
+      `producer_session ${JSON.stringify(missing)} must not clear a blind review`);
+    assert.match(r.rejected[0].why, /independence cannot be established/);
+  }
+
+  const noWorker = { ...TASK, worker_session: null };
+  const mirror = admissibleEvidence('blind_review_result', noWorker,
+    [ev({ type: 'blind_review_result', producer_session: 'sess-worker' })]);
+  assert.equal(mirror.admitted.length, 0,
+    'a task naming no worker cannot establish independence either');
+});
+
+test('CRITICAL: one capital letter no longer defeats the maker rule', () => {
+  const r = admissibleEvidence('blind_review_result', TASK,
+    [ev({ type: 'blind_review_result', producer_session: 'SESS-WORKER' })]);
+  assert.equal(r.admitted.length, 0, 'str() trimmed but did not fold, so a case variant walked through');
+  assert.match(r.rejected[0].why, /not independent/);
+});
+
+test('CRITICAL: canAdvance cannot be fooled by a DUPLICATE phase name', () => {
+  /*
+   * It used phases.indexOf(target), which returns the FIRST index, so a
+   * template whose target also appeared earlier collapsed the window and the
+   * task advanced with earlier proofs still PENDING.
+   */
+  const dup = {
+    id: 'dup',
+    phases: ['verify', 'reproduce', 'verify'],
+    requirements: { reproduce: ['reproduction_result'], verify: ['positive_test_result'] },
+  };
+  const r = canAdvance({
+    task: TASK, template: dup, targetPhase: 'verify',
+    evidence: [ev({ type: 'positive_test_result' })],
+  });
+  assert.equal(r.ok, false, 'the reproduce phase was skipped and advancement was allowed');
+  assert.match(r.why, /reproduce:reproduction_result/);
+});
+
+test('CRITICAL: a waiver is bound to its task, attempt and candidate', () => {
+  /*
+   * Item ids are generic -- blind-review:blind_review_result is the same
+   * string on every task in the repo -- and the first version checked no
+   * identity at all, so ONE waiver replayed across every task forever, and
+   * WAIVED counts as satisfied.
+   */
+  const foreign = [{
+    item_id: 'blind-review:blind_review_result',
+    reason: 'granted once, long ago',
+    granted_by: 'danny',
+    task_id: 'SOME-OTHER-TASK',
+    attempt: 99,
+    candidate_sha: 'deadbeef',
+  }];
+  assert.equal(
+    evaluateTask({ task: TASK, template: TEMPLATE, waivers: foreign })
+      .items.find((i) => i.phase === 'blind-review').state,
+    ITEM_STATES.PENDING,
+    'a waiver granted for other work must not clear this item',
+  );
+
+  for (const wrong of [{ attempt: 99 }, { candidate_sha: 'deadbeef' }, { task_id: 'other' }]) {
+    const w = [{
+      item_id: 'blind-review:blind_review_result',
+      reason: 'r',
+      granted_by: 'danny',
+      task_id: 't-1',
+      attempt: 3,
+      candidate_sha: 'cafe1234',
+      ...wrong,
+    }];
+    assert.equal(
+      evaluateTask({ task: TASK, template: TEMPLATE, waivers: w })
+        .items.find((i) => i.phase === 'blind-review').state,
+      ITEM_STATES.PENDING,
+      `a waiver with the wrong ${Object.keys(wrong)[0]} must not apply`,
+    );
+  }
+});
+
+test('HIGH: an UNKNOWN proof type satisfies nothing, and a near-alias cannot dodge rule 20', () => {
+  /*
+   * PROOF_TYPES was declared a closed set and enforced nowhere. The sharp
+   * version: a requirement named blind_review rather than blind_review_result
+   * slipped past MAKER_MAY_NOT_PRODUCE, so one missing suffix in a template
+   * turned rule 20 off.
+   */
+  const vibes = { id: 'v', phases: ['p'], requirements: { p: ['vibes_check'] } };
+  assert.equal(
+    evaluateTask({ task: TASK, template: vibes, evidence: [ev({ type: 'vibes_check' })] }).items[0].state,
+    ITEM_STATES.PENDING,
+  );
+
+  const alias = { id: 'a', phases: ['p'], requirements: { p: ['blind_review'] } };
+  assert.equal(
+    evaluateTask({ task: TASK, template: alias, evidence: [ev({ type: 'blind_review' })] }).items[0].state,
+    ITEM_STATES.PENDING,
+    'a near-alias must not become a self-signable review',
+  );
+});
+
+test('HIGH: non-string ids do not match each other through a shared null', () => {
+  /*
+   * str() collapsed every non-string to null, and null === null, so evidence
+   * for task 2 turned task 1 green.
+   */
+  const numeric = { task_id: 1, attempt: 1, worker_session: 'w' };
+  const foreign = {
+    evidence_id: 'from-task-2', type: 'reproduction_result',
+    task_id: 2, attempt: 1, status: 'passed',
+  };
+  const tpl = { id: 'n', phases: ['p'], requirements: { p: ['reproduction_result'] } };
+  assert.equal(
+    evaluateTask({ task: numeric, template: tpl, evidence: [foreign] }).items[0].state,
+    ITEM_STATES.PENDING,
+    'two absences are not a match',
+  );
+  assert.equal(evidenceMatches(foreign, numeric), false);
+});
+
+test('MEDIUM: evidence that OMITS candidate_sha cannot satisfy a task that declares one', () => {
+  const r = evaluateTask({ task: TASK, template: TEMPLATE, evidence: [ev({ candidate_sha: undefined })] });
+  assert.equal(r.items.find((i) => i.phase === 'reproduce').state, ITEM_STATES.PENDING,
+    'the rule was evaded by deleting the field rather than lying about it');
+});
+
+test('MEDIUM: canAdvance is NOT vacuously true for a template that requires nothing', () => {
+  const empty = { id: 'e', phases: ['reproduce', 'verify'], requirements: {} };
+  const r = canAdvance({ task: TASK, template: empty, targetPhase: 'verify' });
+  assert.equal(r.ok, false, 'nothing was verified, so nothing is established');
+  assert.match(r.why, /requires no proof/);
+});
+
+test('MEDIUM: malformed input is refused, never thrown', () => {
+  /*
+   * A throw inside a caller's try/catch disables the control silently -- the
+   * shape this repository has already paid for in the Stop gate.
+   */
+  for (const bad of [null, 'nope', {}, 42]) {
+    assert.doesNotThrow(() => evaluateTask({ task: TASK, template: TEMPLATE, evidence: bad }));
+  }
+  for (const phase of ['constructor', 'toString']) {
+    const tpl = { id: 'p', phases: [phase], requirements: {} };
+    assert.doesNotThrow(() => evaluateTask({ task: TASK, template: tpl, evidence: [] }));
+    assert.doesNotThrow(() => canAdvance({ task: TASK, template: tpl, targetPhase: phase }));
+  }
+  const strReq = { id: 's', phases: ['p'], requirements: { p: 'reproduction_result' } };
+  assert.equal(evaluateTask({ task: TASK, template: strReq, evidence: [] }).items.length, 0,
+    'a string requirement must not iterate character by character into bogus items');
+});
+
+test('MEDIUM: a recorded FAILURE outranks a later pass on the same candidate', () => {
+  /*
+   * [failed, passed] for the SAME task, attempt and candidate came out
+   * VERIFIED with blocked empty -- re-run-until-green against an unchanged
+   * artefact, invisible on the board. Nothing about the work changed between
+   * those runs, so the failure is still true. A new candidate carries a new
+   * sha and is a different question.
+   */
+  const r = evaluateTask({
+    task: TASK, template: TEMPLATE,
+    evidence: [ev({ status: 'failed' }), ev({ status: 'passed' })],
+  });
+  assert.equal(r.items.find((i) => i.phase === 'reproduce').state, ITEM_STATES.FAILED);
+  assert.equal(r.blocked.length, 1, 'the field a caller gates on must show it');
+});
+
+test('LOW: RUNNING is scoped to this task, and does not leak from another', () => {
+  const other = ev({ status: 'running', task_id: 't-999' });
+  assert.equal(
+    evaluateTask({ task: TASK, template: TEMPLATE, evidence: [other] })
+      .items.find((i) => i.phase === 'reproduce').state,
+    ITEM_STATES.PENDING,
+    'a board that lies about whose work is in flight is still a board that lies',
+  );
+
+  assert.equal(
+    evaluateTask({ task: TASK, template: TEMPLATE, evidence: [ev({ status: 'running' })] })
+      .items.find((i) => i.phase === 'reproduce').state,
+    ITEM_STATES.RUNNING,
+  );
+});
+
+test('LOW: a task with no attempt admits nothing, rather than everything through NaN', () => {
+  const noAttempt = { ...TASK, attempt: undefined };
+  assert.equal(evidenceMatches(ev(), noAttempt), false);
+  assert.equal(evidenceMatches(ev({ attempt: undefined }), noAttempt), false,
+    'NaN !== NaN must not become "both absent, therefore equal"');
+});
+
+test('LOW: producer_session is read once, so a changing getter cannot mislabel the receipt', () => {
+  let reads = 0;
+  const sneaky = {
+    evidence_id: 'toctou',
+    type: 'blind_review_result',
+    task_id: 't-1',
+    attempt: 3,
+    candidate_sha: 'cafe1234',
+    status: 'passed',
+    get producer_session() { reads += 1; return reads <= 2 ? 'sess-auditor' : 'sess-worker'; },
+  };
+  const item = evaluateTask({ task: TASK, template: TEMPLATE, evidence: [sneaky] })
+    .items.find((i) => i.phase === 'blind-review');
+  if (item.state === ITEM_STATES.VERIFIED) {
+    assert.equal(item.satisfied_by, 'sess-auditor',
+      'the receipt must name the party the decision was actually made on');
+  }
 });
