@@ -12,7 +12,11 @@
  * FAILS CLOSED on a missing or unreadable snapshot, because "nobody knows" is
  * not "nothing changed".
  */
-import { spawn } from 'node:child_process';
+/*
+ * NO CHILD PROCESSES. This gate reads state and prints a verdict; it does not
+ * run the suite and does not start anything that does. See the verify-absent
+ * branch for why the detached-spawn version was withdrawn.
+ */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -1021,23 +1025,40 @@ const admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
 
 if (decision.action === ACTION.START) {
   /*
-   * DETACHED, AND ITS OUTPUT GOES TO THE STORE RATHER THAN TO THIS PIPE. An
-   * inherited stdio handle keeps the parent's pipe open, and Claude Code waits
-   * on it -- so an unawaited child would still hold the hook for the length of
-   * the suite, which is the bug this whole change removes, rebuilt through a
-   * different door.
+   * ═══ THIS GATE STARTS NOTHING. NOT EVEN DETACHED. ═══
+   *
+   * The first version spawned a detached verifier here so verification would be
+   * automatic. Two things were wrong with it, and the second is the one that
+   * matters.
+   *
+   * MEASURED: `test/auditEscalationWiring.test.mjs` began failing EPERM on
+   * `rmSync`. The gate runs against a temp fixture in those tests, the detached
+   * child inherited `cwd: <fixture>`, and a live process holding a directory
+   * open cannot be removed on Windows. So the gate acquired a side effect that
+   * outlived it and leaked into every caller's workspace -- in a test it is a
+   * failed cleanup, in a throwaway worktree it is a full suite running in a
+   * directory somebody is about to delete.
+   *
+   * AND THE PRINCIPLE, WHICH I HAD ALREADY WRITTEN AND THEN CONTRADICTED. The
+   * whole argument for this change is that the gate should stop being a test
+   * runner and become a result CONSUMER. Spawning a runner is still being a
+   * test runner; making it asynchronous hides the coupling rather than removing
+   * it. A hook that judges a turn should not also start work.
+   *
+   * SO IT REFUSES AND SAYS WHAT TO RUN. That is an honest outage-shaped default
+   * -- a turn cannot be approved until somebody produces a result -- and it is
+   * the direction rule 19 warns about, so the remedy is one command and it is
+   * printed. Making production automatic belongs to the launcher or a watcher,
+   * which can own a process without owning a verdict.
    */
-  try {
-    const child = spawn(process.execPath, [path.join(root, 'scripts', 'verify-run.mjs')], {
-      cwd: root, detached: true, stdio: 'ignore',
-    });
-    child.unref();
-    out(`[agentbridge:verify-started] Nothing had verified this exact tree, so one run was started (pid ${child.pid}). `
-      + 'THIS TURN IS NOT APPROVED -- a run that has just begun has proved nothing. The next turn reads its '
-      + `result instead of starting another. Watch it with: node scripts/verify-run.mjs --status`);
-  } catch (e) {
-    out(`[agentbridge:verify-unstartable] No result exists for this tree and the verifier could not be started (${e?.message ?? e}). NOTHING WAS VERIFIED.`);
-  }
+  out('[agentbridge:verify-absent] Nothing has verified this exact tree, so NOTHING WAS VERIFIED and this '
+    + 'turn is not approved. This gate no longer runs the suite itself: it used to spawn one at every turn '
+    + 'end, which collided with any suite a session or a second agent was already running and made both miss '
+    + 'the deadline.\n'
+    + '  Produce a result with:  npm run verify\n'
+    + '  Then read it with:      npm run verify -- --status\n'
+    + '  A result is keyed to this exact working tree, so it is reused until something changes and is never '
+    + 'reused across an edit.');
 }
 
 if (decision.action === ACTION.ATTACH) {
