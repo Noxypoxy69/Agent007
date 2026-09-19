@@ -332,3 +332,66 @@ test('scriptsChanged FAILS CLOSED when it cannot read either side', async (t) =>
   assert.equal(scriptsChanged(r.dir, 'not-a-sha'), true,
     'an unreadable revision is unknown, not unchanged');
 });
+
+test('A MERGE COMMIT THAT CARRIES A CONTROL IS NOT INVISIBLE', async (t) => {
+  /*
+   * Found by audit and reproduced here before fixing. `git log --name-only`
+   * prints a header and NO FILE LIST for a merge -- git declines to pick a
+   * side -- so files=[], touched=[], and auditCoverage's loop `continue`s.
+   * The commit is not reported as unaudited; it is not reported AT ALL.
+   *
+   * Measured on the real repository before the fix:
+   *
+   *   git log --format=%x1e%H%x09%s --name-only -1 cbbe34c
+   *     -> header only
+   *   ...with --diff-merges=first-parent
+   *     -> header, then the file
+   *
+   * And it does not age out. An EVIL MERGE, whose conflict resolution
+   * matches neither parent, exists in no other commit -- so what it carried
+   * was invisible permanently rather than until the range moved.
+   */
+  const dir = lab(t);
+  const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  mkdirSync(path.join(dir, 'src'), { recursive: true });
+  g('init', '-q');
+  g('config', 'user.email', 't@example.invalid');
+  g('config', 'user.name', 'T');
+
+  writeFileSync(path.join(dir, 'README.md'), 'base\n');
+  g('add', '-A'); g('commit', '-qm', 'base');
+  g('branch', 'side');
+
+  /* Mainline moves, so the merge is a real one rather than a fast-forward. */
+  writeFileSync(path.join(dir, 'README.md'), 'main\n');
+  g('add', '-A'); g('commit', '-qm', 'mainline');
+
+  g('checkout', '-q', 'side');
+  writeFileSync(path.join(dir, 'src', 'claudeGuard.mjs'), '// changed on the side branch\n');
+  g('add', '-A'); g('commit', '-qm', 'touch the guard on a side branch');
+
+  g('checkout', '-q', 'master');
+  g('merge', '--no-ff', '-q', 'side', '-m', 'Merge side');
+  const merge = g('rev-parse', 'HEAD').trim();
+
+  /*
+   * THE RANGE IS THE MERGE ALONE. `merge^..merge` would also contain the
+   * SIDE-BRANCH commit, which carries src/claudeGuard.mjs in its own file
+   * list -- so the assertion passed while the merge itself stayed invisible.
+   * That was this test's first version and a mutation caught it: removing
+   * --diff-merges left it green. `<sha>^!` excludes every parent, so the
+   * range is that one commit and nothing else.
+   */
+  const cov = auditCoverage({ repoRoot: dir, range: `${merge}^!`, ledgerText: '' });
+  const seen = cov.commits.map((c) => `${c.sha.slice(0, 7)}:${c.touched.join(',')}`);
+
+  const mergeRow = cov.commits.find((c) => c.sha.trim().startsWith(merge.slice(0, 7)));
+  assert.ok(mergeRow,
+    `THE MERGE ITSELF carried src/claudeGuard.mjs and was reported by nothing. saw: ${JSON.stringify(seen)}`);
+  assert.ok(mergeRow.touched.some((f) => /claudeGuard/.test(f)),
+    `the control the merge carried must be named against the merge. got: ${JSON.stringify(mergeRow.touched)}`);
+
+  /* And it must BLOCK, not merely appear: it is decision logic, unaudited. */
+  assert.ok(auditEscalation(cov, []).block,
+    'a merge carrying an unaudited control must stop the turn like any other commit');
+});

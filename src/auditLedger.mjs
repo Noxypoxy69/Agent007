@@ -143,7 +143,32 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
   const REC = String.fromCharCode(30);
   let raw;
   try {
-    raw = String(runGit(['-C', repoRoot, 'log', '--format=%x1e%H%x09%s', '--name-only', range], {
+    /*
+     * --diff-merges=first-parent, BECAUSE A MERGE SHOWED NO FILES AT ALL.
+     *
+     * `git log --name-only` prints a header and NOTHING ELSE for a merge
+     * commit: git declines to pick a side by default. So files=[],
+     * touched=[], and the loop below hits `continue` and skips the commit
+     * ENTIRELY -- it is not reported as unaudited, it is not reported at all.
+     *
+     * Measured on this repository:
+     *
+     *   git log --format=%x1e%H%x09%s --name-only -1 cbbe34c
+     *     -> the header line, and no file list
+     *   ...with --diff-merges=first-parent
+     *     -> the header line, then test/leakRegression.test.mjs
+     *
+     * Nine merges in this history carried audit-bearing controls past the
+     * escalation this way, the worst of them merging the guard binary, the
+     * Stop gate, guardSession, safeGit and the guard's own test.
+     *
+     * It is not a stale-range problem that goes away when the window moves.
+     * An EVIL MERGE -- one whose conflict resolution differs from both
+     * parents -- exists in NO OTHER COMMIT, so the change it carries was
+     * invisible permanently. first-parent is the right side to diff: it is
+     * what the branch actually received.
+     */
+    raw = String(runGit(['-C', repoRoot, 'log', '--format=%x1e%H%x09%s', '--diff-merges=first-parent', '--name-only', range], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }));
