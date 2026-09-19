@@ -59,64 +59,45 @@
  * is the same judgement as the corrections kept visible in CLAUDE.md.
  */
 
-/**
- * Subcommands whose OUTPUT is the staging area.
+/*
+ * ═══ WHAT THIS FENCE DOES NOT COVER, AND WHY THE CODE FOR IT IS GONE ═══
  *
- * ROUTE ON THE SHAPE, NOT ON A ROSTER OF NAMES -- rule 19, learned here by
- * shipping both halves of the failure: allowing by known name leaked, and
- * denying by unknown name refused 25 tools of a real 54 and would have got the
- * whole layer switched off. So the question asked is "does this command write
- * the index", which is a property of the operation, and the entries below are
- * the ones for which the answer is yes by definition rather than by guess.
+ * BLIND AUDIT FINDINGS D3 AND D5, 2026-09-18, and the second is the reason the
+ * first existed.
  *
- * AN UNRECOGNISED SUBCOMMAND IS NOT FENCED, deliberately. The asymmetry: a
- * false refusal blocks a peer and gets the fence switched off, while a false
- * permission costs a collision that git history makes fully recoverable and
- * that is the status quo today. Advisory fences fail open; that is what makes
- * them advisory, and saying so out loud is the difference between this and a
- * gate that pretends.
+ * D5: `commit` is not the only subcommand that records the shared index.
+ * `git rebase --continue`, `git cherry-pick --continue` and
+ * `git revert --continue` all commit whatever is staged, and a bare `git stash`
+ * removes another session's staged work from the tree -- the same hazard, and
+ * louder. None of them is fenced. They are not in GIT_SWEEPS_TREE either, so
+ * they get neither check.
  *
- * CONSEQUENCE, so nobody overreads it: plumbing that writes the index
- * (`update-index`, `read-tree`, `apply --cached`) is not on this list. No agent
- * here uses those shapes, and the day one does, this list is wrong rather than
- * merely incomplete.
+ * D3: this file shipped `INDEX_WRITERS`, `gitSubcommand` and `writesIndex` --
+ * three exports that would identify exactly those verbs -- with NO PRODUCTION
+ * CALLER. Tested, correct, consulted by nothing, in a file that is a protected
+ * guard dependency. `gitSubcommand`'s own header lectured about the
+ * `tokens[1]`-only mistake while the rail two files over read `tokens[1]`
+ * directly. Rule 17, in the same commit whose message invoked rule 17.
+ *
+ * SO THEY ARE DELETED RATHER THAN WIRED, AND THAT IS THE ARGUABLE PART.
+ * Extending the fence to those verbs would refuse `git rebase --continue`, and
+ * there is NO compliant spelling of that -- you cannot name paths on it. A
+ * refusal with no alternative is an outage, an outage gets the hook switched
+ * off, and that loses every layer at once. So the honest position is that these
+ * verbs stay unfenced and the residual is written down here, where the next
+ * person to widen the fence will read it, rather than kept as dead code that
+ * makes the gap look handled.
+ *
+ * The thing that would actually close D5 is a different control: `git stash`
+ * and the `--continue` family are cheap to detect and expensive to refuse, so
+ * they want a WARNING, and this rail only says allow or deny.
+ *
+ * `git --no-pager commit` and `git -C <dir> commit` -- the shapes `gitSubcommand`
+ * existed to catch -- are already refused by GIT_POISON and by the approved-shape
+ * default, verified through the shipped rail by the audit. Wiring it would have
+ * risked LOOSENING that: a global option resolving to a GIT_WRITE verb enters
+ * the write branch instead of falling through to deny.
  */
-export const INDEX_WRITERS = Object.freeze([
-  'add', 'rm', 'mv', 'commit', 'restore', 'reset', 'stash',
-  'checkout', 'switch', 'merge', 'rebase', 'cherry-pick', 'revert', 'am',
-]);
-
-/** Global options that swallow the token after them, so it is not the verb. */
-const GLOBAL_TAKES_VALUE = /^(-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix)$/;
-
-/**
- * The subcommand, or null when the tokens do not name one.
- *
- * `git -C other add .` and `git --no-pager add .` are the same command as
- * `git add .`, and a check that reads argv[1] blindly misses both -- the
- * `tokens[1]`-only mistake already measured on the node branch of this rail.
- */
-export function gitSubcommand(argv) {
-  if (!Array.isArray(argv)) return null;
-  const start = argv[0] === 'git' ? 1 : 0;
-  for (let i = start; i < argv.length; i += 1) {
-    const t = argv[i];
-    if (typeof t !== 'string') return null;
-    if (t === '--') return null;
-    if (t.startsWith('-')) {
-      if (GLOBAL_TAKES_VALUE.test(t)) i += 1;
-      continue;
-    }
-    return t;
-  }
-  return null;
-}
-
-/** Does this invocation write the index? */
-export function writesIndex(argv) {
-  const verb = gitSubcommand(argv);
-  return verb !== null && INDEX_WRITERS.includes(verb);
-}
 
 /**
  * Options of `git commit` that consume the token after them, so that token is

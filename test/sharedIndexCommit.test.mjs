@@ -17,7 +17,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { commitFence, writesIndex, gitSubcommand, INDEX_WRITERS } from '../src/gitIndexLease.mjs';
+import { commitFence } from '../src/gitIndexLease.mjs';
 
 /**
  * The old boolean, so the cases below keep reading as "does this name its
@@ -113,53 +113,40 @@ test('THE MESSAGE IS NOT A PATHSPEC, which the rail has already got wrong once',
     'a message that looks like a path was counted as one');
 });
 
-test('the subcommand survives global options -- not argv[1] alone', () => {
+test('THE SCOPE IS commit ALONE, and the residual is asserted rather than assumed', () => {
   /*
-   * `git -C other add .` and `git --no-pager add .` are the same command as
-   * `git add .`. Reading argv[1] blindly misses both, which is the tokens[1]
-   * mistake already measured on the node branch of this rail.
+   * AUDIT FINDING D5. `git rebase --continue`, `git cherry-pick --continue`,
+   * `git revert --continue` and a bare `git stash` all move the shared index,
+   * and none of them is fenced. This file used to carry `INDEX_WRITERS`,
+   * `gitSubcommand` and `writesIndex` -- three exports that identified exactly
+   * those verbs, with no production caller anywhere (finding D3). Tested,
+   * correct, consulted by nothing.
+   *
+   * They are deleted rather than wired, because refusing `git rebase --continue`
+   * has NO compliant spelling -- you cannot name paths on it -- and a refusal
+   * with no alternative is an outage that gets the hook switched off. The
+   * reasoning lives in the module header now instead of in dead code that made
+   * the gap look handled.
+   *
+   * SO THIS TEST PINS THE GAP RATHER THAN CLOSING IT. If somebody widens the
+   * fence, this goes red and points them at the header paragraph that has to
+   * change with it. A residual nothing asserts is a residual nobody will find.
    */
-  assert.equal(gitSubcommand(argv('git -C other add .')), 'add');
-  assert.equal(gitSubcommand(argv('git --no-pager add .')), 'add');
-  assert.equal(gitSubcommand(argv('git -c user.name=x commit -m y')), 'commit');
-  assert.equal(gitSubcommand(argv('git --git-dir other/.git status')), 'status');
-  assert.equal(gitSubcommand(argv('git')), null);
-  assert.equal(gitSubcommand(argv('git --no-pager')), null);
-});
-
-test('writesIndex is GENERATED from the table, so adding an entry extends it', () => {
-  /*
-   * Rule 7: generate the fixtures from the real list rather than restating a
-   * few of them, so the coverage grows when the table does.
-   */
-  assert.ok(INDEX_WRITERS.length > 5, 'the table is too small to be the real one');
-  for (const verb of INDEX_WRITERS) {
-    assert.equal(writesIndex(['git', verb]), true, `${verb} is in the table but not detected`);
-    assert.equal(writesIndex(['git', '-C', 'other', verb]), true,
-      `${verb} is missed behind a global option`);
-  }
-  for (const verb of ['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'fetch', 'push']) {
-    assert.equal(writesIndex(['git', verb]), false, `${verb} does not write the index`);
-  }
-});
-
-test('NOT FENCED IS NOT A CLAIM OF SAFETY, and the module says so', () => {
-  /*
-   * Rule 8: an enumeration bounds nothing. `update-index` writes the index and
-   * is deliberately absent, because an advisory fence fails open. Asserting the
-   * gap keeps it honest -- if somebody later adds these, this test tells them
-   * the fail-open reasoning in the module header has to change with it.
-   */
-  for (const plumbing of ['update-index', 'read-tree', 'apply', 'checkout-index']) {
-    assert.equal(writesIndex(['git', plumbing]), false,
-      `${plumbing} is now fenced; update the fail-open paragraph in src/gitIndexLease.mjs`);
+  for (const verb of ['rebase', 'cherry-pick', 'revert', 'stash', 'merge', 'am']) {
+    const v = judge(`git ${verb} --continue`);
+    assert.ok(
+      !(v.allowed === false && /pathspec|not bounded by the paths/.test(v.reason ?? '')),
+      `git ${verb} is now refused by the shared-index fence. That may be right -- but the `
+        + 'header of src/gitIndexLease.mjs says these are deliberately unfenced and why. '
+        + 'Update it, and this test, together.',
+    );
   }
 });
 
-test('garbage in is false, not a throw', () => {
+test('garbage in is a refusal, not a throw', () => {
   for (const bad of [null, undefined, 'git commit', 42, {}, [], ['git'], [null, 'commit']]) {
     assert.equal(commitNamesItsPaths(bad), false, `${JSON.stringify(bad)} was read as a named commit`);
-    assert.doesNotThrow(() => writesIndex(bad));
+    assert.doesNotThrow(() => commitFence(bad));
   }
 });
 
