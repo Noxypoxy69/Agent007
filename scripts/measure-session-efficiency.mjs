@@ -31,8 +31,13 @@
  * ACCOUNTING RULE (matches src/tokenTelemetry.mjs): cached input is SEPARATE from
  * input, never summed in. noncached = input + output (billed at full rate).
  *
- * READ-ONLY without --persist. --persist appends observations to the measurement
- * store, idempotent by a stable key so re-running does not duplicate.
+ * READ-ONLY without --persist. --persist REPLACES this script's own derived rows
+ * (sources claude-transcript-session and period-efficiency) and preserves every
+ * other row, so re-running is idempotent and always reflects current truth. These
+ * are RE-DERIVED aggregates, not point-in-time events, so replacing them beats
+ * accumulating stale/duplicate copies -- an earlier append-by-key scheme both
+ * froze the summaries (keyed without last_ts) and duplicated growing-session rows
+ * (keyed with an advancing last_ts). A blind audit caught that; this is the fix.
  *
  *   node scripts/measure-session-efficiency.mjs [transcriptDir] [--persist] [--json <out>]
  */
@@ -48,8 +53,17 @@ const dir = argv.find((a) => !a.startsWith('--') && a !== jsonAt)
   || path.join(os.homedir(), '.claude', 'projects', 'C--Users-DANNY-GARCIA-Agent007');
 
 // EARLY = before this instant, RECENT = on/after. Sep 16-17 vs Sep 18-19.
+// COMPARE BY EPOCH, NOT BY STRING. git %cI carries a local offset (this repo's
+// history mixes -07:00 and Z), so a lexicographic compare against a Z cutoff
+// ignores the timezone and misfiles the local-evening band into EARLY. Date.parse
+// normalises both the offset-bearing commit dates and the UTC transcript dates to
+// the same instant. A blind audit caught ~21 commits misfiled by the string form.
 const CUTOFF = '2026-09-18T00:00:00Z';
-const periodOf = (iso) => (iso && iso >= CUTOFF ? 'RECENT' : 'EARLY');
+const CUTOFF_MS = Date.parse(CUTOFF);
+const periodOf = (iso) => {
+  const t = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(t) && t >= CUTOFF_MS ? 'RECENT' : 'EARLY';
+};
 
 function readTranscript(file) {
   const text = readFileSync(file, 'utf8');
@@ -192,13 +206,13 @@ if (jsonAt) {
 if (persist) {
   const { readMeasurements, writeMeasurements } = await import('../src/provenanceStore.mjs');
   const existing = await readMeasurements();
-  const seen = new Set(existing.map((r) => `${r.source}:${r.session_id ?? r.period}@${r.last_ts ?? ''}`));
-  const candidates = [...perSessionRows, ...summaries];
-  const additions = candidates.filter((r) => !seen.has(`${r.source}:${r.session_id ?? r.period}@${r.last_ts ?? ''}`));
-  if (additions.length === 0) {
-    console.log('\npersist: nothing new to add');
-  } else {
-    await writeMeasurements([...existing, ...additions]);
-    console.log(`\npersist: appended ${additions.length} row(s) to ~/.agentbridge/tokenMeasurements.json`);
-  }
+  // Manage-replace: drop this script's own derived rows and rewrite them from the
+  // current computation; preserve every other row (e.g. token-budget handoff rows).
+  // Re-derived aggregates are not point-in-time events, so replacing is idempotent
+  // and correct where append-by-key froze summaries and duplicated session rows.
+  const MANAGED = new Set(['claude-transcript-session', 'period-efficiency']);
+  const kept = existing.filter((r) => !MANAGED.has(r.source));
+  const managed = [...perSessionRows, ...summaries];
+  await writeMeasurements([...kept, ...managed]);
+  console.log(`\npersist: wrote ${managed.length} managed row(s); preserved ${kept.length} other row(s)`);
 }
