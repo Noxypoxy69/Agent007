@@ -1393,6 +1393,116 @@ export function isGateSelfConfig(rel) {
   return GATE_SELF_CONFIG.some((p) => p.toLowerCase() === norm);
 }
 
+/**
+ * Does this settings file still ARM every control, read from the file itself?
+ *
+ * ═══ WHY THIS EXISTS: A CORRECT RULE WITH AN UNRECOVERABLE CONSEQUENCE ═══
+ *
+ * The Stop gate excludes its own configuration from BOTH reliefs -- grants and
+ * committed work -- and the reasoning is right: `.claude/settings.json` decides
+ * whether the guard runs at all, so "I committed it" must not be a stronger
+ * permission than an override, and an override must not let the repaired file
+ * dictate how long the gate may look. Neither of those should change.
+ *
+ * THE CONSEQUENCE NOBODY COSTED. A session's snapshot is minted once and may
+ * never be re-minted -- deliberately, because a session that re-baselines a
+ * damaged tree adopts the damage. So when ANOTHER session legitimately commits
+ * a settings change, every already-running session is blocked on drift it did
+ * not cause, against a file that matches HEAD, with no recovery but restarting
+ * and losing its context. Measured here across most of a working session: the
+ * commit added two poll hooks and removed nothing, leaving the file strictly
+ * MORE armed than the snapshot, and the gate refused every turn regardless.
+ *
+ * ATTRIBUTION IS THE WRONG QUESTION, WHICH IS WHY THE EXCLUSION IS RIGHT. That
+ * a change was committed says who made it, not whether it disarmed anything. So
+ * this asks the other question directly, of the artefact: are the controls still
+ * there and still enabled? A file that answers yes has not disarmed the gate --
+ * whoever wrote it, however it got there.
+ *
+ * IT IS ONLY HALF A PERMISSION, and the caller must supply the other half. This
+ * says "armed"; the Stop gate additionally requires the working file to MATCH
+ * HEAD before it relieves anything. Together those close the attack the
+ * exclusion was built for, and each alone does not:
+ *
+ *   armed but uncommitted  -- could be this session's own unrecorded edit, and
+ *                             "armed" does not mean "harmless"; an ADDED hook
+ *                             runs too. Still blocks.
+ *   committed but disarmed -- exactly the "commit it" bypass. Still blocks,
+ *                             because this returns false.
+ *
+ * AND MATCHING HEAD SUBSUMES THE TIMEOUT ATTACK the gate's own header records:
+ * a granted edit once chose a Stop timeout of 99999 and the gate did not block.
+ * A file identical to HEAD carries HEAD's timeout, so inflating it requires a
+ * commit that changes HEAD -- which is a diff a reader can see, not a silent
+ * local edit.
+ *
+ * PURE, and takes the TEXT rather than a path, so the suite can watch it fail
+ * without a filesystem -- rule 10. Malformed JSON is NOT armed: a settings file
+ * nobody can parse is one Claude Code cannot load either.
+ *
+ * @param {string} text  the settings file's contents
+ * @returns {{armed: boolean, missing: string[]}}
+ */
+export function gateConfigArms(text) {
+  const missing = [];
+  let cfg;
+  try {
+    cfg = JSON.parse(String(text ?? ''));
+  } catch {
+    return { armed: false, missing: ['the file is not readable JSON'] };
+  }
+  if (!cfg || typeof cfg !== 'object') return { armed: false, missing: ['no settings object'] };
+
+  /*
+   * `disableAllHooks` TURNS EVERYTHING OFF IN ONE FIELD, so it is checked first
+   * and on its own. A config can name every hook correctly and still run none
+   * of them.
+   */
+  if (cfg.disableAllHooks === true) missing.push('disableAllHooks is true');
+
+  const commandsFor = (event) => {
+    const entries = Array.isArray(cfg?.hooks?.[event]) ? cfg.hooks[event] : [];
+    const out = [];
+    for (const e of entries) {
+      for (const h of Array.isArray(e?.hooks) ? e.hooks : []) {
+        if (typeof h?.command === 'string') out.push({ command: h.command, matcher: e?.matcher });
+      }
+    }
+    return out;
+  };
+
+  /*
+   * MATCHED ON THE SCRIPT THE HOOK RUNS, not on a spelling of the whole command
+   * line. The command is quoted, carries an interpolated project directory and
+   * may gain flags; pinning the literal string would refuse every legitimate
+   * edit and teach people to route around this. Rule 19 -- the property is
+   * "this event still reaches that program".
+   */
+  const runs = (event, script) => commandsFor(event).some((h) => h.command.includes(script));
+
+  if (!runs('PreToolUse', 'agentbridge-claude-guard.mjs')) {
+    missing.push('PreToolUse no longer runs the guard');
+  } else {
+    /*
+     * A MATCHER THAT IS NOT `*` IS A DISARM WEARING A CONFIGURATION. This is
+     * the measured 2026-09-17 incident: the matcher listed tool NAMES, Windows
+     * sessions run shell through a PowerShell tool that was not on the list,
+     * and a real session deleted the guard's own source with no refusal from
+     * anywhere. The guard's unit tests were green throughout.
+     */
+    const wild = commandsFor('PreToolUse')
+      .some((h) => h.command.includes('agentbridge-claude-guard.mjs') && h.matcher === '*');
+    if (!wild) missing.push('the PreToolUse matcher is not "*", so some tools bypass the guard');
+  }
+
+  if (!runs('Stop', 'claude-stop-gate.mjs')) missing.push('Stop no longer runs the stop gate');
+  if (!runs('SessionStart', 'agentbridge-claude-guard.mjs')) {
+    missing.push('SessionStart no longer mints a snapshot');
+  }
+
+  return { armed: missing.length === 0, missing };
+}
+
 export function overrideCovers(repoRoot, rel, now = Date.now()) {
   const grant = readOverride(repoRoot, now);
   if (!grant) return null;

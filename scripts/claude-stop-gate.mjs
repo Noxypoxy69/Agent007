@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot, overrideCovers,
-  isGateSelfConfig,
+  isGateSelfConfig, gateConfigArms,
 } from '../src/guardSession.mjs';
 // git is asked whether a drifted control is committed; see isCommittedWork.
 // Through safeGit, because this gate shells out inside a repository whose own
@@ -360,6 +360,32 @@ function isCommittedWork(rel) {
   }
 }
 
+/**
+ * Read the settings file on disk and ask whether it still arms every control.
+ *
+ * FAILS CLOSED on anything it cannot read: an unreadable config is not an armed
+ * one, and "nobody knows" is not "nothing changed" -- the same sentence this
+ * file's header already applies to a missing snapshot.
+ *
+ * The verdict is announced when it REFUSES relief, because a settings file that
+ * matches HEAD and still fails this check means the committed configuration has
+ * disarmed something, which is worth saying out loud rather than surfacing as a
+ * bare drift line.
+ */
+const selfConfigAlarm = [];
+function gateConfigStillArms(rel) {
+  let verdict;
+  try {
+    verdict = gateConfigArms(readFileSync(path.join(root, rel), 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!verdict.armed) {
+    selfConfigAlarm.push(`  ${rel}: ${verdict.missing.join('; ')}`);
+  }
+  return verdict.armed;
+}
+
 const driftDecisions = allDrift.map((d) => {
   const granted = !isGateSelfConfig(d.file) && Boolean(overrideCovers(root, d.file));
   return {
@@ -379,9 +405,32 @@ const driftDecisions = allDrift.map((d) => {
      * silence.
      */
     landed: !granted
-      && !isGateSelfConfig(d.file)
       && d.now !== 'deleted'
-      && isCommittedWork(d.file),
+      && isCommittedWork(d.file)
+      /*
+       * THE GATE'S OWN CONFIG IS RELIEVED ONLY WHEN IT STILL ARMS THE GATE, and
+       * that is a different question from who committed it.
+       *
+       * The exclusion here was right and its consequence was unrecoverable. A
+       * session's snapshot mints once and may never be re-minted, so when
+       * ANOTHER session legitimately commits a settings change, every running
+       * session blocks forever on a file that matches HEAD, with no escape but
+       * restarting. Measured across most of a working session: ade7ab9 ADDED
+       * two poll hooks and removed nothing -- strictly more armed than the
+       * snapshot -- and every turn was refused regardless.
+       *
+       * So the relief needs BOTH halves, and neither alone would do:
+       *   isCommittedWork  -- it matches HEAD, so it is attributable, diffable,
+       *                       and it carries HEAD's Stop timeout rather than
+       *                       one a local edit chose (the measured 99999 case).
+       *   gateConfigArms   -- the controls are STILL THERE, read out of the
+       *                       file. A committed DISARM fails this, so "commit
+       *                       it" is still not a permission.
+       *
+       * A deletion is still never relieved, above, for the reason already
+       * recorded: a committed deletion of a control is the founding incident.
+       */
+      && (!isGateSelfConfig(d.file) || gateConfigStillArms(d.file)),
   };
 });
 const granted = driftDecisions.filter((x) => x.granted).map((x) => x.entry);
@@ -454,7 +503,18 @@ if (granted.length) {
   );
 }
 if (drift.length) {
-  out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}`);
+  /*
+   * THE DISARM CASE IS NAMED, not left to look like ordinary drift. If a
+   * settings file matches HEAD and STILL fails the arming check, the committed
+   * configuration has turned a control off -- which is a different and much
+   * louder fact than "this differs from your snapshot", and it is the one case
+   * where "commit it" was trying to buy silence.
+   */
+  const why = selfConfigAlarm.length
+    ? '\nAND THE GATE\'S OWN CONFIGURATION NO LONGER ARMS IT, which is why committing it '
+      + `bought nothing:\n${selfConfigAlarm.join('\n')}`
+    : '';
+  out(`[agentbridge:protected-control-changed] Protected controls differ from the session snapshot (committing does not hide this):\n${drift.map((d) => `  ${d.file}: ${d.now}`).join('\n')}${why}`);
 }
 
 /*
