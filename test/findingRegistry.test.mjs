@@ -236,7 +236,7 @@ test('THE FIXER MAY NOT CLEAR ITS OWN REPAIR (CLAUDE.md rule 20)', () => {
 
   const self = transition(retesting, FINDING.VERIFIED_FIXED, { by: FIXER });
   assert.equal(self.ok, false, 'the fixer declared its own repair verified');
-  assert.match(self.errors.join(' '), /wrote the repair/);
+  assert.match(self.errors.join(' '), /wrote a repair/);
 
   assert.equal(transition(retesting, FINDING.VERIFIED_FIXED, { by: THIRD }).ok, true);
 });
@@ -285,14 +285,28 @@ test('EVERY TERMINAL STATE DEMANDS INDEPENDENCE -- generated, not listed', () =>
    * missing. Derive the expectation from the same shape the subject derives it
    * from, and a fourth terminal state is covered on the day it is added.
    */
-  const terminal = Object.values(FINDING).filter(
-    (s) => transition({ ...make(), status: s }, FINDING.SUPERSEDED, { by: THIRD }).ok === false
-      && transition(make(), s, { by: THIRD }).ok === true,
-  );
+  const all = Object.values(FINDING);
+
+  /* Terminal means nothing can leave it -- asked of the subject, not listed. */
+  const terminal = all.filter((s) => all.every(
+    (to) => transition({ ...make(), status: s }, to, { by: THIRD }).ok === false,
+  ));
   assert.ok(terminal.length >= 3, `expected at least three terminal states, found ${terminal.join(', ')}`);
+
   for (const s of terminal) {
-    assert.equal(transition(make(), s, { by: null }).ok, false, `${s} accepted an unnamed actor`);
-    assert.equal(transition(make(), s, { by: REVIEWER }).ok, false, `${s} accepted the reporter`);
+    /*
+     * Each terminal state is reachable from a different place -- VERIFIED_FIXED
+     * only through RETESTING -- so the source is found rather than assumed. The
+     * first draft of this test assumed OPEN and silently skipped VERIFIED_FIXED,
+     * which is the fixture-cannot-reach-the-branch shape (hollow gate 9) in the
+     * test written to stop a missing terminal state.
+     */
+    const from = all.find((f) => transition({ ...make(), status: f }, s, { by: THIRD }).ok === true);
+    assert.ok(from, `no state reaches ${s}, so this proves nothing about it`);
+    const at = { ...make(), status: from };
+    assert.equal(transition(at, s, { by: null }).ok, false, `${s} accepted an unnamed actor`);
+    assert.equal(transition(at, s, { by: REVIEWER }).ok, false, `${s} accepted the reporter`);
+    assert.equal(transition(at, s, { by: THIRD }).ok, true, `${s} refused an independent party`);
   }
 });
 
