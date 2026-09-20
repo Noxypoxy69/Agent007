@@ -37,8 +37,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync, existsSync } from 'node:fs';
+import { spawnSync, spawn } from 'node:child_process';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync, existsSync, linkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -584,4 +584,128 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     'a rem line disappears entirely, separators included');
   assert.equal(executableStatements('echo "a & b"'), '',
     'a separator inside quotes is literal, so this is one echo statement');
+});
+
+test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude ran', async (t) => {
+  /*
+   * THE EVIDENCE CHANNEL THE SUBJECT CANNOT WRITE.
+   *
+   * Five versions of the token matcher, four auditors, and the standing
+   * conclusion was that a launcher which writes the report itself cannot be
+   * caught -- because the stub must be on the child's PATH to be launched,
+   * so the subject can always read whatever the stub needs.
+   *
+   * That is true of FILES and it was the wrong conclusion. It only holds
+   * while the evidence is something written. The OS knows whether a process
+   * existed, agent.cmd does not author the process table, and a forged
+   * report cannot put a pid in it.
+   *
+   * So the gate stops relying on the report alone. The report still proves
+   * cwd and the environment, which the process table does not expose; the
+   * process table proves the launch, which the report cannot. Neither is
+   * sufficient and together they cover what each other misses.
+   *
+   * MEASURED before writing this, three launchers through the same harness:
+   *
+   *     real     cd + set + claude   -> claude LAUNCHED (new pid)
+   *     hollow   exit /b 0           -> NO claude process appeared
+   *     forger   writes the report,
+   *              launches nothing    -> NO claude process appeared
+   *
+   * The forger is the exact shape that defeated v4 with 8 of 8 green.
+   *
+   * ONLY PIDS NEW SINCE THIS LAUNCH COUNT. The first version of this probe
+   * saw the previous run's still-live grandchild and reported the HOLLOW
+   * launcher as having launched claude -- a stale observation, the same
+   * class of error as measuring a dirty worktree. The baseline is taken
+   * after reaping, and the stub is reaped again afterwards.
+   */
+  const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-'));
+  const home = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-home-'));
+  t.after(() => {
+    for (const d of [box, home]) rmSync(d, { recursive: true, force: true });
+  });
+
+  /*
+   * A DISTINCTLY NAMED IMAGE, derived from process.execPath rather than
+   * built, so the process-table question has one unambiguous answer and
+   * cannot collide with any other node on this machine (rule 21).
+   */
+  const image = `claudeproc_${Math.random().toString(36).slice(2, 8)}.exe`;
+  const imagePath = path.join(box, image);
+  try { linkSync(process.execPath, imagePath); } catch { cpSync(process.execPath, imagePath); }
+
+  /* The stub holds itself alive so the observation is deterministic, not a race. */
+  writeFileSync(path.join(box, 'claude.cmd'),
+    `@echo off\r\n"${imagePath}" -e "setInterval(() => {}, 50)"\r\n`);
+
+  const ps = (script) => spawnSync('powershell', ['-NoProfile', '-Command', script],
+    { encoding: 'utf8', timeout: 30_000, windowsHide: true });
+
+  const livePids = () => new Set(
+    String(ps(`Get-CimInstance Win32_Process -Filter "Name='${image}'" | ForEach-Object { $_.ProcessId }`).stdout ?? '')
+      .trim().split('\n').map((s) => Number(s.trim())).filter(Number.isInteger),
+  );
+  const reap = () => ps(`Get-Process -Name '${image.replace(/\.exe$/, '')}' -ErrorAction SilentlyContinue `
+    + '| Stop-Process -Force');
+  t.after(reap);
+
+  /** Spawn a launcher and answer one question: did a NEW claude appear? */
+  const launched = async (launcherPath) => {
+    reap();
+    await new Promise((r) => { setTimeout(r, 250); });
+    const before = livePids();
+
+    /* '/c' or cmd starts interactively and never runs the script at all. */
+    const child = spawn(process.env.ComSpec || 'cmd.exe', ['/c', launcherPath, 'code-a', 'lane7'], {
+      cwd: box,
+      /*
+       * THE FULL ENVIRONMENT WITH PATH PREPENDED, not a hand-picked subset.
+       * My first version passed only PATH, SystemRoot and AGENTBRIDGE_HOME,
+       * and the shipped launcher then found no claude at all -- cmd needs
+       * PATHEXT to resolve a bare `claude` to `claude.cmd`. The positive
+       * control caught it and said so: the harness was wrong, not the
+       * launcher. Rule 21, in the probe rather than the subject.
+       */
+      env: {
+        ...process.env,
+        PATH: `${box}${path.delimiter}${process.env.PATH ?? ''}`,
+        AGENTBRIDGE_HOME: home,
+      },
+      stdio: 'ignore',
+    });
+
+    let fresh = null;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && fresh === null) {
+      for (const pid of livePids()) if (!before.has(pid)) { fresh = pid; break; }
+      if (fresh === null) await new Promise((r) => { setTimeout(r, 100); });
+    }
+    try { child.kill(); } catch { /* already gone */ }
+    reap();
+    return fresh;
+  };
+
+  /* THE POSITIVE CONTROL FIRST (rule 5): the real launcher must be seen. */
+  const real = await launched(path.join(REPO, 'agent.cmd'));
+  assert.ok(real,
+    'the SHIPPED agent.cmd launched no observable claude process -- if this fails the '
+    + 'harness is wrong, not the launcher, and nothing below means anything');
+
+  /*
+   * THE FORGER. Writes a report naming the right id, lane and cwd, and never
+   * launches anything. This is what passed v4 eight of eight.
+   */
+  const forger = path.join(box, 'forger.cmd');
+  writeFileSync(forger, [
+    '@echo off',
+    'if "%~1"=="" ( echo usage & exit /b 2 )',
+    `> "${path.join(box, 'report.txt').replace(/\\/g, '\\\\')}" echo ID=[%~1]`,
+    'exit /b 0',
+    '',
+  ].join('\r\n'));
+
+  assert.equal(await launched(forger), null,
+    'a launcher that writes the report and never runs claude was accepted -- the process '
+    + 'table is the one channel it cannot forge, and it must not say a process existed');
 });
