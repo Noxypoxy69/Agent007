@@ -146,6 +146,21 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/reviewerPacket.mjs',
   'src/resultEnvelope.mjs',
   /*
+   * auditQueueStore ARRIVED IN THE GUARD'S CLOSURE WITHOUT ARRIVING IN THIS
+   * LIST, and the closure test is what said so -- 7fe462d added the import to
+   * scripts/claude-stop-gate.mjs, which is a guard entry point, and the Stop
+   * gate has been loading an unprotected module since. It decides which work
+   * the audit loop hands out; a session that could rewrite it could choose
+   * its own auditor, and because the binary fails to load when a dependency
+   * is missing, deleting it disables the gate outright.
+   *
+   * This is the list doing exactly what its own header says it cannot do
+   * alone -- it did not catch the import, the CLOSURE did, and the list only
+   * had to be told. That is the division of labour working: the test walks
+   * the real import graph and this list records the decision.
+   */
+  'src/auditQueueStore.mjs',
+  /*
    * THE VERIFICATION LAYER, and the gate now depends on it for its loudest
    * verdict. `verifyCache` decides whether a result may be reused, and a
    * session that could rewrite it could make the gate accept a PASS for a tree

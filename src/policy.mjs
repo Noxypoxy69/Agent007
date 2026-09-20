@@ -65,6 +65,9 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/auditJob.mjs',
   'src/reviewerPacket.mjs',
   'src/resultEnvelope.mjs',
+  /* Added with guardSession's copy: the parity gate refuses a one-sided edit,
+   * which is the whole reason two lists are survivable. */
+  'src/auditQueueStore.mjs',
   // The verification layer the Stop gate now consumes. Full reasoning in
   // guardSession.mjs. Both lists in one edit, as this file keeps asking.
   'src/verifyCache.mjs',
