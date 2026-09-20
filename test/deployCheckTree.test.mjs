@@ -101,9 +101,34 @@ test('THE 19:37 FAILURE: AN IDENTICAL TREE IS REFUSED, NOT DEPLOYED', async (t) 
     !different.reasons.includes('nothing-would-change'),
     'a tree that DOES differ was still refused as nothing-would-change',
   );
+  /*
+   * `dirty-tree` IS DROPPED FROM BOTH SIDES, AND NOT BECAUSE IT IS
+   * INCONVENIENT.
+   *
+   * The comment above says this difference holds "whatever else the gate
+   * happens to be unhappy about -- a dirty tree". It only cancels out if it
+   * is the SAME on both sides, and it is not: the two invocations each read
+   * the LIVE SHARED WORKTREE, at different moments, on a machine where
+   * several sessions commit and edit continuously. One session staging a file
+   * between the two runs produces exactly
+   *
+   *   actual   [ 'dirty-tree', 'head-not-promoted', 'live-drift-unchecked' ]
+   *   expected [ 'head-not-promoted', 'live-drift-unchecked' ]
+   *
+   * which is what an auditor measured here. It fails in the direction that
+   * looks like the DEPLOY GATE is wrong, which is the expensive kind of
+   * false red -- rule 21, a test encoding an accident of the tree it happens
+   * to be standing in.
+   *
+   * Dropping it is safe because it is not what this test is about: the
+   * property being asserted is that the ONLY difference between an identical
+   * tree and a differing one is the tree comparison itself. A reason that is
+   * a function of wall-clock worktree state cannot participate in that.
+   */
+  const stable = (rs) => rs.filter((r) => r !== 'nothing-would-change' && r !== 'dirty-tree');
   assert.deepEqual(
-    identical.reasons.filter((r) => r !== 'nothing-would-change'),
-    different.reasons,
+    stable(identical.reasons),
+    stable(different.reasons),
     'the two runs differ by something other than the tree comparison, so this proves nothing',
   );
   assert.equal(identical.ok, false, 'the gate reported ok:true while refusing');

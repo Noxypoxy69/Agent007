@@ -281,8 +281,24 @@ test('a budget too small to finish is refused rather than started', (t) => {
   assert.equal(verdict.blocked, true,
     `too little budget to verify is not a reason to approve, got: ${JSON.stringify(verdict)}`);
   assert.match(verdict.reason, /stop-deadline/, `got: ${verdict.reason}`);
-  assert.ok(verdict.elapsedMs < 5_000,
-    `it must refuse without starting a run it cannot finish (${verdict.elapsedMs}ms)`);
+  /*
+   * DERIVE "IT DID NOT START A RUN", DO NOT TIME IT.
+   *
+   * This was `elapsedMs < 5_000`, which is a fact about how fast the machine
+   * happens to be, not about the gate. It passed standalone and went red in
+   * the full suite, where node startup, hashing and discovery alone can
+   * exceed five seconds -- and it failed in the direction that looks like the
+   * gate started a run it should have refused. Rule 21: anything the author's
+   * machine supplies for free is suspect, and a clock is top of that list.
+   *
+   * The pre-suite refusal names itself, so ask the gate what it did instead
+   * of inferring it from a stopwatch. The elapsed check is kept only as a
+   * generous upper bound against the gate actually running a whole suite.
+   */
+  assert.match(verdict.reason, /a run needs to reach a TAP summary|less than the/,
+    `it must refuse WITHOUT starting a run it cannot finish, and say so: ${verdict.reason}`);
+  assert.ok(verdict.elapsedMs < 12_000,
+    `the gate ran something rather than refusing up front (${verdict.elapsedMs}ms)`);
 });
 
 test('the SMALLEST declared timeout governs, not the first one found', (t) => {
