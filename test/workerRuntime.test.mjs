@@ -554,21 +554,41 @@ test('CHECKPOINTABLE IS ASKED OF GIT: nothing committed means FAIL, never rotate
 test('THE STEP COUNT IS PER ATTEMPT, not for the life of the process', async () => {
   /*
    * A counter that accumulates across tasks holds the bar against a successor
-   * for its predecessor's work, and the second task of any long-lived worker
-   * is rotated on arrival. The fixture below never degrades, so the only way
-   * `steps` can run away is if it is counting the whole process.
+   * for its predecessor's work, so the second task of any long-lived worker is
+   * rotated on arrival.
+   *
+   * THIS NEEDS TWO TASKS, WHICH THE FIRST VERSION OF IT DID NOT HAVE. With a
+   * single never-finishing attempt, per-attempt and per-process counting
+   * produce identical numbers and the test cannot fail for the thing it
+   * claims to check -- hollow gate 9, in a test written to avoid hollow gates.
+   * It went red on a legitimate count of 27 and said so.
    */
   const seen = [];
+  let delivered = 0;
   const { deps } = world({
-    pollRun: async () => ({ done: false }),
-    observe: async (w) => { seen.push(w.observed?.steps ?? null); return {}; },
+    waitForEvents: async () => {
+      delivered += 1;
+      if (delivered > 2) return [];
+      return [{ kind: 'assigned', task_id: `t${delivered}`, lease_token: 'tok-1', at: iso(NOW0) }];
+    },
+    readTask: async (a) => ({ ...TASK, task_id: a?.task_id ?? a ?? 't1' }),
+    observe: async (w, base) => { seen.push([w.task.task_id, base.steps]); return {}; },
   });
   await run(deps, 30);
 
-  assert.ok(seen.length > 0, 'observe was never called, so this test measured nothing');
-  assert.ok(seen.every((s) => typeof s === 'number' && s >= 0),
+  const t1 = seen.filter(([id]) => id === 't1').map(([, s]) => s);
+  const t2 = seen.filter(([id]) => id === 't2').map(([, s]) => s);
+
+  /* THE PRECONDITION IS ASSERTED, NOT GUARDED ON (rule 6). Without a second
+   * attempt this test proves nothing, so it must fail rather than pass quietly. */
+  assert.ok(t1.length > 0, `the first task was never observed: ${JSON.stringify(seen)}`);
+  assert.ok(t2.length > 0, `a second attempt never ran, so this cannot distinguish anything: ${JSON.stringify(seen)}`);
+
+  assert.ok(seen.every(([, s]) => typeof s === 'number' && s >= 0),
     `steps was not a number on every cycle: ${JSON.stringify(seen)}`);
-  assert.ok(Math.max(...seen) < 30, `steps ran away to ${Math.max(...seen)} on a 30-cycle run`);
+  assert.equal(t2[0], 0, `the successor inherited ${t2[0]} steps from its predecessor`);
+  assert.ok(Math.min(...t2) <= Math.min(...t1),
+    `the second attempt started higher than the first: t1=${JSON.stringify(t1)} t2=${JSON.stringify(t2)}`);
 });
 
 test('AN UNMONITORED WORKER IS NOT STALLED, and the bar says it measured nothing', async () => {

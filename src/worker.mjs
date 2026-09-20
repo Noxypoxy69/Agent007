@@ -264,14 +264,20 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
       const startedAt = Number.isFinite(w.attemptStartedAt) ? w.attemptStartedAt : null;
       const at = Date.parse(now);
 
-      w.observed = {
+      const base = {
         steps: cycles - w.attemptCycle0,
         elapsedMs: startedAt !== null && Number.isFinite(at) ? at - startedAt : null,
         rotations: Number.isInteger(w.task.attempt) ? w.task.attempt : 0,
         /* A commit that is not the base is work this worker actually produced. */
         checkpointable: Boolean(sha) && sha !== w.task.base_sha,
-        ...((await deps.observe?.(w)) ?? {}),
       };
+      /*
+       * `observe` IS HANDED WHAT THE LOOP ALREADY MEASURED, so a supplier can
+       * see the loop's own numbers rather than re-deriving them from `w` and
+       * drifting. It overrides them because a runtime with a real step counter
+       * inside the agent process knows better than a cycle count does.
+       */
+      w.observed = { ...base, ...((await deps.observe?.(w, base)) ?? {}) };
     } else {
       w.observed = null;
       w.attemptOf = null;
