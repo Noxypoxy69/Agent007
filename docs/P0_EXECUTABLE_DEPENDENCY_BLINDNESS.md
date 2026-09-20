@@ -3,7 +3,43 @@
 **Status:** open. **Do not clear this yourself** — it changes the trust boundary
 and needs independent review.
 
-## The defect, found twice independently
+## CORRECTION, 2026-09-20: the founding instance was already fixed when this was written
+
+**The invariant below stands. The example it was built on does not.** A fourth
+blind audit (finding M10) checked the claim and it does not reproduce:
+
+    grep -an "verify-run\|verifyRunner" scripts/claude-stop-gate.mjs
+      1143:   * IMPORTED, NOT SPAWNED BY PATH. The first version ran
+      1151:   const { runVerification, killLiveShards } = await import('../src/verifyRunner.mjs');
+
+    git merge-base --is-ancestor 48e77ec 14e3f03    -> true (exit 0)
+
+`48e77ec` ("The Stop gate should not be a test runner", 2026-09-19) changed
+that spawn to an import, and it is an **ancestor of this document**. So the
+hole was closed the day before this P0 was opened.
+
+Worse than a stale fact: the section below is headed *"found twice
+independently"*, which makes **two readings of the same already-fixed code**
+look like corroboration. Two auditors agreeing is strong evidence — unless
+both read a stale state, in which case it is one error counted twice. That is
+the same defect as a cached reading agreeing with itself, and this repository
+has now produced it at both ends: an agent repeating a 09-17 conclusion
+without re-deriving it, and this document.
+
+**Why it is corrected rather than deleted.** "Trust closure follows influence,
+not merely imports" is true, and `test/guardDependenciesProtected.test.mjs`
+genuinely does derive its closure from import edges and genuinely would not
+see a spawn-by-path. The class is real and the gate is still blind to it; what
+is gone is the live instance. A reader must not act on the Reproduction
+section below expecting it to fail — it will not.
+
+**A P0 marked "do not clear this yourself" needs its instance re-measured
+before anyone spends a day on it.** Ask whether the hole is still open, not
+whether the document still says so.
+
+---
+
+## The defect as originally stated (instance now stale — see above)
 
 Two blind clone audits, from different commits, reached the same structural
 hole:
