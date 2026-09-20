@@ -23,6 +23,7 @@ import {
   isAuditBearing, parseLedger, auditCoverage, formatCoverage, AUDIT_BEARING_EXTRAS,
   auditEscalation, scriptsChanged,
   defaultAuditRange,
+  standingAudit,
 } from '../src/auditLedger.mjs';
 import { PROTECTED_PATHS } from '../src/guardSession.mjs';
 
@@ -422,4 +423,106 @@ test('A MERGE COMMIT THAT CARRIES A CONTROL IS NOT INVISIBLE', async (t) => {
   /* And it must BLOCK, not merely appear: it is decision logic, unaudited. */
   assert.ok(auditEscalation(cov, []).block,
     'a merge carrying an unaudited control must stop the turn like any other commit');
+});
+
+/* ══ two audits of one commit, and which one stands ═════════════════════ */
+
+test('THE STANDING AUDIT DOES NOT DEPEND ON THE ORDER OF THE FILE', () => {
+  /*
+   * d81e9643 carries two blind audits that disagree: an early pass reporting
+   * found:0, "no defect specific to this commit", and a later independent
+   * pass reporting found:8 with two HIGH. Both are real records and neither
+   * should be deleted.
+   *
+   * The old resolver took the first prefix match in map-insertion order, so
+   * the answer was decided by where somebody pasted a line. MEASURED on the
+   * real rows, both orders:
+   *
+   *     as written     OLD -> found:8    NEW -> found:8
+   *     rows swapped   OLD -> found:0    NEW -> found:8
+   *
+   * Moving one line past another silently turned "eight findings, two HIGH"
+   * into "no defect specific to this commit". That is not a verdict a text
+   * editor should be able to change.
+   */
+  const early = JSON.stringify({
+    commit: 'abc1234', auditor: 'first blind pass', at: '2026-01-01T00:00:00Z', found: 0,
+  });
+  const later = JSON.stringify({
+    commit: 'abc12345', auditor: 'second blind pass', at: '2026-02-01T00:00:00Z', found: 8,
+  });
+  const key = 'abc123456789abcdef0123456789abcdef012345';
+
+  for (const [label, text] of [['as written', `${early}\n${later}`], ['swapped', `${later}\n${early}`]]) {
+    const { audited } = parseLedger(text);
+    const row = standingAudit(audited, key);
+    assert.equal(row?.found, 8, `${label}: the newer audit must stand, not whichever line came first`);
+  }
+});
+
+test('AND A SUPERSEDED ROW NEVER STANDS WHILE ANOTHER DOES', () => {
+  /*
+   * The newest-wins rule alone is not enough: an audit can be retracted or
+   * replaced by one that is not newer in wall-clock terms, for instance when
+   * a transcription is corrected after the fact. An explicit marker has to
+   * beat a timestamp.
+   */
+  const superseded = JSON.stringify({
+    commit: 'def1234', auditor: 'withdrawn pass', at: '2026-03-01T00:00:00Z', found: 0,
+    superseded_by: 'the pass below',
+  });
+  const standing = JSON.stringify({
+    commit: 'def1234a', auditor: 'the pass that stands', at: '2026-02-01T00:00:00Z', found: 5,
+  });
+  const key = 'def1234abcdef0123456789abcdef0123456789a';
+
+  for (const text of [`${superseded}\n${standing}`, `${standing}\n${superseded}`]) {
+    const { audited } = parseLedger(text);
+    const row = standingAudit(audited, key);
+    assert.equal(row?.found, 5, 'the superseded row stood even though it is newer');
+  }
+
+  /* But a superseded row is still an audit if it is the only one there is. */
+  const { audited } = parseLedger(superseded);
+  assert.ok(standingAudit(audited, key), 'a lone superseded row must still count as audited');
+});
+
+test('THE SHIPPED LEDGER HAS NO UNRESOLVED CONTRADICTION', async () => {
+  /*
+   * The class, not the instance. Two live rows for one commit that disagree
+   * on the count are a contradiction a reader cannot resolve, and the gate
+   * reports one of them as the truth. Either the rows agree, or all but one
+   * says which pass replaced it.
+   *
+   * SHORT AND LONG SPELLINGS ARE THE SAME COMMIT. "d81e964" and "d81e9643"
+   * were two separate map keys, so a check that grouped by exact key would
+   * have found no contradiction at all and passed while one sat in the file.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const { audited } = parseLedger(readFileSync(path.join(repoRoot, 'docs', 'audit-ledger.jsonl'), 'utf8'));
+
+  /* Group keys that are prefixes of one another: they name the same commit. */
+  const keys = [...audited.keys()].sort((a, b) => a.length - b.length);
+  const groups = new Map();
+  for (const k of keys) {
+    const parent = [...groups.keys()].find((g) => k.startsWith(g) || g.startsWith(k));
+    if (parent) groups.get(parent).push(k);
+    else groups.set(k, [k]);
+  }
+
+  const unresolved = [];
+  for (const [head, members] of groups) {
+    if (members.length < 2) continue;
+    const live = members.map((k) => audited.get(k)).filter((r) => !r.superseded_by);
+    const counts = new Set(live.map((r) => r.found).filter((f) => f !== undefined));
+    if (counts.size > 1) {
+      unresolved.push(`${head}: ${members.join(', ')} -- live counts ${[...counts].join(' vs ')}`);
+    }
+  }
+
+  assert.deepEqual(unresolved, [],
+    'a commit has two live audits that disagree, and nothing says which one stands:\n  '
+    + unresolved.join('\n  '));
 });

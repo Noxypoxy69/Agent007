@@ -218,18 +218,51 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
     }
 
     const key = sha.trim().toLowerCase();
-    const entry = audited.get(key)
-      ?? [...audited.keys()].find((k) => k.length >= 7 && key.startsWith(k));
+    const entry = standingAudit(audited, key);
     commits.push({
       sha,
       subject: subject ?? '',
       touched,
       audited: Boolean(entry),
-      auditor: typeof entry === 'string' ? audited.get(entry)?.auditor : entry?.auditor ?? null,
+      auditor: entry?.auditor ?? null,
     });
   }
 
   return { commits, malformed, error: null };
+}
+
+/**
+ * The audit that STANDS for a commit, when more than one row matches it.
+ *
+ * TWO LIVE ROWS FOR ONE COMMIT DISAGREED, AND WHICH ONE COUNTED DEPENDED ON
+ * THE ORDER OF THE FILE. d81e9643 carried a blind audit reporting found:0
+ * and, later, a second independent blind audit reporting found:8 with two
+ * HIGH. Both are real records of real passes and neither should be deleted.
+ * But the old resolver took `audited.get(key)` and otherwise the FIRST
+ * prefix match in map-insertion order, so the standing verdict for that
+ * commit was decided by where somebody happened to paste a line -- and
+ * moving one row past the other would silently flip the gate's answer from
+ * "eight findings, two HIGH" to "no defect specific to this commit".
+ *
+ * So the rule is stated instead of inherited from the file layout:
+ *
+ *   1. a row carrying `superseded_by` never stands while another row does
+ *   2. among the rest, the newest `at` wins
+ *   3. with no `at` to compare, first match, which is the old behaviour
+ *
+ * SHORT AND LONG SPELLINGS OF THE SAME SHA ARE THE SAME COMMIT here, which
+ * they were not before: "d81e964" and "d81e9643" produced two separate map
+ * entries, so a reader looking for a contradiction would not even see one.
+ */
+export function standingAudit(audited, key) {
+  const matches = [...audited.entries()]
+    .filter(([k]) => k === key || (k.length >= 7 && key.startsWith(k)))
+    .map(([, row]) => row);
+  if (matches.length === 0) return null;
+
+  const standing = matches.filter((r) => !r.superseded_by);
+  const pool = standing.length > 0 ? standing : matches;
+  return pool.reduce((best, r) => (String(r.at ?? '') > String(best.at ?? '') ? r : best), pool[0]);
 }
 
 /**
