@@ -161,10 +161,45 @@ async function tick() {
     return true;
   }
 
+  /*
+   * A CLAIM THAT CANNOT BE WORKED MUST GO BACK.
+   *
+   * The first version let the spawn failure escape as an unhandled 'error'
+   * event: the daemon crashed and the job stayed CLAIMED with no reviewer,
+   * stranded until the lease lapsed. I had guarded exactly that for workspace
+   * allocation five lines above and not for the spawn -- the same failure, one
+   * step later. A consumer that claims work it then abandons is starvation
+   * wearing a claim, which is worse than never having claimed it.
+   */
+  const release = (why) => {
+    const back = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
+      ? { ...r, state: JOB.PENDING, claimed_by: null, claimed_at: null }
+      : r));
+    writeQueue(REPO, back);
+    say(`[audit-daemon] released ${job.audit_id} back to PENDING: ${why}`);
+  };
+
+  /*
+   * `shell: true` ON WINDOWS, because `claude` is a .cmd shim and a bare
+   * spawn cannot resolve it -- measured: spawn claude ENOENT, errno -4058.
+   * The arguments here are a path derived from a sha and a fixed sentence, so
+   * there is no caller-controlled text reaching the shell.
+   */
   const child = spawn('claude', ['-p', `Read ${briefPath} and carry it out.`], {
-    cwd: ws.dir, stdio: 'inherit', shell: false,
+    cwd: ws.dir, stdio: 'inherit', shell: process.platform === 'win32',
   });
-  await new Promise((r) => child.on('close', r));
+
+  const code = await new Promise((resolve) => {
+    child.on('error', (e) => { release(`the reviewer could not be started (${e.code ?? e.message})`); resolve(null); });
+    child.on('close', resolve);
+  });
+
+  if (code === null) return false;
+  if (code !== 0) {
+    release(`the reviewer exited ${code} without recording a verdict`);
+    return false;
+  }
+
   say(`[audit-daemon] reviewer exited for ${job.audit_id}. Record with: agentbridge audit-record --id ${job.audit_id} --verdict <PASS|FAIL>`);
   return true;
 }
