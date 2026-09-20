@@ -67,6 +67,8 @@
  * signature is exactly the thing a test must be able to lie to.
  */
 
+import { OWNER_ONLY_PREFIXES, denies } from './permissionRequest.mjs';
+
 const str = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 
 /** Whether the governor is standing on anything. */
@@ -84,24 +86,29 @@ export const VERDICT = Object.freeze({
 });
 
 /**
- * The classes of act that are the owner's and nobody else's.
+ * WHICH ACTS ARE THE OWNER'S: ASKED OF `permissionRequest`, NOT RE-LISTED.
  *
- * TAKEN FROM CLAUDE.md RATHER THAN INVENTED HERE, because a governor that
- * defines its own scope has widened it. "Production deploys, destructive
- * actions, spending, merges to main and anything a customer receives are
- * HIS, and no coordinator may approve them on his behalf."
+ * The first version of this module carried its own array and matched with
+ * `includes`. Two things wrong with that, and the second is a live bug:
+ *
+ *   A SECOND LIST. `OWNER_ONLY_PREFIXES` already exists, is already wired,
+ *   and is already what `canDecidePermission` enforces. Two lists is the pair
+ *   nobody watches when they disagree, and the one that disagrees downward is
+ *   the one an attacker uses.
+ *
+ *   EXACT MATCHING IS HOLLOW GATE 8, VERBATIM. That entry reads: "it tried
+ *   three lower-case strings. `Deploy.Production` routed to the coordinator."
+ *   `includes` is case-sensitive and whole-string, so `Deploy.Production`,
+ *   `deploy.production.eu` and `x.deploy.production` all escaped a list that
+ *   named `deploy.production`. `denies` walks prefixes AND segment suffixes,
+ *   which is why it exists.
  */
-export const OWNER_ONLY = Object.freeze([
-  'deploy.production',
-  'destructive',
-  'spend',
-  'merge.main',
-  'customer_facing',
-  /* Added because the audit showed these are self-grantable today. */
-  'grant.override',
-  'trust.genesis',
-  'authority.widen',
-]);
+export { OWNER_ONLY_PREFIXES };
+
+/** Is this act the owner's? One answer, from the module that already owns it. */
+export function isOwnerOnly(action, list = OWNER_ONLY_PREFIXES) {
+  return denies(str(action) ?? '', list);
+}
 
 /**
  * Is a proof of owner authority actually a proof?
@@ -172,8 +179,8 @@ export function govern(req = {}, ctx = {}) {
     return { verdict: VERDICT.DENY, why: 'no action was named, and a governor that permits the unnamed permits everything' };
   }
 
-  const list = Array.isArray(req.ownerOnly) ? req.ownerOnly : OWNER_ONLY;
-  const isOwnerOnly = list.includes(action);
+  const list = Array.isArray(req.ownerOnly) ? req.ownerOnly : OWNER_ONLY_PREFIXES;
+  const ownerOnly = isOwnerOnly(action, list);
   const anchor = anchorState(ctx.proof);
 
   /*
@@ -182,7 +189,7 @@ export function govern(req = {}, ctx = {}) {
    * and a layer that is off protects nothing. UNANCHORED costs escalation,
    * not operation.
    */
-  if (!isOwnerOnly) {
+  if (!ownerOnly) {
     /*
      * ...unless the ledger says otherwise. A standing owner DENY outranks
      * "this is ordinary", because that is what the ledger is for.

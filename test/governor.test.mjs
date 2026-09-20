@@ -16,7 +16,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { govern, anchorState, ANCHOR, VERDICT, OWNER_ONLY } from '../src/governor.mjs';
+import {
+  govern, anchorState, isOwnerOnly, ANCHOR, VERDICT, OWNER_ONLY_PREFIXES,
+} from '../src/governor.mjs';
 
 const REAL = { verified: true, owner: 'danny', method: 'signature' };
 
@@ -84,11 +86,46 @@ test('UNANCHORED DOES STOP EVERY OWNER-ONLY ACT, generated from the real list', 
    * covered. A hand-typed list stops covering the module the moment somebody
    * adds an entry, and nothing goes red to say so.
    */
-  assert.ok(OWNER_ONLY.length >= 5, 'the owner-only list shrank; this test is weaker than it reads');
-  for (const action of OWNER_ONLY) {
+  assert.ok(OWNER_ONLY_PREFIXES.length >= 3, 'the owner-only list shrank; this test is weaker than it reads');
+  for (const action of OWNER_ONLY_PREFIXES) {
     const r = govern({ action, actor: 'code-b' }, {});
     assert.equal(r.verdict, VERDICT.REQUIRES_OWNER, `${action} was decided without an owner anchor`);
     assert.match(r.why, /No agent can authorise this/);
+  }
+});
+
+test('THE ADVERSARIAL SPELLINGS ARE GENERATED FROM THE REAL LIST', () => {
+  /*
+   * HOLLOW GATE 8, WHICH THIS MODULE SHIPPED AND AN EXACT-MATCH `includes`
+   * WOULD STILL HAVE: "it tried three lower-case strings. `Deploy.Production`
+   * routed to the coordinator." Rule 7 says generate the hostile fixtures
+   * from the real list so adding an entry extends the coverage without
+   * anybody remembering to, and rule 8 says fix the matcher rather than the
+   * strings the prober happened to try.
+   */
+  for (const base of OWNER_ONLY_PREFIXES) {
+    const variants = [
+      base.toUpperCase(),
+      base.replace(/^./, (c) => c.toUpperCase()),
+      `${base}.eu`,
+      `${base}.something.deeper`,
+      `  ${base}  `,
+    ];
+    for (const action of variants) {
+      assert.equal(
+        govern({ action, actor: 'code-b' }, {}).verdict,
+        VERDICT.REQUIRES_OWNER,
+        `"${action}" escaped the owner-only list that names "${base}"`,
+      );
+    }
+  }
+});
+
+test('isOwnerOnly DISTINGUISHES, in both directions', () => {
+  /* Rule 5: a matcher that says yes to everything would pass the test above. */
+  assert.equal(isOwnerOnly(OWNER_ONLY_PREFIXES[0]), true);
+  for (const ordinary of ['commit', 'read', 'test.run', 'lint', '']) {
+    assert.equal(isOwnerOnly(ordinary), false, `"${ordinary}" was treated as an owner-only act`);
   }
 });
 
