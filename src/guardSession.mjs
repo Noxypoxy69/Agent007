@@ -201,6 +201,11 @@ export const PROTECTED_PATHS = Object.freeze([
   'scripts/audit-daemon.mjs',
   'scripts/diff-suite.mjs',
   'scripts/verify-run.mjs',
+  /* The hook attestation is one mechanism: protecting the hook while leaving
+   * the template or the checker writable is a control that announces its own
+   * bypass. Kept in step with src/policy.mjs. */
+  'templates/hooks/post-commit',
+  'scripts/verify-hook-integrity.mjs',
   /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing

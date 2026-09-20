@@ -21,16 +21,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isProtectedRelPath as fromGuardSession, PROTECTED_PATHS as LIST_A } from '../src/guardSession.mjs';
-import { isProtectedRelPath as fromPolicy } from '../src/policy.mjs';
+import { isProtectedRelPath as fromPolicy, PROTECTED_PATHS as LIST_B } from '../src/policy.mjs';
 
 /*
- * The corpus is built from the SHIPPED list rather than typed out, so a path
+ * The corpus is built from the SHIPPED lists rather than typed out, so a path
  * added to PROTECTED_PATHS is compared automatically instead of waiting for
  * somebody to remember this file. Rule 19: a list of names fails in both
  * directions, and a hand-typed corpus is a list of names.
+ *
+ * FROM THE UNION, AND THAT WORD IS THE WHOLE FIX. Until 2026-09-20 the corpus
+ * was derived from LIST_A alone, which makes the fixture SHRINK WITH THE BUG:
+ * delete an entry from guardSession.mjs and it leaves the corpus in the same
+ * stroke, so nothing ever asks the two implementations about it and the drift
+ * passes. Measured both directions on the hook-attestation entries --
+ * removing them from policy.mjs failed loudly with a named diff; removing the
+ * same two from guardSession.mjs was 7/7 GREEN. A parity gate blind to one of
+ * the two files it compares is hollow gate 5: the negative needs the positive,
+ * and here the positive was supplied by the side under test.
  */
+const ENTRIES = [...new Set([...LIST_A, ...LIST_B])];
+
 const CORPUS = [
-  ...LIST_A.flatMap((entry) => (entry.endsWith('/')
+  ...ENTRIES.flatMap((entry) => (entry.endsWith('/')
     ? [`${entry}settings.json`, `${entry}nested/deep/file.mjs`, entry]
     : [entry, `${entry}.bak`, `x/${entry}`])),
   // the worktree exemption and its edges
@@ -56,6 +68,28 @@ test('both protected-path implementations agree on every path in the corpus', ()
     'guardSession.mjs and policy.mjs disagree about these paths. src/verifier.mjs '
     + 'uses the policy.mjs answer, so a disagreement here is a real difference in '
     + 'what the verifier protects, not a cosmetic one.',
+  );
+});
+
+test('the corpus asks about every entry BOTH lists ship, not just one side', () => {
+  /*
+   * THE GATE ABOVE CAN ONLY SPEAK ABOUT PATHS SOMEBODY PUT IN THE CORPUS, so
+   * how the corpus is derived is part of the control and not an
+   * implementation detail. Derived from one list, it shrinks with the bug:
+   * the deletion that causes the drift also removes the probe that would
+   * catch it. This asserts the precondition instead of trusting it (rule 6).
+   *
+   * It stays GREEN while the two lists agree even under a one-sided
+   * derivation -- correctly, because there is nothing to miss then -- and
+   * goes red the moment a narrowed corpus would actually be blind. Rule 15:
+   * let a gate move rather than close.
+   */
+  const missing = [...LIST_A, ...LIST_B].filter((entry) => !CORPUS.includes(entry));
+  assert.deepEqual(
+    missing, [],
+    'these shipped protected paths are never handed to either implementation, so '
+    + 'the parity check above says nothing about them. Derive CORPUS from the '
+    + 'UNION of both lists.',
   );
 });
 

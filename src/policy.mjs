@@ -123,6 +123,17 @@ export const PROTECTED_PATHS = Object.freeze([
   'scripts/diff-suite.mjs',
   'scripts/verify-run.mjs',
   /*
+   * THE ATTESTATION IS ONLY AS STRONG AS ITS TEMPLATE AND ITS CHECKER.
+   *
+   * verify-hook-integrity.mjs compares the installed .git/hooks/post-commit
+   * against templates/hooks/post-commit. If either side were writable,
+   * tampering with BOTH passes cleanly -- so protecting only the hook would
+   * be a control that announces its own bypass. Registered together, and
+   * deliberately adjacent so a reader sees they are one mechanism.
+   */
+  'templates/hooks/post-commit',
+  'scripts/verify-hook-integrity.mjs',
+  /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing
    * a change to"; the converse was missing. src/governor.mjs is wired at
