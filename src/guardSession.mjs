@@ -177,6 +177,22 @@ export const PROTECTED_PATHS = Object.freeze([
    */
   'scripts/bridge-session-poll.mjs',
   /*
+   * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
+   * principle is "a file worth refusing a write to is a file worth auditing
+   * a change to"; the converse was missing. src/governor.mjs is wired at
+   * bin/agentbridge.mjs:3977 and src/principalResolution.mjs decides whether
+   * an identity counts as authenticated -- a session that can rewrite either
+   * does not need to defeat any of the rest of this list.
+   *
+   * src/tokenFile.mjs is deliberately NOT here. It is audit-bearing but
+   * writable, and test/claudeGuardToolDispatch.test.mjs pins that as the
+   * negative control for the root-spelling check. I added it, broke that
+   * test, and took it back out: the finding named these two, and widening
+   * past a finding is how a fix acquires a defect of its own.
+   */
+  'src/principalResolution.mjs',
+  'src/governor.mjs',
+  /*
    * THE VERIFICATION LAYER, and the gate now depends on it for its loudest
    * verdict. `verifyCache` decides whether a result may be reused, and a
    * session that could rewrite it could make the gate accept a PASS for a tree

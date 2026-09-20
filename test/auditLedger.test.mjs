@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -26,6 +27,11 @@ import {
   standingAudit,
 } from '../src/auditLedger.mjs';
 import { PROTECTED_PATHS } from '../src/guardSession.mjs';
+
+/** The repository this test file lives in, derived rather than typed. */
+function repoRootOf() {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+}
 
 function lab(t) {
   // realpath.native: tmpdir() is an 8.3 short path on Windows and git reports
@@ -624,4 +630,41 @@ test('A BARE MAP IS REFUSED RATHER THAN QUIETLY MISREAD (A-2)', () => {
   assert.ok(standingAudit(parsed, key), 'the parse result must still work');
   assert.throws(() => standingAudit(parsed.audited, key), /not its \.audited Map/,
     'passing the Map must fail loudly, not return a row derived from discarded data');
+});
+
+test('EVERY REGISTERED CONTROL NAMES A FILE THAT EXISTS', () => {
+  /*
+   * A ONE-CHARACTER TYPO SILENTLY REVERTS THE GATE TO GREEN, and an auditor
+   * measured it: renaming the entry 'src/principalresolution.mjs' to
+   * '...resolutoin.mjs' left 46 tests passing and turned
+   * check-audit-coverage from "1 commit touching a control" into
+   * "every control-touching commit in range has a ledger entry", exit 0.
+   *
+   * Nothing asked the filesystem. Both tests that iterate the list feed
+   * each entry back into the predicate that was BUILT from it, so they
+   * agree with themselves through any regression -- hollow gate #2 from the
+   * table, in the gate that decides what needs auditing.
+   *
+   * CASE IS DERIVED, NOT ASSUMED (rule 21). The registry spells entries in
+   * lower case and isAuditBearing lowercases both sides, so the spelling is
+   * correct on any filesystem -- but existsSync would answer yes on Windows
+   * and no on the ubuntu-latest CI runner for 'principalresolution.mjs'.
+   * So the comparison is against the real tracked file list, lowercased,
+   * which is the same answer on both.
+   */
+  const tracked = execFileSync('git', ['ls-files'],
+    { cwd: repoRootOf(), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    .split('\n').map((l) => l.trim().toLowerCase()).filter(Boolean);
+  const known = new Set(tracked);
+
+  assert.ok(known.size > 100,
+    `git ls-files returned ${known.size} paths, which is too few to be real`);
+
+  const ghosts = AUDIT_BEARING_EXTRAS
+    .filter((e) => !String(e).includes('#'))
+    .filter((e) => !known.has(String(e).toLowerCase()));
+
+  assert.deepEqual(ghosts, [],
+    'these are registered as controls and name no tracked file, so the gate they '
+    + `are supposed to arm is silently off for them:\n  ${ghosts.join('\n  ')}`);
 });
