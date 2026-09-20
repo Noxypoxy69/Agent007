@@ -97,6 +97,7 @@ if (decision.action === ACTION.ATTACH) {
    * dead one are different and only the heartbeat distinguishes them.
    */
   console.error(`verify: ${decision.why}`);
+  let takeOver = false;
   const deadline = Date.now() + 30 * 60_000;
   while (Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
@@ -108,12 +109,40 @@ if (decision.action === ACTION.ATTACH) {
       process.exit(EXIT[now.state] ?? 2);
     }
     if (d.action === ACTION.START) {
-      console.error(`verify: the run we attached to ${d.why}`);
-      process.exit(2);
+      /*
+       * THE HOLDER DIED, SO TAKE OVER. Giving up here was a livelock.
+       *
+       * "POLL, DO NOT SPAWN" above is about not running a SECOND CONCURRENT
+       * suite, which is the duplication that made every run miss the
+       * deadline. When the holder is dead there is no second -- there is
+       * zero, and a stale RUNNING record that the next caller will attach to
+       * exactly as this one did.
+       *
+       * Measured: the Stop gate started a run, hit its deadline, reaped its
+       * children and left the record RUNNING. An out-of-band verify attached
+       * to that corpse, correctly reported "dead rather than slow", and
+       * exited having verified nothing -- so the tree still had no result and
+       * the next attempt would repeat the whole cycle.
+       *
+       * Deciding to run is safe precisely BECAUSE the heartbeat says nobody
+       * else is: that is the one thing `decideVerify` is sure of here, and it
+       * is the same evidence the gate itself uses to start.
+       */
+      console.error(`verify: the run we attached to ${d.why}. Taking over rather than leaving this tree unverified`);
+      takeOver = true;
+      break;
     }
   }
-  console.error('verify: gave up waiting; the other run is still beating but has not finished');
-  process.exit(3);
+  /*
+   * ONLY GIVE UP WHILE THE OTHER RUN IS STILL ALIVE. A holder that is still
+   * beating after thirty minutes is a machine to look at, and starting a
+   * second suite beside it would be the duplication this design removes. A
+   * holder that DIED is the opposite case and falls through to run it.
+   */
+  if (!takeOver) {
+    console.error('verify: gave up waiting; the other run is still beating but has not finished');
+    process.exit(3);
+  }
 }
 
 if (statusOnly) {
