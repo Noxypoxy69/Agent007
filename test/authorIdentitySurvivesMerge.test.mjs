@@ -109,6 +109,34 @@ test('AN UNAVAILABLE READING NEVER OVERWRITES A MEASURED ONE, in either order', 
     'stored unavailable + computed known did not adopt the author');
 });
 
+test('D14: A LEGACY ROW WITH AN AUTHOR IS NOT OVERWRITTEN BY A FAILED LOOKUP', () => {
+  /*
+   * Fifth-lap blind audit D14. `authorStrength(undefined)` returned -1,
+   * BELOW `unavailable`'s 0 -- so a computed unavailable packet outranked a
+   * row written before `author_source` existed, and `{...was, ...job}`
+   * destroyed a real `author_session` in favour of a reading that measured
+   * nothing.
+   *
+   * Rows with no `author_source` are the pre-fix shape, so this is the
+   * migration case: it must not cost an author that was genuinely recorded.
+   */
+  const legacy = [{
+    audit_id: 'audit-1',
+    candidate_sha: SHA,
+    candidate_tree_sha: TREE,
+    state: 'PENDING',
+    author_session: 'session_01LEGACY',
+    /* deliberately NO author_source -- that is what makes it legacy */
+  }];
+  const stored = mergeQueue([], legacy, { now: 't' }).queue;
+  assert.equal(stored[0].author_session, 'session_01LEGACY');
+  assert.equal(stored[0].author_source, undefined, 'the fixture is not the legacy shape');
+
+  const after = mergeQueue(stored, withoutResolver(), { now: 't' }).queue;
+  assert.equal(after[0].author_session, 'session_01LEGACY',
+    'a caller that could not look destroyed an author a legacy row had recorded');
+});
+
 test('A POSITIVE FINDING OUTRANKS A LATER EMPTY ONE, because the commit is immutable', () => {
   /*
    * ═══ I ASSERTED THE OPPOSITE HERE FIRST, AND IT WAS WRONG ═══

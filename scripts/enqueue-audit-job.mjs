@@ -73,7 +73,39 @@ try {
    * single-commit spelling `<sha>~1..<sha>` would fail -- and failing here
    * would mean the very first commit in a repository is the one that escapes.
    */
-  const hasParent = git(['rev-parse', '--verify', '--quiet', `${commit}^`]) !== null;
+  /*
+   * ═══ AND "COULD NOT ASK" IS NOT "NO PARENT" ═══
+   *
+   * Fifth-lap blind audit D15. `git()` returns null on ANY failure, so a
+   * transient one read as "this is a root commit" and `range` became the
+   * BARE SHA -- which `auditCoverage` hands to `git log <sha>`, i.e. the
+   * entire ancestry, uncapped. One flaky call and the post-commit hook
+   * enqueues an audit demand for every commit in history.
+   *
+   * Ten lines below the fix whose message said "there is nothing left to
+   * hand-roll", in the same file. The primitive does not stay fixed by being
+   * fixed once somewhere else.
+   *
+   * `rev-parse --verify --quiet` exits 1 for "no such rev" -- which IS the
+   * root-commit answer -- and non-1 for anything else. A wrapper that
+   * flattens both to null cannot distinguish them, so this asks git directly
+   * and treats an unreadable answer as fatal: refusing to enqueue is
+   * recoverable on the next commit, flooding the queue is not.
+   */
+  let hasParent;
+  try {
+    runGit(['rev-parse', '--verify', '--quiet', `${commit}^`], { cwd: REPO });
+    hasParent = true;
+  } catch (e) {
+    if (e?.status === 1) {
+      hasParent = false;                       // genuinely a root commit
+    } else {
+      say(`[audit-queue] could not determine whether ${commit.slice(0, 8)} has a parent `
+        + `(${String(e?.stderr || e?.message || e).trim()}). No demand recorded -- that is a `
+        + 'gap, not a pass, and it is safer than enqueueing against the whole ancestry.');
+      process.exit(0);
+    }
+  }
   const range = hasParent ? `${commit}~1..${commit}` : commit;
 
   const { auditCoverage } = await import('../src/auditLedger.mjs');
