@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { readQueue, writeQueue, auditQueuePath } from '../src/auditQueueStore.mjs';
+import { auditJobsFor, mergeQueue } from '../src/auditJob.mjs';
 
 const REPO = process.cwd();
 let home;
@@ -80,6 +81,42 @@ test('A REAL CHANGE STILL LANDS, or the test above passes by writing nothing', (
 
   const one = readQueue(REPO, home).rows.find((r) => r.audit_id === 'audit-1');
   assert.equal(one.state, 'COMPLETED_PASS', 'a genuine update was swallowed');
+});
+
+test('D1: A RECOMPUTED PACKET IS NOT A CHANGED ROW -- created_at must not drift', () => {
+  /*
+   * Seventh-lap blind audit D1, MEASURED against the operator's live store:
+   * two consecutive rows byte-identical except `created_at`, and eleven
+   * whole-queue rows appended by one invocation that added and stranded
+   * nothing. `auditJobsFor` stamps a fresh timestamp into every computed
+   * packet and `mergeQueue`'s spread let it win, so every row differed from
+   * disk on every run -- the no-op filter never fired once.
+   *
+   * This is the test the filter never had: it exercised only rows built by
+   * hand, never a RECOMPUTED packet, which is the only shape production
+   * produces. Hollow gate 9 again, in the file that gates the store.
+   */
+  const coverage = {
+    commits: [{ sha: 'a'.repeat(40), subject: 's', touched: ['src/policy.mjs'], audited: false }],
+    malformed: [],
+    error: null,
+  };
+  const compute = (now) => auditJobsFor(coverage, { treeShaFor: () => '1'.repeat(40), now }).jobs;
+
+  const first = mergeQueue([], compute('2026-09-21T00:00:00Z'), { now: 'a' }).queue;
+  writeQueue(REPO, first, home);
+  const before = readFileSync(auditQueuePath(REPO, home), 'utf8');
+
+  /* The SAME candidate, recomputed a minute later. Nothing about it changed. */
+  const again = mergeQueue(first, compute('2026-09-21T00:01:00Z'), { now: 'b' }).queue;
+  assert.equal(again[0].created_at, first[0].created_at,
+    'a recomputed packet moved created_at, so every row looks changed and the '
+    + 'no-op filter can never fire');
+
+  writeQueue(REPO, again, home);
+  assert.equal(readFileSync(auditQueuePath(REPO, home), 'utf8'), before,
+    'recomputing an unchanged queue appended rows -- the store grows by the whole '
+    + 'queue on every run, and a stale producer reverts live claims');
 });
 
 test('AN UNCHANGED SNAPSHOT APPENDS NOTHING, so the file stops growing per commit', () => {

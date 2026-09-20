@@ -500,7 +500,8 @@ async function tick() {
    *
    * Fourth-lap blind audit M12. With `shell: true` Node joins the file and
    * args with spaces and applies NO quoting -- that is documented -- and
-   * `os.tmpdir()` here is under `C:\Users\DANNY GARCIA\...`. So the reviewer
+   * `os.tmpdir()` on this machine sits under a home directory whose name
+   * CONTAINS A SPACE. So the reviewer
    * received the prompt split across roughly eight tokens with the path
    * broken in the middle, could not open the brief, produced no verdict
    * marker, and the job was released. The brief is what carries the
