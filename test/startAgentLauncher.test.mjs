@@ -37,7 +37,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawnSync, spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync, existsSync, linkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -389,11 +389,39 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
 
     const seen = /CWD=\[([^\]]*)\]/.exec(said);
     assert.ok(seen, `the stub reported no cwd. Report was:\n${said}`);
+
+    /*
+     * THE PROPERTY IS "somewhere that loads the guard", NOT "the repo root",
+     * and this assertion said the second for a while after it stopped being
+     * true. 224c1b8 gave every agent its own worktree and agent.cmd now ends
+     * with `cd /d "%AGENT_WT%"`, so claude legitimately starts in
+     * <home>/wt-code-a. The test kept comparing against REPO and had been
+     * red ever since -- a stale assertion, not a regression in the launcher.
+     *
+     * Its own message says what it cares about: ".claude/settings.json, and
+     * therefore the guard, the Stop gate and the poll hook". A git worktree
+     * carries that file, so the thing to check is that the file is THERE,
+     * which is true of the repo root and of any worktree of it and false of
+     * the home directory -- the case that actually caused the outage.
+     */
+    const startedIn = realpathSync.native(seen[1]);
+    assert.ok(existsSync(path.join(startedIn, '.claude', 'settings.json')),
+      'claude started somewhere that carries no .claude/settings.json, so it loads no guard, '
+      + `no Stop gate and no poll hook. Started in: ${startedIn}`);
+
+    /*
+     * And it must be the repository or a worktree of it, not merely any
+     * directory that happens to have a .claude -- otherwise the check above
+     * could be satisfied by a decoy.
+     */
+    const gitCommon = execFileSync('git', ['rev-parse', '--git-common-dir'],
+      { cwd: startedIn, encoding: 'utf8' }).trim();
+    const repoCommon = execFileSync('git', ['rev-parse', '--git-common-dir'],
+      { cwd: REPO, encoding: 'utf8' }).trim();
     assert.equal(
-      realpathSync.native(seen[1]).toLowerCase(),
-      realpathSync.native(REPO).toLowerCase(),
-      'claude must start IN THE REPOSITORY, or it loads no .claude/settings.json and '
-      + `therefore no guard, no Stop gate and no poll hook. Started in: ${seen[1]}`,
+      realpathSync.native(path.resolve(startedIn, gitCommon)).toLowerCase(),
+      realpathSync.native(path.resolve(REPO, repoCommon)).toLowerCase(),
+      `claude started outside this repository and its worktrees: ${startedIn}`,
     );
 
     /*
