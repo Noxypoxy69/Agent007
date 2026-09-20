@@ -49,7 +49,6 @@
  * a payload in a carriage return.
  */
 import { readFileSync, statSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -127,20 +126,27 @@ function hookPath() {
  * permanent blind spot, and `ok: true` meant "the file I chose to look at is
  * unchanged" while git ran something else.
  *
- * ASKED WITHOUT THE HARDENING, deliberately. `runGit` injects
- * `-c core.hooksPath=/dev/null`, which would mask the very setting being
- * looked for -- so this reads the CONFIG rather than the resolved path, and
- * `--local --get` cannot execute anything. A global or system setting is
- * caught too, because `hooks/pre-commit` in this repository tells readers to
- * run `git config --global core.hooksPath ~/.githooks`: the repo documents
- * the step that disarms its own attestation.
+ * ═══ WHY AN EXPLICIT SCOPE, AND WHY runGit IS STILL SAFE HERE ═══
+ *
+ * `runGit` hardens every call with `-c core.hooksPath=/dev/null`, so the
+ * obvious `git config --get core.hooksPath` would read back the OVERRIDE and
+ * report `/dev/null` on a machine with no setting at all -- the same trap
+ * that made `--git-path` answer `/dev/null/post-commit`, one command along.
+ *
+ * `--local`, `--global` and `--system` each read one config FILE and ignore
+ * the command-line scope `-c` writes to. So the hardening cannot mask the
+ * answer, and there is no reason to reach around `runGit` -- my first version
+ * of this used a bare `execFileSync` and the safeGit scan caught it, which is
+ * that gate doing precisely its job.
+ *
+ * All three scopes, because `hooks/pre-commit` in this repository tells
+ * readers to run `git config --global core.hooksPath ~/.githooks` -- the repo
+ * documents the step that disarms its own attestation.
  */
 function hooksPathOverride() {
   for (const scope of ['--local', '--global', '--system']) {
     try {
-      const v = String(execFileSync('git', ['config', scope, '--get', 'core.hooksPath'], {
-        cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-      })).trim();
+      const v = String(runGit(['config', scope, '--get', 'core.hooksPath'], { cwd: REPO })).trim();
       if (v) return { scope: scope.replace('--', ''), value: v };
     } catch { /* unset in this scope: git exits 1, which is the common case */ }
   }
