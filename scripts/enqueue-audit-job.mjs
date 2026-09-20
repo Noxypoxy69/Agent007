@@ -77,7 +77,7 @@ try {
   const range = hasParent ? `${commit}~1..${commit}` : commit;
 
   const { auditCoverage } = await import('../src/auditLedger.mjs');
-  const { auditJobsFor, mergeQueue } = await import('../src/auditJob.mjs');
+  const { auditJobsFor, mergeQueue, authorSessionFrom } = await import('../src/auditJob.mjs');
   const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
 
   let ledgerText = '';
@@ -93,6 +93,20 @@ try {
 
   const computed = auditJobsFor(coverage, {
     treeShaFor: (c) => flag('--tree') ?? git(['rev-parse', `${c}^{tree}`]),
+    /*
+     * THE PRIMARY PRODUCER RESOLVES THE AUTHOR, and it is the one that most
+     * needs to. Second-lap blind audit D-1: the resolver landed on
+     * bin/agentbridge.mjs alone, while the three callers that actually WRITE
+     * the queue had none -- so every row in the store carried a null author
+     * and both consumers of the author exclusion went on reading nothing.
+     *
+     * This hook runs on every commit, so it is where a job first enters the
+     * queue and the only place the trailer is guaranteed fresh.
+     *
+     * %B, not %s: the trailer is in the BODY, and asking for the subject
+     * resolves every author to null while looking like it asked.
+     */
+    authorSessionFor: (c) => authorSessionFrom(git(['log', '-1', '--format=%B', c]) ?? ''),
     now: new Date().toISOString(),
   });
   if (computed.error) {
