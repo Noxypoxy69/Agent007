@@ -27,7 +27,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { rmSync } from 'node:fs';
+import { rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -90,7 +90,16 @@ test('EVERY NON-INTEGER EXIT CODE IS A FAILURE, not just null', () => {
  * cancellation. A fixture that cannot reach the branch cannot fail for it.
  */
 async function slowRepo() {
-  const dir = await mkdtemp(path.join(tmpdir(), 'verify-cancel-'));
+  /*
+   * REAL PATH, NOT THE 8.3 ALIAS. `mkdtemp(tmpdir())` hands back
+   * `C:\Users\DANNYG~1\...` on this machine, and the shard glob matched
+   * NOTHING under it -- two shards, exit 0, zero tests -- while the identical
+   * invocation works in the long-named repository. That is rule 21 exactly: an
+   * accident of the machine the test was written on, and the same instinct
+   * that put `realpathSync.native` in the resolver fixes it here. Ask the OS
+   * what the path really is rather than trusting what it handed you.
+   */
+  const dir = realpathSync.native(await mkdtemp(path.join(tmpdir(), 'verify-cancel-')));
   /*
    * A SUBDIRECTORY, BECAUSE THE SHARD GLOB IS `test/**` + `/*.test.mjs`.
    * Files placed directly in `test/` matched nothing here: both shards exited
