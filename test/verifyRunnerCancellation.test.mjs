@@ -100,13 +100,22 @@ async function slowRepo() {
    * there was nothing to kill and the assertion measured nothing.
    */
   await mkdir(path.join(dir, 'test', 'sub'), { recursive: true });
+  await writeFile(path.join(dir, 'package.json'), '{"name":"cancel-fixture","private":true,"type":"module"}\n');
+  const body = (n) => "import test from 'node:test';\n"
+    + `test('slow-${n}', async () => { await new Promise((r) => setTimeout(r, 120000)); });\n`;
   for (const n of ['a', 'b']) {
+    /*
+     * BOTH PLACES ON PURPOSE. `countTestFiles` reads only the TOP LEVEL of
+     * `test/`, while the shard argument globs `test/**` + `/*.test.mjs`. Put
+     * the files in one place and the other half sees nothing: top-level only
+     * gave two shards running zero tests, and `sub/` only made the file count
+     * zero and collapsed the plan to a single shard. That mismatch between the
+     * counter and the glob is itself worth a look in production.
+     */
     // eslint-disable-next-line no-await-in-loop
-    await writeFile(
-      path.join(dir, 'test', 'sub', `slow-${n}.test.mjs`),
-      "import test from 'node:test';\n"
-      + `test('slow-${n}', async () => { await new Promise((r) => setTimeout(r, 120000)); });\n`,
-    );
+    await writeFile(path.join(dir, 'test', `slow-${n}.test.mjs`), body(n));
+    // eslint-disable-next-line no-await-in-loop
+    await writeFile(path.join(dir, 'test', 'sub', `slow-${n}.test.mjs`), body(`sub-${n}`));
   }
   return dir;
 }
