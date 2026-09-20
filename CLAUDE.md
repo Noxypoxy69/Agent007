@@ -424,9 +424,9 @@ by node rather than judged by the rail, so an untracked file matching it runs
 without even the commit. That one is still worth closing, and the two options
 above still stand.
 
-**THREE SOURCE FILES ARE INVISIBLE TO `grep`, AND THE THIRD IS `src/guardSession.mjs`.**
-`src/deployGate.mjs`, `src/auditRange.mjs` and — measured 2026-09-20 —
-`src/guardSession.mjs` contain literal NUL bytes: real `\x00` characters, not
+**FOUR SOURCE FILES ARE INVISIBLE TO `grep`. DO NOT TRUST THIS COUNT EITHER.**
+`src/deployGate.mjs`, `src/auditRange.mjs` and — both measured 2026-09-20 —
+`src/guardSession.mjs` and `src/auditJob.mjs` contain literal NUL bytes: real `\x00` characters, not
 the escape, used deliberately as length framing in a digest
 (`${path}\x00${len}\x00${body}\x00`). That is correct and must stay; without the
 framing, two different file lists can hash the same. In `guardSession.mjs` it is
@@ -439,10 +439,21 @@ file as binary and **suppresses the matching lines**:
     Binary file src/guardSession.mjs matches
     src/policy.mjs:25:export const PROTECTED_PATHS = Object.freeze([
 
-So any repo-wide audit built on grep has a **three**-file blind spot, and the
-new member is the guard's central module — the one an audit is most likely to
-be sweeping. Found while checking that two `PROTECTED_PATHS` lists agreed.
-`grep -a` works, and so does the `Grep` tool, which is ripgrep.
+So any repo-wide audit built on grep has a **four**-file blind spot, and the
+new members are the guard's central module and the audit queue — the two files
+an audit is most likely to be sweeping. `grep -a` works, and so does the `Grep`
+tool, which is ripgrep, and ripgrep is the only one that *names the offset*:
+`binary file matches (found "\0" byte around offset 4050)`.
+
+**THE COUNT WENT 2 → 3 → 4 IN ONE AFTERNOON, AND THAT IS THE ACTUAL LESSON.**
+The third was found by accident while checking that two `PROTECTED_PATHS` lists
+agreed; the fourth an hour later, while reading the audit queue for something
+unrelated. Nobody has ever enumerated these deliberately — each one has been a
+by-product of looking at something else, so **the list is a record of where
+people happened to look, not of where the NUL bytes are.** Treat any number
+here as a floor. The framing idiom is spreading because it is the right answer
+for digests, which means this keeps happening; if you need a real answer, scan
+the bytes rather than reading this sentence.
 
 **Two claims in the previous version of this paragraph did not reproduce, and
 both erred toward complacency.** `grep -l` **does** list the file — it is the
