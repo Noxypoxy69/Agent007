@@ -251,6 +251,40 @@ export function parseLedger(text) {
      * compared. The Map stays for the callers that want one row per commit;
      * `rows` is the actual record.
      */
+    /*
+     * AN `owner_waiver: true` ROW IS A WAIVER WEARING AN AUDIT ROW'S SHAPE.
+     *
+     * Eight of these were already on disk when the structural waiver above
+     * was built, written by code-a on 2026-09-20 -- and written CAREFULLY:
+     * every one carries `owner_waiver: true`, an `auditor` reading
+     * "OWNER WAIVER (Danny) -- NOT AN AUDIT", and a note saying in full that
+     * no auditor examined the commit.
+     *
+     * The rows were honest. THE PARSER WAS NOT LISTENING. It required
+     * `commit` and `auditor`, both present, so each row landed in `audited`,
+     * and `audited: Boolean(entry)` meant eight commits reported as reviewed
+     * that nobody had read. The disclaimer was addressed to a human and every
+     * consumer saw a clearance -- which is exactly the failure the new
+     * `owner_bootstrap_waiver` type was introduced to avoid, already live in
+     * the file, in a shape nobody had checked.
+     *
+     * So the fix is here rather than in the rows: honour the field the author
+     * took the trouble to write. It is the same treatment the typed waiver
+     * gets -- suppresses the block, never sets `audited` -- so both spellings
+     * mean one thing and neither can be mistaken for a review.
+     */
+    if (row.owner_waiver === true) {
+      waived.add(row.commit.trim().toLowerCase());
+      waivers.push({
+        type: 'owner_waiver_row',
+        commits: [row.commit.trim().toLowerCase()],
+        audit_performed: false,
+        grants_audit_pass: false,
+        reason: typeof row.note === 'string' ? row.note : 'owner waiver row',
+      });
+      continue;
+    }
+
     rows.push(row);
     audited.set(row.commit.trim().toLowerCase(), row);
   }

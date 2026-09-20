@@ -164,6 +164,52 @@ test('SHORT AND LONG SPELLINGS MATCH, because the ledger uses both', () => {
   assert.equal(isWaived(long, ''), false, 'an empty sha matched a waiver by prefix');
 });
 
+test('AN owner_waiver:true ROW IS A WAIVER, NOT AN AUDIT -- the eight already on disk', () => {
+  /*
+   * These were written before the typed waiver existed, and written well:
+   * owner_waiver:true, an auditor string saying NOT AN AUDIT, and a note
+   * stating that nobody examined the commit. The parser ignored all of it,
+   * filed them under `audited`, and eight commits reported as reviewed.
+   *
+   * The rows were honest; the parser was not listening. This pins that it
+   * now does.
+   */
+  const line = JSON.stringify({
+    commit: '6b33d7d2',
+    auditor: 'OWNER WAIVER (Danny) -- NOT AN AUDIT',
+    owner_waiver: true,
+    note: 'no auditor examined this commit',
+  });
+  const led = parseLedger(line);
+
+  assert.equal(led.audited.size, 0,
+    'an owner_waiver row is still counted as an audit, so the commit reports as reviewed');
+  assert.equal(led.rows.length, 0, 'it was kept as an ordinary audit row');
+  assert.equal(led.malformed.length, 0, 'a well-formed owner_waiver row was rejected outright');
+  assert.equal(isWaived(led, '6b33d7d2'), true, 'it suppresses nothing, so the gate still blocks');
+
+  /*
+   * THE POSITIVE BESIDE IT (rule 5): an ordinary audit row on the same shape
+   * must still register, or this test passes because nothing registers.
+   */
+  const real = parseLedger(JSON.stringify({ commit: 'abc1234', auditor: 'somebody-else' }));
+  assert.equal(real.audited.size, 1, 'an ordinary audit row stopped counting as an audit');
+  assert.equal(isWaived(real, 'abc1234'), false, 'an ordinary audit row was treated as a waiver');
+});
+
+test('owner_waiver MUST BE EXACTLY true, not merely truthy', () => {
+  /*
+   * `"owner_waiver": "no"` is truthy. A loose check would turn a row whose
+   * author was saying the OPPOSITE into a waiver -- and the rows this feature
+   * exists for are hand-written, which is where that typo lives.
+   */
+  for (const v of ['no', 'false', 1, {}, 'true']) {
+    const led = parseLedger(JSON.stringify({ commit: 'abc1234', auditor: 'x', owner_waiver: v }));
+    assert.equal(led.waived.size, 0, `owner_waiver:${JSON.stringify(v)} granted a waiver`);
+    assert.equal(led.audited.size, 1, `owner_waiver:${JSON.stringify(v)} lost the audit row entirely`);
+  }
+});
+
 test('THE REAL LEDGER CARRIES EXACTLY ONE WAIVER, and it grants no pass', () => {
   /*
    * Rule 17: the shipped file is a separate claim from the parser. A waiver
@@ -173,9 +219,25 @@ test('THE REAL LEDGER CARRIES EXACTLY ONE WAIVER, and it grants no pass', () => 
   const text = readFileSync(new URL('../docs/audit-ledger.jsonl', import.meta.url), 'utf8');
   const led = parseLedger(text);
 
-  assert.equal(led.waivers.length, 1,
-    `expected exactly one owner waiver on disk, found ${led.waivers.length}`);
-  const w = led.waivers[0];
+  /*
+   * ONE TYPED waiver plus the eight owner_waiver ROWS that predate it. The
+   * count is asserted rather than the shape alone, because the number is the
+   * thing that silently drifts -- and a ninth appearing unnoticed is how a
+   * waiver stops being an exception and becomes the default.
+   */
+  const typed = led.waivers.filter((w) => w.type === WAIVER_TYPE);
+  const rowForm = led.waivers.filter((w) => w.type === 'owner_waiver_row');
+  assert.equal(typed.length, 1,
+    `expected exactly one TYPED owner waiver on disk, found ${typed.length}`);
+  assert.equal(rowForm.length, 8,
+    `expected the eight pre-existing owner_waiver rows, found ${rowForm.length}`);
+
+  for (const w of led.waivers) {
+    assert.equal(w.audit_performed, false, 'a waiver on disk claims an audit was performed');
+    assert.equal(w.grants_audit_pass, false, 'a waiver on disk claims to grant a pass');
+  }
+
+  const w = typed[0];
   assert.equal(w.audit_performed, false);
   assert.equal(w.grants_audit_pass, false);
   assert.equal(w.commits.length, 14, 'the waiver no longer names the fourteen escaped commits');
