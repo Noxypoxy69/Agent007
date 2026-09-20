@@ -165,17 +165,21 @@ function brief(job, dir) {
     'REPORT: defects ranked by severity, each with the command that demonstrates it; SEPARATELY the',
     'claims you checked and found TRUE; and what you could not check and why.',
     '',
-    'THEN WRITE YOUR VERDICT AS A FILE, because prose cannot be read by a machine without',
-    'guessing, and a guess that lands on PASS is a forged clearance:',
+    'THEN END YOUR OUTPUT WITH THIS EXACT BLOCK, on its own lines. Print it to stdout -- do NOT',
+    'try to write a file: the first reviewer to run this could not write anywhere in the worktree',
+    '(the permission layer refuses it), produced a FAIL, and the verdict was LOST because the brief',
+    'had asked for a file. Its words: "The verdict is FAIL and the JSON content is ready to land the',
+    'moment someone can write it." Stdout is the channel you actually have.',
     '',
-    `  ${path.join(dir, '.audit', 'VERDICT.json')}`,
-    '',
+    '  <<<AGENT007_VERDICT',
     '  {"verdict":"PASS"|"FAIL","findings":["short line each"],"checked_true":["short line each"],',
     '   "could_not_check":["short line each"]}',
+    '  AGENT007_VERDICT>>>',
     '',
-    'PASS means you tried to break it and could not. FAIL means you found a defect. If you could not',
-    'establish either, write no file at all -- absence is read as "nothing was proved", which is the',
-    'honest answer and is never treated as a pass.',
+    'The markers matter: they are how a machine reads this without guessing at prose, and a guess',
+    'that landed on PASS would be a forged clearance. PASS means you tried to break it and could',
+    'not. FAIL means you found a defect. If you established neither, emit no block -- absence reads',
+    'as "nothing was proved", which is honest and is never treated as a pass.',
   ].join('\n');
 }
 
@@ -239,9 +243,18 @@ async function tick() {
    * The arguments here are a path derived from a sha and a fixed sentence, so
    * there is no caller-controlled text reaching the shell.
    */
+  /*
+   * STDOUT IS CAPTURED AS WELL AS SHOWN, because the verdict arrives on it.
+   * `stdio: 'inherit'` alone gave the operator the transcript and gave this
+   * process nothing to read -- which is how the first reviewer's FAIL was
+   * lost.
+   */
+  let transcript = '';
   const child = spawn('claude', ['-p', `Read ${briefPath} and carry it out.`], {
-    cwd: ws.dir, stdio: 'inherit', shell: process.platform === 'win32',
+    cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32',
   });
+  child.stdout?.on('data', (d) => { transcript += d; process.stdout.write(d); });
+  child.stderr?.on('data', (d) => { transcript += d; process.stderr.write(d); });
 
   const code = await new Promise((resolve) => {
     child.on('error', (e) => { release(`the reviewer could not be started (${e.code ?? e.message})`); resolve(null); });
@@ -269,12 +282,22 @@ async function tick() {
    * and as `measured: false` on the hold bar.
    */
   let verdict = null;
-  try {
-    const raw = readFileSync(path.join(briefDir, 'VERDICT.json'), 'utf8');
-    const parsed = JSON.parse(raw);
-    const v = typeof parsed?.verdict === 'string' ? parsed.verdict.trim().toUpperCase() : null;
-    if (v === 'PASS' || v === 'FAIL') verdict = { ...parsed, verdict: v };
-  } catch { verdict = null; }
+  const marked = /<<<AGENT007_VERDICT([\s\S]*?)AGENT007_VERDICT>>>/.exec(transcript);
+  if (marked) {
+    try {
+      const parsed = JSON.parse(marked[1].trim());
+      const v = typeof parsed?.verdict === 'string' ? parsed.verdict.trim().toUpperCase() : null;
+      if (v === 'PASS' || v === 'FAIL') verdict = { ...parsed, verdict: v };
+    } catch { verdict = null; }
+  }
+  /* The file remains a fallback for a reviewer that CAN write one. */
+  if (!verdict) {
+    try {
+      const parsed = JSON.parse(readFileSync(path.join(briefDir, 'VERDICT.json'), 'utf8'));
+      const v = typeof parsed?.verdict === 'string' ? parsed.verdict.trim().toUpperCase() : null;
+      if (v === 'PASS' || v === 'FAIL') verdict = { ...parsed, verdict: v };
+    } catch { verdict = null; }
+  }
 
   if (!verdict) {
     release('the reviewer recorded no readable verdict, so nothing was proved');
