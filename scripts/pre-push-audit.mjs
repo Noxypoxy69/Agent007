@@ -131,8 +131,24 @@ try {
       continue;
     }
 
-    const jobs = auditJobsFor(coverage, { treeShaFor, now });
-    audited += (coverage.commits?.length ?? 0) - jobs.length;
+    /*
+     * `auditJobsFor` RETURNS A RESULT OBJECT, NOT AN ARRAY -- deliberately, so
+     * an unmeasurable candidate is reported rather than silently absent. I
+     * wrote that module and still called it as an array here; a single test
+     * run said "jobs is not iterable" before this shipped.
+     */
+    const computed = auditJobsFor(coverage, { treeShaFor, now });
+    if (computed.error) {
+      say(`[agentbridge:prepush] could not compute audit jobs for ${r.spec}: ${computed.error}.`
+        + ' That is a gap, not a pass.');
+      continue;
+    }
+    const jobs = computed.jobs ?? [];
+    for (const u of computed.unmeasurable ?? []) {
+      say(`[agentbridge:prepush] unmeasurable candidate ${String(u.candidate_sha ?? u).slice(0, 8)}:`
+        + ' no audit demand could be keyed to it.');
+    }
+    audited += Math.max(0, (coverage.commits?.length ?? 0) - jobs.length);
     if (jobs.length === 0) continue;
 
     const merged = mergeQueue(readQueue(REPO).rows, jobs, { now });
