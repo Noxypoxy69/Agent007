@@ -177,7 +177,7 @@ test('AN UNSIGNED "decided_by" DOES NOT MATCH BY BEING ABSENT', () => {
    */
   for (const decided_by of [undefined, null, '', '   ']) {
     const r = govern(
-      { action: 'spend', actor: 'x' },
+      { action: 'spend.aws', actor: 'x' },
       { proof: REAL, decision: { effect: 'allow', decided_by } },
     );
     assert.equal(r.verdict, VERDICT.REQUIRES_OWNER, `an allow with decided_by=${JSON.stringify(decided_by)} passed`);
@@ -185,7 +185,7 @@ test('AN UNSIGNED "decided_by" DOES NOT MATCH BY BEING ABSENT', () => {
 });
 
 test('ANCHORED WITH NO DECISION IS STILL THE OWNER\'S CALL', () => {
-  const r = govern({ action: 'destructive', actor: 'code-b' }, { proof: REAL });
+  const r = govern({ action: 'delete.bucket', actor: 'code-b' }, { proof: REAL });
   assert.equal(r.verdict, VERDICT.REQUIRES_OWNER);
   assert.match(r.why, /no decision covers it/);
 });
