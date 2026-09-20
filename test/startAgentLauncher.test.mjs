@@ -706,7 +706,31 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    * cannot collide with any other node on this machine (rule 21).
    */
   const image = `claudeproc_${Math.random().toString(36).slice(2, 8)}.exe`;
-  const imagePath = path.join(box, image);
+
+  /*
+   * THE IMAGE LIVES OUTSIDE THE LAUNCHER'S REACH, and the version that put
+   * it in `box` handed the subject the answer. `box` is both the cwd and
+   * the head of PATH, so a launcher that wanted to pass without running
+   * claude could have globbed `claudeproc_*.exe` beside itself and started
+   * it. The random name was doing all the work, and a random name is not a
+   * boundary -- it is an obscurity.
+   *
+   * Now claude.cmd is the only thing in `box`, and it names the image by an
+   * absolute path in a directory that is neither the cwd nor on PATH.
+   *
+   * WHAT THIS STILL DOES NOT BOUND, stated rather than left for the next
+   * auditor: a launcher can READ claude.cmd -- it has to be readable to be
+   * runnable -- and start the image itself. That is not a hole in the
+   * property being tested. The claim here is "this launcher started a
+   * process rather than only writing a file about one", and a launcher that
+   * reads the path and starts the image has done exactly that. No test can
+   * distinguish launching a program from launching that same program by
+   * another route, and pretending otherwise is how the report-based version
+   * of this gate came to be believed.
+   */
+  const vault = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-img-'));
+  t.after(() => rmSync(vault, { recursive: true, force: true }));
+  const imagePath = path.join(vault, image);
   try { linkSync(process.execPath, imagePath); } catch { cpSync(process.execPath, imagePath); }
 
   /* The stub holds itself alive so the observation is deterministic, not a race. */
@@ -716,16 +740,54 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
   const ps = (script) => spawnSync('powershell', ['-NoProfile', '-Command', script],
     { encoding: 'utf8', timeout: 30_000, windowsHide: true });
 
-  const livePids = () => new Set(
-    String(ps(`Get-CimInstance Win32_Process -Filter "Name='${image}'" | ForEach-Object { $_.ProcessId }`).stdout ?? '')
-      .trim().split('\n').map((s) => Number(s.trim())).filter(Number.isInteger),
-  );
+  /** Every live stub process, WITH its parent, so descent can be checked. */
+  const livePids = () => {
+    const out = String(ps(`Get-CimInstance Win32_Process -Filter "Name='${image}'" `
+      + '| ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId)" }').stdout ?? '');
+    const map = new Map();
+    for (const line of out.trim().split('\n')) {
+      const [pid, ppid] = line.trim().split(',').map((n) => Number(n));
+      if (Number.isInteger(pid)) map.set(pid, Number.isInteger(ppid) ? ppid : null);
+    }
+    return map;
+  };
+
+  /** The whole process table's parent links, for walking an ancestry chain. */
+  const parents = () => {
+    const out = String(ps('Get-CimInstance Win32_Process '
+      + '| ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId)" }').stdout ?? '');
+    const map = new Map();
+    for (const line of out.trim().split('\n')) {
+      const [pid, ppid] = line.trim().split(',').map((n) => Number(n));
+      if (Number.isInteger(pid)) map.set(pid, ppid);
+    }
+    return map;
+  };
+
+  /**
+   * Does `pid` descend from `root`?
+   *
+   * A FRESH PID IS NOT ENOUGH ON ITS OWN. "No stub process existed before
+   * and one exists now" is a claim about the whole machine, and anything
+   * else starting that image inside the window -- a parallel run of this
+   * same file, a leftover from a reaped run -- satisfies it. The question
+   * the gate means to ask is whether THIS launcher started it, and only the
+   * parent chain answers that.
+   */
+  const descendsFrom = (pid, root, links) => {
+    let cur = pid;
+    for (let hops = 0; hops < 24 && Number.isInteger(cur) && cur > 0; hops += 1) {
+      if (cur === root) return true;
+      cur = links.get(cur);
+    }
+    return false;
+  };
   const reap = () => ps(`Get-Process -Name '${image.replace(/\.exe$/, '')}' -ErrorAction SilentlyContinue `
     + '| Stop-Process -Force');
   t.after(reap);
 
   /** Spawn a launcher and answer one question: did a NEW claude appear? */
-  const launched = async (launcherPath) => {
+  const launched = async (launcherPath, afterSpawn = null) => {
     reap();
     await new Promise((r) => { setTimeout(r, 250); });
     const before = livePids();
@@ -749,20 +811,80 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
       stdio: 'ignore',
     });
 
+    /*
+     * A FIXED 15s DEADLINE WAS A RACE, AND IT FAILED IN THE EXPENSIVE
+     * DIRECTION. Reaching it meant "no process appeared", which on a loaded
+     * machine is also what "the machine was slow" looks like -- so the
+     * SHIPPED launcher could be reported as launching nothing, and a red
+     * gate on an innocent subject is the one people switch off (rule 16).
+     *
+     * The negative does not need a timer at all. A launcher that starts
+     * nothing EXITS, and once it has exited and the table has settled,
+     * absence is a fact rather than a deadline: there is no longer anything
+     * running that could start a process. A launcher that started something
+     * is still running, holding its child, and gets waited on.
+     *
+     * So the loop ends on one of three conditions, and only the last is a
+     * timer -- a generous backstop against a wedged launcher, not the
+     * measurement:
+     *
+     *   1. a descendant stub process appeared            -> launched
+     *   2. the launcher exited, plus a settle sample     -> did not launch
+     *   3. 120s                                          -> inconclusive, and said so
+     */
+    /*
+     * THE EXIT LISTENER GOES ON FIRST, BEFORE ANY await. I attached it after
+     * the hook below and a launcher that exits during that await fired its
+     * 'exit' before anything was listening -- so `exited` stayed false, the
+     * loop ran to the 120s backstop, and the case took three minutes and
+     * still passed. `child.exitCode` is read as well as the event, because
+     * a flag that can be missed is not a fact.
+     */
+    let exitSeen = false;
+    child.on('exit', () => { exitSeen = true; });
+    const hasExited = () => exitSeen || child.exitCode !== null || child.signalCode !== null;
+
+    /*
+     * ANYTHING THE CASE NEEDS TO HAPPEN INSIDE THE WINDOW GOES HERE, not
+     * before the call. The first version of the stranger case below started
+     * its process before `launched` ran, and `reap()` on the first line
+     * killed it -- so the case passed with the descent check REMOVED, which
+     * is how I found out it was testing nothing.
+     */
+    if (afterSpawn) await afterSpawn(child);
+
     let fresh = null;
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline && fresh === null) {
-      for (const pid of livePids()) if (!before.has(pid)) { fresh = pid; break; }
-      if (fresh === null) await new Promise((r) => { setTimeout(r, 100); });
+    let exitedAt = null;
+    let timedOut = false;
+    const backstop = Date.now() + 120_000;
+
+    for (;;) {
+      const live = livePids();
+      const candidates = [...live.keys()].filter((pid) => !before.has(pid));
+      if (candidates.length > 0) {
+        const links = parents();
+        /* Prefer a descendant; a stranger's process is not this launcher's. */
+        fresh = candidates.find((pid) => descendsFrom(pid, child.pid, links)) ?? null;
+        if (fresh !== null) break;
+      }
+      if (hasExited() && exitedAt === null) exitedAt = Date.now();
+      /* One settle window after exit: a process it started is visible by now. */
+      if (exitedAt !== null && Date.now() - exitedAt > 1500) break;
+      if (Date.now() > backstop) { timedOut = true; break; }
+      await new Promise((r) => { setTimeout(r, 100); });
     }
+
     try { child.kill(); } catch { /* already gone */ }
     reap();
-    return fresh;
+    return { pid: fresh, timedOut, exited: hasExited() };
   };
 
   /* THE POSITIVE CONTROL FIRST (rule 5): the real launcher must be seen. */
   const real = await launched(path.join(REPO, 'agent.cmd'));
-  assert.ok(real,
+  assert.equal(real.timedOut, false,
+    'the probe hit its 120s backstop on the shipped launcher -- that is inconclusive, '
+    + 'not a failure of agent.cmd, and nothing below can be trusted after it');
+  assert.ok(real.pid,
     'the SHIPPED agent.cmd launched no observable claude process -- if this fails the '
     + 'harness is wrong, not the launcher, and nothing below means anything');
 
@@ -779,7 +901,69 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
     '',
   ].join('\r\n'));
 
-  assert.equal(await launched(forger), null,
+  const forged = await launched(forger);
+  assert.equal(forged.timedOut, false,
+    'the forger never exited, so its absence of a process proves nothing yet');
+  assert.equal(forged.exited, true,
+    'the forger must have exited before absence counts as evidence');
+  assert.equal(forged.pid, null,
     'a launcher that writes the report and never runs claude was accepted -- the process '
     + 'table is the one channel it cannot forge, and it must not say a process existed');
+
+  /*
+   * THE GLOBBER. The attack the old arrangement allowed: the stub image sat
+   * in the launcher's own cwd, which is also the head of its PATH, so
+   * starting it took no knowledge of claude.cmd at all -- just a wildcard.
+   * The random name was the only thing standing in the way and a random
+   * name is obscurity, not a boundary. With the image in `vault` this
+   * matches nothing.
+   */
+  const globber = path.join(box, 'globber.cmd');
+  writeFileSync(globber, [
+    '@echo off',
+    'for %%f in (claudeproc_*.exe) do start "" "%%f"',
+    'for %%f in ("%~dp0claudeproc_*.exe") do start "" "%%f"',
+    'exit /b 0',
+    '',
+  ].join('\r\n'));
+
+  const globbed = await launched(globber);
+  assert.equal(globbed.timedOut, false,
+    'the globber run hit the backstop, so its result is inconclusive rather than a pass');
+  assert.equal(globbed.pid, null,
+    'a launcher found the stub image beside itself and started it without going near '
+    + 'claude.cmd -- the image must not be reachable from the launcher cwd or PATH');
+
+  /*
+   * THE STRANGER, which is what the parent chain is for. Something else on
+   * the machine starts the image while a launcher that starts nothing is
+   * running: a parallel run of this same file, a leftover, anything. A
+   * fresh-pid check alone reads that as "the launcher launched claude",
+   * because "no stub existed before and one exists now" is a claim about
+   * the whole machine rather than about this subject.
+   *
+   * MEASURED rather than assumed: the stranger is started HERE, by the test
+   * process, so it is genuinely not a descendant of the launcher, and the
+   * assertion below fails if descent is not checked.
+   */
+  const bystander = path.join(box, 'bystander.cmd');
+  writeFileSync(bystander, ['@echo off', 'timeout /t 4 /nobreak > nul', 'exit /b 0', ''].join('\r\n'));
+
+  let stranger = null;
+  try {
+    const seen = await launched(bystander, async () => {
+      /* Started by THIS process, inside the window, after the baseline. */
+      stranger = spawn(imagePath, ['-e', 'setInterval(() => {}, 50)'], { stdio: 'ignore' });
+      await new Promise((r) => { setTimeout(r, 400); });
+    });
+    assert.ok(stranger?.pid, 'the stranger never started, so this case proves nothing');
+    assert.equal(seen.timedOut, false,
+      'the stranger run hit the backstop -- an inconclusive run must not read as a pass, '
+      + 'which is exactly how an exit-event race hid here for one revision');
+    assert.equal(seen.pid, null,
+      `a stub process started by something else (pid ${stranger.pid}) was credited to a `
+      + 'launcher that started nothing -- a fresh pid is not evidence of descent');
+  } finally {
+    try { stranger?.kill(); } catch { /* already gone */ }
+  }
 });
