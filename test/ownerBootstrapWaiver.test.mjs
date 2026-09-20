@@ -58,10 +58,21 @@ test('A WAIVED COMMIT STOPS BLOCKING, and is STILL REPORTED AS UNAUDITED', () =>
   const after = auditEscalation(waivedCoverage, []);
   assert.equal(after.block, null, 'the waiver did not stop the block');
 
-  /* and the far end (rule 4): it is still counted and named as unaudited. */
-  assert.match(String(after.notice), /unaudited/i,
+  /*
+   * AND THE FAR END (rule 4): it is still NAMED in the report as having no
+   * audit. Asserted on the sha rather than on the word "unaudited" -- the
+   * first version of this matched /unaudited/i and went red against a notice
+   * reading "1 commit(s) changed a control with no audit recorded", which is
+   * the same statement in the formatter's own words. The assertion was wrong,
+   * not the code, and matching prose would have kept breaking on rewording.
+   * What must be true is that the commit is still listed.
+   */
+  const notice = String(after.notice);
+  assert.match(notice, /no audit recorded/,
     'the waiver silenced the REPORT as well as the block, so a reader can no longer '
     + 'tell these commits were never reviewed');
+  assert.match(notice, new RegExp(SHA_A.slice(0, 8)),
+    'the waived commit vanished from the report entirely');
 });
 
 test('A WAIVER DOES NOT SET audited, WHICH IS THE WHOLE POINT', () => {
