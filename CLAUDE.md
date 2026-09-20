@@ -424,20 +424,37 @@ by node rather than judged by the rail, so an untracked file matching it runs
 without even the commit. That one is still worth closing, and the two options
 above still stand.
 
-**TWO SOURCE FILES ARE INVISIBLE TO `grep` AND `git grep`.**
-`src/deployGate.mjs` and `src/auditRange.mjs` contain literal NUL bytes — real
-`\x00` characters, not the escape — used deliberately as length framing in a
-digest (`${path}\x00${len}\x00${body}\x00`). That is correct and must stay;
-without the framing, two different file lists can hash the same. The cost is
-that grep classifies both files as binary and **silently skips them**, reporting
-`binary file matches` at best and nothing at all with `-l`.
+**THREE SOURCE FILES ARE INVISIBLE TO `grep`, AND THE THIRD IS `src/guardSession.mjs`.**
+`src/deployGate.mjs`, `src/auditRange.mjs` and — measured 2026-09-20 —
+`src/guardSession.mjs` contain literal NUL bytes: real `\x00` characters, not
+the escape, used deliberately as length framing in a digest
+(`${path}\x00${len}\x00${body}\x00`). That is correct and must stay; without the
+framing, two different file lists can hash the same. In `guardSession.mjs` it is
+a single line, 618, framing a symlink target so a body containing the target
+text cannot be confused with it — which is what lets the Stop gate see a
+junction repointed at a control path. The cost is that grep classifies the whole
+file as binary and **suppresses the matching lines**:
 
-So any repo-wide audit built on `git grep` has a two-file blind spot and will
-report a clean sweep it did not perform. This was found while scrubbing the
-operator's real home directory out of the tree — a scrub driven entirely by
-`git grep`. Both files were checked afterwards by reading the bytes in Python
-and were clean, so nothing was missed that time. Next time, read the files;
-`git grep -a` also works. A check that skips a file must not print a pass.
+    grep -n "export const PROTECTED_PATHS" src/guardSession.mjs src/policy.mjs
+    Binary file src/guardSession.mjs matches
+    src/policy.mjs:25:export const PROTECTED_PATHS = Object.freeze([
+
+So any repo-wide audit built on grep has a **three**-file blind spot, and the
+new member is the guard's central module — the one an audit is most likely to
+be sweeping. Found while checking that two `PROTECTED_PATHS` lists agreed.
+`grep -a` works, and so does the `Grep` tool, which is ripgrep.
+
+**Two claims in the previous version of this paragraph did not reproduce, and
+both erred toward complacency.** `grep -l` **does** list the file — it is the
+content that is withheld, not the filename, so a sweep that greps for a name and
+reads the matched lines is the one that goes blind. And `git grep` is probably **not**
+affected by this third file: git's binary detection scans only the first 8000
+bytes, the NUL here is at line 618, and `git show --numstat` reports ordinary
+line counts for it rather than `-`. That last one is a PROXY and is labelled as
+such — the rail refuses `git grep`, so it could not be run from the session that
+measured this, and an auditor in its own clone should settle it. Do not assume the three files behave alike
+under every tool; ask the tool. A check that skips a file must not print a pass,
+and a note about which checks skip it must itself be measured.
 
 **`_shared.js` IS A HAND-MAINTAINED SPLICE** of `src/` and `bridge/`, because a
 Supabase edge function cannot import from outside its own directory. The tests
