@@ -3674,6 +3674,66 @@ try {
         console.log('author identity plus a credential-resolved claimant qualifies -- a commit trailer is');
         console.log('written by the author and cannot establish that the reviewer is not the author.');
       }
+      /*
+       * WHO COULD ACTUALLY TAKE THESE, asked of the live roster.
+       *
+       * Until now this command printed a queue and stopped, so "25 PENDING"
+       * read the same whether three reviewers were idle or the only consumer
+       * had been dead for a day. It was the second -- and nothing here said
+       * so, which is the same could-not-measure-versus-measured-zero confusion
+       * the liveness work keeps turning up.
+       *
+       * Selection is proposeAudit's, liveness is liveRegistry's, and the claim
+       * is still claimJob's. This only ASKS and prints; it takes nothing, so
+       * running it changes no state.
+       */
+      try {
+        const { proposeAudit, UNPLACED } = await import('../src/auditDispatch.mjs');
+        const LRa = await import('../src/liveRegistry.mjs');
+        const { readRegistrations } = await import('../src/registrationStore.mjs');
+
+        let roster = [];
+        try { roster = await readRegistrations(); } catch { roster = []; }
+
+        const nowMs = Date.now();
+        const plan = proposeAudit({
+          jobs: open,
+          sessions: roster,
+          now: nowMs,
+          isLive: (s) => LRa.isLive(s, { now: new Date(nowMs).toISOString() }),
+        });
+
+        console.log('');
+        if (plan.seats.length === 0) {
+          /*
+           * NOT "nothing to do". The queue is being served by nobody, which is
+           * a different sentence and the one that was missing.
+           */
+          console.log('seats    NO LIVE REVIEWER. These jobs are waiting, not failing --');
+          console.log('         nothing is consuming this queue right now.');
+        } else {
+          const free = plan.seats.filter((s) => !s.busy).length;
+          console.log(`seats    ${plan.seats.length} live (${free} free)`);
+          for (const p of plan.proposals.slice(0, 10)) {
+            console.log(`  would go to ${p.session_id ?? p.agent_id}  ${p.audit_id}`
+              + `${p.recovered ? `  (RECOVERED from ${p.previous_holder})` : ''}`);
+          }
+          const onlyAuthor = plan.unassigned.filter((u) => u.code === UNPLACED.ONLY_AUTHOR_AVAILABLE);
+          if (onlyAuthor.length) {
+            console.log(`  ${onlyAuthor.length} job(s) have only their own author free -- rule 20 holds them`);
+          }
+        }
+      } catch (e) {
+        /*
+         * A REPORTER MUST NOT TAKE THE COMMAND DOWN. The queue above is the
+         * point; this paragraph is extra. Say it could not be computed rather
+         * than printing nothing, because a silent omission here reads as
+         * "no seats".
+         */
+        console.log('');
+        console.log(`seats    COULD NOT BE READ (${e?.message ?? e}). That is unknown, not "nobody is available".`);
+      }
+
       console.log('');
       console.log('Claim one with: agentbridge audit-claim --id <audit-...> --by <your session>');
       /*
