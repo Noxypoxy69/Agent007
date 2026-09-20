@@ -628,6 +628,51 @@ async function tick() {
   for (const f of (verdict.findings ?? []).slice(0, 8)) say(`    finding: ${f}`);
 
   /*
+   * ═══ WHAT WAS ACTUALLY REVIEWED, MEASURED FROM THE WORKTREE ═══
+   *
+   * This is the independent half of the fence D4 found missing. Read AFTER
+   * the reviewer exits, from `ws.dir`, so `recordAudit` compares a genuine
+   * observation against what the claim named rather than a row against
+   * itself.
+   *
+   * DIRTY COUNTS AS MOVED. `HEAD^{tree}` is the tree of the COMMIT, so a
+   * reviewer that edited files without committing leaves it unchanged --
+   * and the brief explicitly tells reviewers to mutate and restore. A
+   * half-restored worktree is not the candidate, so `status --porcelain`
+   * is part of the reading rather than a separate nicety.
+   *
+   * COULD NOT MEASURE IS NOT A PASS. If any of the three reads fails, the
+   * job is released rather than recorded: a verdict about a tree nobody can
+   * identify is exactly the shape this fence exists to refuse.
+   */
+  let reviewed;
+  try {
+    const g = (args) => String(runGit(args, { cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'] })).trim();
+    reviewed = { sha: g(['rev-parse', 'HEAD']), tree: g(['rev-parse', 'HEAD^{tree}']) };
+    const dirt = g(['status', '--porcelain']);
+    if (dirt !== '') {
+      release(`the reviewer left ${dirt.split('\n').length} uncommitted change(s) in the worktree, `
+        + 'so what was reviewed is not the candidate and the verdict cannot be attributed to it');
+      return false;
+    }
+  } catch (e) {
+    release(`could not read what was actually reviewed from ${ws.dir} `
+      + `(${String(e?.stderr || e?.message || e).trim().split('\n')[0]}), so the verdict cannot be pinned`);
+    return false;
+  }
+
+  if (reviewed.sha !== String(job.candidate_sha) || reviewed.tree !== String(job.candidate_tree_sha)) {
+    /*
+     * THE FENCE FIRING, LOCALLY. `recordAudit` would refuse this too, and
+     * saying it here names the worktree -- the CLI only sees two shas.
+     */
+    release(`the worktree was at ${reviewed.sha.slice(0, 8)}/${reviewed.tree.slice(0, 8)} but the claim `
+      + `named ${String(job.candidate_sha).slice(0, 8)}/${String(job.candidate_tree_sha).slice(0, 8)}; `
+      + 'the candidate moved under the audit, so the verdict is about something else');
+    return false;
+  }
+
+  /*
    * THE TERMINAL WRITE IS ATTEMPTED, AND ITS REFUSAL IS REPORTED RATHER THAN
    * WORKED AROUND. `recordAudit` holds the fences -- the writer must be the
    * claimant, the lease must be live, the candidate must not have moved, and
@@ -639,23 +684,23 @@ async function tick() {
     path.join(REPO, 'bin', 'agentbridge.mjs'), 'audit-record',
     '--id', job.audit_id, '--verdict', verdict.verdict,
     /*
-     * THE CANDIDATE AND ITS TREE ARE NAMED, or the fence compares the row
-     * against itself. Fourth-lap blind audit M7.
+     * MEASURED FROM THE WORKTREE, NOT COPIED FROM THE ROW.
      *
-     * `recordAudit` fences on `candidate_sha` and `candidate_tree_sha` --
-     * the audit-pin lesson, demonstrated live against this repository. The
-     * daemon passed NEITHER, and the CLI defaults both FROM THE ROW, so on
-     * the only automated write path the check compared the row with itself
-     * and could never fire.
+     * Seventh-lap blind audit D4, and it caught my own comment lying. M7
+     * added these arguments from `job.candidate_sha` / `job.candidate_tree_sha`
+     * -- and `recordAudit` compares them against `job.candidate_sha` /
+     * `job.candidate_tree_sha` of the SAME ROW. Row equals row. The fence
+     * still could not fire, and the comment I wrote said the tree half was
+     * "what makes the fence mean anything here". Nothing measured the tree.
      *
-     * The values come from the job as CLAIMED, not from the worktree: what
-     * is being asserted is "the thing I reviewed is the thing I was given".
-     * A reviewer that edits the worktree cannot move the sha, but it can
-     * move the tree, and that is exactly what the tree half of the fence is
-     * for -- so passing it is what makes the fence mean anything here.
+     * A fence needs two independent readings. These come from `ws.dir`
+     * AFTER the reviewer has exited, so the comparison is genuinely
+     * "the thing that was reviewed" against "the thing the claim named".
+     * A reviewer that checked out something else, committed, or left the
+     * tree dirty now fails it.
      */
-    '--candidate', String(job.candidate_sha),
-    '--tree', String(job.candidate_tree_sha),
+    '--candidate', reviewed.sha,
+    '--tree', reviewed.tree,
     /*
      * THE WRITER MUST BE NAMED, and it is the DAEMON's identity, not the
      * session's. `recordAudit` fences on writer === claimant; the daemon is
