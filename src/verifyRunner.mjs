@@ -104,13 +104,27 @@ export function killLiveShards() {
   return n;
 }
 
-function runShard(root, shard, signal) {
+/**
+ * THE SPAWN IS INJECTABLE SO THE KILL PATH CAN BE WATCHED FAILING.
+ *
+ * Rule 1 wants this branch pointed at the broken state and seen going red,
+ * and a real fixture could not get there: a temp repository runs zero tests
+ * under the shard glob, and the rail refuses `node` against any path outside
+ * the inherited repository, so the failure cannot even be DIAGNOSED from a
+ * guarded session. Testing cancellation by racing a genuinely slow suite was
+ * four rounds of guesswork that measured nothing.
+ *
+ * The seam is the same move rule 10 already asks for everywhere else: put the
+ * dangerous logic where a test can reach it, rather than behind an effect only
+ * production can produce.
+ */
+function runShard(root, shard, signal, spawnFn = spawn) {
   return new Promise((resolve) => {
     if (signal?.aborted) {
       resolve({ index: shard.index, exitCode: 1, tests: 0, fail: 0, output: 'cancelled before start' });
       return;
     }
-    const child = spawn(process.execPath, ['--test', shard.arg, 'test/**/*.test.mjs'], { cwd: root });
+    const child = spawnFn(process.execPath, ['--test', shard.arg, 'test/**/*.test.mjs'], { cwd: root });
     live.add(child);
     const onAbort = () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } };
     signal?.addEventListener?.('abort', onAbort, { once: true });
@@ -156,7 +170,7 @@ function runShard(root, shard, signal) {
  */
 export async function runVerification({
   root, key, identity, shards = 4, concurrency = 2, home = undefined, now = () => Date.now(),
-  signal = undefined,
+  signal = undefined, spawnFn = spawn,
 } = {}) {
   /*
    * THE SHARD COUNT IS CLAMPED TO THE FILES THAT EXIST, and the caller's number
@@ -215,7 +229,7 @@ export async function runVerification({
     while (queue.length) {
       const shard = queue.shift();
       // eslint-disable-next-line no-await-in-loop
-      results.push(await runShard(root, shard, signal));
+      results.push(await runShard(root, shard, signal, spawnFn));
     }
   };
 

@@ -16,18 +16,32 @@
  *   budget and answered when the timer won, then called process.exit(0) with a
  *   full `node --test` per shard still alive -- unbounded across turns, which
  *   is the duplicate-suite load the whole single-flight design exists to
- *   remove. On Windows an orphan holding `cwd` also blocks fixture cleanup with
- *   EPERM, which `rmSync(force)` does NOT suppress; that is a real failure
- *   already observed in this suite.
+ *   remove. On Windows an orphan holding `cwd` also blocks fixture cleanup
+ *   with EPERM, which `rmSync(force)` does NOT suppress.
  *
- * The cancellation test asserts the ORPHAN IS GONE by removing the directory
- * the child was running in. That is the far end (rule 4), not a proxy: a
- * surviving child holds `cwd` and the removal fails.
+ * ═══ WHY THE SPAWN IS INJECTED RATHER THAN REAL ═══
+ *
+ * The first four versions of this file raced cancellation against a genuinely
+ * slow temp repository and measured NOTHING, every time. `aggregateShards`
+ * kept saying so -- "every shard exited 0 and no test ran at all" -- and I
+ * kept treating it as a fixture detail instead of reading it. Three separate
+ * causes were ruled out (single-shard clamp, top-level vs nested glob, the 8.3
+ * temp alias) and the real one was never found, because the rail refuses
+ * `node` against any path outside the inherited repository, so a guarded
+ * session cannot even diagnose it.
+ *
+ * A fixture that cannot construct the real case cannot fail for it, and a test
+ * I cannot show going green is a countdown rather than a ratchet. So the child
+ * is injected: the kill path is now watched directly, deterministically, and
+ * the assertion is about the thing that was broken -- that a live child is
+ * tracked and really receives SIGKILL -- rather than about a temp directory's
+ * glob behaviour.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { rmSync, realpathSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -78,138 +92,136 @@ test('EVERY NON-INTEGER EXIT CODE IS A FAILURE, not just null', () => {
 /* ── cancellation really kills the children ──────────────────────────── */
 
 /**
- * A repository whose tests never finish on their own.
- *
- * TWO FILES, NOT ONE, AND THE REASON IS A BUG THIS FIXTURE ALREADY HAD.
- * `shardPlan` clamps the shard count to the number of test files, so a
- * one-file repo produces `--test-shard=1/1`. That child exits immediately
- * instead of running the slow test, `live` is empty by the time the test
- * aborts, and the cancellation assertion measures nothing -- while the
- * companion "does not record a PASS" assertion passes for the WRONG REASON,
- * because the record is FAILED from the quick exit rather than from the
- * cancellation. A fixture that cannot reach the branch cannot fail for it.
+ * A child that behaves like a long-running `node --test`: it produces nothing
+ * and never exits until it is killed, and it records the signal it got.
  */
-async function slowRepo() {
-  /*
-   * REAL PATH, NOT THE 8.3 ALIAS. `mkdtemp(tmpdir())` hands back
-   * `C:\Users\DANNYG~1\...` on this machine, and the shard glob matched
-   * NOTHING under it -- two shards, exit 0, zero tests -- while the identical
-   * invocation works in the long-named repository. That is rule 21 exactly: an
-   * accident of the machine the test was written on, and the same instinct
-   * that put `realpathSync.native` in the resolver fixes it here. Ask the OS
-   * what the path really is rather than trusting what it handed you.
-   */
-  const dir = realpathSync.native(await mkdtemp(path.join(tmpdir(), 'verify-cancel-')));
-  /*
-   * A SUBDIRECTORY, BECAUSE THE SHARD GLOB IS `test/**` + `/*.test.mjs`.
-   * Files placed directly in `test/` matched nothing here: both shards exited
-   * 0 having run 0 tests, and the run came back VERIFY_PARTIAL with "every
-   * shard exited 0 and no test ran at all" -- aggregateShards caught my broken
-   * fixture, which is the refusal working. The children never existed, so
-   * there was nothing to kill and the assertion measured nothing.
-   */
-  await mkdir(path.join(dir, 'test', 'sub'), { recursive: true });
-  await writeFile(path.join(dir, 'package.json'), '{"name":"cancel-fixture","private":true,"type":"module"}\n');
-  const body = (n) => "import test from 'node:test';\n"
-    + `test('slow-${n}', async () => { await new Promise((r) => setTimeout(r, 120000)); });\n`;
-  for (const n of ['a', 'b']) {
-    /*
-     * BOTH PLACES ON PURPOSE. `countTestFiles` reads only the TOP LEVEL of
-     * `test/`, while the shard argument globs `test/**` + `/*.test.mjs`. Put
-     * the files in one place and the other half sees nothing: top-level only
-     * gave two shards running zero tests, and `sub/` only made the file count
-     * zero and collapsed the plan to a single shard. That mismatch between the
-     * counter and the glob is itself worth a look in production.
-     */
-    // eslint-disable-next-line no-await-in-loop
-    await writeFile(path.join(dir, 'test', `slow-${n}.test.mjs`), body(n));
-    // eslint-disable-next-line no-await-in-loop
-    await writeFile(path.join(dir, 'test', 'sub', `slow-${n}.test.mjs`), body(`sub-${n}`));
-  }
-  return dir;
+function fakeChildFactory(log) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.killed = false;
+    child.kill = (sig) => {
+      if (child.killed) return false;
+      child.killed = true;
+      log.push(sig);
+      /* A real child closes asynchronously after the signal, with code null. */
+      setImmediate(() => child.emit('close', null));
+      return true;
+    };
+    log.spawned = (log.spawned ?? 0) + 1;
+    return child;
+  };
 }
 
-const SHARDS = { shards: 2, concurrency: 2 };
+const fixtureHome = async () => realpathSync.native(await mkdtemp(path.join(tmpdir(), 'verify-cancel-home-')));
 
-test('ABORTING A RUN KILLS ITS CHILDREN, so nothing is orphaned', async (t) => {
-  const root = await slowRepo();
-  const home = await mkdtemp(path.join(tmpdir(), 'verify-cancel-home-'));
+test('ABORTING A RUN SIGKILLS ITS CHILDREN, so nothing is orphaned', async (t) => {
+  const home = await fixtureHome();
   t.after(async () => { await rm(home, { recursive: true, force: true }); });
 
+  const log = [];
   const control = new AbortController();
-  const started = Date.now();
   const run = runVerification({
-    root, key: 'k'.repeat(32), identity: { t: 1 }, ...SHARDS, home, signal: control.signal,
+    root: process.cwd(),
+    key: 'k'.repeat(32),
+    identity: { t: 1 },
+    shards: 2,
+    concurrency: 2,
+    home,
+    signal: control.signal,
+    spawnFn: fakeChildFactory(log),
   });
 
-  await new Promise((r) => { setTimeout(r, 1500); });
+  /* Let the workers get their children spawned before cancelling. */
+  await new Promise((r) => { setImmediate(r); });
   control.abort();
-  const reaped = killLiveShards();
 
   const rec = await run;
-  const elapsed = Date.now() - started;
-  /* A failure here must say WHY the shards ended, or the next reader guesses as I did. */
-  const shardDetail = `state=${rec?.state} why=${rec?.why} shards=${JSON.stringify(rec?.shards)} `
-    + `out=${String(rec?.failing_output ?? '').slice(0, 400)}`;
 
   /*
-   * THE PRECONDITION IS ASSERTED, NOT GUARDED ON (rule 6). If the child never
-   * started, this test proves nothing about killing it and must fail rather
-   * than pass quietly.
+   * THE PRECONDITION IS ASSERTED, NOT GUARDED ON (rule 6). If no child was
+   * ever spawned this test proves nothing about killing one, and it must fail
+   * rather than pass quietly -- which is exactly how the previous four
+   * versions of this file passed while measuring nothing.
    */
-  assert.ok(reaped >= 1,
-    `no live shard was tracked, so nothing was killed and nothing is proved (reaped=${reaped}). ${shardDetail}`);
-  assert.ok(elapsed < 60_000, `the run outlived its cancellation by ${elapsed}ms: the abort did not stop it`);
+  assert.ok(log.spawned >= 1, 'no child was spawned, so nothing was killed and nothing is proved');
+  assert.ok(log.length >= 1, `the abort killed nothing; signals sent: ${JSON.stringify(log)}`);
+  assert.ok(log.every((s) => s === 'SIGKILL'),
+    `a child was asked politely instead of killed: ${JSON.stringify(log)}. A test runner asked to `
+    + 'terminate can outlive a budget that is already exhausted');
 
   /*
-   * THE FAR END. A surviving child holds `cwd` and this removal fails with
-   * EPERM on Windows -- which is the exact symptom that was observed in this
-   * suite, and which rmSync's `force` does NOT suppress.
-   */
-  assert.doesNotThrow(
-    () => rmSync(root, { recursive: true, force: true }),
-    'the working directory could not be removed, so a suite process is still holding it',
-  );
-});
-
-test('A CANCELLED RUN DOES NOT RECORD A PASS', async (t) => {
-  /*
-   * The dangerous half. Killing the children is only half the fix: if the
+   * THE DANGEROUS HALF. Killing the children is only half the fix: if the
    * killed shards then aggregate to green, the cancellation has manufactured
    * the very approval the deadline was refusing to give.
    */
-  const root = await slowRepo();
-  const home = await mkdtemp(path.join(tmpdir(), 'verify-cancel-home-'));
-  t.after(async () => {
-    await rm(home, { recursive: true, force: true });
-    await rm(root, { recursive: true, force: true });
-  });
-
-  const control = new AbortController();
-  const run = runVerification({
-    root, key: 'm'.repeat(32), identity: { t: 1 }, ...SHARDS, home, signal: control.signal,
-  });
-  await new Promise((r) => { setTimeout(r, 1500); });
-  control.abort();
-  killLiveShards();
-
-  const rec = await run;
   assert.notEqual(rec.state, VERIFY.PASSED,
-    'a run that was cancelled mid-flight recorded a PASS: the deadline manufactured an approval');
+    'a cancelled run recorded a PASS: the deadline manufactured the approval it was refusing');
+});
+
+test('killLiveShards REAPS A CHILD THE ABORT DID NOT, and reports how many', async (t) => {
+  /*
+   * The gate calls this after aborting, as a belt to the signal's braces: if
+   * the abort path ever stops firing, an orphan still gets killed and the
+   * refusal still reports a truthful count.
+   */
+  const home = await fixtureHome();
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
+
+  const log = [];
+  const run = runVerification({
+    root: process.cwd(),
+    key: 'r'.repeat(32),
+    identity: { t: 1 },
+    shards: 2,
+    concurrency: 2,
+    home,
+    spawnFn: fakeChildFactory(log), // no signal at all
+  });
+
+  await new Promise((r) => { setImmediate(r); });
+  const reaped = killLiveShards();
+
+  await run;
+  assert.ok(reaped >= 1, `killLiveShards found nothing to reap although a child was live (reaped=${reaped})`);
+  assert.ok(log.every((s) => s === 'SIGKILL'), `reaping used the wrong signal: ${JSON.stringify(log)}`);
+});
+
+test('A REAPED SET IS EMPTY AFTERWARDS, so a second call cannot double-count', async (t) => {
+  const home = await fixtureHome();
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
+
+  const log = [];
+  const run = runVerification({
+    root: process.cwd(), key: 's'.repeat(32), identity: { t: 1 }, shards: 1, concurrency: 1, home,
+    spawnFn: fakeChildFactory(log),
+  });
+  await new Promise((r) => { setImmediate(r); });
+
+  killLiveShards();
+  assert.equal(killLiveShards(), 0, 'a second reap counted children that were already dead');
+  await run;
 });
 
 test('A RUN ABORTED BEFORE IT STARTS NEVER SPAWNS, and still is not a pass', async (t) => {
-  const root = await slowRepo();
-  const home = await mkdtemp(path.join(tmpdir(), 'verify-cancel-home-'));
-  t.after(async () => {
-    await rm(home, { recursive: true, force: true });
-    await rm(root, { recursive: true, force: true });
-  });
+  const home = await fixtureHome();
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
 
+  const log = [];
   const control = new AbortController();
   control.abort();
   const rec = await runVerification({
-    root, key: 'p'.repeat(32), identity: { t: 1 }, ...SHARDS, home, signal: control.signal,
+    root: process.cwd(),
+    key: 'p'.repeat(32),
+    identity: { t: 1 },
+    shards: 2,
+    concurrency: 2,
+    home,
+    signal: control.signal,
+    spawnFn: fakeChildFactory(log),
   });
+
+  assert.equal(log.spawned ?? 0, 0, 'an already-aborted run still spawned a suite');
   assert.notEqual(rec.state, VERIFY.PASSED, 'an already-aborted run produced a pass having executed nothing');
 });
