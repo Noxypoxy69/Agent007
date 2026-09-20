@@ -170,8 +170,33 @@ test('THE SCOPE ACTUALLY MOVES WITH --since, which is the property that matters'
    * because a literal SHA is a fact about one machine's history -- rule 21,
    * and the 8.3 short-name test is the standing example of getting this wrong.
    */
+  /*
+   * ═══ THIS TEST WAS SATISFIED BY EQUALITY, WHICH IS THE BUG IT GATES ═══
+   *
+   * Blind audit D-E. It asserted `farSet.size >= nearSet.size` and
+   * `nearSet ⊆ farSet`. BOTH HOLD WHEN THE TWO SETS ARE IDENTICAL -- that is,
+   * when `--since` is ignored entirely and every run returns the six
+   * whole-repo gates. The test named "THE SCOPE ACTUALLY MOVES" did not
+   * assert that it moves.
+   *
+   * It was non-vacuous only by accident of history: `--since HEAD~5` happened
+   * to span a source change. `--since HEAD~1 --list` gives 6 files, identical
+   * to `--since HEAD`. Had the recent commits been doc-only -- as one in this
+   * very range was -- this would have been green and proved nothing.
+   *
+   * So the far revision is DERIVED from the repository at run time: ask git
+   * for a commit that actually touched a source file, and assert STRICT
+   * inequality. Rule 21 -- a literal `HEAD~5` is a fact about one machine's
+   * history, not a property of the tool.
+   */
+  const srcTouching = spawnSync('git', [
+    'log', '-1', '--format=%H', '--', 'src',
+  ], { cwd: REPO, encoding: 'utf8' }).stdout.trim();
+  assert.match(srcTouching, /^[0-9a-f]{40}$/,
+    'could not find a commit touching src/, so the comparison below would be vacuous');
+
   const near = run(['--since', 'HEAD', '--list']);
-  const far = run(['--since', 'HEAD~5', '--list']);
+  const far = run(['--since', `${srcTouching}~1`, '--list']);
 
   assert.equal(near.code, 0, `--since HEAD failed: ${near.err}`);
   assert.equal(far.code, 0, `--since HEAD~5 failed: ${far.err}`);
@@ -190,9 +215,14 @@ test('THE SCOPE ACTUALLY MOVES WITH --since, which is the property that matters'
    * be equal and this test would prove nothing -- so say that out loud rather
    * than wrapping the real assertion in an `if`.
    */
-  assert.ok(farSet.size >= nearSet.size,
-    'a wider range selected FEWER tests, which means selection is not monotonic '
-    + `in the range: HEAD gave ${nearSet.size}, HEAD~5 gave ${farSet.size}`);
+  /*
+   * STRICT. Equality here means --since changed nothing, which is precisely
+   * the defect this file exists to gate, and the previous `>=` accepted it.
+   */
+  assert.ok(farSet.size > nearSet.size,
+    'a range spanning a KNOWN source change selected no more tests than HEAD did, '
+    + `so --since is not moving the scope at all: HEAD gave ${nearSet.size}, `
+    + `${srcTouching.slice(0, 8)}~1 gave ${farSet.size}`);
 
   for (const t of nearSet) {
     assert.ok(farSet.has(t),

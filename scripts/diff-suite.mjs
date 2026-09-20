@@ -2,7 +2,16 @@
 /**
  * RUN THE TESTS THE DIFF CAN ACTUALLY BREAK, NOT ALL OF THEM.
  *
- *   node scripts/diff-suite.mjs [--since <ref>] [--list] [--all-on-doubt]
+ *   node scripts/diff-suite.mjs [--since <ref>] [--list]
+ *
+ * `--all-on-doubt` used to be documented here and was never implemented --
+ * blind audit D-F. Running everything on doubt is UNCONDITIONAL: an
+ * unreadable diff or an import graph that will not build both fall back to
+ * `npm test`, and neither is optional, because a scoping tool that narrows
+ * when it is confused is the whole failure this file exists to avoid. A flag
+ * offering to turn that off would have been a footgun; a documented flag that
+ * does not exist is just a refusal waiting to confuse somebody, which is what
+ * it became when the parser started refusing unknown arguments.
  *
  * ═══ WHY ═══
  *
@@ -135,11 +144,25 @@ if (leftover.length) {
  */
 for (const [f, n] of seen) {
   if (n > 1) {
-    refuse([
-      `${f} was given ${n} times`,
-      'The first occurrence wins, so a corrected retype is silently ignored and the',
-      'scope is computed from the value you meant to replace. Give it once.',
-    ]);
+    /*
+     * THE REASON DIFFERS BY FLAG, AND SAYING THE WRONG ONE IS ITS OWN DEFECT.
+     * Blind audit D-H: this told somebody who typed `--list --list` that "the
+     * scope is computed from the value you meant to replace". `--list` has no
+     * value. A refusal that explains itself wrongly teaches the reader a
+     * false model of the tool, which is worse than a bare refusal.
+     */
+    refuse(VALUE_FLAGS.has(f)
+      ? [
+        `${f} was given ${n} times`,
+        'The first occurrence wins, so a corrected retype is silently ignored and the',
+        'scope is computed from the value you meant to replace. Give it once.',
+      ]
+      : [
+        `${f} was given ${n} times`,
+        'It takes no value, so this is harmless -- but it is refused rather than',
+        'ignored, because a command line nobody read carefully is how the wrong',
+        'scope gets run and reported as a pass. Give it once.',
+      ]);
   }
 }
 
@@ -150,10 +173,26 @@ for (const [f, n] of seen) {
  * case would be rule 8: patching the strings the prober happened to try
  * instead of the way the option is read.
  */
+/*
+ * ANY FLAG-SHAPED VALUE, not only a known flag. Blind audit D-G.
+ *
+ * The first version tested `KNOWN_FLAGS.has(next)`, which narrowed what the
+ * version before it had caught with `startsWith('--')`. So `--since --foo`
+ * fell past this check and was refused further down by the revision
+ * validator, which told the operator that git "would accept it as a
+ * PATHSPEC instead". git would do no such thing with `--foo`; it would
+ * reject it as an unknown option.
+ *
+ * The refusal direction was safe and the REASON was invented. A control that
+ * refuses for a reason that is not true of the input is teaching the next
+ * reader a false model of git, and this file already has one finding about
+ * exactly that.
+ */
 const sinceAt = argv.indexOf('--since');
-if (sinceAt !== -1 && (sinceAt + 1 >= argv.length || KNOWN_FLAGS.has(argv[sinceAt + 1]))) {
+const sinceVal = sinceAt === -1 ? null : argv[sinceAt + 1];
+if (sinceAt !== -1 && (sinceAt + 1 >= argv.length || String(sinceVal ?? '').startsWith('-'))) {
   refuse([
-    '--since needs a revision after it.',
+    `--since needs a revision after it${sinceVal === undefined ? '' : `, and got ${sinceVal}`}.`,
     'Given none, this would silently scope to "working tree against HEAD" and',
     'call that a pass.',
   ]);
@@ -206,6 +245,22 @@ const { runGit } = await import('../src/safeGit.mjs');
  * happily and then diffs to something meaningless.
  */
 const since = flag('--since');
+if (since === '') {
+  /*
+   * EXPLICIT, BECAUSE IT WAS CLOSED ONLY BY LUCK. `--since ""` survives the
+   * arity check (it is not flag-shaped) and reaches the validator, where
+   * `rev-parse '^{commit}'` happens to fail. But `changedFiles` guards with
+   * `since ? ... : 'HEAD'`, and `''` IS FALSY -- so had that rev-parse ever
+   * succeeded, an empty revision would have silently scoped to HEAD and
+   * reported a green run over six gates. Depending on an unrelated command
+   * to fail is not a check.
+   */
+  refuse([
+    '--since was given an empty revision.',
+    'That would fall through to "working tree against HEAD" and report a green',
+    'run over the whole-repo gates alone.',
+  ]);
+}
 if (since !== null) {
   try {
     runGit(['rev-parse', '--verify', '--quiet', `${since}^{commit}`], { cwd: REPO });
