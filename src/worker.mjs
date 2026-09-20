@@ -255,8 +255,26 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
      * field that must never be a guess.
      */
     if (w.task) {
-      if (w.attemptOf !== w.task.task_id) {
-        w.attemptOf = w.task.task_id;
+      /*
+       * THE COUNTER RESETS PER ATTEMPT, AND THE KEY CARRIES THE ATTEMPT NUMBER
+       * RATHER THAN JUST THE TASK ID.
+       *
+       * Keying on the task alone looks right until a ROTATED task comes back
+       * to the same worker, which is the ordinary case: the id matches, the
+       * counter is not reset, the successor inherits its predecessor's step
+       * count and re-rotates within a few cycles -- spending the rotation
+       * budget on a task nobody has actually spent any effort on yet.
+       *
+       * This is the sole owner of the reset. It used to be cleared in the
+       * task-less branch below as well, and that redundancy made a mutation of
+       * this line a no-op: every gap between two tasks happens to pass through
+       * an idle cycle today. Rule 11 -- a protection that is only untested
+       * because it is currently redundant is how a protection quietly stops
+       * being one.
+       */
+      const attemptKey = `${w.task.task_id}#${Number.isInteger(w.task.attempt) ? w.task.attempt : 0}`;
+      if (w.attemptOf !== attemptKey) {
+        w.attemptOf = attemptKey;
         w.attemptCycle0 = cycles;
         w.attemptStartedAt = Date.parse(now);
       }
@@ -279,8 +297,8 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
        */
       w.observed = { ...base, ...((await deps.observe?.(w, base)) ?? {}) };
     } else {
+      /* `attemptOf` is deliberately NOT cleared here; see the reset above. */
       w.observed = null;
-      w.attemptOf = null;
     }
 
     const decision = nextAction(w, { now });

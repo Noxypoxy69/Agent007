@@ -36,10 +36,12 @@
  * reason, not a rotation that quietly drops an hour of edits -- and this
  * repository has a header about never destroying evidence.
  *
- * ROTATION CANNOT BE AN ESCAPE FROM FAILING. A builder that has just produced
- * three identical errors is not degraded, it is stuck, and rotating hands a
- * fresh builder the same wall. Unrecoverable signals outrank every soft limit,
- * so `fail` is checked first.
+ * ROTATION CANNOT BE AN ESCAPE FROM FAILING. A builder going round in circles
+ * is not degraded, it is stuck, and rotating hands a fresh builder the same
+ * wall. Unrecoverable signals outrank every soft limit, so `fail` is checked
+ * first. "Stuck" is ASKED OF `src/loopDetector.mjs`, which already owns that
+ * judgement and already runs in the attempt pipeline -- see the note on the
+ * `loop` branch for why a second counter here was worse than none.
  *
  * ROTATION IS BOUNDED. Unbounded rotation is a task that never completes and
  * never fails, which is worse than either: it consumes budget forever and
@@ -47,11 +49,12 @@
  *
  * ═══ MEASURED BY THE RUNTIME, NOT SELF-REPORTED ═══
  *
- * Every field in `observed` is something the runtime counts: steps taken,
- * tokens consumed, distinct paths touched, elapsed time, consecutive identical
- * errors. A builder asked "are you degrading?" is the self-assessment this
- * whole layer exists to remove -- and a degrading builder is precisely the one
- * whose judgement about its own state is worth least.
+ * Every field in `observed` is something the runtime counts or another module
+ * already decided: steps taken, tokens consumed, distinct paths touched,
+ * elapsed time, and the loop detector's finding. A builder asked "are you
+ * degrading?" is the self-assessment this whole layer exists to remove -- and
+ * a degrading builder is precisely the one whose judgement about its own state
+ * is worth least.
  *
  * PURE. No clock, no filesystem, no process table. Rule 10, and the only
  * reason the interesting cases are testable: no test can degrade a real
@@ -90,8 +93,6 @@ export const LIMITS = Object.freeze({
   elapsedMs: 90 * 60_000,
   /* How many times one task may rotate before it is simply failing. */
   rotations: 3,
-  /* Consecutive identical errors that mean stuck rather than tired. */
-  repeatedErrors: 3,
 });
 
 /**
@@ -105,6 +106,7 @@ export const LIMITS = Object.freeze({
 export const SOFT_SIGNALS = Object.freeze(['steps', 'contextFraction', 'filesTouched', 'elapsedMs']);
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const str = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 
 /**
  * Should this builder keep going?
@@ -146,13 +148,29 @@ export function holdVerdict(observed = {}, { limits = LIMITS } = {}) {
     return { verdict: HOLD.FAIL, why: `unrecoverable: ${unrecoverable}`, crossed: ['unrecoverable'], measured };
   }
 
-  const repeated = num(o.repeatedErrors) ?? 0;
-  if (repeated >= L.repeatedErrors) {
+  /*
+   * STUCK IS ASKED OF THE LOOP DETECTOR, NOT COUNTED AGAIN HERE.
+   *
+   * The first version of this module carried its own `repeatedErrors >= 3`
+   * counter. `src/loopDetector.mjs` already does that job, is already wired
+   * into `attemptPipeline.mjs`, and does it BETTER: it detects oscillation --
+   * A B A B, a fix that breaks the other test and the revert that brings it
+   * back -- where every attempt differs from the one before, so a repeat
+   * counter never fires. Its own header calls that "the shape that runs all
+   * night", and my counter was blind to exactly it.
+   *
+   * Two implementations of the same judgement is the pair nobody watches when
+   * they disagree. So this consumes the detector's finding instead of forming
+   * a second opinion, and it is deliberately `!== null` rather than a
+   * re-reading of the fingerprints: the detector owns the threshold.
+   */
+  const loop = o.loop && typeof o.loop === 'object' && str(o.loop.kind) ? o.loop : null;
+  if (loop) {
     return {
       verdict: HOLD.FAIL,
-      why: `${repeated} consecutive identical errors: this builder is stuck, not degraded, and a fresh `
+      why: `the loop detector reports ${loop.kind}: this builder is stuck, not degraded, and a fresh `
         + 'one would meet the same wall',
-      crossed: ['repeatedErrors'],
+      crossed: ['loop'],
       measured,
     };
   }

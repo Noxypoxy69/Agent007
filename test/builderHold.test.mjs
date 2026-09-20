@@ -29,6 +29,7 @@ import {
   holdVerdict, rotationHandover, HOLD, LIMITS, SOFT_SIGNALS,
 } from '../src/builderHold.mjs';
 import { nextAction, returnPayload, ACTION } from '../src/workerLoop.mjs';
+import { createLoopState, observe } from '../src/loopDetector.mjs';
 
 /* A builder that has done a little of everything and is nowhere near the bar. */
 const healthy = () => ({
@@ -37,7 +38,7 @@ const healthy = () => ({
   filesTouched: 2,
   elapsedMs: 60_000,
   rotations: 0,
-  repeatedErrors: 0,
+  loop: null,
   checkpointable: true,
 });
 
@@ -132,18 +133,52 @@ test('ROTATION MUST NOT LOSE WORK: uncheckpointable and degraded is a FAIL', () 
 
 test('ROTATION IS NOT AN ESCAPE FROM BEING STUCK', () => {
   /*
-   * A builder repeating one error is not tired, and a fresh one meets the same
+   * A builder going in circles is not tired, and a fresh one meets the same
    * wall with a full budget to spend on it. This must outrank every soft
-   * limit, so the fixture is degraded AND stuck: if the ordering were wrong it
-   * would rotate.
+   * limit, so each fixture is degraded AND stuck: if the ordering were wrong
+   * it would rotate.
+   *
+   * THE FINDINGS COME FROM THE REAL DETECTOR, not from a hand-written shape.
+   * A fixture invented here would keep passing after loopDetector changed what
+   * it emits -- hollow gate 9, the fixture that is not a shape the system
+   * produces.
    */
-  const v = holdVerdict({ ...healthy(), steps: LIMITS.steps, repeatedErrors: LIMITS.repeatedErrors });
+  let st = createLoopState();
+  for (const fp of ['a', 'a', 'a']) st = observe(st, fp);
+  assert.ok(st.loop, 'the real detector did not report a repeat; this fixture proves nothing');
+
+  const v = holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: st.loop });
   assert.equal(v.verdict, HOLD.FAIL);
   assert.match(v.why, /stuck, not degraded/);
+  assert.match(v.why, /repeat/, 'the verdict does not say which loop shape was found');
 
-  /* Below the threshold it is just a bad patch, and the soft limits decide. */
-  const fewer = holdVerdict({ ...healthy(), steps: LIMITS.steps, repeatedErrors: LIMITS.repeatedErrors - 1 });
-  assert.equal(fewer.verdict, HOLD.ROTATE);
+  /*
+   * OSCILLATION IS THE ONE THE OLD COUNTER MISSED. Every attempt differs from
+   * the one before it, so a consecutive-identical-errors counter never fires,
+   * and loopDetector's own header calls this "the shape that runs all night".
+   */
+  let osc = createLoopState();
+  for (const fp of ['a', 'b', 'a', 'b']) osc = observe(osc, fp);
+  assert.ok(osc.loop, 'the real detector did not report an oscillation');
+  assert.equal(holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: osc.loop }).verdict, HOLD.FAIL,
+    'an oscillating builder was rotated: the successor inherits the same A-B-A-B');
+
+  /* No loop found: the soft limits decide, and a rotation is right. */
+  const clean = observe(createLoopState(), 'a');
+  assert.equal(clean.loop, null, 'the detector fired on a single fingerprint');
+  assert.equal(holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: clean.loop }).verdict, HOLD.ROTATE);
+});
+
+test('A MALFORMED LOOP FINDING IS NOT A LOOP', () => {
+  /*
+   * The detector owns the threshold, so this only checks the finding is real
+   * rather than re-reading it. That makes junk in this field the way to kill
+   * a healthy attempt, so junk must not count.
+   */
+  for (const junk of [{}, { kind: '' }, { kind: '  ' }, 'repeat', 42, true, [], null, undefined]) {
+    assert.equal(holdVerdict({ ...healthy(), loop: junk }).verdict, HOLD.CONTINUE,
+      `a malformed loop finding ${JSON.stringify(junk)} terminated a healthy attempt`);
+  }
 });
 
 test('AN UNRECOVERABLE REASON OUTRANKS EVERYTHING, including a clean fixture', () => {
