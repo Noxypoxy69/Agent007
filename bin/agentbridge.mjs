@@ -3942,7 +3942,8 @@ try {
      * an env var quietly reporting `enforced`.
      */
     const { govern, anchorState, isOwnerOnly } = await import('../src/governor.mjs');
-    const action = args.action ? String(args.action) : String(args._?.[1] ?? '');
+    const { positionals } = await import('../src/argv.mjs');
+    const action = args.action ? String(args.action) : (positionals(process.argv.slice(3))[0] ?? '');
     const actor = args.actor ? String(args.actor) : null;
 
     /*
