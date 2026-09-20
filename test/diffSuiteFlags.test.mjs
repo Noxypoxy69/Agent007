@@ -1,0 +1,132 @@
+/**
+ * THE SCOPING TOOL HAD NO TESTS AT ALL, AND IT DECIDES WHAT GETS TESTED.
+ *
+ * `scripts/diff-suite.mjs` selects which test files run for a change. It is in
+ * PROTECTED_PATHS, it is on the path of every scoped verification, and until
+ * this file nothing exercised it. A silent mis-scope there removes coverage
+ * everywhere downstream while still printing a green summary, which is the
+ * most expensive shape of hollow gate available: not one wrong answer, but a
+ * whole suite that was never asked.
+ *
+ * THE MEASURED DEFECT, 2026-09-20. The flag is `--since`. An invocation read
+ *
+ *     node scripts/diff-suite.mjs --base 553724b --print
+ *
+ * and nothing complained. Both unknown flags were ignored, the scope fell back
+ * to "working tree against HEAD", and the run reported 66/66 GREEN having
+ * selected SIX of the thirty-three test files the intended range needed. The
+ * honest run was 431 tests. A narrower green than was asked for, announced as
+ * a pass -- and nothing in the output distinguished it from the real thing.
+ *
+ * So these assert on the REFUSAL and on the SCOPE, never on "it exited 0".
+ * Rule 4: an exit code is a proxy for what a tool selected.
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const SCRIPT = path.join(REPO, 'scripts', 'diff-suite.mjs');
+
+const run = (args) => {
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], {
+    cwd: REPO, encoding: 'utf8', timeout: 120_000,
+  });
+  return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
+};
+
+test('AN UNKNOWN FLAG IS REFUSED, not absorbed into a default scope', () => {
+  const r = run(['--base', 'HEAD~1', '--list']);
+
+  /*
+   * The exact code, not `notEqual(0)`. Rule 3: a non-zero exit is evidence a
+   * process was unhappy, and a crash would satisfy notEqual(0) just as well.
+   */
+  assert.equal(r.code, 2,
+    `expected the documented refusal code 2, got ${r.code}. stderr: ${r.err}`);
+
+  assert.match(r.err, /--base/,
+    'the refusal must NAME the flag it did not recognise, or the operator has '
+    + 'to guess which of their arguments was dropped');
+  assert.match(r.err, /--since/,
+    'and it must name the flag they probably meant');
+
+  /*
+   * A NEGATIVE NEEDS THE POSITIVE (rule 5). A script that exits 2 on
+   * everything would satisfy every assertion above, so prove it did not even
+   * begin selecting: the refusal happens before any scope is computed.
+   */
+  assert.doesNotMatch(`${r.out}${r.err}`, /changed:/,
+    'it refused but still computed a scope first, so a later edit could let '
+    + 'that scope be used');
+});
+
+test('--since WITH NO REVISION is refused too -- the same defect, second spelling', () => {
+  /*
+   * Fixing only the unknown-NAME case would be rule 8: patching the strings a
+   * prober happened to try rather than the way the option is read. `--since`
+   * as the final argument, or followed by another flag, makes the option
+   * reader return its default, which is the HEAD fallback again.
+   */
+  for (const args of [['--since'], ['--since', '--list']]) {
+    const r = run(args);
+    assert.equal(r.code, 2,
+      `${JSON.stringify(args)} should be refused, got ${r.code}. stderr: ${r.err}`);
+    assert.match(r.err, /--since needs a revision/,
+      `${JSON.stringify(args)} was refused for the wrong reason: ${r.err}`);
+  }
+});
+
+test('AND THE KNOWN FLAGS STILL WORK, so the refusal is not an outage', () => {
+  /*
+   * Rule 19, in miniature. A check that denies everything it does not
+   * recognise is an outage, and an outage gets the tool stopped being used --
+   * which loses the scoping AND the whole-repo gates it always runs.
+   */
+  const r = run(['--list']);
+  assert.equal(r.code, 0, `plain --list must still work. stderr: ${r.err}`);
+  assert.match(r.err, /test file\(s\)/,
+    'a working --list reports how many test files it selected');
+});
+
+test('THE SCOPE ACTUALLY MOVES WITH --since, which is the property that matters', () => {
+  /*
+   * THE REFUSAL IS NOT THE POINT; the point is that a supplied revision
+   * CHANGES WHAT RUNS. Assert the far end (rule 4): a wider range must select
+   * a superset, not merely a different exit code.
+   *
+   * Derived from the repository at run time rather than pinned to a revision,
+   * because a literal SHA is a fact about one machine's history -- rule 21,
+   * and the 8.3 short-name test is the standing example of getting this wrong.
+   */
+  const near = run(['--since', 'HEAD', '--list']);
+  const far = run(['--since', 'HEAD~5', '--list']);
+
+  assert.equal(near.code, 0, `--since HEAD failed: ${near.err}`);
+  assert.equal(far.code, 0, `--since HEAD~5 failed: ${far.err}`);
+
+  const files = (s) => new Set(
+    s.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('test/')),
+  );
+  const nearSet = files(near.out);
+  const farSet = files(far.out);
+
+  assert.ok(nearSet.size > 0, 'the always-run whole-repo gates must appear even at HEAD');
+
+  /*
+   * ASSERT THE PRECONDITION, DO NOT GUARD ON IT (rule 6). If the last five
+   * commits happened to touch nothing outside the always-list, the sets would
+   * be equal and this test would prove nothing -- so say that out loud rather
+   * than wrapping the real assertion in an `if`.
+   */
+  assert.ok(farSet.size >= nearSet.size,
+    'a wider range selected FEWER tests, which means selection is not monotonic '
+    + `in the range: HEAD gave ${nearSet.size}, HEAD~5 gave ${farSet.size}`);
+
+  for (const t of nearSet) {
+    assert.ok(farSet.has(t),
+      `${t} is selected for HEAD but dropped for the wider HEAD~5 range`);
+  }
+});
