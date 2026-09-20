@@ -88,6 +88,66 @@ test('--since WITH NO REVISION is refused too -- the same defect, second spellin
   }
 });
 
+test('EVERY ARGUMENT MUST BE CLAIMED -- short flags and bare positionals too', () => {
+  /*
+   * RULE 8, APPLIED TO THE PREVIOUS FIX IN THIS FILE. That fix refused
+   * unrecognised LONG-FLAG NAMES and its commit message said the class was
+   * closed. Measured afterwards, all of these exited 0 and selected the 6
+   * whole-repo gates instead of the 39 the range needed -- a green run that
+   * tested almost nothing:
+   *
+   *     -s <rev>        short flag, never inspected
+   *     <rev>           bare positional, ignored
+   *
+   * The defect was never "unknown long-flag names", it was "an argument this
+   * script does not understand is silently discarded". These assert the
+   * PROPERTY -- consume-and-check -- so a spelling nobody has thought of is
+   * covered too.
+   */
+  for (const args of [['-s', 'HEAD', '--list'], ['HEAD', '--list'], ['--list', 'extra']]) {
+    const r = run(args);
+    assert.equal(r.code, 2,
+      `${JSON.stringify(args)} was absorbed instead of refused, got ${r.code}. stderr: ${r.err}`);
+    assert.match(r.err, /unrecognised argument/,
+      `${JSON.stringify(args)} was refused for the wrong reason: ${r.err}`);
+    assert.doesNotMatch(`${r.out}${r.err}`, /changed:/,
+      `${JSON.stringify(args)} computed a scope before refusing`);
+  }
+});
+
+test('A REPEATED FLAG IS REFUSED, because the FIRST one wins', () => {
+  /*
+   * `argv.indexOf` takes the first occurrence, so somebody correcting a typo
+   * by retyping the flag gets the value they meant to replace -- and the run
+   * looks fine. Refusing is the only option that cannot be silently wrong.
+   */
+  const r = run(['--since', 'HEAD', '--since', 'HEAD~1', '--list']);
+  assert.equal(r.code, 2, `a repeated flag was resolved rather than refused: ${r.err}`);
+  assert.match(r.err, /given 2 times/);
+});
+
+test('A --since THAT IS NOT A COMMIT IS REFUSED, not read as a pathspec', () => {
+  /*
+   * THE SHARPEST OF THE FOUR. `git diff --name-only CLAUDE.md` is a VALID
+   * command: git reads an unresolvable revision as a PATHSPEC and diffs the
+   * working tree against HEAD limited to that path. So `--since CLAUDE.md`
+   * produced an empty scope, exit 0, and an output line reading "nothing
+   * changed against HEAD" WHILE --since was on the command line -- the
+   * message contradicting the invocation and still reading as a pass.
+   *
+   * Arity and spelling checks structurally cannot catch it: the argument is
+   * present, a string, and in the right place. Only git can answer.
+   */
+  const r = run(['--since', 'CLAUDE.md', '--list']);
+  assert.equal(r.code, 2, `a pathspec was accepted as a revision: ${r.out}${r.err}`);
+  assert.match(r.err, /does not resolve to a commit/);
+
+  /* A tree sha verifies under a bare --verify; it must still be refused. */
+  const tree = run(['--since', 'HEAD^{tree}', '--list']);
+  assert.equal(tree.code, 2,
+    'a TREE resolved as a valid --since, and diffing against a tree is meaningless');
+});
+
 test('AND THE KNOWN FLAGS STILL WORK, so the refusal is not an outage', () => {
   /*
    * Rule 19, in miniature. A check that denies everything it does not
