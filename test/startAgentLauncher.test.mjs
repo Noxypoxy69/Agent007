@@ -472,27 +472,91 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
    */
   const cmd = readFileSync(path.join(REPO, 'agent.cmd'), 'utf8');
 
+  /*
+   * CMD.EXE'S CARET PHASE, WHICH v5 DID NOT MODEL AND AN AUDITOR USED.
+   *
+   * The caret is removed BEFORE cmd decides what the command name is, so a
+   * launcher can run npm without the file containing the string "npm" --
+   * and five rounds of this matcher, all operating on the raw text, could
+   * not see it. Rule 8: the probe does not bound the hole, the matcher does.
+   *
+   * MEASURED, not read off the parser documentation. A stub npm.cmd on PATH
+   * writes a marker file, so "did npm run" is a fact about the process
+   * table rather than about a string. Eleven spellings through cmd.exe:
+   *
+   *     npm run x                      RAN
+   *     "npm" run x                    RAN
+   *     n^pm run x                     RAN    <- caret removed from the name
+   *     n^p^m run x                    RAN
+   *     n"p"m run x                    RAN    <- quotes split the name
+   *     n^ <newline> pm run x          RAN    <- caret at EOL joins the lines
+   *     echo warming & npm run x       RAN
+   *     set "N=npm" / call %N% run x   RAN
+   *
+   *     "n^pm" run x                   no     <- inside quotes the caret is LITERAL
+   *     echo a ^& npm run x            no     <- the escaped & is not a separator
+   *     rem npm^ <newline> npm run x   no     <- rem swallows the joined line too
+   *
+   * THE LAST THREE ARE WHY THIS IS A MODEL AND NOT A STRIPPER. Deleting
+   * every caret would catch the first six and then refuse all three of
+   * these, which run nothing -- a gate red on an innocent launcher is one
+   * people switch off (rule 16). The caret means different things inside
+   * quotes, before a separator and at end of line, so all three are
+   * represented.
+   */
+  const CARET_PHASE = (text) => {
+    const out = [];                       // { c, esc, quote }
+    let quoted = false;
+    for (let i = 0; i < text.length; i += 1) {
+      const c = text[i];
+      if (c === '"') { quoted = !quoted; out.push({ c, esc: false, quote: true }); continue; }
+      if (!quoted && c === '^') {
+        const next = text[i + 1];
+        if (next === undefined) continue;                  // a trailing caret vanishes
+        if (next === '\r' || next === '\n') {              // line continuation
+          i += (next === '\r' && text[i + 2] === '\n') ? 2 : 1;
+          continue;
+        }
+        out.push({ c: next, esc: true, quote: false });    // literal, never a separator
+        i += 1;
+        continue;
+      }
+      out.push({ c, esc: false, quote: false, inQuote: quoted });
+    }
+    return out;
+  };
+
+  /** The text cmd would match a command NAME against: quote marks removed. */
+  const spell = (chars) => chars.filter((x) => !x.quote).map((x) => x.c).join('');
+
   /** What cmd.exe would actually run: statements, minus the inert ones. */
   const executableStatements = (text) => {
     const kept = [];
-    for (const raw of text.split(/\r?\n/)) {
-      const line = raw.replace(/^\s*@?\s*/, '');
+
+    /* Lines, split only on newlines the caret phase left standing. */
+    const lines = [[]];
+    for (const x of CARET_PHASE(text)) {
+      if (x.c === '\n' && !x.esc) { lines.push([]); continue; }
+      if (x.c === '\r' && !x.esc) continue;
+      lines[lines.length - 1].push(x);
+    }
+
+    for (const lineChars of lines) {
+      const line = spell(lineChars).replace(/^\s*@?\s*/, '');
       /* rem and :: swallow the remainder of the line, separators included. */
       if (/^(?:rem\b|::)/i.test(line)) continue;
 
-      /* Split on unquoted & or |; a separator inside quotes is literal. */
-      const parts = [];
-      let cur = '';
+      /* Split on & or | that are neither quoted nor caret-escaped. */
+      const parts = [[]];
       let quoted = false;
-      for (const ch of line) {
-        if (ch === '"') { quoted = !quoted; cur += ch; continue; }
-        if (!quoted && (ch === '&' || ch === '|')) { parts.push(cur); cur = ''; continue; }
-        cur += ch;
+      for (const x of lineChars) {
+        if (x.quote) { quoted = !quoted; parts[parts.length - 1].push(x); continue; }
+        if (!quoted && !x.esc && (x.c === '&' || x.c === '|')) { parts.push([]); continue; }
+        parts[parts.length - 1].push(x);
       }
-      parts.push(cur);
 
       for (const part of parts) {
-        const st = part.replace(/^\s*@?\s*/, '').trim();
+        const st = spell(part).replace(/^\s*@?\s*/, '').trim();
         if (st === '') continue;
         if (/^(?:rem\b|::)/i.test(st)) continue;
         /* "echo whatever" and "echo." PRINT their payload; they run nothing. */
@@ -543,6 +607,12 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     '"npm" run start-agent',
     'npm.ps1 run agent',
     'node "%APPDATA%\\npm\\node_modules\\npm\\bin\\npm-cli.js" run agent',
+    /* the caret and quote spellings, each MEASURED to execute npm */
+    'n^pm run x',
+    'n^p^m run x',
+    'n"p"m run x',
+    'n^\r\npm run x',
+    '"n^pm" run x & npm run y',
     /* the echo-chained forms, each MEASURED above to execute npm */
     'echo warming up & npm run start-agent',
     'echo warming up & call npm run agent:check',
@@ -565,6 +635,10 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     ':: npm is deliberately not used',
     'rem  A & npm run TAIL',
     'echo   Run  npm run agent:check -- %1 --print',
+    /* MEASURED inert: the caret means something different in each of these */
+    '"n^pm" run x',
+    'echo a ^& npm run x',
+    'rem npm^\r\nnpm run x',
   ]) {
     assert.doesNotMatch(executableStatements(inert), RUNS_NPM,
       `"${inert}" executes nothing and must be allowed`);
