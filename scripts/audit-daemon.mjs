@@ -42,7 +42,9 @@
  * fires an LLM session per control commit unattended is how you find that out
  * the expensive way. Measure the volume first.
  */
-import { existsSync, writeFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync, writeFileSync, mkdirSync, readFileSync, rmSync, mkdtempSync,
+} from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -199,57 +201,54 @@ function nextJob() {
 }
 
 /**
- * A detached worktree at the exact candidate, via the manager's own pattern.
+ * A detached worktree at the exact candidate, at a path nobody can predict.
  *
- * ═══ A REUSED DIRECTORY IS VERIFIED, OR IT IS NOT REUSED ═══
+ * ═══ THE NAME WAS THE ROOT CAUSE OF THREE FINDINGS ═══
  *
- * Fourth-lap blind audit M6. This returned `{ok:true, reused:true}` for ANY
- * pre-existing `%TEMP%/audit-<sha12>` -- no check that it was a registered
- * worktree, that it was checked out at the candidate, or that it was clean.
- * And the brief then asserted to the reviewer, in so many words, "It is a
- * detached worktree at the exact candidate."
+ * Sixth-lap blind audit, and the auditor named the cheap fix: this was
+ * `%TEMP%/audit-<sha12>`, DERIVED FROM THE CANDIDATE, so any local process
+ * could compute the path before the daemon ever ran. Everything downstream
+ * followed from that one choice:
  *
- * `os.tmpdir()` is writable by any local process. Pre-creating
- * `audit-<sha12>` as a worktree at a DIFFERENT commit made the reviewer audit
- * the wrong tree while the verdict was attributed to `job.candidate_sha` --
- * the brief's own "wrong candidate" question, answered yes. Seven such
- * directories were sitting in TEMP when this was found, so the precondition
- * was live, not hypothetical.
+ *   D9  a pre-created directory was adopted, and verifying it needed three
+ *       separate checks (registered worktree / at the candidate / clean) of
+ *       which only one was ever written. A separate `git clone` at the right
+ *       commit passed the one check and defeated the other two.
+ *   D10 `mkdir %TEMP%/audit-<sha12>` of the head-of-queue candidate WEDGED
+ *       THE WHOLE DAEMON: allocate refused, the job stayed PENDING, and it
+ *       is re-selected first on every subsequent tick. Permanently, silently,
+ *       with no fallback and no alarm.
+ *   D11 teardown `--force`-removed a directory the daemon may not have
+ *       created, destroying a review in progress left by the `!LAUNCH` path.
  *
- * Teardown is `worktree remove --force`, so a wrongly-reused directory also
- * gets its contents discarded.
+ * `mkdtempSync` removes all three at once: the path is unguessable, so it is
+ * never pre-created, never adopted, never someone else's. No reuse logic
+ * remains to be got wrong, and the verification it needed is gone rather
+ * than improved -- which is the better outcome, because two of its three
+ * checks were never going to be written.
  *
- * Now: reuse only what git agrees is a worktree at exactly this commit, and
- * refuse otherwise rather than adopting it. Refusing is safe -- the job stays
- * PENDING and says why.
+ * The cost is that the `!LAUNCH` convenience no longer reuses a prepared
+ * worktree across runs. That was never reliable anyway -- it depended on the
+ * name colliding -- and the path is printed, so an operator can still work
+ * in it.
  */
 function allocate(candidateSha) {
-  const dir = path.join(os.tmpdir(), `audit-${String(candidateSha).slice(0, 12)}`);
-  if (existsSync(dir)) {
-    let head = null;
-    try {
-      head = String(runGit(['rev-parse', 'HEAD'], { cwd: dir })).trim();
-    } catch {
-      return {
-        ok: false,
-        why: `${dir} exists but git does not recognise it as a worktree. Refusing to `
-          + 'adopt a directory of unknown provenance as the candidate checkout',
-      };
-    }
-    if (head !== String(candidateSha)) {
-      return {
-        ok: false,
-        why: `${dir} exists but is at ${head?.slice(0, 12)}, not the candidate `
-          + `${String(candidateSha).slice(0, 12)}. Reusing it would review the wrong tree `
-          + 'and attribute the verdict to the right one',
-      };
-    }
-    return { ok: true, dir, reused: true };
+  let dir;
+  try {
+    dir = mkdtempSync(path.join(os.tmpdir(), `audit-${String(candidateSha).slice(0, 8)}-`));
+  } catch (e) {
+    return { ok: false, why: `could not create a workspace: ${String(e?.message ?? e)}` };
   }
   try {
-    runGit(['worktree', 'add', '--detach', dir, candidateSha], { cwd: REPO });
+    /*
+     * `--force` because mkdtemp already made the directory and `worktree
+     * add` refuses a non-empty target otherwise. The directory is ours and
+     * brand new, so there is nothing here to overwrite.
+     */
+    runGit(['worktree', 'add', '--detach', '--force', dir, candidateSha], { cwd: REPO });
     return { ok: true, dir, reused: false };
   } catch (e) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     return { ok: false, why: String(e?.stderr || e?.message || e).trim() };
   }
 }
@@ -491,7 +490,24 @@ async function tick() {
    * lost.
    */
   let transcript = '';
-  const child = spawn('claude', ['-p', `Read ${briefPath} and carry it out.`], {
+  /*
+   * THE BRIEF PATH IS QUOTED, BECAUSE IT CONTAINS A SPACE ON THIS MACHINE.
+   *
+   * Fourth-lap blind audit M12. With `shell: true` Node joins the file and
+   * args with spaces and applies NO quoting -- that is documented -- and
+   * `os.tmpdir()` here is under `C:\Users\DANNY GARCIA\...`. So the reviewer
+   * received the prompt split across roughly eight tokens with the path
+   * broken in the middle, could not open the brief, produced no verdict
+   * marker, and the job was released. The brief is what carries the
+   * blindness discipline and the proof obligations, so a reviewer that
+   * cannot read it is not a degraded review -- it is no review at all,
+   * looping.
+   *
+   * Double quotes are correct for cmd.exe, which is the shell `shell: true`
+   * selects on win32, and harmless in the prompt text on other platforms
+   * where no shell is used at all.
+   */
+  const child = spawn('claude', ['-p', `Read "${briefPath}" and carry it out.`], {
     cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32',
   });
   child.stdout?.on('data', (d) => { transcript += d; process.stdout.write(d); });
@@ -616,6 +632,24 @@ async function tick() {
   const rec = spawnSync(process.execPath, [
     path.join(REPO, 'bin', 'agentbridge.mjs'), 'audit-record',
     '--id', job.audit_id, '--verdict', verdict.verdict,
+    /*
+     * THE CANDIDATE AND ITS TREE ARE NAMED, or the fence compares the row
+     * against itself. Fourth-lap blind audit M7.
+     *
+     * `recordAudit` fences on `candidate_sha` and `candidate_tree_sha` --
+     * the audit-pin lesson, demonstrated live against this repository. The
+     * daemon passed NEITHER, and the CLI defaults both FROM THE ROW, so on
+     * the only automated write path the check compared the row with itself
+     * and could never fire.
+     *
+     * The values come from the job as CLAIMED, not from the worktree: what
+     * is being asserted is "the thing I reviewed is the thing I was given".
+     * A reviewer that edits the worktree cannot move the sha, but it can
+     * move the tree, and that is exactly what the tree half of the fence is
+     * for -- so passing it is what makes the fence mean anything here.
+     */
+    '--candidate', String(job.candidate_sha),
+    '--tree', String(job.candidate_tree_sha),
     /*
      * THE WRITER MUST BE NAMED, and it is the DAEMON's identity, not the
      * session's. `recordAudit` fences on writer === claimant; the daemon is
