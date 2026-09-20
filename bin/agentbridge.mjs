@@ -3502,7 +3502,23 @@ try {
         process.exit(2);
       }
       const merged = mergeQueue(readQueue(), computed.jobs, { now: new Date().toISOString() });
-      if (merged.added.length || merged.stranded.length) writeQueue(merged.queue);
+      /*
+       * WRITE UNCONDITIONALLY, because the guard is now inside writeQueue.
+       *
+       * Sixth-lap blind audit D-B. This wrote only when something was ADDED
+       * or STRANDED -- so a row whose `author_source` had just been UPGRADED
+       * (from `unavailable`, because this is the one caller with a resolver)
+       * was recomputed in memory and thrown away. Combined with the
+       * fail-closed dispatch, a row that entered as `unavailable` from the
+       * Stop gate or pre-push was PERMANENTLY unplaceable: the only producer
+       * that could repair it declined to persist the repair.
+       *
+       * The condition existed to avoid appending the whole queue on every
+       * invocation. `writeQueue` filters to genuinely-changed rows itself
+       * now, so an unchanged queue appends nothing and the condition is not
+       * merely redundant -- it is the bug.
+       */
+      writeQueue(merged.queue);
 
       if (cmd === 'audit-record') {
         /*
@@ -3756,9 +3772,28 @@ try {
             console.log(`  would go to ${p.session_id ?? p.agent_id}  ${p.audit_id}`
               + `${p.recovered ? `  (RECOVERED from ${p.previous_holder})` : ''}`);
           }
-          const onlyAuthor = plan.unassigned.filter((u) => u.code === UNPLACED.ONLY_AUTHOR_AVAILABLE);
-          if (onlyAuthor.length) {
-            console.log(`  ${onlyAuthor.length} job(s) have only their own author free -- rule 20 holds them`);
+          /*
+           * EVERY REASON, DERIVED FROM THE CODES THEMSELVES. Sixth-lap
+           * blind audit D-C: this filtered for ONLY_AUTHOR_AVAILABLE alone,
+           * so when AUTHOR_UNKNOWN was added the CLI printed "3 live (3
+           * free)" and nothing else against an entirely unplaceable queue --
+           * re-creating, one code later, the exact ambiguity the seats line
+           * was added to remove.
+           *
+           * Grouping over whatever codes are present means a code added
+           * tomorrow is reported without anybody remembering this block.
+           * Rule 7: derive from the real list rather than enumerating.
+           */
+          const byCode = new Map();
+          for (const u of plan.unassigned) {
+            if (!byCode.has(u.code)) byCode.set(u.code, []);
+            byCode.get(u.code).push(u);
+          }
+          for (const [code, group] of byCode) {
+            console.log(`  ${group.length} job(s) unplaceable: ${code} -- ${group[0].why}`);
+          }
+          if (plan.proposals.length === 0 && plan.unassigned.length > 0) {
+            console.log('  NOTHING can be dispatched right now. That is a starved queue, not an idle one.');
           }
         }
       } catch (e) {

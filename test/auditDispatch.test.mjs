@@ -23,7 +23,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { proposeAudit, isClaimable, UNPLACED } from '../src/auditDispatch.mjs';
-import { claimJob, CLAIM_LEASE_MS, JOB } from '../src/auditJob.mjs';
+import { claimJob, CLAIM_LEASE_MS, JOB, AUTHOR_UNAVAILABLE } from '../src/auditJob.mjs';
 
 const T0 = 1_000_000;
 const SHA = 'a'.repeat(40);
@@ -118,6 +118,44 @@ test('THE AUTHOR IS NOT OFFERED ITS OWN CANDIDATE, and the job says why', () => 
     'nothing was placed even with an eligible seat present, so the refusal above '
     + 'proves only that the dispatcher refuses everything');
   assert.equal(withOther.proposals[0].session_id, 'session_OTHER');
+});
+
+test('AN UNKNOWN AUTHOR FAILS CLOSED, and the branch is watched firing', () => {
+  /*
+   * Sixth-lap blind audit D-B: the fail-closed branch shipped with NO test.
+   * No fixture anywhere constructed `author_source: 'unavailable'` and
+   * handed it to proposeAudit, so deleting the whole block left the suite
+   * green -- rule 1 unmet, in the same range whose sibling commit added
+   * dependency injection specifically so a branch could be watched firing.
+   *
+   * `unavailable` means nobody established who wrote the candidate. Rule 20
+   * cannot be enforced against an author you cannot name, so dispatching
+   * anyway and recording the result as independent is the laundering rule
+   * 20 exists to prevent.
+   */
+  const r = proposeAudit({
+    jobs: [job({ author_source: AUTHOR_UNAVAILABLE })],
+    sessions: [seat('reviewer-one'), seat('reviewer-two')],
+    now: T0,
+    isLive: allLive,
+  });
+  assert.equal(r.proposals.length, 0,
+    'a candidate whose author could not be established was dispatched anyway');
+  assert.equal(r.unassigned[0].code, UNPLACED.AUTHOR_UNKNOWN);
+
+  /*
+   * AND A MEASURED ABSENCE STILL DISPATCHES (rule 5). If both collapsed to
+   * a refusal, every commit without a Claude-Session trailer would be
+   * permanently unauditable -- an outage dressed as rigour.
+   */
+  const measured = proposeAudit({
+    jobs: [job({ author_source: null, author_session: null })],
+    sessions: [seat('reviewer-one')],
+    now: T0,
+    isLive: allLive,
+  });
+  assert.equal(measured.proposals.length, 1,
+    `a commit with no trailer became unauditable: ${JSON.stringify(measured.unassigned)}`);
 });
 
 test('A SEAT HOLDING A LIVE CLAIM IS BUSY, and that is read from the QUEUE', () => {

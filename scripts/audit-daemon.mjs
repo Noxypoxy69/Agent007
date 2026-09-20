@@ -63,7 +63,9 @@ const say = (s) => process.stderr.write(`${s}\n`);
 
 const { runGit } = await import('../src/safeGit.mjs');
 const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
-const { claimJob, JOB, REQUIRED_PROOFS } = await import('../src/auditJob.mjs');
+const {
+  claimJob, JOB, REQUIRED_PROOFS, makeAuthorResolver, AUTHOR_UNAVAILABLE,
+} = await import('../src/auditJob.mjs');
 const { proposeAudit, isClaimable } = await import('../src/auditDispatch.mjs');
 
 /*
@@ -129,7 +131,37 @@ function nextJob() {
    * a preference of whoever is watching. That comparator now lives in
    * proposeAudit, and `escaped` is the flag it sorts on.
    */
-  const jobs = rows.map((j) => ({ ...j, escaped: hasEscaped(j.candidate_sha, upstream) }));
+  /*
+   * RE-RESOLVE AN UNKNOWN AUTHOR HERE, BECAUSE THIS PROCESS HAS GIT.
+   *
+   * Sixth-lap blind audit D-B. `auditJobsFor` records `unavailable` whenever
+   * its caller passed no resolver, and two callers that WRITE THE STORE have
+   * none: the Stop gate and pre-push. The dispatcher then fail-closes on
+   * `unavailable` -- correctly, rule 20 cannot be enforced against an author
+   * nobody named -- so every row those two originate was undispatchable.
+   *
+   * The comment I wrote there said such a row "is picked up on the next tick
+   * once the lookup succeeds". THAT WAS FALSE: nothing re-resolved. nextJob
+   * only read the queue, and `author_source` was frozen on disk.
+   *
+   * It is fixed here rather than by giving the Stop gate a resolver, because
+   * that file is one no session may edit and because the daemon is the right
+   * place anyway: it is the party that dispatches, it has a git handle, and
+   * the trailer is immutable so a later read is as good as an earlier one.
+   * The upgrade persists through the ordinary claim write, and the strength
+   * ordering accepts it because `unavailable` (0) is weaker than `trailer`
+   * (2) and than a measured `null` (1).
+   */
+  const resolveAuthor = makeAuthorResolver(
+    (c) => String(runGit(['log', '-1', '--format=%B', c], { cwd: REPO })),
+  );
+  const jobs = rows.map((j) => {
+    const base = { ...j, escaped: hasEscaped(j.candidate_sha, upstream) };
+    if (base.author_source !== AUTHOR_UNAVAILABLE) return base;
+    const answer = resolveAuthor(base.candidate_sha);
+    if (answer === AUTHOR_UNAVAILABLE) return base;   // still cannot look
+    return { ...base, author_session: answer, author_source: answer ? 'trailer' : null };
+  });
 
   /*
    * ONE SEAT: this process. isLive is `true` because the daemon is the thing
@@ -295,7 +327,22 @@ function brief(job, dir, nonce) {
 
 async function tick() {
   const { rows, job, pendingCount } = nextJob();
-  if (!job) { say(`[audit-daemon] queue empty (${rows.length} row(s)); nothing to consume`); return false; }
+  if (!job) {
+    /*
+     * "EMPTY" AND "STARVED" ARE DIFFERENT, AND THIS SAID EMPTY FOR BOTH.
+     * Sixth-lap blind audit D-C. A queue full of jobs none of which can be
+     * placed -- no live seat, every seat busy, the author unknown -- was
+     * reported as `queue empty`, which is the one sentence guaranteed to
+     * stop anybody looking. Same shape as the complaint the `audits` seats
+     * line was added to answer, one layer down.
+     */
+    const claimableNow = pendingCount;
+    say(claimableNow > 0
+      ? `[audit-daemon] STARVED: ${claimableNow} claimable job(s) and none could be placed. `
+        + 'Reasons above. This is not an empty queue.'
+      : `[audit-daemon] queue empty (${rows.length} row(s)); nothing to consume`);
+    return false;
+  }
 
   /*
    * THE AUTHOR IS PASSED IN, WHICH IT WAS NOT. Blind audit D4, HIGH.

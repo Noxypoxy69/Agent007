@@ -152,7 +152,9 @@ try {
     if (jobs.length === 0) continue;
 
     const merged = mergeQueue(readQueue(REPO).rows, jobs, { now });
-    if (merged.added.length || merged.stranded.length) writeQueue(REPO, merged.queue);
+    /* Unconditional: writeQueue filters no-ops itself, and the condition
+     * discarded upgraded rows. See bin/agentbridge.mjs for the full note. */
+    writeQueue(REPO, merged.queue);
     created += merged.added.length;
     for (const j of jobs) wouldRefuse.push(`${String(j.candidate_sha).slice(0, 8)}  ${(j.touched ?? []).join(', ')}`);
   }
