@@ -43,6 +43,44 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, cpSync, writeFileSync, rmSync } from 'node:fs';
+
+/**
+ * REMOVE A SCRATCH REPO WITHOUT FAILING THE TEST THAT ALREADY PASSED.
+ *
+ * Measured 2026-09-21: shard 4 went red with
+ *
+ *     EPERM, Permission denied: ...\Temp\stop-deadline-sQylQQ
+ *       at rmSync (test/stopGateDeadline.test.mjs:172)
+ *
+ * in a `t.after` hook, on a test whose body had already passed in 14.2s.
+ * These tests spawn a real Stop gate that spawns a suite and then KILLS it
+ * at a deadline -- that is the thing they exist to prove -- and on Windows a
+ * dying child holds handles on its cwd for a short while after the kill
+ * returns. `force: true` does not help: it suppresses ENOENT, not EPERM.
+ *
+ * So the cleanup retried briefly, and a cleanup that still cannot finish
+ * LEAVES THE DIRECTORY rather than failing the run. A temp directory that
+ * outlives a test is untidy; a green test reported red is a false alarm on
+ * the guard's own suite, and rule 16 says an alarm that fires on healthy
+ * work is one people learn to skip.
+ *
+ * NOT SILENT, THOUGH. It says so on stderr, because "the machine could not
+ * delete this" and "nothing happened" must not look identical -- if these
+ * start accumulating, somebody should see why.
+ */
+function removeScratch(dir) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (e?.code !== 'EPERM' && e?.code !== 'EBUSY') throw e;
+      /* Busy-wait briefly: Atomics.wait is the only sync sleep available. */
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  process.stderr.write(`[stopGateDeadline] could not remove ${dir}: a killed child still holds it\n`);
+}
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -169,7 +207,7 @@ function primed(dir, sessionId) {
 test('the gate refuses before the hook deadline instead of being killed into a silent allow', (t) => {
   const HOOK_TIMEOUT_S = 20;
   const dir = scratchRepo({ stopTimeoutS: HOOK_TIMEOUT_S, suite: SLOW_SUITE });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeScratch(dir));
   primed(dir, 'deadline-session');
 
   const verdict = stop(dir, 'deadline-session', HOOK_TIMEOUT_S * 1000);
@@ -250,7 +288,7 @@ test('a green suite inside the budget is still approved', (t) => {
    * off, losing all three delegated layers at once. Same machinery, approved.
    */
   const dir = scratchRepo({ stopTimeoutS: 190, suite: PASSING_SUITE });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeScratch(dir));
   primed(dir, 'healthy-session');
 
   const verdict = stop(dir, 'healthy-session', 190_000);
@@ -273,7 +311,7 @@ test('a budget too small to finish is refused rather than started', (t) => {
    * ignoring the declaration would produce here.
    */
   const dir = scratchRepo({ stopTimeoutS: 12, suite: PASSING_SUITE });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeScratch(dir));
   primed(dir, 'cramped-session');
 
   const verdict = stop(dir, 'cramped-session', 12_000);
@@ -314,7 +352,7 @@ test('the SMALLEST declared timeout governs, not the first one found', (t) => {
    * project file alone would run the green suite and APPROVE.
    */
   const dir = scratchRepo({ stopTimeoutS: 190, localTimeoutS: 12, suite: PASSING_SUITE });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeScratch(dir));
   primed(dir, 'two-declarations');
 
   const verdict = stop(dir, 'two-declarations', 12_000);
@@ -340,7 +378,7 @@ test('an unreadable hook declaration leaves the gate working rather than wedged'
    * as good as it was before the deadline existed -- no worse, and no better.
    */
   const dir = scratchRepo({ stopTimeoutS: 190, suite: PASSING_SUITE });
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => removeScratch(dir));
   writeFileSync(path.join(dir, '.claude', 'settings.json'), 'not json at all\n');
   execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'ignore' });
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'break settings'],

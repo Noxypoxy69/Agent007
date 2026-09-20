@@ -42,7 +42,7 @@
  * fires an LLM session per control commit unattended is how you find that out
  * the expensive way. Measure the volume first.
  */
-import { existsSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -343,7 +343,33 @@ async function tick() {
    */
   const nonce = randomUUID().replace(/-/g, '').slice(0, 16);
 
-  const briefDir = path.join(ws.dir, '.audit');
+  /*
+   * ═══ THE BRIEF LIVES OUTSIDE THE TREE IT DESCRIBES ═══
+   *
+   * Sixth-lap blind audit D-A, HIGH, and it falsified a security claim I had
+   * written one commit earlier. Removing the VERDICT.json channel, I wrote
+   * "there is ONE channel now, and it is the one carrying a secret the
+   * candidate cannot know". The nonce was written into
+   * `<worktree>/.audit/BRIEF.txt` -- inside the tree that
+   * `git worktree add --detach <dir> <candidate_sha>` had just checked out
+   * FROM THE CANDIDATE -- and the reviewer runs with `cwd: ws.dir`, so the
+   * candidate's own CLAUDE.md loads as its project instructions. The
+   * daemon's own comment six lines away said exactly that.
+   *
+   * So the nonce was readable by candidate-controlled content before the
+   * reviewer started, and the two-blocks refusal only catches a REPLAY
+   * beside an honest block. An injected instruction that suppresses the
+   * reviewer's own block and emits one forged PASS produces a single match
+   * that parses cleanly and is recorded. One of two doors was closed and the
+   * message said there was only one.
+   *
+   * The brief path is already handed to the reviewer as an ABSOLUTE path, so
+   * moving the directory out of the worktree costs nothing and closes it.
+   * It also closes D-H: a candidate committing a FILE named `.audit` made
+   * `mkdirSync` throw after the job was already marked CLAIMED, stranding it
+   * and taking the daemon down.
+   */
+  const briefDir = path.join(os.tmpdir(), `audit-brief-${nonce}`);
   mkdirSync(briefDir, { recursive: true });
   const briefPath = path.join(briefDir, 'BRIEF.txt');
   writeFileSync(briefPath, `${brief(job, ws.dir, nonce)}\n`);
@@ -397,6 +423,12 @@ async function tick() {
     } catch (e) {
       say(`[audit-daemon] could NOT remove ${ws.dir}: ${String(e?.stderr || e?.message || e).trim()}`);
     }
+    /*
+     * AND THE BRIEF, which now lives outside the worktree (D-A) and so is no
+     * longer carried away by `worktree remove`. It holds the run's nonce, so
+     * leaving it behind leaves the secret on disk.
+     */
+    try { rmSync(briefDir, { recursive: true, force: true }); } catch { /* best effort */ }
   };
 
   /*
@@ -594,6 +626,7 @@ async function tick() {
    * administrative records go too, instead of leaving entries that only
    * `prune` can clear.
    */
+  try { rmSync(briefDir, { recursive: true, force: true }); } catch { /* best effort */ }
   try {
     runGit(['worktree', 'remove', '--force', ws.dir], { cwd: REPO });
     say(`[audit-daemon] removed ${ws.dir}`);
