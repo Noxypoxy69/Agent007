@@ -63,6 +63,7 @@ const say = (s) => process.stderr.write(`${s}\n`);
 const { runGit } = await import('../src/safeGit.mjs');
 const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
 const { claimJob, JOB, REQUIRED_PROOFS } = await import('../src/auditJob.mjs');
+const { proposeAudit, isClaimable } = await import('../src/auditDispatch.mjs');
 
 /*
  * THE DAEMON'S IDENTITY IS ITS OWN, NOT THE SESSION'S.
@@ -98,7 +99,6 @@ function hasEscaped(sha, upstream) {
 
 function nextJob() {
   const { rows } = readQueue(REPO);
-  const pending = rows.filter((j) => (j.state ?? JOB.PENDING) === JOB.PENDING);
 
   let upstream = null;
   try {
@@ -108,21 +108,61 @@ function nextJob() {
   }
 
   /*
-   * ESCAPED FIRST, THEN OLDEST. A RULE, NOT A PICK -- which is the whole point
-   * of the daemon. The maker does not choose which of its commits get
-   * reviewed; it does not get to choose the order either, and "already on
-   * other machines outranks still local" is a property of the candidate rather
-   * than a preference of whoever is watching.
+   * SELECTION IS proposeAudit's, AND MOVING IT THERE FIXED A REAL BUG.
+   *
+   * This function used to filter `rows` to state === PENDING and rank those.
+   * A CLAIMED job whose holder died was therefore NEVER RE-OFFERED -- not
+   * after the lease expired, not on the next tick, not after a restart. That
+   * is why the eight jobs claimed by a dead seat sat stranded: restarting the
+   * daemon would not have recovered a single one of them, because the only
+   * thing it ever looked at was PENDING.
+   *
+   * proposeAudit's `isClaimable` admits PENDING *and* CLAIMED-past-the-lease,
+   * so recovery happens here now without this file knowing how a lease works.
+   * It also applies the author exclusion at selection, which this never did.
+   *
+   * ESCAPED FIRST, THEN OLDEST, still -- a RULE, not a pick, which is the
+   * whole point of the daemon. The maker does not choose which of its commits
+   * get reviewed and does not choose the order either; "already on other
+   * machines outranks still local" is a property of the candidate rather than
+   * a preference of whoever is watching. That comparator now lives in
+   * proposeAudit, and `escaped` is the flag it sorts on.
    */
-  const ranked = pending
-    .map((j) => ({ j, escaped: hasEscaped(j.candidate_sha, upstream) }))
-    .sort((a, b) => (Number(b.escaped) - Number(a.escaped))
-      || String(a.j.first_seen_at ?? '').localeCompare(String(b.j.first_seen_at ?? '')));
+  const jobs = rows.map((j) => ({ ...j, escaped: hasEscaped(j.candidate_sha, upstream) }));
 
-  const escapedCount = ranked.filter((r) => r.escaped).length;
-  if (escapedCount) say(`[audit-daemon] ${escapedCount} of ${pending.length} pending have already left the machine; taking those first`);
+  /*
+   * ONE SEAT: this process. isLive is `true` because the daemon is the thing
+   * asking -- it is demonstrably running. That is the honest answer here and
+   * NOT a bypass of liveRegistry: the registry answers "is that other agent
+   * alive", a question nobody needs to ask about themselves.
+   */
+  const seat = { session_id: BY, agent_id: BY, capacity: 'idle' };
+  const plan = proposeAudit({
+    jobs, sessions: [seat], now: Date.now(), isLive: () => true,
+  });
 
-  return { rows, job: ranked[0]?.j ?? null, pendingCount: pending.length };
+  const claimable = jobs.filter((j) => isClaimable(j, { now: Date.now() }));
+  const escapedCount = claimable.filter((j) => j.escaped).length;
+  if (escapedCount) {
+    say(`[audit-daemon] ${escapedCount} of ${claimable.length} claimable have already left the machine; taking those first`);
+  }
+
+  const picked = plan.proposals[0] ?? null;
+  if (!picked) {
+    /*
+     * SAY WHY NOTHING WAS TAKEN. "no job" and "the only job left is one I
+     * wrote myself" are different states, and the second is the one that
+     * looks like an idle daemon while a control sits unreviewed.
+     */
+    for (const u of plan.unassigned.slice(0, 3)) say(`[audit-daemon] ${u.audit_id}: ${u.why}`);
+    return { rows, job: null, pendingCount: claimable.length };
+  }
+
+  const job = jobs.find((j) => j.audit_id === picked.audit_id) ?? null;
+  if (picked.recovered) {
+    say(`[audit-daemon] ${picked.audit_id} RECOVERED from ${picked.previous_holder}: its lease expired`);
+  }
+  return { rows, job, pendingCount: claimable.length };
 }
 
 /** A detached worktree at the exact candidate, via the manager's own pattern. */
