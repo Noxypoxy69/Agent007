@@ -626,6 +626,55 @@ test('A ROTATED TASK COMING BACK GETS A FRESH STEP BUDGET', async () => {
     `the re-claimed attempt inherited ${second[0]} steps from the attempt that was rotated away`);
 });
 
+test('BREADTH IS MEASURED FROM OUTSIDE THE BUILDER, by asking git', async () => {
+  /*
+   * THE BUILDER IS NOT ONE OF OUR AGENTS. Whatever the platform dispatches
+   * into the worktree is a black box: we do not write it, cannot instrument
+   * it, and must not require it to report on itself. So breadth is asked of
+   * git, which works identically for an agent nobody here has ever seen.
+   */
+  const asked = [];
+  const seen = [];
+  const { deps } = world({
+    pollRun: async () => ({ done: false }),
+    changedPaths: async (dir, base) => { asked.push([dir, base]); return ['src/a.mjs', 'src/b.mjs', 'README.md']; },
+    observe: async (_w, base) => { seen.push(base.filesTouched); return {}; },
+  });
+  await run(deps, 12);
+
+  assert.ok(asked.length > 0, 'git was never asked what changed, so breadth is never measured');
+  assert.equal(asked[0][1], TASK.base_sha, 'breadth was measured against something other than the task base');
+  assert.ok(seen.includes(3), `the three changed paths did not reach the bar: ${JSON.stringify(seen)}`);
+});
+
+test('COULD NOT LOOK IS NULL, NEVER ZERO', async () => {
+  /*
+   * THE FAIL-OPEN THIS PREVENTS. Zero files touched is a real observation
+   * that tells the bar the builder is well inside its breadth limit. Reporting
+   * it after a FAILED lookup means the bar stands down on exactly the runs
+   * where the measurement broke -- absent is not zero, which this repository
+   * has had to relearn in four separate places.
+   */
+  const seen = [];
+  const { deps } = world({
+    pollRun: async () => ({ done: false }),
+    changedPaths: async () => null,
+    observe: async (_w, base) => { seen.push(base.filesTouched); return {}; },
+  });
+  await run(deps, 12);
+
+  assert.ok(seen.length > 0, 'observe never ran, so this measured nothing');
+  assert.ok(seen.every((v) => v === null), `a failed lookup was reported as a count: ${JSON.stringify(seen)}`);
+  assert.ok(!seen.includes(0), 'a failed breadth lookup became zero files touched');
+});
+
+test('A RUNTIME WITH NO changedPaths DEP STILL RUNS', async () => {
+  /* Optional on purpose: an older daemon that does not supply it must not crash. */
+  const { deps, calls } = world({ changedPaths: undefined });
+  await run(deps);
+  assert.equal(calls.returned.length, 1, 'a worker without the breadth dep stopped working');
+});
+
 test('AN UNMONITORED WORKER IS NOT STALLED, and the bar says it measured nothing', async () => {
   /*
    * Today's production shape: no `observe` dep at all. The bar must not refuse

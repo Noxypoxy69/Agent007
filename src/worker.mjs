@@ -282,9 +282,22 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
       const startedAt = Number.isFinite(w.attemptStartedAt) ? w.attemptStartedAt : null;
       const at = Date.parse(now);
 
+      /*
+       * BREADTH IS ASKED OF GIT, NOT OF THE BUILDER. The agent in the worktree
+       * is not ours -- it is whatever the platform dispatched -- so it cannot
+       * be asked to report on itself and does not need to be. `changedPaths`
+       * returns null when it could not look, and null stays null: an empty
+       * set would read as "well inside the limit" on exactly the runs where
+       * the lookup broke.
+       */
+      const touched = nonEmpty(w.dir) && deps.changedPaths
+        ? await deps.changedPaths(w.dir, w.task.base_sha)
+        : null;
+
       const base = {
         steps: cycles - w.attemptCycle0,
         elapsedMs: startedAt !== null && Number.isFinite(at) ? at - startedAt : null,
+        filesTouched: Array.isArray(touched) ? touched.length : null,
         rotations: Number.isInteger(w.task.attempt) ? w.task.attempt : 0,
         /* A commit that is not the base is work this worker actually produced. */
         checkpointable: Boolean(sha) && sha !== w.task.base_sha,

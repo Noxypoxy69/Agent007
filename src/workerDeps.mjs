@@ -86,6 +86,44 @@ export async function headSha(dir) {
 }
 
 /**
+ * HOW MUCH OF THE TREE THIS BUILDER HAS TOUCHED, ASKED OF GIT.
+ *
+ * THE BUILDER IS NOT ONE OF OUR AGENTS. Whatever the platform dispatches into
+ * the worktree is a black box: we do not write it, cannot instrument it, and
+ * must not require it to report on itself. So breadth is measured from the
+ * OUTSIDE, by asking git what changed -- which works identically for an agent
+ * nobody here has ever seen.
+ *
+ * NULL MEANS NOT MEASURED, AND NEVER ZERO. If either git call fails, an
+ * honest "could not look" has to come back rather than an empty set: zero
+ * files touched is a real observation that would tell the hold bar the
+ * builder is well inside its breadth limit, so reporting it after a failed
+ * lookup is the fail-open that stops the bar firing on exactly the runs that
+ * went wrong.
+ *
+ * Untracked files are counted. An agent that writes ten new files has touched
+ * ten paths whether or not it thought to stage them, and a diff alone cannot
+ * see them.
+ */
+export async function changedPaths(dir, base) {
+  if (!dir || !/^[0-9a-f]{40}$/i.test(String(base ?? ''))) return null;
+  const paths = new Set();
+  const collect = (args) => {
+    for (const line of String(runGit(args, { cwd: dir, timeout: 15000 })).split('\n')) {
+      const p = line.trim();
+      if (p) paths.add(p);
+    }
+  };
+  try {
+    collect(['diff', '--name-only', base]);
+    collect(['ls-files', '--others', '--exclude-standard']);
+  } catch {
+    return null; // could not look; say so rather than reporting an empty tree
+  }
+  return [...paths];
+}
+
+/**
  * START THE AGENT, AND DO NOT WAIT FOR IT.
  *
  * The driver polls, because it must stay free to renew the lease while the

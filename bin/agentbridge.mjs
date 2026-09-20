@@ -1143,6 +1143,12 @@ try {
       prepareWorktree: (a) => D.prepareWorktree(a),
       cleanupWorktree: (d) => D.cleanupWorktree(d),
       headSha: (d) => D.headSha(d),
+      /*
+       * BREADTH FOR THE HOLD BAR, MEASURED FROM OUTSIDE THE BUILDER. The agent
+       * in the worktree is not ours and cannot be asked how much it has
+       * touched, so git is asked instead.
+       */
+      changedPaths: (d, base) => D.changedPaths(d, base),
       startRun: (a) => D.startRun(a),
       pollRun: (s) => D.pollRun(s),
 
