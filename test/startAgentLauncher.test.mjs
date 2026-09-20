@@ -708,6 +708,126 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
   }
 
   /*
+   * ═══ AND THIS IS THE RULE THAT ACTUALLY BOUNDS IT ═══
+   *
+   * THE npm MATCHER ABOVE HAS NOW BEEN OUT-SPELLED THREE TIMES: five
+   * literal forms, then the caret, then variable indirection -- and an
+   * auditor broke the indirection fix too, with six more spellings it
+   * MEASURED running npm through a real cmd.exe:
+   *
+   *     set A=nqm            / call %A:q=p% run x      substitution modifier
+   *     set A=xxnpm          / call %A:~2% run x       substring modifier
+   *     set "A-1=n"          / call %A-1%%A-2% run x   hyphen in the name
+   *     set "x.1=n"          / call %x.1%%x.2% run x   dot in the name
+   *     call set "A=n"       / call %A%%B% run x       assignment behind call
+   *     for %%v in (n) do set A=%%v / call %A%%B%      assignment in a for body
+   *
+   * I reproduced all six, plus the negative control staying inert. Every one
+   * is derivable from the text, so none is excused by the "a value read from
+   * a file or the environment is not derivable" bound I wrote.
+   *
+   * EXTENDING THE REGEX AGAIN WOULD BE EXTENDING BY EXAMPLE A FOURTH TIME,
+   * which is precisely what rule 8 forbids and what the last three rounds
+   * each did. cmd's expansion is not a thing a pattern wins against.
+   *
+   * SO THE QUESTION CHANGES, exactly as it did for the npm flag rail: stop
+   * asking "does this text run npm" and ask "does this launcher ever put an
+   * EXPANSION where the command name goes". It does not need to, and every
+   * one of the nine spellings across three rounds does -- that is not a
+   * coincidence, it is the only way to hide a command name in text.
+   *
+   * agent.cmd needs exactly two external programs, both written literally:
+   * node, inside the for /f that resolves the worktree, and claude. cd, set,
+   * if, for, echo and exit are builtins and run nothing. So a variable in
+   * command position is not a thing this file has any reason to contain, and
+   * refusing it costs the launcher nothing it currently does.
+   */
+  const COMMAND_POSITIONS = (statement) => {
+    const out = [];
+    const push = (tok) => { if (tok) out.push(tok); };
+    const firstWord = (text) => (/^\s*([^\s(]+)/.exec(text ?? '') ?? [])[1];
+
+    /* The statement's own command, and anything behind `call`. */
+    let head = statement.trim();
+    while (/^call\s+/i.test(head)) head = head.replace(/^call\s+/i, '');
+    push(firstWord(head));
+
+    /* for /f ... in ('CMD') do CMD : both inner positions are commands. */
+    const inClause = /\bin\s*\(\s*'([^']*)'/i.exec(statement);
+    if (inClause) push(firstWord(inClause[1]));
+    const doClause = /\bdo\s+(.*)$/i.exec(statement);
+    if (doClause) {
+      let body = doClause[1].trim();
+      while (/^call\s+/i.test(body)) body = body.replace(/^call\s+/i, '');
+      push(firstWord(body));
+    }
+    return out;
+  };
+
+  const EXPANSION = /[%!]/;
+
+  test_commandPositionsAreLiteral: {
+    const offenders = [];
+    for (const statement of executable.split('\n')) {
+      if (statement.trim() === '') continue;
+      for (const cmdToken of COMMAND_POSITIONS(statement)) {
+        if (EXPANSION.test(cmdToken)) offenders.push(`${cmdToken}   in:  ${statement.trim()}`);
+      }
+    }
+    assert.deepEqual(offenders, [],
+      'agent.cmd puts a variable expansion where the command name goes. That is the only way to '
+      + 'spell a command name so this file cannot read it, and every evasion found in three rounds '
+      + 'of the npm matcher needed it. Write the program name literally:\n  '
+      + offenders.join('\n  '));
+  }
+
+  /*
+   * RULE 1 FOR THE RULE ITSELF. Six spellings that defeated the npm matcher,
+   * each MEASURED to run npm, must all be caught by command position alone --
+   * and the shapes the launcher legitimately uses must not be.
+   */
+  for (const runsIt of [
+    'set A=nqm\r\ncall %A:q=p% run x',
+    'set A=xxnpm\r\ncall %A:~2% run x',
+    'set "A-1=n"\r\nset "A-2=pm"\r\ncall %A-1%%A-2% run x',
+    'set "x.1=n"\r\nset "x.2=pm"\r\ncall %x.1%%x.2% run x',
+    'call set "A=n"\r\ncall set "B=pm"\r\ncall %A%%B% run x',
+    'for %%v in (n) do set A=%%v\r\nset B=pm\r\ncall %A%%B% run x',
+    'set A=n\r\nset B=pm\r\ncall %A%%B% run x',
+  ]) {
+    /*
+     * EITHER RULE MAY CATCH IT, and which one does is the interesting part.
+     * The expansion-aware matcher resolves the spellings it can model and
+     * the command-position rule catches the ones it cannot: %A%%B% expands
+     * to a literal npm and the first sees it, while %A:q=p% and the
+     * hyphenated names are unmodellable and only the second does.
+     *
+     * The claim is the DISJUNCTION. Asserting either rule alone is how the
+     * previous three rounds each looked closed.
+     */
+    const expanded = executableStatements(runsIt);
+    const byMatcher = RUNS_NPM.test(expanded);
+    const byPosition = expanded.split(String.fromCharCode(10))
+      .some((st) => COMMAND_POSITIONS(st).some((c) => EXPANSION.test(c)));
+    assert.equal(byMatcher || byPosition, true,
+      `this spelling runs npm and neither rule caught it: ${JSON.stringify(runsIt)}`);
+  }
+
+  for (const legitimate of [
+    'cd /d "%~dp0"',
+    'set "AGENTBRIDGE_AGENT_ID=%~1"',
+    'if not "%~2"=="" set "AGENTBRIDGE_LANE=%~2"',
+    'cd /d "%AGENT_WT%"',
+    String.raw`for /f "delims=" %%p in ('node "%~dp0scripts\agent-worktree.mjs" "%AGENTBRIDGE_AGENT_ID%"') do set "AGENT_WT=%%p"`,
+    'claude',
+  ]) {
+    const statements = executableStatements(legitimate).split('\n');
+    const caught = statements.some((st) => COMMAND_POSITIONS(st).some((c) => EXPANSION.test(c)));
+    assert.equal(caught, false,
+      `a shape the launcher legitimately uses was refused, which is an outage (rule 16): ${legitimate}`);
+  }
+
+  /*
    * THE SPLITTER IS THE LOAD-BEARING PART NOW, so it is asserted directly on
    * fixtures rather than inferred from agent.cmd's current contents. v4
    * asserted that agent.cmd DOES discuss npm as a precondition, which made
