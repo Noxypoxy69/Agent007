@@ -152,9 +152,50 @@ export function hooksPathOverride(readConfig = null) {
    * appears in comments that PREDATE the fix, so it was green against the
    * blind version too. Rule 13, in a file added to close a rule 17 finding.
    */
+  /*
+   * `stdio` IS SPECIFIED, AND THAT IS THE WHOLE OF THE NOISE FIX.
+   *
+   * Sixth-lap blind audit D-F. `execFileSync` writes a child's stderr to the
+   * PARENT's stderr unless stdio says otherwise, and routing this through
+   * `runGit` dropped the `stdio: ['ignore','pipe','ignore']` the previous
+   * bare call had. So every invocation printed a git fatal, five times over
+   * during the test file -- and if the pending Stop-gate wiring ever lands,
+   * that goes into hook output, where stray text on stderr is exactly what
+   * a hook contract cannot afford.
+   */
   const ask = typeof readConfig === 'function'
     ? readConfig
-    : (scope) => String(runGit(['config', scope, '--get', 'core.hooksPath'], { cwd: REPO }));
+    : (scope) => String(runGit(['config', scope, '--get', 'core.hooksPath'], {
+      cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
+    }));
+
+  /*
+   * ASK WHETHER WORKTREE CONFIG EXISTS, RATHER THAN MATCHING GIT'S APOLOGY.
+   *
+   * The first version queried `--worktree` unconditionally and swallowed the
+   * failure by testing `/worktree/i` against git's stderr. That is a bet on
+   * git's English: a localised or reworded message turns every call into
+   * `E_HOOKS_PATH_UNREADABLE`, and this file's own test did not list that
+   * code -- so the suite would have failed pointing at the TEST rather than
+   * at the cause. Rule 21, with the symptom booby-trapped to misdirect.
+   *
+   * `extensions.worktreeConfig` is the thing that decides whether
+   * `config.worktree` is read at all, so asking IT removes both the fatal
+   * and the locale dependency. Unset means git ignores per-worktree config
+   * entirely, which is not a failure and not a scope worth querying.
+   */
+  let scopes = ['--local', '--global', '--system'];
+  if (typeof readConfig !== 'function') {
+    try {
+      const on = String(runGit(['config', '--get', 'extensions.worktreeConfig'], {
+        cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
+      })).trim();
+      if (on === 'true') scopes = ['--worktree', ...scopes];
+    } catch { /* unset, or unreadable: either way per-worktree config is not in play */ }
+  } else {
+    /* An injected reader is a fixture; give it every scope to exercise. */
+    scopes = ['--worktree', ...scopes];
+  }
 
   /*
    * `--worktree` FIRST, AND IT WAS THE SCOPE THAT MATTERED MOST. Fifth-lap
@@ -166,7 +207,7 @@ export function hooksPathOverride(readConfig = null) {
    * git's own precedence, highest first, so the first hit is the effective
    * one rather than merely a set one.
    */
-  for (const scope of ['--worktree', '--local', '--global', '--system']) {
+  for (const scope of scopes) {
     let raw;
     try {
       raw = ask(scope);
@@ -185,9 +226,12 @@ export function hooksPathOverride(readConfig = null) {
        * a usage error, which is genuinely "not applicable here" rather than
        * a failure, so it is allowed to fall through like an unset scope.
        */
-      const status = e?.status;
-      const usage = /worktree/i.test(String(e?.stderr ?? '')) && scope === '--worktree';
-      if (status === 1 || usage) continue;
+      /*
+       * EXIT 1 IS "UNSET IN THIS SCOPE". Nothing else is, and the English
+       * string match that used to sit here is gone -- see the scope
+       * selection above for why it was a locale bet rather than a check.
+       */
+      if (e?.status === 1) continue;
       return {
         scope: scope.replace('--', ''),
         value: null,

@@ -48,9 +48,20 @@ test('THE RESULT IS ONE OF THE DECLARED STATES, whatever this machine looks like
    * legitimate answer and must not be a test failure.
    */
   const r = verifyHookIntegrity();
+  /*
+   * `E_HOOKS_PATH_UNREADABLE` WAS MISSING FROM THIS LIST, and that omission
+   * is what would have made a real failure misdirect. Sixth-lap blind audit
+   * D-F: if the config read ever started failing -- a localised git message
+   * under the old string match, a git that is not on PATH -- every call
+   * would return that code, and this assertion would fail with "undeclared
+   * code", pointing the reader at the TEST rather than at git.
+   *
+   * A list of codes that omits one the module can return is not a contract,
+   * it is a trap with a date on it.
+   */
   const DECLARED = ['OK', 'E_HOOK_MISSING', 'E_HOOK_INTEGRITY_TAMPERED',
     'E_HOOK_NOT_EXECUTABLE', 'E_HOOK_TEMPLATE_MISSING', 'E_HOOK_PATH_UNKNOWN',
-    'E_HOOKS_PATH_REDIRECTED'];
+    'E_HOOKS_PATH_REDIRECTED', 'E_HOOKS_PATH_UNREADABLE'];
   assert.ok(DECLARED.includes(r.code), `undeclared code ${r.code}: ${r.reason}`);
   assert.equal(r.ok, r.code === 'OK', 'ok and code disagree about the same result');
   if (r.ok) assert.match(String(r.digest), /^[0-9a-f]{16}$/);
@@ -182,6 +193,34 @@ test('AN EMPTY VALUE IS SET, NOT UNSET', () => {
   });
   assert.equal(r.code, 'E_HOOKS_PATH_REDIRECTED',
     'an empty core.hooksPath was reported as unset while the setting is present');
+});
+
+test('THE DECLARED LIST IS COMPLETE, derived from the module rather than typed', () => {
+  /*
+   * Rule 7 applied to the list above. A hand-typed roster of codes drifts
+   * the moment somebody adds a branch -- which is exactly how
+   * E_HOOKS_PATH_UNREADABLE came to be missing from it -- and the drift
+   * surfaces as a test failure blaming the test.
+   *
+   * Every `code:` literal the module can return is extracted from source
+   * (comment-blanked first, rule 13, because the prologue discusses these
+   * codes in prose) and checked against the list the first test asserts on.
+   */
+  const src = readFileSync(path.join(REPO, 'scripts', 'verify-hook-integrity.mjs'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '));
+
+  const emitted = [...src.matchAll(/code:\s*'([A-Z_]+)'/g)].map((m) => m[1]);
+  assert.ok(emitted.length >= 6, `only found ${emitted.length} code literals; the extractor broke`);
+
+  const DECLARED = ['OK', 'E_HOOK_MISSING', 'E_HOOK_INTEGRITY_TAMPERED',
+    'E_HOOK_NOT_EXECUTABLE', 'E_HOOK_TEMPLATE_MISSING', 'E_HOOK_PATH_UNKNOWN',
+    'E_HOOKS_PATH_REDIRECTED', 'E_HOOKS_PATH_UNREADABLE'];
+
+  const undeclared = [...new Set(emitted)].filter((c) => !DECLARED.includes(c));
+  assert.deepEqual(undeclared, [],
+    'the module can return codes the first test does not declare, so a real failure '
+    + 'would surface as "undeclared code" and point the reader at this file');
 });
 
 test('AND AN ALL-UNSET CONFIG STILL REACHES THE DIGEST (rule 5)', () => {
