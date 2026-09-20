@@ -43,6 +43,7 @@
  * the expensive way. Measure the volume first.
  */
 import { existsSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
@@ -165,10 +166,54 @@ function nextJob() {
   return { rows, job, pendingCount: claimable.length };
 }
 
-/** A detached worktree at the exact candidate, via the manager's own pattern. */
+/**
+ * A detached worktree at the exact candidate, via the manager's own pattern.
+ *
+ * ═══ A REUSED DIRECTORY IS VERIFIED, OR IT IS NOT REUSED ═══
+ *
+ * Fourth-lap blind audit M6. This returned `{ok:true, reused:true}` for ANY
+ * pre-existing `%TEMP%/audit-<sha12>` -- no check that it was a registered
+ * worktree, that it was checked out at the candidate, or that it was clean.
+ * And the brief then asserted to the reviewer, in so many words, "It is a
+ * detached worktree at the exact candidate."
+ *
+ * `os.tmpdir()` is writable by any local process. Pre-creating
+ * `audit-<sha12>` as a worktree at a DIFFERENT commit made the reviewer audit
+ * the wrong tree while the verdict was attributed to `job.candidate_sha` --
+ * the brief's own "wrong candidate" question, answered yes. Seven such
+ * directories were sitting in TEMP when this was found, so the precondition
+ * was live, not hypothetical.
+ *
+ * Teardown is `worktree remove --force`, so a wrongly-reused directory also
+ * gets its contents discarded.
+ *
+ * Now: reuse only what git agrees is a worktree at exactly this commit, and
+ * refuse otherwise rather than adopting it. Refusing is safe -- the job stays
+ * PENDING and says why.
+ */
 function allocate(candidateSha) {
   const dir = path.join(os.tmpdir(), `audit-${String(candidateSha).slice(0, 12)}`);
-  if (existsSync(dir)) return { ok: true, dir, reused: true };
+  if (existsSync(dir)) {
+    let head = null;
+    try {
+      head = String(runGit(['rev-parse', 'HEAD'], { cwd: dir })).trim();
+    } catch {
+      return {
+        ok: false,
+        why: `${dir} exists but git does not recognise it as a worktree. Refusing to `
+          + 'adopt a directory of unknown provenance as the candidate checkout',
+      };
+    }
+    if (head !== String(candidateSha)) {
+      return {
+        ok: false,
+        why: `${dir} exists but is at ${head?.slice(0, 12)}, not the candidate `
+          + `${String(candidateSha).slice(0, 12)}. Reusing it would review the wrong tree `
+          + 'and attribute the verdict to the right one',
+      };
+    }
+    return { ok: true, dir, reused: true };
+  }
   try {
     runGit(['worktree', 'add', '--detach', dir, candidateSha], { cwd: REPO });
     return { ok: true, dir, reused: false };
@@ -181,7 +226,7 @@ function allocate(candidateSha) {
  * The brief. THE COMMIT SUBJECT IS NOT IN IT, and that is the whole point of
  * §7.2: a reviewer who reads the maker's account starts by agreeing with it.
  */
-function brief(job, dir) {
+function brief(job, dir, nonce) {
   return [
     'You are an INDEPENDENT AUDITOR. You did not write this. Your job is to BREAK it, not confirm it.',
     '',
@@ -211,15 +256,23 @@ function brief(job, dir) {
     'had asked for a file. Its words: "The verdict is FAIL and the JSON content is ready to land the',
     'moment someone can write it." Stdout is the channel you actually have.',
     '',
-    '  <<<AGENT007_VERDICT',
+    `  <<<AGENT007_VERDICT:${nonce}`,
     '  {"verdict":"PASS"|"FAIL","findings":["short line each"],"checked_true":["short line each"],',
     '   "could_not_check":["short line each"]}',
-    '  AGENT007_VERDICT>>>',
+    `  AGENT007_VERDICT:${nonce}>>>`,
     '',
     'The markers matter: they are how a machine reads this without guessing at prose, and a guess',
     'that landed on PASS would be a forged clearance. PASS means you tried to break it and could',
     'not. FAIL means you found a defect. If you established neither, emit no block -- absence reads',
     'as "nothing was proved", which is honest and is never treated as a pass.',
+    '',
+    `THE TRAILING ${nonce} IS A PER-RUN NONCE AND IT IS NOT DECORATION. The marker used to be a`,
+    'fixed literal, and this brief lives inside the worktree you are auditing -- so a candidate',
+    'could plant a complete verdict block in any file you might print, and YOUR honest quoting of',
+    'observed output would have handed back a forged PASS before your real conclusion was read.',
+    'Emit the block EXACTLY ONCE. If two blocks carrying this nonce appear in your output, the',
+    'run is refused and your work is discarded -- so do not echo it back while explaining it, and',
+    'if you must discuss the format, describe it rather than reproducing it.',
   ].join('\n');
 }
 
@@ -264,10 +317,19 @@ async function tick() {
 
   writeQueue(REPO, rows.map((r) => (r.audit_id === job.audit_id ? claim.job : r)));
 
+  /*
+   * MINTED PER RUN, NEVER COMMITTED. A candidate authored before this moment
+   * cannot contain it, which is the whole property -- see the verdict parser
+   * for the forgery it closes. `randomUUID` because guessability is the
+   * entire threat model; a counter or a timestamp would be predictable from
+   * the candidate's own side.
+   */
+  const nonce = randomUUID().replace(/-/g, '').slice(0, 16);
+
   const briefDir = path.join(ws.dir, '.audit');
   mkdirSync(briefDir, { recursive: true });
   const briefPath = path.join(briefDir, 'BRIEF.txt');
-  writeFileSync(briefPath, `${brief(job, ws.dir)}\n`);
+  writeFileSync(briefPath, `${brief(job, ws.dir, nonce)}\n`);
 
   say(`[audit-daemon] claimed ${job.audit_id} (${pendingCount} pending)`);
   say(`[audit-daemon] workspace ${ws.dir}${ws.reused ? ' (reused)' : ''}`);
@@ -296,6 +358,28 @@ async function tick() {
       : r));
     writeQueue(REPO, back);
     say(`[audit-daemon] released ${job.audit_id} back to PENDING: ${why}`);
+    /*
+     * AND TEAR THE WORKTREE DOWN HERE, because teardown used to sit only at
+     * the END of tick(). Fourth-lap blind audit M5: every early return
+     * skipped it, and the three that do so -- spawn error, reviewer non-zero
+     * exit, no readable verdict -- are exactly the three paths this helper
+     * was written for. So the commit whose message said it had stopped the
+     * worktrees accumulating left the leak open on precisely the failures
+     * that leak most often.
+     *
+     * It matters beyond tidiness: by this repository's own notes each
+     * leftover worktree adds permanent Stop-gate drift lines, so a leaking
+     * consumer degrades a control on every failed review.
+     *
+     * Failure to remove is reported, never thrown -- the release itself has
+     * already landed and must not be undone by a cleanup problem.
+     */
+    try {
+      runGit(['worktree', 'remove', '--force', ws.dir], { cwd: REPO });
+      say(`[audit-daemon] removed ${ws.dir}`);
+    } catch (e) {
+      say(`[audit-daemon] could NOT remove ${ws.dir}: ${String(e?.stderr || e?.message || e).trim()}`);
+    }
   };
 
   /*
@@ -342,16 +426,58 @@ async function tick() {
    * the tree is fine -- the same distinction as a shard that could not start,
    * and as `measured: false` on the hold bar.
    */
+  /*
+   * ═══ A PER-RUN NONCE, AND MORE THAN ONE BLOCK IS A REFUSAL ═══
+   *
+   * Fourth-lap blind audit H4. The marker was a FIXED LITERAL, matched
+   * first-match-wins, over a transcript holding the reviewer's stdout and
+   * stderr -- while the reviewer is an LLM auditing a candidate in a worktree
+   * AT that candidate, and routinely quotes file contents and command output
+   * into its report.
+   *
+   * So a candidate commit could plant the marker block in any file the
+   * reviewer would print -- a test name, a script banner, a fixture -- and an
+   * HONEST reviewer quoting observed output before its own conclusion handed
+   * the daemon a forged PASS. The planted block matched first; the reviewer's
+   * real FAIL was never examined. The literal is published in this file and
+   * written verbatim into the brief, so the candidate always knew it.
+   *
+   * Two changes, and the nonce alone would not be enough:
+   *
+   *   1. THE NONCE. Minted per run, never committed, so a candidate written
+   *      before the run cannot contain it. The brief carries it to the
+   *      reviewer.
+   *   2. REFUSE ON MORE THAN ONE MATCH. A reviewer that legitimately echoes
+   *      its own block twice, or a candidate that captures the nonce out of
+   *      the brief inside the worktree and replays it, produces two. Taking
+   *      either one is a guess; `release` is the honest answer, and it is the
+   *      safe direction -- the job returns to PENDING.
+   *
+   * Rule 8: the fix is the matcher, not a longer literal.
+   */
   let verdict = null;
-  const marked = /<<<AGENT007_VERDICT([\s\S]*?)AGENT007_VERDICT>>>/.exec(transcript);
-  if (marked) {
+  const marker = new RegExp(
+    `<<<AGENT007_VERDICT:${nonce}([\\s\\S]*?)AGENT007_VERDICT:${nonce}>>>`,
+    'g',
+  );
+  const blocks = [...String(transcript).matchAll(marker)];
+  if (blocks.length > 1) {
+    release(`the transcript carried ${blocks.length} verdict blocks for this run's nonce; `
+      + 'taking either one would be a guess, so nothing was proved');
+    return false;
+  }
+  if (blocks.length === 1) {
     try {
-      const parsed = JSON.parse(marked[1].trim());
+      const parsed = JSON.parse(blocks[0][1].trim());
       const v = typeof parsed?.verdict === 'string' ? parsed.verdict.trim().toUpperCase() : null;
       if (v === 'PASS' || v === 'FAIL') verdict = { ...parsed, verdict: v };
     } catch { verdict = null; }
   }
-  /* The file remains a fallback for a reviewer that CAN write one. */
+  /*
+   * The file remains a fallback for a reviewer that CAN write one -- but it
+   * lives INSIDE the worktree, which is candidate-controlled, so it is read
+   * only when no nonce block was produced and it cannot override one.
+   */
   if (!verdict) {
     try {
       const parsed = JSON.parse(readFileSync(path.join(briefDir, 'VERDICT.json'), 'utf8'));
