@@ -183,7 +183,29 @@ const TOOL_FILE_SHORT = new Map([
    * 'jq -f evil.jq' case caught it immediately -- the note four lines above in
    * this very file says '-f is a file for grep and jq'. */
   ['jq', new Set(['f'])],
-  /* -o on git means other/untracked in ls-files, never an output path. */
+  /*
+   * D8, MEASURED BOTH WAYS. This row used to say "-o on git means
+   * other/untracked in ls-files, never an output path", which reads as though
+   * it is what keeps `git ls-files -o --exclude-standard` working. It is not.
+   * GIT_POISON lists -o and matches anywhere in the command, so that form is
+   * refused with this row and without it:
+   *
+   *     git ls-files -o --exclude-standard        DENY   with row and without
+   *     git ls-files --others --exclude-standard  ALLOW  with row and without
+   *
+   * An audit read that false justification and concluded the row was pure
+   * loosening, to be deleted. Deleting it was measured too, and it is an
+   * outage: without the row git falls through to the tool-agnostic bare-flag
+   * check, and eleven read-only forms start being refused, among them
+   *
+   *     git blame -f src/shellAllowlist.mjs       -f is --show-name
+   *
+   * So the row stays, for the reason that is true rather than the one that
+   * was written: git has no SHORT option that names a file it writes. The
+   * long ones (--output, --upload-pack, --git-dir) are GIT_POISON's, and a
+   * glued path is still caught -- `git blame -fsrc/shellAllowlist.mjs` is
+   * DENY with this row in place.
+   */
   ['git', new Set()],
   ['wc', new Set()],
   ['uniq', new Set()],
@@ -205,10 +227,66 @@ function toolName(argv0) {
  * rule, and it is why `-ozz` and `-aozz` are caught without asking what the
  * value looks like -- which is what the shape heuristic could not do.
  */
-function clusterTakesFile(token, letters) {
+/**
+ * Short options that consume the rest of the cluster as their VALUE, per tool.
+ *
+ * D7: SCANNING THE WHOLE CLUSTER FOR A FILE LETTER OVER-BLOCKS, because the
+ * letter may be sitting inside some other option's value rather than being an
+ * option at all. Measured through the shipped rail:
+ *
+ *     grep -eself README.md     DENY   <- the pattern is "self"; the f is in it
+ *     rg -tconfig thing         DENY   <- the type is "config"
+ *     sort -ko package.json     DENY   <- the key spec is "o"
+ *
+ * In `-eself` the `-e` takes a value, so everything after it is that value and
+ * no later character is an option. Whichever value-taking letter comes FIRST
+ * owns the remainder, which is also why `-fe` still matches for grep: there
+ * the file letter is first and `e` is its path.
+ *
+ * ERRING TOWARD REFUSAL WHERE THIS TABLE IS SILENT. A tool absent here, or a
+ * letter absent from its set, leaves the scan running exactly as before --
+ * stricter. Adding an entry can only ever relax, and only for the cluster
+ * shapes where the letter genuinely precedes the file letter, so a wrong
+ * entry is visible as a permitted command rather than as a silent hole
+ * somewhere else.
+ */
+const TOOL_VALUE_SHORT = new Map([
+  /* -e pattern, -m max-count, -A/-B/-C context, -d/-D action. */
+  ['grep', new Set(['e', 'm', 'A', 'B', 'C', 'd', 'D'])],
+  ['egrep', new Set(['e', 'm', 'A', 'B', 'C', 'd', 'D'])],
+  ['fgrep', new Set(['e', 'm', 'A', 'B', 'C', 'd', 'D'])],
+  /* -t type, -T type-not, -g glob, -r replace, -j threads, -M max-columns. */
+  ['rg', new Set(['e', 'm', 'A', 'B', 'C', 'g', 't', 'T', 'M', 'j', 'r', 'E'])],
+  /* -k key, -t separator, -S buffer size, -T temp dir. */
+  ['sort', new Set(['k', 't', 'S', 'T'])],
+  /* -f field list, -d delimiter, -c/-b ranges -- none of them files. */
+  ['cut', new Set(['f', 'd', 'c', 'b'])],
+  ['head', new Set(['n', 'c'])],
+  ['tail', new Set(['n', 'c', 's'])],
+  /* -L is a module directory. */
+  ['jq', new Set(['L'])],
+  /* -f skip-fields, -s skip-chars, -w check-chars. */
+  ['uniq', new Set(['f', 's', 'w'])],
+]);
+
+/**
+ * Does this cluster carry one of the tool's file letters?
+ *
+ * A SHORT OPTION'S VALUE IS GLUED AND ITS FLAG IS LAST IN THE CLUSTER, so the
+ * letter may sit anywhere in the run and everything after it is the path:
+ * `-aozz` is `-a` then `-o zz`. Scanning for the letter is therefore the whole
+ * rule, and it is why `-ozz` and `-aozz` are caught without asking what the
+ * value looks like -- which is what the shape heuristic could not do.
+ *
+ * The scan stops at the first letter that takes a value of its own, because
+ * from there on the characters are that value and not options. See
+ * TOOL_VALUE_SHORT.
+ */
+function clusterTakesFile(token, letters, valueLetters) {
   if (!/^-[A-Za-z]/.test(token) || token.startsWith('--')) return false;
   for (const ch of token.slice(1)) {
     if (letters.has(ch)) return true;
+    if (valueLetters && valueLetters.has(ch)) return false;  // the rest is its value
     if (!/[A-Za-z]/.test(ch)) return false;   // past the cluster, into a value
   }
   return false;
@@ -227,7 +305,7 @@ function isWriteFlagToken(token, argv0) {
   const tool = toolName(argv0);
   const letters = tool === null ? null : TOOL_FILE_SHORT.get(tool);
   if (letters) {
-    if (clusterTakesFile(token, letters)) return true;
+    if (clusterTakesFile(token, letters, TOOL_VALUE_SHORT.get(tool))) return true;
   } else if (letters === undefined) {
     // The bare short flag, and the separated form .
     if (WRITE_FLAG_SHORT.includes(token)) return true;

@@ -184,3 +184,80 @@ test('AN OFF-TABLE TOOL STILL FALLS BACK TO THE CONSERVATIVE UNION', () => {
   assert.equal(judge('diff -osrc/x.mjs afile').allowed, false,
     'an off-table tool with a glued path-shaped value must still be refused');
 });
+
+test('A VALUE-TAKING LETTER OWNS THE REST OF THE CLUSTER (D7)', () => {
+  /*
+   * THE OVER-BLOCK HALF, and the one the glued-value scan created. Scanning
+   * a whole cluster for the file letter finds it inside another option's
+   * VALUE, where it is not an option at all:
+   *
+   *     grep -eself   the pattern is "self"; the f is a character in it
+   *     rg -tconfig   the type is "config"
+   *     sort -ko      the key spec is "o"
+   *
+   * All three were DENY before the value-letter table and all three read
+   * nothing and write nothing. Measured against HEAD before the change and
+   * after it, with the nine side-file forms below unchanged.
+   */
+  for (const cmd of ['grep -eself README.md', 'grep -esuffix README.md',
+    'rg -tconfig thing', 'rg -tfsharp thing', 'sort -ko package.json']) {
+    const v = judge(cmd);
+    assert.equal(v.allowed, true,
+      `${cmd} was REFUSED -- the file letter is inside another option's value: ${v.reason}`);
+  }
+});
+
+test('BUT ORDER DECIDES IT, so the file letter still wins when it comes first', () => {
+  /*
+   * RULE 5's positive control for the test above, and the property that makes
+   * the table safe rather than merely permissive. In `-fe` the file letter is
+   * first, so `e` is its PATH and this must stay refused; in `-ef` the `-e`
+   * is first, so `f` is part of the pattern. Same two characters, opposite
+   * verdicts, and only the ordering rule gets both right.
+   *
+   * Without this, a value-letter table that swallowed the file letter
+   * outright would satisfy the D7 test forever while opening a hole.
+   */
+  assert.equal(judge('grep -fe README.md').allowed, false,
+    'grep -fe names a pattern FILE called e and must stay refused');
+  assert.equal(judge('grep -ef README.md').allowed, true,
+    'grep -ef is the pattern "f" and reads nothing else');
+
+  /* And the glued path forms the earlier rounds closed are untouched. */
+  for (const cmd of ['sort -ozz afile', 'sort -aozz afile', 'grep -fpatterns.txt README.md',
+    'jq -f evil.jq package.json', 'sort -aosrc/evil.mjs package.json']) {
+    assert.equal(judge(cmd).allowed, false, `${cmd} was ALLOWED and it names a side file`);
+  }
+});
+
+test('THE GIT ROW IS LOAD-BEARING FOR READS, AND NOT FOR THE REASON IT CLAIMED (D8)', () => {
+  /*
+   * An audit read this row's comment -- "-o on git means other/untracked in
+   * ls-files" -- as meaning the row is what keeps `git ls-files -o` working,
+   * concluded it therefore bought nothing, and recommended deleting it.
+   *
+   * Measured with the row and without it. The justification was false AND the
+   * recommendation was wrong, in opposite directions:
+   *
+   *     git ls-files -o --exclude-standard       DENY both ways  <- GIT_POISON
+   *     git ls-files --others --exclude-standard ALLOW both ways <- the spelling that works
+   *     git blame -f src/shellAllowlist.mjs      ALLOW with row, DENY without
+   *
+   * Eleven read-only git forms depend on the row. This pins all three facts
+   * so the next reader does not have to re-derive them from a comment.
+   */
+  assert.equal(judge('git ls-files -o --exclude-standard').allowed, false,
+    'GIT_POISON lists -o; if this passes, the poison matcher has been narrowed');
+  assert.match(judge('git ls-files -o --exclude-standard').reason, /git flag/,
+    'refused by the wrong layer -- this must be GIT_POISON, not the write-flag matcher (rule 18)');
+
+  assert.equal(judge('git ls-files --others --exclude-standard').allowed, true,
+    'the working spelling for listing untracked files must stay allowed');
+
+  assert.equal(judge('git blame -f src/shellAllowlist.mjs').allowed, true,
+    'git blame -f is --show-name and writes nothing -- removing the git row denies it');
+
+  /* The row is an EMPTY set, so a glued path must still be caught tool-agnostically. */
+  assert.equal(judge('git blame -fsrc/shellAllowlist.mjs').allowed, false,
+    'a glued path after -f is a side file whatever the tool');
+});
