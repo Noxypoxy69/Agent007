@@ -143,23 +143,92 @@ function hookPath() {
  * readers to run `git config --global core.hooksPath ~/.githooks` -- the repo
  * documents the step that disarms its own attestation.
  */
-function hooksPathOverride() {
-  for (const scope of ['--local', '--global', '--system']) {
+export function hooksPathOverride(readConfig = null) {
+  /*
+   * INJECTABLE, so the redirect branch can be watched going red. Fifth-lap
+   * blind audit D12: nothing constructed an input that made it fire, so
+   * H3's behaviour had never been watched failing (rule 1), and the only
+   * coverage was a source grep for the string `core.hooksPath` -- which
+   * appears in comments that PREDATE the fix, so it was green against the
+   * blind version too. Rule 13, in a file added to close a rule 17 finding.
+   */
+  const ask = typeof readConfig === 'function'
+    ? readConfig
+    : (scope) => String(runGit(['config', scope, '--get', 'core.hooksPath'], { cwd: REPO }));
+
+  /*
+   * `--worktree` FIRST, AND IT WAS THE SCOPE THAT MATTERED MOST. Fifth-lap
+   * blind audit D8: with `extensions.worktreeConfig` enabled, a value in
+   * `.git/worktrees/<n>/config.worktree` OVERRIDES all three of the others
+   * and is invisible to `--local` -- and a worktree is exactly where this
+   * daemon runs its reviewers. The blind spot H3 exists to close was still
+   * open in the one place it is most likely to be exploited. Ordered by
+   * git's own precedence, highest first, so the first hit is the effective
+   * one rather than merely a set one.
+   */
+  for (const scope of ['--worktree', '--local', '--global', '--system']) {
+    let raw;
     try {
-      const v = String(runGit(['config', scope, '--get', 'core.hooksPath'], { cwd: REPO })).trim();
-      if (v) return { scope: scope.replace('--', ''), value: v };
-    } catch { /* unset in this scope: git exits 1, which is the common case */ }
+      raw = ask(scope);
+    } catch (e) {
+      /*
+       * EXIT 1 IS "UNSET IN THIS SCOPE" AND IS THE COMMON CASE. ANYTHING
+       * ELSE IS "COULD NOT LOOK", AND THE OLD BLANKET CATCH TREATED THEM
+       * ALIKE -- so git missing from PATH, a vanished cwd or a hung child
+       * all read as "not set" and the checker went on to report ok:true.
+       *
+       * That is the could-not-measure-is-not-measured-zero primitive,
+       * reintroduced three files from where this same range fixes it, in a
+       * security control. Fifth-lap blind audit D7.
+       *
+       * `--worktree` outside a worktree-config repo also exits non-zero with
+       * a usage error, which is genuinely "not applicable here" rather than
+       * a failure, so it is allowed to fall through like an unset scope.
+       */
+      const status = e?.status;
+      const usage = /worktree/i.test(String(e?.stderr ?? '')) && scope === '--worktree';
+      if (status === 1 || usage) continue;
+      return {
+        scope: scope.replace('--', ''),
+        value: null,
+        unreadable: String(e?.stderr || e?.message || e).trim(),
+      };
+    }
+
+    /*
+     * AN EMPTY VALUE IS SET, NOT UNSET. `git config core.hooksPath ""`
+     * stores an empty string, and `if (v)` after a trim dropped it -- so the
+     * setting was present and reported absent. D8's second half.
+     */
+    if (raw !== null && raw !== undefined) {
+      const v = String(raw).trim();
+      if (v !== '' || String(raw).length > 0) return { scope: scope.replace('--', ''), value: v };
+    }
   }
   return null;
 }
 
-export function verifyHookIntegrity() {
+export function verifyHookIntegrity({ readConfig = null } = {}) {
   /*
    * CHECKED FIRST, because every answer below is about a file git may not
    * run. Rule 15: the gate moves rather than closes -- this is its own code,
    * not a silent pass and not a tampering claim.
    */
-  const redirect = hooksPathOverride();
+  const redirect = hooksPathOverride(readConfig);
+  if (redirect && redirect.unreadable) {
+    /*
+     * COULD NOT LOOK IS ITS OWN ANSWER. Reporting "no redirect" here would
+     * be the exact failure D7 names -- a control concluding clean because
+     * its own lookup broke.
+     */
+    return {
+      ok: false,
+      code: 'E_HOOKS_PATH_UNREADABLE',
+      redirect,
+      reason: `could not read core.hooksPath from ${redirect.scope} config (${redirect.unreadable}), `
+        + 'so whether git runs the hook this attestation checks is UNKNOWN, not clean',
+    };
+  }
   if (redirect) {
     return {
       ok: false,

@@ -116,6 +116,87 @@ test('THE DIGEST IGNORES A MISSING TRAILING NEWLINE -- L15, watched', () => {
     'the normalisation swallowed an appended command');
 });
 
+test('WATCH THE REDIRECT FIRE: a set core.hooksPath refuses, and says which scope', () => {
+  /*
+   * Fifth-lap blind audit D12: nothing constructed an input that made this
+   * branch fire, so H3's behaviour had NEVER been watched going red (rule
+   * 1), and the only coverage was a source grep for a string that appears
+   * in comments predating the fix -- green against the blind version too.
+   *
+   * `readConfig` is injected rather than setting git config, because
+   * mutating the operator's machine from a test is the disclosure a
+   * previous auditor had to make about itself.
+   */
+  const r = verifyHookIntegrity({
+    readConfig: (scope) => (scope === '--global' ? '~/.githooks' : (() => {
+      const e = new Error('not set'); e.status = 1; throw e;
+    })()),
+  });
+  assert.equal(r.ok, false, 'a redirected hooksPath reported the hook surface as clean');
+  assert.equal(r.code, 'E_HOOKS_PATH_REDIRECTED');
+  assert.equal(r.redirect.scope, 'global', 'the refusal does not say which scope set it');
+  assert.match(r.reason, /git runs\s+hooks from there/);
+});
+
+test('WORKTREE SCOPE WINS, because it overrides all three others', () => {
+  /*
+   * D8. With extensions.worktreeConfig, `.git/worktrees/<n>/config.worktree`
+   * overrides local, global and system -- and is invisible to `--local`. A
+   * worktree is exactly where this daemon runs its reviewers, so the blind
+   * spot H3 exists to close was still open in the likeliest place.
+   */
+  const r = verifyHookIntegrity({
+    readConfig: (scope) => {
+      if (scope === '--worktree') return '/tmp/wt-hooks';
+      if (scope === '--local') return '/tmp/local-hooks';
+      const e = new Error('not set'); e.status = 1; throw e;
+    },
+  });
+  assert.equal(r.code, 'E_HOOKS_PATH_REDIRECTED');
+  assert.equal(r.redirect.scope, 'worktree',
+    'a per-worktree override was masked by the local one, which git ignores');
+});
+
+test('AN UNREADABLE CONFIG IS UNKNOWN, NOT CLEAN', () => {
+  /*
+   * D7. The blanket catch swallowed every failure, not just the exit-1
+   * unset case, so git missing from PATH read as "not set" and the checker
+   * proceeded to ok:true. That is could-not-measure treated as
+   * measured-zero, in a security control, three files from where the same
+   * range fixes it.
+   */
+  const r = verifyHookIntegrity({
+    readConfig: () => { const e = new Error('git: not found'); e.status = 127; throw e; },
+  });
+  assert.equal(r.ok, false, 'a broken config lookup reported the hook surface as clean');
+  assert.equal(r.code, 'E_HOOKS_PATH_UNREADABLE');
+  assert.match(r.reason, /UNKNOWN, not clean/);
+});
+
+test('AN EMPTY VALUE IS SET, NOT UNSET', () => {
+  /* D8's second half: `if (v)` after a trim dropped `core.hooksPath ""`. */
+  const r = verifyHookIntegrity({
+    readConfig: (scope) => (scope === '--local' ? '   ' : (() => {
+      const e = new Error('not set'); e.status = 1; throw e;
+    })()),
+  });
+  assert.equal(r.code, 'E_HOOKS_PATH_REDIRECTED',
+    'an empty core.hooksPath was reported as unset while the setting is present');
+});
+
+test('AND AN ALL-UNSET CONFIG STILL REACHES THE DIGEST (rule 5)', () => {
+  /*
+   * The positive beside four negatives. If every injected reader produced a
+   * refusal, the tests above would pass against a function that refuses
+   * everything.
+   */
+  const r = verifyHookIntegrity({
+    readConfig: () => { const e = new Error('not set'); e.status = 1; throw e; },
+  });
+  assert.notEqual(r.code, 'E_HOOKS_PATH_REDIRECTED');
+  assert.notEqual(r.code, 'E_HOOKS_PATH_UNREADABLE');
+});
+
 test('A REDIRECT IS ITS OWN CODE, not a pass and not a tampering claim', () => {
   /*
    * H3's shape, asserted on the CONTRACT rather than by setting the config --
@@ -133,12 +214,14 @@ test('A REDIRECT IS ITS OWN CODE, not a pass and not a tampering claim', () => {
     'core.hooksPath is set on this machine, so the attestation is checking a file '
     + 'git does not run -- this is the finding, live');
 
-  /* The code is a real branch in the module, not a string I invented here. */
-  const src = readFileSync(path.join(REPO, 'scripts', 'verify-hook-integrity.mjs'), 'utf8');
-  assert.match(src, /E_HOOKS_PATH_REDIRECTED/,
-    'the redirect branch was removed; the checker is blind to core.hooksPath again');
-  assert.match(src, /core\.hooksPath/,
-    'nothing reads core.hooksPath, which is the threat the prologue names');
+  /*
+   * NO SOURCE GREP HERE ANY MORE. The previous version asserted
+   * `match(src, /core\.hooksPath/)`, which is VACUOUS -- that string appears
+   * in comments that predate the fix, so it was green against the blind
+   * version while its failure message read "nothing reads core.hooksPath".
+   * Rule 13. The behavioural tests above replaced it: they make the branch
+   * actually fire, which is what the grep was standing in for.
+   */
 });
 
 test('THE TEMPLATE AND THE CHECKER ARE BOTH PROTECTED, or the attestation is theatre', () => {
