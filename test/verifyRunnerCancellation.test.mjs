@@ -77,17 +77,33 @@ test('EVERY NON-INTEGER EXIT CODE IS A FAILURE, not just null', () => {
 
 /* ── cancellation really kills the children ──────────────────────────── */
 
-/** A repository whose only test never finishes on its own. */
+/**
+ * A repository whose tests never finish on their own.
+ *
+ * TWO FILES, NOT ONE, AND THE REASON IS A BUG THIS FIXTURE ALREADY HAD.
+ * `shardPlan` clamps the shard count to the number of test files, so a
+ * one-file repo produces `--test-shard=1/1`. That child exits immediately
+ * instead of running the slow test, `live` is empty by the time the test
+ * aborts, and the cancellation assertion measures nothing -- while the
+ * companion "does not record a PASS" assertion passes for the WRONG REASON,
+ * because the record is FAILED from the quick exit rather than from the
+ * cancellation. A fixture that cannot reach the branch cannot fail for it.
+ */
 async function slowRepo() {
   const dir = await mkdtemp(path.join(tmpdir(), 'verify-cancel-'));
   await mkdir(path.join(dir, 'test'), { recursive: true });
-  await writeFile(
-    path.join(dir, 'test', 'slow.test.mjs'),
-    "import test from 'node:test';\n"
-    + "test('slow', async () => { await new Promise((r) => setTimeout(r, 120000)); });\n",
-  );
+  for (const n of ['a', 'b']) {
+    // eslint-disable-next-line no-await-in-loop
+    await writeFile(
+      path.join(dir, 'test', `slow-${n}.test.mjs`),
+      "import test from 'node:test';\n"
+      + `test('slow-${n}', async () => { await new Promise((r) => setTimeout(r, 120000)); });\n`,
+    );
+  }
   return dir;
 }
+
+const SHARDS = { shards: 2, concurrency: 2 };
 
 test('ABORTING A RUN KILLS ITS CHILDREN, so nothing is orphaned', async (t) => {
   const root = await slowRepo();
@@ -97,7 +113,7 @@ test('ABORTING A RUN KILLS ITS CHILDREN, so nothing is orphaned', async (t) => {
   const control = new AbortController();
   const started = Date.now();
   const run = runVerification({
-    root, key: 'k'.repeat(32), identity: { t: 1 }, shards: 1, concurrency: 1, home, signal: control.signal,
+    root, key: 'k'.repeat(32), identity: { t: 1 }, ...SHARDS, home, signal: control.signal,
   });
 
   await new Promise((r) => { setTimeout(r, 1500); });
@@ -141,7 +157,7 @@ test('A CANCELLED RUN DOES NOT RECORD A PASS', async (t) => {
 
   const control = new AbortController();
   const run = runVerification({
-    root, key: 'm'.repeat(32), identity: { t: 1 }, shards: 1, concurrency: 1, home, signal: control.signal,
+    root, key: 'm'.repeat(32), identity: { t: 1 }, ...SHARDS, home, signal: control.signal,
   });
   await new Promise((r) => { setTimeout(r, 1500); });
   control.abort();
@@ -163,7 +179,7 @@ test('A RUN ABORTED BEFORE IT STARTS NEVER SPAWNS, and still is not a pass', asy
   const control = new AbortController();
   control.abort();
   const rec = await runVerification({
-    root, key: 'p'.repeat(32), identity: { t: 1 }, shards: 1, concurrency: 1, home, signal: control.signal,
+    root, key: 'p'.repeat(32), identity: { t: 1 }, ...SHARDS, home, signal: control.signal,
   });
   assert.notEqual(rec.state, VERIFY.PASSED, 'an already-aborted run produced a pass having executed nothing');
 });
