@@ -91,11 +91,19 @@ test('EVERY NON-INTEGER EXIT CODE IS A FAILURE, not just null', () => {
  */
 async function slowRepo() {
   const dir = await mkdtemp(path.join(tmpdir(), 'verify-cancel-'));
-  await mkdir(path.join(dir, 'test'), { recursive: true });
+  /*
+   * A SUBDIRECTORY, BECAUSE THE SHARD GLOB IS `test/**` + `/*.test.mjs`.
+   * Files placed directly in `test/` matched nothing here: both shards exited
+   * 0 having run 0 tests, and the run came back VERIFY_PARTIAL with "every
+   * shard exited 0 and no test ran at all" -- aggregateShards caught my broken
+   * fixture, which is the refusal working. The children never existed, so
+   * there was nothing to kill and the assertion measured nothing.
+   */
+  await mkdir(path.join(dir, 'test', 'sub'), { recursive: true });
   for (const n of ['a', 'b']) {
     // eslint-disable-next-line no-await-in-loop
     await writeFile(
-      path.join(dir, 'test', `slow-${n}.test.mjs`),
+      path.join(dir, 'test', 'sub', `slow-${n}.test.mjs`),
       "import test from 'node:test';\n"
       + `test('slow-${n}', async () => { await new Promise((r) => setTimeout(r, 120000)); });\n`,
     );
