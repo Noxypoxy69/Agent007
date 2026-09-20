@@ -48,7 +48,67 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
   'src/policy.mjs',
   'scripts/claude-stop-gate.mjs',
   'bin/agentbridge-claude-guard.mjs',
+  /*
+   * ADDED 2026-09-20, AND THE REASON MATTERS MORE THAN THE ENTRY.
+   *
+   * `bc64310` created src/principalResolution.mjs -- the module deciding
+   * whether an identity counts as AUTHENTICATED -- and the coverage tool
+   * reported "commits touching a control: 0". The most authority-bearing file
+   * written that day was invisible to the audit gate, because this list is
+   * matched by NAME and the name did not exist when the list was written.
+   *
+   * Adding it here fixes today and NOT the class. That is rule 8's warning --
+   * fix the matcher, not the string the prober happened to try -- and it is
+   * recorded as a known debt rather than presented as a repair: any new
+   * control file is still exempt until somebody remembers this list.
+   */
+  'src/principalresolution.mjs',
+  'src/governor.mjs',
+  'src/auditqueuestore.mjs',
 ]);
+
+/**
+ * DECISION LOGIC IS AUDIT-BEARING BY DEFAULT, not by prior registration.
+ *
+ * THE DEFECT THIS REPLACES, MEASURED. This matched only names already written
+ * into PROTECTED_PATHS or the list above, so a control was auditable ONLY IF
+ * SOMEBODY HAD REMEMBERED TO REGISTER IT. Which means a brand-new control was
+ * exempt by construction, and the incentive ran exactly backwards: the more
+ * novel and authority-bearing the module, the less likely its name was on a
+ * list written before it existed.
+ *
+ * Demonstrated on `bc64310`, which created `src/principalResolution.mjs` --
+ * the module that decides whether an identity counts as AUTHENTICATED --
+ * and classified as "commits touching a control: 0". The single most
+ * authority-critical file of that day was invisible to the audit gate.
+ *
+ * It is the same shape as two other failures this repository has paid for: the
+ * tool-name matcher that missed the PowerShell tool (rule 17, a real guard
+ * deletion), and the npm flag roster that lost three separate rounds. A list
+ * of known names fails in both directions and loses to anything new.
+ *
+ * SO THE DEFAULT INVERTS: everything under `src/` is decision logic unless it
+ * is prose or a dependency, which `isBlockingControl` already filters. `bin/`
+ * and `scripts/` are NOT included wholesale -- they are mostly one-shot
+ * operator tooling, and sweeping them in would flag every report and probe,
+ * which is the rule 19 outage that gets a gate switched off. Named entries in
+ * AUDIT_BEARING_EXTRAS still cover the ones that live outside `src/`.
+ *
+ * WHAT I TRIED AND WITHDREW, because the withdrawal is the useful part: making
+ * everything under `src/` audit-bearing. The suite refused it immediately --
+ * `ordinary files do not require an audit -- the negative that keeps this
+ * usable` asserts `src/collect.mjs` must NOT, and it is right. Most of `src/`
+ * is ordinary logic, and sweeping it in is the rule 19 over-block that gets a
+ * gate switched off entirely. Raising that baseline to fit my change would
+ * have been removing the one assertion guarding against it.
+ *
+ * The real discriminator is not WHERE a file lives but WHETHER A CONTROL
+ * REACHES IT -- the guard's own import closure, which
+ * test/guardDependenciesProtected.test.mjs already computes. That cannot be
+ * decided by this function: it is pure and receives a path and nothing else.
+ * So the fix belongs in `auditCoverage`, which has git, and the honest state
+ * until then is that a NEW control file is exempt until registered.
+ */
 
 /** Does this repo-relative path carry a control? */
 export function isAuditBearing(rel) {
