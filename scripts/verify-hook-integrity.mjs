@@ -143,6 +143,44 @@ function hookPath() {
  * readers to run `git config --global core.hooksPath ~/.githooks` -- the repo
  * documents the step that disarms its own attestation.
  */
+/**
+ * IS PER-WORKTREE CONFIG IN PLAY? ASK GIT TO PARSE ITS OWN BOOLEAN.
+ *
+ * Seventh-lap blind audit D3. This was `String(...) === 'true'`, and
+ * `git config --get` returns THE RAW STRING FROM THE FILE. git parses this
+ * key with `git_config_bool`, which accepts `true`, `1`, `yes`, `on`, any
+ * casing, AND a valueless key. So every one of those enabled per-worktree
+ * config while the guard concluded it was off and skipped the `--worktree`
+ * scope -- and `--worktree` OVERRIDES all three others, so a hooks redirect
+ * hidden there became invisible.
+ *
+ * A straight regression on a guard surface, introduced by my own fix for
+ * D-F, and the same class as the locale bet it replaced: a string equality
+ * standing in for a semantic question. The answer is the same both times --
+ * ASK THE THING THAT OWNS THE MEANING. `--bool` makes git normalise, so
+ * this consumes a canonical `true`/`false` instead of reimplementing git's
+ * boolean grammar.
+ *
+ * Exit 1 is "unset", which is the overwhelmingly common case and means git
+ * ignores `config.worktree` entirely. Any other failure is also treated as
+ * "not in play": an unreadable extensions key is not evidence of a redirect,
+ * and the scopes that remain are queried regardless -- with git documenting
+ * that `--worktree` is an alias for `--local` when the extension is off, so
+ * nothing is lost.
+ */
+export function worktreeConfigEnabled({ cwd = REPO, readConfig = null } = {}) {
+  try {
+    const raw = typeof readConfig === 'function'
+      ? readConfig('--bool-extensions-worktreeConfig')
+      : runGit(['config', '--bool', '--get', 'extensions.worktreeConfig'], {
+        cwd, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    return String(raw ?? '').trim().toLowerCase() === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export function hooksPathOverride(readConfig = null) {
   /*
    * INJECTABLE, so the redirect branch can be watched going red. Fifth-lap
@@ -184,18 +222,9 @@ export function hooksPathOverride(readConfig = null) {
    * and the locale dependency. Unset means git ignores per-worktree config
    * entirely, which is not a failure and not a scope worth querying.
    */
-  let scopes = ['--local', '--global', '--system'];
-  if (typeof readConfig !== 'function') {
-    try {
-      const on = String(runGit(['config', '--get', 'extensions.worktreeConfig'], {
-        cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
-      })).trim();
-      if (on === 'true') scopes = ['--worktree', ...scopes];
-    } catch { /* unset, or unreadable: either way per-worktree config is not in play */ }
-  } else {
-    /* An injected reader is a fixture; give it every scope to exercise. */
-    scopes = ['--worktree', ...scopes];
-  }
+  const scopes = worktreeConfigEnabled({ cwd: REPO, readConfig })
+    ? ['--worktree', '--local', '--global', '--system']
+    : ['--local', '--global', '--system'];
 
   /*
    * `--worktree` FIRST, AND IT WAS THE SCOPE THAT MATTERED MOST. Fifth-lap
