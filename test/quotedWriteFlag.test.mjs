@@ -294,3 +294,29 @@ test('THE FILE LETTER IS CHECKED BEFORE THE VALUE LETTER, and that ordering is t
   assert.equal(clusterTakesFile('--output', new Set(['o']), new Set()), false,
     'a long flag is not a short cluster');
 });
+
+test('AN UNMEASURABLE RELAXATION IS NOT TAKEN: jq stays off the value table (L1)', () => {
+  /*
+   * An auditor flagged that 2979ec9d relaxed `jq -Lf evil.jq` from DENY to
+   * ALLOW, and could not test it: jq is not installed here. Nor could I.
+   * jq does not use GNU getopt, so the premise the value table rests on --
+   * whichever value-taking letter comes FIRST owns the remainder -- may not
+   * hold for it at all.
+   *
+   * The twelve rg relaxations from the same commit WERE measurable and
+   * were measured against ripgrep 14.1.1 (-ef -Af -Bf -Cf -mf -gf -tf -Tf
+   * -Mf -jf -rf -Ef): not one read a file named f. Those stay. This one
+   * does not, because an unmeasured relaxation buys a glued -L<dir> and
+   * costs a side-file read if the premise is wrong.
+   */
+  assert.equal(judge(`jq -Lf evil.jq package.json`).allowed, false,
+    'jq -Lf was allowed -- jq is back on the value table and nobody can measure it here');
+  assert.equal(judge(`jq -f evil.jq package.json`).allowed, false,
+    'the plain pattern-file form must stay refused');
+
+  /* And the cost is bounded: the separated form still works. */
+  assert.equal(judge(`jq -L dir package.json`).allowed, true,
+    'jq -L with a separated value reads no side file and must stay allowed');
+  assert.equal(judge(`jq .name package.json`).allowed, true,
+    'ordinary jq must keep working');
+});

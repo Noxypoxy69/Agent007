@@ -263,8 +263,27 @@ const TOOL_VALUE_SHORT = new Map([
   ['cut', new Set(['f', 'd', 'c', 'b'])],
   ['head', new Set(['n', 'c'])],
   ['tail', new Set(['n', 'c', 's'])],
-  /* -L is a module directory. */
-  ['jq', new Set(['L'])],
+  /*
+   * jq IS DELIBERATELY ABSENT, and absent means stricter.
+   *
+   * I gave it ['L'] for --library-path, which relaxed `jq -Lf evil.jq`
+   * from DENY to ALLOW while `jq -f evil.jq` stayed DENY. jq does not use GNU
+   * getopt and its short-option scanner can match several letters inside one
+   * cluster, so the premise this whole table rests on -- whichever
+   * value-taking letter comes FIRST owns the remainder -- may simply not
+   * hold for it. An auditor raised that and could not test it; jq is not
+   * installed on this machine either, so neither could I.
+   *
+   * The twelve rg relaxations WERE measurable and were measured against
+   * ripgrep 14.1.1: -ef -Af -Bf -Cf -mf -gf -tf -Tf -Mf -jf -rf -Ef, and not
+   * one of them read a file named f. Every letter consumed it as its own
+   * value. So those stay.
+   *
+   * This one goes, because an unmeasured relaxation on a tool whose parser
+   * I have reason to doubt is not a trade worth making for `-L<dir>` glued
+   * to another flag. The cost is that `jq -Lf` is refused; `jq -L dir` is
+   * unaffected.
+   */
   /* -f skip-fields, -s skip-chars, -w check-chars. */
   ['uniq', new Set(['f', 's', 'w'])],
 ]);
