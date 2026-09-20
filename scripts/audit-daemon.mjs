@@ -227,7 +227,28 @@ async function tick() {
   const { rows, job, pendingCount } = nextJob();
   if (!job) { say(`[audit-daemon] queue empty (${rows.length} row(s)); nothing to consume`); return false; }
 
-  const claim = claimJob(job, { by: BY, bySource: 'asserted', now: Date.now() });
+  /*
+   * THE AUTHOR IS PASSED IN, WHICH IT WAS NOT. Blind audit D4, HIGH.
+   *
+   * The header forty lines up says "a daemon that claimed its own author's
+   * work would reproduce the defect it exists to fix, so claimJob is asked,
+   * not second-guessed: it holds the author-cannot-audit rule". claimJob does
+   * hold that rule -- and this call handed it no `authorSession`, so the rule
+   * had nothing to compare and could not fire. The comment described an
+   * intent the call did not implement, which is the most expensive kind of
+   * comment in this repository.
+   *
+   * `job.author_session` is populated by auditJobsFor now. It is the trailer,
+   * so it is provenance rather than authority and can never grade `enforced`
+   * -- it catches the honest case, which is the one that was happening.
+   */
+  const claim = claimJob(job, {
+    by: BY,
+    bySource: 'asserted',
+    authorSession: job.author_session ?? null,
+    authorSource: job.author_source ?? null,
+    now: Date.now(),
+  });
   if (!claim.ok) {
     say(`[audit-daemon] cannot claim ${job.audit_id}: ${claim.why}`);
     return false;

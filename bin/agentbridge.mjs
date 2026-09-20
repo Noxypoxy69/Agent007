@@ -3471,7 +3471,26 @@ try {
           })).trim();
         } catch { return null; }
       };
-      const computed = auditJobsFor(coverage, { treeShaFor, now: new Date().toISOString() });
+      /*
+       * THE ONE PLACE WITH GIT, so it is the one place that can read the
+       * trailer. auditJobsFor is pure and takes this the same way it takes
+       * treeShaFor. Blind audit D4: without it, `author_session` had no
+       * producer anywhere and every author-exclusion consumer read undefined.
+       *
+       * %B, not %s -- the trailer lives in the body, and the subject alone
+       * would silently resolve every author to null while looking like it had
+       * asked.
+       */
+      const authorSessionFor = (c) => {
+        try {
+          return authorSessionFrom(String(rgA(['-C', repo, 'log', '-1', '--format=%B', c], {
+            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+          })));
+        } catch { return null; }
+      };
+      const computed = auditJobsFor(coverage, {
+        treeShaFor, authorSessionFor, now: new Date().toISOString(),
+      });
       if (computed.error) {
         console.error(`${cmd}: could not compute the queue: ${computed.error}`);
         console.error('  That is UNKNOWN, not "no audits are due".');
