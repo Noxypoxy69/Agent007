@@ -101,12 +101,25 @@ try {
   const { auditCoverage } = await import('../src/auditLedger.mjs');
   const { auditJobsFor, mergeQueue } = await import('../src/auditJob.mjs');
   const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
+  const { readFileSync } = await import('node:fs');
+
+  /*
+   * THE LEDGER IS AN ARGUMENT, and an unreadable one is an EMPTY one, not a
+   * reason to skip. An empty ledger makes every control commit in range read
+   * as unaudited -- which is loud and correct. Treating "I could not read the
+   * ledger" as "nothing is due" is the conflation this whole mechanism exists
+   * to prevent.
+   */
+  let ledgerText = '';
+  try {
+    ledgerText = readFileSync(path.join(REPO, 'docs', 'audit-ledger.jsonl'), 'utf8');
+  } catch { ledgerText = ''; }
 
   const treeShaFor = (candidate) => git(['rev-parse', `${candidate}^{tree}`]);
   const now = new Date().toISOString();
 
   for (const r of ranges) {
-    const coverage = auditCoverage(REPO, { range: r.spec });
+    const coverage = auditCoverage({ repoRoot: REPO, range: r.spec, ledgerText });
     if (!coverage || coverage.error) {
       /*
        * COULD NOT LOOK IS NOT "NOTHING IS DUE". Said out loud rather than
