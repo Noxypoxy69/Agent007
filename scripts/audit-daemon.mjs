@@ -69,6 +69,7 @@ const {
   claimJob, JOB, REQUIRED_PROOFS, makeAuthorResolver, AUTHOR_UNAVAILABLE,
 } = await import('../src/auditJob.mjs');
 const { proposeAudit, isClaimable } = await import('../src/auditDispatch.mjs');
+const { allocateWorkspace, releaseWorkspace } = await import('../src/auditWorkspace.mjs');
 
 /*
  * THE DAEMON'S IDENTITY IS ITS OWN, NOT THE SESSION'S.
@@ -233,24 +234,23 @@ function nextJob() {
  * in it.
  */
 function allocate(candidateSha) {
-  let dir;
-  try {
-    dir = mkdtempSync(path.join(os.tmpdir(), `audit-${String(candidateSha).slice(0, 8)}-`));
-  } catch (e) {
-    return { ok: false, why: `could not create a workspace: ${String(e?.message ?? e)}` };
-  }
-  try {
-    /*
-     * `--force` because mkdtemp already made the directory and `worktree
-     * add` refuses a non-empty target otherwise. The directory is ours and
-     * brand new, so there is nothing here to overwrite.
-     */
-    runGit(['worktree', 'add', '--detach', '--force', dir, candidateSha], { cwd: REPO });
-    return { ok: true, dir, reused: false };
-  } catch (e) {
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-    return { ok: false, why: String(e?.stderr || e?.message || e).trim() };
-  }
+  /*
+   * DELEGATED, so the contract is testable. The first version of this fix
+   * inlined `mkdtempSync` here -- which removed the predictable NAME and
+   * left the identity fuzzy: nothing stopped a later caller recomputing a
+   * path from the sha, and with a per-run suffix there can now be several
+   * workspaces for one candidate, so a recomputed path is a guess at which
+   * one it owns. Danny's correction: allocation MINTS an identity and
+   * cleanup CONSUMES it.
+   *
+   * src/auditWorkspace.mjs also gets the run id from `randomUUID` rather
+   * than `mkdtemp`'s six implementation-defined characters, because the
+   * threat is a local process PREDICTING the path -- a guessability
+   * property, not a uniqueness one.
+   */
+  const r = allocateWorkspace({ candidateSha, runGit, repoRoot: REPO });
+  if (!r.ok) return { ok: false, why: r.why };
+  return { ok: true, dir: r.allocation.dir, allocation: r.allocation, reused: false };
 }
 
 /**
@@ -463,12 +463,17 @@ async function tick() {
      * Failure to remove is reported, never thrown -- the release itself has
      * already landed and must not be undone by a cleanup problem.
      */
-    try {
-      runGit(['worktree', 'remove', '--force', ws.dir], { cwd: REPO });
-      say(`[audit-daemon] removed ${ws.dir}`);
-    } catch (e) {
-      say(`[audit-daemon] could NOT remove ${ws.dir}: ${String(e?.stderr || e?.message || e).trim()}`);
-    }
+    /*
+     * THE ALLOCATION, NOT THE PATH. `releaseWorkspace` refuses anything
+     * whose directory does not match the identity it claims, which is what
+     * stops a future edit recomputing a name from the sha and deleting a
+     * SIBLING run of the same candidate -- newly possible now that the
+     * suffix is per-run.
+     */
+    const rel = releaseWorkspace(ws.allocation, { runGit, repoRoot: REPO });
+    say(rel.ok
+      ? `[audit-daemon] removed ${ws.dir}`
+      : `[audit-daemon] could NOT remove ${ws.dir}: ${rel.why}`);
     /*
      * AND THE BRIEF, which now lives outside the worktree (D-A) and so is no
      * longer carried away by `worktree remove`. It holds the run's nonce, so
@@ -708,12 +713,11 @@ async function tick() {
    * `prune` can clear.
    */
   try { rmSync(briefDir, { recursive: true, force: true }); } catch { /* best effort */ }
-  try {
-    runGit(['worktree', 'remove', '--force', ws.dir], { cwd: REPO });
-    say(`[audit-daemon] removed ${ws.dir}`);
-  } catch (e) {
-    say(`[audit-daemon] could not remove ${ws.dir}: ${String(e?.stderr || e?.message || e).trim().split('\n')[0]}`);
-  }
+  /* Same identity discipline as the release path; see releaseWorkspace. */
+  const rel = releaseWorkspace(ws.allocation, { runGit, repoRoot: REPO });
+  say(rel.ok
+    ? `[audit-daemon] removed ${ws.dir}`
+    : `[audit-daemon] could not remove ${ws.dir}: ${rel.why}`);
   return true;
 }
 

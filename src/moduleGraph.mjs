@@ -87,6 +87,16 @@ export const DEFAULT_ENTRY_POINTS = [
    * for the same reason as the two above: from the graph an entry point and an
    * orphan are identical, and the difference has to be stated by a person. */
   'scripts/verify-run.mjs',
+  /* THE AUDIT CONSUMER. A person or a scheduler runs it; nothing in the graph
+   * imports it, so from here it is indistinguishable from an orphan -- and its
+   * absence from this list meant everything IT imports read as test-only.
+   * src/auditWorkspace.mjs was reported unreferenced the moment it was
+   * extracted, which is the shape that invites an allowlist entry for a module
+   * that is in fact wired. Declared for exactly the reason the four above are.
+   *
+   * That it currently has no SCHEDULER is a separate, open question (the
+   * autonomy decision), and not a reason to call its imports orphans. */
+  'scripts/audit-daemon.mjs',
   /* THE LAUNCHER'S WORKSPACE RESOLVER. `agent.cmd` invokes it before Claude
    * starts, to put each agent in its own worktree -- so src/agentWorkspace.mjs
    * is shipped, not test-only. It is declared here for the reason the three
