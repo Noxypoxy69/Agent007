@@ -168,7 +168,7 @@ test('no id, and an id that would escape the polls directory, are both refused',
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test('agent.cmd IS EXECUTED, and must really set the id and really land in the repo', () => {
+test('agent.cmd IS EXECUTED, and must really set the id and really land in the repo', (t) => {
   /*
    * THIS TEST RUNS agent.cmd. THE TWO VERSIONS BEFORE IT READ agent.cmd AS TEXT,
    * AND BOTH WERE HOLLOW.
@@ -196,6 +196,46 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
    * in the right place. Every one of those eighteen mutations fails this by
    * construction, because each one changes what the stub prints.
    */
+  /*
+   * THIS TEST RUNS THE REAL agent.cmd, WHICH REGISTERS A WORKTREE BESIDE
+   * THE REPO AND DOES NOT REMOVE IT. Every clone that runs this file left
+   * another wt-<id> behind, which is the mechanism that manufactured the
+   * stale worktrees now sitting on this machine -- and a stale one is what
+   * makes the probe above fail for the wrong reason.
+   *
+   * So: note whether it existed BEFORE, and remove it afterwards only if
+   * this run created it. In the shared checkout wt-code-a is a real agent's
+   * workspace and must be left completely alone; in a fresh clone it never
+   * pre-exists, so the clone cleans up after itself.
+   */
+  const agentWt = path.join(path.dirname(REPO), 'wt-code-a');
+  const wtPreexisted = existsSync(agentWt);
+  t.after(async () => {
+    if (wtPreexisted || !existsSync(agentWt)) return;
+    /*
+     * THE FIRST VERSION OF THIS TRIED ONCE AND SILENTLY DID NOTHING. I
+     * measured it in a clone: worktree left behind true, still registered
+     * true. agent.cmd leaves a process holding the directory for a moment
+     * after the test returns, so a single remove races it -- the same
+     * mistake as the three-rmSync-calls-in-a-microsecond sweep, made again
+     * one hook along.
+     *
+     * A cleanup that claims to work and does not is worse than none,
+     * because the litter then has a paragraph saying it cannot exist.
+     */
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      spawnSync('git', ['worktree', 'remove', '--force', agentWt], { cwd: REPO, encoding: 'utf8' });
+      try { rmSync(agentWt, { recursive: true, force: true }); } catch { /* handle open */ }
+      if (!existsSync(agentWt)) break;
+      await new Promise((r) => { setTimeout(r, 200 * (attempt + 1)); });
+    }
+    spawnSync('git', ['worktree', 'prune'], { cwd: REPO, encoding: 'utf8' });
+    if (existsSync(agentWt)) {
+      process.stderr.write(`[startAgentLauncher] could not remove ${agentWt} -- it is litter, `
+        + 'and a later run against it will fail on the missing .claude/settings.json\n');
+    }
+  });
+
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-exec-'));
   const elsewhere = mkdtempSync(path.join(tmpdir(), 'agentcmd-cwd-'));
   /*
@@ -414,10 +454,36 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
      * directory that happens to have a .claude -- otherwise the check above
      * could be satisfied by a decoy.
      */
-    const gitCommon = execFileSync('git', ['rev-parse', '--git-common-dir'],
-      { cwd: startedIn, encoding: 'utf8' }).trim();
-    const repoCommon = execFileSync('git', ['rev-parse', '--git-common-dir'],
-      { cwd: REPO, encoding: 'utf8' }).trim();
+    /*
+     * A TREE git CANNOT DESCRIBE IS A FAILURE, NOT AN EXCEPTION, and the
+     * version that let execFileSync throw manufactured a false defect.
+     *
+     * An auditor hit it: agent.cmd REUSES an existing wt-<id> beside the
+     * repo, and against a stale one whose backing clone had been deleted
+     * git answered "fatal: not a git repository: (NULL)", status 128. The
+     * test ERRORED instead of failing, which reads like a defect in the
+     * launcher rather than litter on the machine -- rule 21, and the
+     * previous assertion was a pure string compare that could not throw at
+     * all, so this is a failure mode the fix introduced.
+     */
+    const commonDirOf = (cwd) => {
+      const r = spawnSync('git', ['rev-parse', '--git-common-dir'],
+        { cwd, encoding: 'utf8' });
+      if (r.status !== 0) {
+        return { ok: false, why: String(r.stderr ?? r.error?.message ?? '').trim() || `git exited ${r.status}` };
+      }
+      return { ok: true, dir: String(r.stdout).trim() };
+    };
+
+    const started = commonDirOf(startedIn);
+    assert.ok(started.ok,
+      `git cannot describe the directory claude started in (${startedIn}): ${started.why}. `
+      + 'If that path is a leftover worktree from an earlier run whose clone is gone, this is '
+      + 'litter on the machine and not a defect in agent.cmd -- remove it and run again');
+    const here = commonDirOf(REPO);
+    assert.ok(here.ok, `git cannot describe the repository itself: ${here.why}`);
+    const gitCommon = started.dir;
+    const repoCommon = here.dir;
     assert.equal(
       realpathSync.native(path.resolve(startedIn, gitCommon)).toLowerCase(),
       realpathSync.native(path.resolve(REPO, repoCommon)).toLowerCase(),
