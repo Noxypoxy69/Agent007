@@ -1790,9 +1790,53 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * value carries it after the first `=`, and that value may be a path, so it
      * gets the same question every other operand gets.
      */
+    /*
+     * npm FORWARDS OPERANDS WITH OR WITHOUT THE SEPARATOR, AND THIS CHECK
+     * USED TO LIVE INSIDE `if (sep !== -1)`.
+     *
+     * So the one spelling the rail gated was the one an attacker would not
+     * bother to type. MEASURED by a blind auditor through the shipped hook
+     * binary, with pwn.mjs untracked in the clone:
+     *
+     *     npm test -- pwn.mjs        DENY  [agentbridge:shell-not-allowlisted]
+     *     npm test pwn.mjs           ALLOW
+     *     npm test --silent pwn.mjs  ALLOW
+     *     node --test pwn.mjs        DENY
+     *
+     * and npm 11.16.0 forwards identically either way -- a fixture whose
+     * script echoes argv gives ARGV=["pwn.mjs"] for all of them -- and it
+     * RUNS: with this repository's own test script the auditor got
+     * "PWN RAN" and a marker file.
+     *
+     * That is worse than the `npm test` glob hole CLAUDE.md records as the
+     * boundary of the model. There the payload must be an untracked file
+     * matching test/**; here it is any path the caller names, including one
+     * outside the repository.
+     *
+     * WHICH VERBS FORWARD IS A PROPERTY OF npm, SO IT IS WRITTEN DOWN ONCE.
+     * `test`, `start`, `stop` and `restart` forward everything after the
+     * verb; `run`/`run-script` forward everything after the SCRIPT NAME.
+     * `install`, `ci` and the rest take their own operands -- a package
+     * spec is not a path this rail hands to node -- and those remain the
+     * documented boundary rather than something this change quietly widens.
+     *
+     * Only an UNTRACKED file is refused, exactly as the node branch does, so
+     * `npm test test/committed.test.mjs` still runs.
+     */
+    const FORWARDS_AFTER_VERB = new Set(['test', 'start', 'stop', 'restart']);
+    const FORWARDS_AFTER_SCRIPT = new Set(['run', 'run-script']);
+
+    const verb = String(tokens[1] ?? '').toLowerCase();
+    let operandStart = -1;
+    if (FORWARDS_AFTER_VERB.has(verb)) operandStart = 2;
+    else if (FORWARDS_AFTER_SCRIPT.has(verb)) operandStart = 3;
+
     const sep = tokens.indexOf('--');
-    if (sep !== -1) {
-      const forwarded = tokens.slice(sep + 1).flatMap((t) => {
+    if (operandStart === -1 && sep !== -1) operandStart = sep + 1;
+
+    if (operandStart !== -1) {
+      const forwarded = tokens.slice(operandStart).flatMap((t) => {
+        if (t === '--') return [];
         if (!t.startsWith('-')) return [t];
         const eq = t.indexOf('=');
         if (eq === -1) return [];

@@ -1239,3 +1239,78 @@ test('the key gate sees camelCase, and still does not see content fields', () =>
     'new_source is content, not a location -- this is why source is in neither list');
   assert.equal(content('Edit', { file_path: 'docs/notes.md', old_string: 'CLAUDE.md', new_string: 'x' }), true);
 });
+
+test('npm FORWARDS OPERANDS WITHOUT THE SEPARATOR TOO, and the gate no longer needs one', () => {
+  /*
+   * THE GATE ABOVE ONLY RAN INSIDE `if (tokens.indexOf('--') !== -1)`, so
+   * the single spelling it refused was the one nobody would bother to type.
+   * Measured by a blind auditor through the shipped hook binary, with
+   * pwn.mjs untracked:
+   *
+   *     npm test -- pwn.mjs        DENY
+   *     npm test pwn.mjs           ALLOW
+   *     npm test --silent pwn.mjs  ALLOW
+   *
+   * npm 11.16.0 forwards identically either way -- a fixture echoing argv
+   * gives ARGV=["pwn.mjs"] for all three -- and with this repository's own
+   * test script the auditor got "PWN RAN" and a marker file on disk. That
+   * is wider than the npm-glob hole CLAUDE.md documents as the boundary:
+   * there the payload must be an untracked file matching test/**, here it
+   * is any path, including one outside the repository.
+   *
+   * THE SPELLINGS ARE GENERATED, NOT TYPED (rule 7). A hand-written list is
+   * what left the no-separator form open in the first place, so the cases
+   * come from the forwarding verbs crossed with the ways an operand can
+   * arrive. Adding a verb to the source extends this without anybody
+   * remembering to.
+   */
+  const PAYLOAD = 'pwn.mjs';
+  const mayExecute = (p) => (String(p).endsWith(PAYLOAD) ? 'untracked-file' : 'inherited');
+
+  const FORWARDING = [
+    ['npm test', ''], ['npm start', ''], ['npm stop', ''], ['npm restart', ''],
+    ['npm run build', ''], ['npm run-script build', ''],
+  ];
+  const ARRIVALS = [
+    (base) => `${base} ${PAYLOAD}`,
+    (base) => `${base} -- ${PAYLOAD}`,
+    (base) => `${base} --silent ${PAYLOAD}`,
+    (base) => `${base} --import=${PAYLOAD}`,
+    (base) => `${base} -- --import=${PAYLOAD}`,
+  ];
+
+  const escaped = [];
+  for (const [base] of FORWARDING) {
+    for (const spell of ARRIVALS) {
+      const cmd = spell(base);
+      if (judgeShellCommand(cmd, { mayExecute }).allowed) escaped.push(cmd);
+    }
+  }
+  assert.deepEqual(escaped, [],
+    'npm forwards these to the script it runs, and an untracked payload among them is code '
+    + `this session wrote:\n  ${escaped.join('\n  ')}`);
+});
+
+test('AND THE VERBS THAT DO NOT FORWARD ARE NOT SWEPT UP', () => {
+  /*
+   * Rule 5 and rule 16 together. If the operand check applied to every verb
+   * it would refuse an ordinary package install, and the test above would
+   * pass for a rail that had simply stopped working.
+   *
+   * A package spec is not a path this rail hands to node. `npm install evil`
+   * remains ALLOW, which CLAUDE.md already records as the documented
+   * boundary of the model -- this change must not quietly widen it, in
+   * either direction.
+   */
+  const mayExecute = (p) => (String(p).endsWith('pwn.mjs') ? 'untracked-file' : 'inherited');
+
+  for (const cmd of ['npm install pwn.mjs', 'npm ci', 'npm install', 'npm audit',
+    'npm install some-package', 'npm ls --depth=0']) {
+    assert.equal(judgeShellCommand(cmd, { mayExecute }).allowed, true,
+      `${cmd} does not forward an operand to a script and must not be refused`);
+  }
+
+  /* And a TRACKED file still runs, or committing a test stops working. */
+  assert.equal(judgeShellCommand('npm test test/committed.test.mjs', { mayExecute }).allowed, true,
+    'a tracked test file is exactly what this session inherited and must stay runnable');
+});
