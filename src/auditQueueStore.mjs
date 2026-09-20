@@ -69,37 +69,36 @@ export function readQueue(repoRoot, home = undefined) {
 /**
  * Append the current queue. Callers pass the whole merged set.
  *
- * ═══ ONLY THE ROWS THAT ACTUALLY CHANGED ARE APPENDED ═══
+ * ═══ THIS DOES NOT FIX M11, AND THE FIRST VERSION OF THIS COMMENT CLAIMED IT DID ═══
  *
- * Fourth-lap blind audit M11. Every caller passes its WHOLE snapshot, and
- * the read dedupes last-write-wins -- so a writer re-asserted stale values
- * for every row it had never touched. That is a lost update, and on a
- * machine that commits constantly it is not theoretical:
+ * Fourth-lap blind audit M11 is a lost update: every caller passes its WHOLE
+ * snapshot, the read dedupes last-write-wins, so a writer re-asserts stale
+ * values for rows it never touched. The daemon reads at `nextJob()`, spends
+ * seconds in `git worktree add`, then appends its pre-allocation snapshot;
+ * the post-commit hook runs on every commit and appends its own. A commit
+ * landing mid-allocation reverts a claim while the reviewer is still running.
  *
- *   - `scripts/audit-daemon.mjs` reads at `nextJob()`, then runs
- *     `git worktree add` (seconds), then appends its pre-allocation snapshot.
- *   - `scripts/enqueue-audit-job.mjs` runs on EVERY COMMIT and appends its
- *     own whole snapshot after `auditCoverage` (also seconds of git).
+ * I wrote a filter here that skipped rows identical to what is on disk, and
+ * claimed it removed that "entirely". IT DOES NOT, and my own test caught it
+ * before the claim shipped: A STALE ROW DIFFERS FROM DISK, which is exactly
+ * why it clobbers. The filter cannot tell "I changed this" from "mine is out
+ * of date" — both are differences. Distinguishing them needs the writer's
+ * BASELINE (what it read), which this function is not given.
  *
- * A commit landing while the daemon allocates appended a stale PENDING row
- * for the job the daemon had just claimed, last write won, and the claim
- * evaporated while the reviewer was still running. Symmetrically, a hook run
- * could revert a row the CLI had just recorded.
+ * ═══ WHAT IT ACTUALLY DOES ═══
  *
- * Re-reading here and filtering to genuinely-changed rows removes that
- * entirely: a writer can no longer clobber a row it did not modify, because
- * it no longer writes one. It also stops the file growing by the whole queue
- * on every commit, which is why it was 1400+ rows for ~34 jobs.
+ * It stops the file growing by the entire queue on every commit — the live
+ * store held 1400+ rows for ~34 jobs — and it makes a no-op write a genuine
+ * no-op. Both real, neither is M11.
  *
- * ═══ WHAT THIS DOES NOT FIX, SAID PLAINLY ═══
+ * ═══ M11 REMAINS OPEN, and the fix is a signature change ═══
  *
- * It is NOT a lock. Two writers changing THE SAME row within the same
- * read-modify-write window can still interleave, and the later append wins.
- * That window is now microseconds (a read and a compare) instead of the
- * seconds a `git worktree add` takes, but it is not zero. Closing it needs
- * an advisory lock or a compare-and-set, which is a bigger change than a
- * finding this size warrants -- and pretending otherwise in a comment is how
- * the last four of these got missed.
+ * `writeQueue(repo, rows, {baseline})`, appending only rows that differ from
+ * what the caller READ, with every caller threading its own baseline through
+ * — or an advisory lock. That touches the daemon, the hook, the CLI and the
+ * Stop gate, one of which no session may edit. It is a bigger change than
+ * this slot, and half-doing it while the comment says otherwise is precisely
+ * the failure four consecutive audits have found in this file's neighbours.
  */
 export function writeQueue(repoRoot, rows, home = undefined) {
   const file = auditQueuePath(repoRoot, home);

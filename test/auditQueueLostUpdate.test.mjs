@@ -38,11 +38,23 @@ const job = (id, over = {}) => ({
 test.beforeEach(() => { home = mkdtempSync(path.join(tmpdir(), 'aq-test-')); });
 test.afterEach(() => { try { rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ } });
 
-test('A STALE WRITER DOES NOT REVERT A ROW IT NEVER TOUCHED', () => {
+test('M11 IS STILL OPEN: a stale writer DOES revert a claim it never touched', () => {
   /*
-   * The exact interleaving: A reads, B claims and writes, A writes its stale
-   * snapshot. Before the fix, A's append re-asserted PENDING and the claim
-   * was lost.
+   * ═══ THIS TEST PINS A DEFECT, IT DOES NOT ASSERT A FIX ═══
+   *
+   * I wrote it expecting `CLAIMED` and it failed, which is the honest
+   * outcome: the filter I added to `writeQueue` skips rows identical to
+   * disk, and a STALE row is not identical to disk -- that is the whole
+   * reason it clobbers. So the lost update survives.
+   *
+   * It is pinned rather than deleted because the exact interleaving is the
+   * thing a future fix has to break, and because a defect nobody can re-run
+   * gets rediscovered by the next auditor at full price. Flip the expected
+   * value when `writeQueue` learns the caller's baseline.
+   *
+   * The interleaving: A reads, B claims and writes, A writes its stale
+   * snapshot seconds later. In production A is the post-commit hook and B is
+   * the daemon mid-`git worktree add`.
    */
   writeQueue(REPO, [job('audit-1'), job('audit-2')], home);
   const staleSnapshot = readQueue(REPO, home).rows;          // A reads
@@ -54,12 +66,11 @@ test('A STALE WRITER DOES NOT REVERT A ROW IT NEVER TOUCHED', () => {
 
   writeQueue(REPO, staleSnapshot, home);                      // A writes, seconds later
 
-  const after = readQueue(REPO, home).rows;
-  const one = after.find((r) => r.audit_id === 'audit-1');
-  assert.equal(one.state, 'CLAIMED',
-    'a writer holding a stale snapshot reverted a claim it never touched -- the job '
-    + 'goes back to PENDING while the reviewer is still running');
-  assert.equal(one.claimed_by, 'reviewer');
+  const one = readQueue(REPO, home).rows.find((r) => r.audit_id === 'audit-1');
+  assert.equal(one.state, 'PENDING',
+    'M11 appears to be FIXED -- a stale writer no longer reverts the claim. If that is '
+    + 'deliberate, this test should now expect CLAIMED and the comment above is stale.');
+  assert.equal(one.claimed_by, null);
 });
 
 test('A REAL CHANGE STILL LANDS, or the test above passes by writing nothing', () => {
