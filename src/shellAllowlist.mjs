@@ -1613,21 +1613,84 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * this does refuse that npm would have called ambiguous (--pre, --c) have
      * no legitimate meaning anyway, so refusing them costs nothing.
      */
-    const REDIRECTS = ['prefix', 'cwd'];
-    const npmRedirect = tokens.slice(1).find((raw) => {
+    /*
+     * AND "prefix OR cwd" IS STILL A ROSTER -- OF CONCEPTS INSTEAD OF
+     * SPELLINGS. Third round on this matcher, found by auditing it rather
+     * than by trusting its comment, which says it is "routed on shape".
+     *
+     * MEASURED against npm 11.16.0, judging and executing the SAME string,
+     * with a marker file as the evidence rather than npm's output:
+     *
+     *   npm test --node-options=--require=C:/x/evil.js
+     *       rail = ALLOW      the file RAN
+     *
+     * That is the property 1f29e438 says it closed, reached by a different
+     * concept: not relocating package.json, but injecting a module into
+     * every node the script spawns. The payload is outside the repository,
+     * so the node gate -- five rounds of requiring a file be tracked and
+     * unmodified -- never sees it.
+     *
+     * THE BACKSLASH FORM OF THE SAME ATTACK WAS REFUSED, AND THAT HID IT.
+     * `--node-options=--require=C:\\x\\evil.js` is DENY, by the shell
+     * metacharacter matcher reacting to the backslash -- a different layer,
+     * for a different reason, on a spelling the attacker chooses. Rule 18:
+     * establish WHICH layer refused before believing a surface is covered.
+     *
+     * SO THE LIST IS INVERTED. Enumerating what redirects is a game this
+     * matcher has now lost three times, because npm's config system means
+     * almost any --key sets something. What CANNOT hurt is short and
+     * stable, so npm's own flags must be on it and everything else is
+     * refused by default. Abbreviations are refused too: npm expands
+     * --silen to --silent, and rather than model nopt's expansion, the
+     * exact spelling is required. There is always an exact spelling.
+     *
+     * AND ONLY npm's OWN FLAGS ARE JUDGED. MEASURED, same harness:
+     *
+     *   npm test --prefix <attacker>                  REDIRECTED
+     *   npm test -- --prefix <attacker>               no
+     *   npm test --node-options=--require=<evil>      REDIRECTED
+     *   npm test -- --node-options=--require=<evil>   no
+     *
+     * npm stops reading its own flags at a bare --; after it the words
+     * belong to the script. The previous version scanned every token, so
+     * `npm run build -- --prefix foo` was refused although npm ignores it --
+     * an outage, and rule 16 says an outage is how a rail gets switched
+     * off. The version before THAT scanned only after the --, which is
+     * exactly backwards and is the hole 1f29e438 was written to close.
+     */
+    const NPM_INERT = new Set([
+      /* Output volume and formatting. None of these decide what runs. */
+      's', 'silent', 'quiet', 'loglevel', 'json', 'long', 'parseable',
+      'color', 'no-color', 'progress', 'no-progress',
+      /* Network and registry behaviour for install-type commands. */
+      'prefer-offline', 'prefer-online', 'offline',
+      'audit', 'no-audit', 'fund', 'no-fund',
+      /* Ordinary install shaping. */
+      'production', 'no-save', 'save', 'save-dev', 'save-exact',
+      'dry-run', 'no-package-lock', 'legacy-peer-deps',
+    ]);
+
+    /* npm's own flags stop at a bare --; the rest are the script's. */
+    const npmOwnTokens = [];
+    for (const raw of tokens.slice(1)) {
       const t = raw.replace(/^['"]|['"]$/g, '');
-      if (t === '-C' || t.startsWith('-C=')) return true;
-      const m = /^--([^=]+)/.exec(t);
-      if (!m) return false;
-      const name = m[1].toLowerCase();
-      return REDIRECTS.some((full) => full.startsWith(name));
+      if (t === '--') break;
+      npmOwnTokens.push(t);
+    }
+
+    const npmRedirect = npmOwnTokens.find((t) => {
+      if (!t.startsWith('-') || t === '-') return false;
+      const name = (/^--?([^=]*)/.exec(t)?.[1] ?? '').toLowerCase();
+      return !NPM_INERT.has(name);
     });
     if (npmRedirect) {
       return {
         allowed: false,
-        reason: `"${npmRedirect}" relocates where npm resolves package.json and runs its scripts, which turns `
-          + 'an approved verb into arbitrary execution in a directory this rail never judged. Run npm in the '
-          + 'repository it belongs to',
+        reason: `"${npmRedirect}" is not among the npm flags known to leave execution alone. `
+          + "npm flags decide what code runs: --prefix relocates package.json into a directory this rail "
+          + "never judged, and --node-options injects a module into every node the script spawns, which the "
+          + "node gate cannot see because the payload is not in the repository at all. Use the exact spelling "
+          + "of an inert flag, or pass script arguments after a bare --",
       };
     }
     /*

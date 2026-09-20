@@ -88,33 +88,68 @@ test('THE ESCAPE IS CLOSED, in every spelling of the redirect', () => {
   }
 });
 
-test('THE REDIRECT IS REFUSED WHEREVER IT SITS, not only where it was first seen', () => {
+test('THE REDIRECT IS REFUSED WHEREVER npm WOULD READ IT', () => {
   /*
    * Position mattered in the original bug -- the branch stopped looking at a
-   * literal `--`. So the flag is tried before the verb's other arguments,
-   * after them, and on the far side of a `--`.
+   * literal `--`. So the flag is tried before the verb's other arguments and
+   * after them.
    */
   for (const cmd of [
     'npm --prefix C:/x test',
     'npm test --prefix C:/x',
     'npm run build --prefix C:/x',
     'npm test --silent --prefix C:/x',
-    'npm test -- --prefix C:/x',
   ]) {
     assert.equal(allowed(cmd), false, `the redirect escaped at this position: ${cmd}`);
   }
 });
 
+test('BUT NOT PAST A BARE --, BECAUSE npm STOPS READING ITS OWN FLAGS THERE', () => {
+  /*
+   * CORRECTED BY MEASUREMENT, and the version this replaces asserted the
+   * opposite. It required `npm test -- --prefix C:/x` to be refused. npm does
+   * not redirect on it. Against npm 11.16.0, marker file as the evidence:
+   *
+   *     npm test --prefix <attacker>                  REDIRECTED
+   *     npm test -- --prefix <attacker>               no
+   *     npm test --node-options=--require=<evil>      REDIRECTED
+   *     npm test -- --node-options=--require=<evil>   no
+   *
+   * After a bare -- the words belong to the script, and refusing them is an
+   * outage for the ordinary business of passing an argument through. Rule 16:
+   * an outage is how a rail gets switched off. The version BEFORE the one
+   * being corrected scanned ONLY after the --, which is the opposite error
+   * and is the hole 1f29e438 was written to close; both directions are
+   * asserted here so neither can come back.
+   */
+  assert.equal(allowed('npm run build -- --prefix somearg'), true,
+    'an argument passed to the script was refused, and npm does not read it as its own');
+  assert.equal(allowed('npm test -- --node-options=--require=C:/x/evil.js'), true,
+    'likewise for node-options: past the -- it is the script\'s argument, not npm\'s');
+
+  /* And the same flags BEFORE the -- are still refused, so this is not a hole. */
+  assert.equal(allowed('npm run build --prefix somearg -- --safe'), false,
+    'a redirect before the -- must still be caught');
+});
+
 test('THE REFUSAL NAMES THE MECHANISM AND THIS LAYER (rule 18)', () => {
   /*
-   * A refusal a reader cannot attribute is indistinguishable from the
-   * auto-mode classifier, and three sessions once scored a dead guard as
-   * working for exactly that reason.
+   * Establish WHICH layer refused. This matters more than it looks: the
+   * backslash spelling of the node-options escape,
+   * --node-options=--require=C:\\x\\evil.js, is refused by the shell
+   * METACHARACTER matcher reacting to the backslash -- a different layer, for
+   * a different reason, on a spelling the attacker chooses. Reading that as
+   * "the surface is covered" is how the forward-slash form stayed open.
    */
-  const v = judgeShellCommand('npm test --prefix C:/anywhere');
+  const v = judgeShellCommand('npm test --prefix C:/x');
   assert.equal(v.allowed, false);
-  assert.match(v.reason, /relocates where npm resolves/);
-  assert.match(v.reason, /arbitrary execution/);
+  assert.match(v.reason, /npm flags decide what code runs/,
+    `refused by some other layer, not the npm matcher: ${v.reason}`);
+
+  const n = judgeShellCommand('npm test --node-options=--require=C:/x/evil.js');
+  assert.equal(n.allowed, false);
+  assert.match(n.reason, /npm flags decide what code runs/,
+    `the node-options escape was refused by the wrong layer: ${n.reason}`);
 });
 
 test('THE POSITIVE CONTROL: ordinary npm still works, or this is an outage', () => {
@@ -129,39 +164,69 @@ test('THE POSITIVE CONTROL: ordinary npm still works, or this is an outage', () 
   }
 });
 
-test('A FLAG THAT MERELY CONTAINS THE LETTERS IS NOT A REDIRECT', () => {
+test('THE INERT FLAGS STILL PASS, or this rail is an outage', () => {
   /*
-   * The other direction of rule 8: a matcher that is too eager is an outage
-   * wearing a fix. `--prefer-offline` starts with the same five characters as
-   * `--prefix` up to the x, and `-c` is not `-C`.
+   * The list is inverted now -- npm's own flags must be known-inert rather
+   * than known-dangerous -- so the cost of that inversion is what needs
+   * asserting. These are real npm flags that decide nothing about what runs.
+   *
+   * --config IS NO LONGER HERE, and the version this replaces asserted it
+   * must be allowed. Measured against npm 11.16.0: "npm warn Unknown cli
+   * config \"--config\". This will stop working in the next major version."
+   * It is not an npm flag, so allowing it was never a requirement, and
+   * under a fail-closed list it is refused like any other unknown.
    */
   for (const cmd of [
-    'npm install --prefer-offline',
+    'npm ci --prefer-offline',
+    'npm ci --production',
     'npm test --color',
-    'npm run build --config x',
-    'npm install --production',
-    'npm test --coverage',
-    'npm ci --cache C:/x',
+    'npm test --silent',
+    'npm ci --no-audit --no-fund',
+    'npm test --loglevel=warn',
   ]) {
-    assert.equal(allowed(cmd), true, `an unrelated flag was caught by the redirect matcher: ${cmd}`);
+    assert.equal(allowed(cmd), true, `an inert flag was refused, which is an outage: ${cmd}`);
   }
 });
 
-test('THE MATCHER CANNOT BE OUT-SPELLED, and it is asked rather than enumerated', () => {
+test('THE LIST IS INVERTED, so a redirect nobody enumerated is still refused', () => {
   /*
-   * The property, stated directly: a token is a redirect if its name is a
-   * PREFIX of a redirecting flag's name. That is what npm's own expansion
-   * does, so it cannot be defeated by a spelling nobody here thought of --
-   * which is the failure both previous versions of this matcher had.
+   * THE THIRD ROUND ON THIS MATCHER. Round one listed three spellings.
+   * Round two asked `'prefix'.startsWith(name)` and called that "shape" -- but
+   * it was a roster of two CONCEPTS, and npm has others. MEASURED, judging
+   * and executing the same string, marker file as evidence:
    *
-   * Both directions, because a matcher that says yes to everything would
-   * satisfy the abbreviation test above perfectly.
+   *     npm test --node-options=--require=C:/x/evil.js
+   *         rail = ALLOW      the file RAN
+   *
+   * Same outcome as --prefix, reached by injecting a module into every node
+   * the script spawns instead of relocating package.json -- and the payload
+   * is outside the repository, so the node gate never sees it.
+   *
+   * Enumerating what redirects is a game this matcher lost three times,
+   * because npm's config system means almost any --key sets something. What
+   * cannot hurt is short and stable, so that is the list now.
    */
-  const isRedirect = (flag) => !allowed(`npm test ${flag} C:/x`);
-  for (const yes of ['--p', '--pr', '--pre', '--pref', '--prefi', '--prefix', '--c', '--cw', '--cwd', '-C']) {
-    assert.equal(isRedirect(yes), true, `${yes} was not treated as a redirect`);
+  for (const cmd of [
+    'npm test --node-options=--require=C:/x/evil.js',
+    'npm test --script-shell C:/x/evil.exe',
+    'npm test --userconfig C:/x/.npmrc',
+    'npm test --globalconfig C:/x/.npmrc',
+    'npm test --cache C:/x/poisoned',
+    'npm test -CC:/x',
+    'npm test -w C:/x',
+  ]) {
+    assert.equal(allowed(cmd), false,
+      `a flag that can reach execution was allowed: ${cmd}`);
   }
-  for (const no of ['--prefer-offline', '--production', '--color', '--cache', '--config', '--silent', '-c']) {
-    assert.equal(isRedirect(no), false, `${no} was wrongly treated as a redirect`);
-  }
+
+  /*
+   * ABBREVIATIONS ARE REFUSED TOO, and deliberately. npm expands --silen to
+   * --silent, and rather than model nopt's expansion -- which is what round
+   * two tried -- the exact spelling is required. There is always an exact
+   * spelling, so this costs a caller nothing they cannot write.
+   */
+  assert.equal(allowed('npm test --silen'), false,
+    'an abbreviation was accepted; the inert list requires exact spellings');
+  assert.equal(allowed('npm test --silent'), true,
+    'and the exact spelling must work, or the rule is just a refusal');
 });
