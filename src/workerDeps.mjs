@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { run } from './exec.mjs';
 import { runGit } from './safeGit.mjs';
+import { childEnv } from './childEnv.mjs';
 import {
   waitForEvents, fetchOwnTask, renewLease, returnWork, publishRegistration, HOSTED,
 } from './hostedRegistry.mjs';
@@ -137,13 +138,33 @@ export async function changedPaths(dir, base) {
  *
  * NO SHELL. `shell: false` means a brief or an argument containing `;` or `&&`
  * is text, not a second command.
+ *
+ * AND NO INHERITED ENVIRONMENT, WHICH WAS THE BIGGER HOLE.
+ *
+ * This spawned with no `env` option, so the child inherited process.env whole
+ * -- registration token, service key, coordinator credential, AGENTBRIDGE_HOME.
+ * Three tests assert a credential cannot reach the agent, and all three guard
+ * the ARGV/PROMPT/EVENT channel: the event carries none, and taskBrief cannot
+ * contain one "by construction" because the token is not a parameter. Every
+ * one of those is true, and none of them looks at the environment.
+ *
+ * The narrow channel was closed with real care while the wide one stayed open,
+ * and the test names made the subject read as settled. It matters more than it
+ * would have a week ago: the builder is not one of our agents, it is whatever
+ * the platform dispatches, and it was being handed a coordinator token.
+ *
+ * `childEnv` is an allow-list of what a process needs in order to RUN. A
+ * deny-list of names that look secret is the roster-of-names mistake this
+ * repository lost to three times in one day on the shell rail, and it fails
+ * identically: the next credential is called something else.
  */
-export function startRun({ cmd, args = [], cwd, brief, timeoutMs }) {
+export function startRun({ cmd, args = [], cwd, brief, timeoutMs, env = process.env, allowEnv = [] }) {
   const child = spawn(cmd, args, {
     cwd,
     shell: false,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: childEnv(env, { allow: allowEnv }),
   });
 
   const state = {
