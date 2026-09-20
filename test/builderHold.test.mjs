@@ -143,11 +143,17 @@ test('ROTATION IS NOT AN ESCAPE FROM BEING STUCK', () => {
    * it emits -- hollow gate 9, the fixture that is not a shape the system
    * produces.
    */
-  let st = createLoopState();
-  for (const fp of ['a', 'a', 'a']) st = observe(st, fp);
-  assert.ok(st.loop, 'the real detector did not report a repeat; this fixture proves nothing');
+  const drive = (fps) => {
+    let state = createLoopState();
+    let step = { state, loop: null };
+    for (const fp of fps) { step = observe(state, fp); state = step.state; }
+    return step.loop;
+  };
 
-  const v = holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: st.loop });
+  const repeat = drive(['a', 'a', 'a']);
+  assert.ok(repeat, 'the real detector did not report a repeat; this fixture proves nothing');
+
+  const v = holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: repeat });
   assert.equal(v.verdict, HOLD.FAIL);
   assert.match(v.why, /stuck, not degraded/);
   assert.match(v.why, /repeat/, 'the verdict does not say which loop shape was found');
@@ -157,16 +163,15 @@ test('ROTATION IS NOT AN ESCAPE FROM BEING STUCK', () => {
    * the one before it, so a consecutive-identical-errors counter never fires,
    * and loopDetector's own header calls this "the shape that runs all night".
    */
-  let osc = createLoopState();
-  for (const fp of ['a', 'b', 'a', 'b']) osc = observe(osc, fp);
-  assert.ok(osc.loop, 'the real detector did not report an oscillation');
-  assert.equal(holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: osc.loop }).verdict, HOLD.FAIL,
+  const osc = drive(['a', 'b', 'a', 'b']);
+  assert.ok(osc, 'the real detector did not report an oscillation');
+  assert.equal(holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: osc }).verdict, HOLD.FAIL,
     'an oscillating builder was rotated: the successor inherits the same A-B-A-B');
 
   /* No loop found: the soft limits decide, and a rotation is right. */
-  const clean = observe(createLoopState(), 'a');
-  assert.equal(clean.loop, null, 'the detector fired on a single fingerprint');
-  assert.equal(holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: clean.loop }).verdict, HOLD.ROTATE);
+  const clean = drive(['a']);
+  assert.equal(clean, null, 'the detector fired on a single fingerprint');
+  assert.equal(holdVerdict({ ...healthy(), steps: LIMITS.steps, loop: clean }).verdict, HOLD.ROTATE);
 });
 
 test('A MALFORMED LOOP FINDING IS NOT A LOOP', () => {
