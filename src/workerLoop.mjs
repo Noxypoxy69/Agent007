@@ -50,6 +50,7 @@
  */
 
 import { leaseState } from './leases.mjs';
+import { holdVerdict, HOLD } from './builderHold.mjs';
 
 const ms = (v) => {
   const t = Date.parse(v);
@@ -67,6 +68,7 @@ export const ACTION = Object.freeze({
   ABANDON: 'abandon',     // we are no longer the holder; DISCARD the result
   PAUSE: 'pause',         // a permission decision is outstanding for this task
   STOP: 'stop',           // shutting down
+  ROTATE: 'checkpoint_and_rotate', // this builder has done enough; hand off intact
 });
 
 /**
@@ -174,17 +176,55 @@ export function nextAction(w = {}, { now, leaseMs } = {}) {
 
   if (due) return { action: ACTION.RENEW, reason: 'the lease is inside its renewal window' };
 
-  if (!run) return { action: ACTION.START, reason: `lease live; starting work on ${task.task_id}` };
-
   // 4. A FAILED RUN IS RETURNED, NOT SWALLOWED. `done` covers success, failure
   //    and timeout alike; the outcome rides along in the payload.
-  if (run.done) {
+  //
+  //    THIS OUTRANKS THE HOLD BAR DELIBERATELY. Work that is finished gets
+  //    handed back, never rotated: a rotation of a completed run throws away a
+  //    result that already exists, which is the same mistake the shutdown
+  //    branch at the top of this function exists to avoid.
+  if (run?.done) {
     return {
       action: ACTION.RETURN,
       reason: run.ok ? 'the run succeeded' : `the run failed: ${run.error ?? 'no reason given'}`,
       outcome: run.ok ? 'completed' : 'failed',
     };
   }
+
+  /*
+   * 5. THE HOLD BAR. Everything above this line is about whether we may still
+   *    act at all -- the lease, the renewal, the pause, the finished result.
+   *    This is the first question about whether we SHOULD, and it is last on
+   *    purpose: rotating a task whose lease died, or whose work is already
+   *    done, is worse than not rotating at all.
+   *
+   *    It sits before START as well as before WAIT, so a builder that is
+   *    already past the bar does not pick up a new phase of work -- the cheap
+   *    moment to hand over is before the next thing begins, not halfway
+   *    through it.
+   *
+   *    The observations are supplied by the runtime. `nextAction` is pure and
+   *    counts nothing itself; a builder asked to report its own degradation is
+   *    the self-assessment this layer exists to remove.
+   */
+  const hold = holdVerdict(w.observed, { limits: w.holdLimits });
+  if (hold.verdict === HOLD.FAIL) {
+    return {
+      action: ACTION.RETURN,
+      reason: `held: ${hold.why}`,
+      outcome: 'failed',
+      hold,
+    };
+  }
+  if (hold.verdict === HOLD.ROTATE) {
+    return {
+      action: ACTION.ROTATE,
+      reason: `held: ${hold.why}`,
+      hold,
+    };
+  }
+
+  if (!run) return { action: ACTION.START, reason: `lease live; starting work on ${task.task_id}` };
 
   return { action: ACTION.WAIT, reason: 'running, lease healthy' };
 }
@@ -205,15 +245,48 @@ export function returnPayload(w = {}, { now } = {}) {
   if (ms(now) === null) throw new TypeError('returnPayload requires a `now` timestamp');
   const errors = [];
 
+  /*
+   * A HOLD-TERMINATED ATTEMPT IS A RETURN WITH NO FINISHED RUN, AND THAT IS
+   * THE WHOLE POINT OF IT.
+   *
+   * The hold bar stops a builder mid-flight, so `run.done` is false by
+   * construction. Without this branch `nextAction` would answer RETURN and
+   * this function would refuse to build the payload -- a decision nothing can
+   * carry out, which is a control that fires into a wall.
+   *
+   * The strictness stays exactly where it earns its keep: a run that claims to
+   * have COMPLETED must still name the commit holding the work. What is
+   * relaxed is only the case where there provably is no commit, and the server
+   * agrees -- `index.ts:1457` validates head_sha only when it is present.
+   */
+  const held = w.hold?.verdict === HOLD.FAIL ? w.hold : null;
+
   if (!w.task?.task_id) errors.push('no task is held');
   if (!nonEmpty(w.lease?.lease_token)) errors.push('no lease token: /return would refuse this and should');
   if (!nonEmpty(w.session_id)) errors.push('no session id');
-  if (!w.run?.done) errors.push('the run has not finished');
-  if (w.run?.done && !nonEmpty(w.run?.headSha)) {
-    errors.push('no commit was produced; a return must carry the commit that holds the work');
+  if (!held) {
+    if (!w.run?.done) errors.push('the run has not finished');
+    if (w.run?.done && !nonEmpty(w.run?.headSha)) {
+      errors.push('no commit was produced; a return must carry the commit that holds the work');
+    }
   }
 
   if (errors.length) return { ok: false, errors };
+
+  if (held) {
+    return {
+      ok: true,
+      body: {
+        task_id: w.task.task_id,
+        session_id: w.session_id,
+        lease_token: w.lease.lease_token,
+        /* Whatever was actually committed, and null when nothing was. Never invented. */
+        head_sha: nonEmpty(w.run?.headSha) ? w.run.headSha : null,
+        outcome: 'failed',
+        notes: `HELD: ${held.why}`.slice(0, NOTES_LIMIT),
+      },
+    };
+  }
 
   return {
     ok: true,
