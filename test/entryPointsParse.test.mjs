@@ -22,6 +22,14 @@
  * The outage survived three commits because NOBODY RAN THE SUITE, including
  * me. This gate does not fix that and must not be read as fixing it.
  *
+ * ONE FIGURE I PUBLISHED WAS WRONG, and an auditor could not reproduce it.
+ * 64d0971's message reports the narrowed simulation as "5 pass / 1 fail".
+ * That was a tree with the hooks and scripts REMOVED, which trips one
+ * coverage assertion. Narrowing `executed()` itself to DEFAULT_ENTRY_POINTS
+ * -- which is what "the old behaviour" actually means -- turns three tests
+ * red, not one. The conclusion held; the number described a different
+ * mutation from the one the sentence named.
+ *
  * It is still worth having for a different and smaller reason: it is the
  * cheapest possible question, it needs no fixture, and it answers before any
  * behavioural test spends a second -- a program that cannot parse should
@@ -45,17 +53,39 @@
  * running, the roster empties, the symptom looks like liveness -- and the
  * gate built in response to that outage would have been green throughout.
  *
- * So the three places that actually decide what runs are each asked
- * directly, and none of them is this file:
+ * WIDENED AGAIN, because "everything this repo executes" was still not
+ * everything. An auditor measured the version that said it was: it covered
+ * 15 of the 26 .mjs files in bin/ and scripts/, and among the 11 it missed
+ * were `bin/agentbridge-deploy.mjs` -- a documented executable named in
+ * lanes.yml -- and `scripts/check-deployed-instructions.mjs`, the script
+ * CLAUDE.md rule 12 points readers at. It also read only
+ * `.claude/settings.json`, while `scripts/claude-stop-gate.mjs` itself
+ * iterates BOTH `settings.json` and `settings.local.json` to find hooks,
+ * and `src/auditLedger.mjs` lists the local file as a control. A hook
+ * declared only in the local file was invisible to this gate.
  *
- *     .claude/settings.json   what Claude Code spawns as a hook
- *     package.json scripts    what a person or CI invokes by name
- *     DEFAULT_ENTRY_POINTS    what the module graph calls shipped
+ * That is the third layer of the same over-claim: 0712792 retracted a false
+ * root cause, 64d0971 corrected the list one layer along and made the same
+ * shape of statement about the new list. So the sweep is now a SUPERSET of
+ * anything derivable, and the claim is bounded by construction rather than
+ * by my confidence in a derivation:
+ *
+ *     bin/*.mjs, scripts/*.mjs   the directories this repo keeps executables in
+ *     .claude/settings.json      what Claude Code spawns as a hook
+ *     .claude/settings.local.json  ditto, and read by the Stop gate itself
+ *     package.json scripts       what a person or CI invokes by name
+ *     package.json bin           what `npm link` puts on PATH
+ *     DEFAULT_ENTRY_POINTS       what the module graph calls shipped
+ *
+ * Sweeping two directories wholesale is deliberately cruder than deriving.
+ * A file in bin/ that nothing invokes today still must not contain a
+ * SyntaxError, the check costs milliseconds, and a crude superset cannot
+ * quietly shrink the way a clever derivation just did -- twice.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +93,12 @@ import { fileURLToPath } from 'node:url';
 import { DEFAULT_ENTRY_POINTS } from '../src/moduleGraph.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** The pair scripts/claude-stop-gate.mjs itself reads to find hooks. */
+const SETTINGS_FILES = ['settings.json', 'settings.local.json'];
+
+/** Where this repository keeps things meant to be run. */
+const EXECUTABLE_DIRS = ['bin', 'scripts'];
 
 /**
  * `node --check` on one file: parses, or the reason it does not.
@@ -150,18 +186,44 @@ function executed(root, declared) {
     add(String(rel).replace(/\\/g, '/'), 'module graph', 'DEFAULT_ENTRY_POINTS');
   }
 
-  const settingsPath = path.join(root, '.claude', 'settings.json');
-  if (existsSync(settingsPath)) {
-    for (const cmd of hookCommands(JSON.parse(readFileSync(settingsPath, 'utf8')))) {
-      fromCommand(cmd, 'claude hook', '.claude/settings.json');
+  /*
+   * BOTH SETTINGS FILES. claude-stop-gate.mjs iterates exactly this pair to
+   * find its own hook declarations; reading one of them was the gap.
+   */
+  for (const file of SETTINGS_FILES) {
+    const abs = path.join(root, '.claude', file);
+    if (!existsSync(abs)) continue;
+    let parsed;
+    try { parsed = JSON.parse(readFileSync(abs, 'utf8')); } catch {
+      findings.push(`.claude/${file}: is not parseable JSON, so its hooks cannot be checked`);
+      continue;
     }
+    for (const cmd of hookCommands(parsed)) fromCommand(cmd, 'claude hook', `.claude/${file}`);
   }
 
   const pkgPath = path.join(root, 'package.json');
   if (existsSync(pkgPath)) {
-    const scripts = JSON.parse(readFileSync(pkgPath, 'utf8')).scripts ?? {};
-    for (const [name, cmd] of Object.entries(scripts)) {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    for (const [name, cmd] of Object.entries(pkg.scripts ?? {})) {
       fromCommand(cmd, 'npm script', `package.json scripts.${name}`);
+    }
+    /* What `npm link` puts on PATH is executed by definition. */
+    for (const [name, target] of Object.entries(pkg.bin ?? {})) {
+      for (const t of mjsTokens(String(target))) add(t, 'package.json bin', `package.json bin.${name}`);
+    }
+  }
+
+  /*
+   * AND THE DIRECTORIES THEMSELVES, wholesale. This is the crude part and
+   * it is crude on purpose: it cannot shrink when somebody rewrites a
+   * derivation, and every .mjs sitting in bin/ or scripts/ is there to be
+   * run by something even when no config names it today.
+   */
+  for (const dir of EXECUTABLE_DIRS) {
+    const abs = path.join(root, dir);
+    if (!existsSync(abs)) continue;
+    for (const f of readdirSync(abs)) {
+      if (f.endsWith('.mjs')) add(`${dir}/${f}`, 'executable directory', dir);
     }
   }
 
@@ -219,6 +281,65 @@ test('THE HOOKS AND THE NPM SCRIPTS ARE ACTUALLY IN THE SET', () => {
   /* Named, because the audit that found this deserves a permanent tripwire. */
   assert.ok(checked.has('scripts/bridge-session-poll.mjs'),
     'the SessionStart/SessionEnd hook is not covered -- a SyntaxError there empties the roster silently');
+
+  /*
+   * EVERY EXECUTABLE ON DISK, counted against the directory rather than a
+   * list. The version before this covered 15 of 26 and said "everything".
+   */
+  const onDisk = [];
+  for (const dir of EXECUTABLE_DIRS) {
+    for (const f of readdirSync(path.join(REPO, dir))) if (f.endsWith('.mjs')) onDisk.push(`${dir}/${f}`);
+  }
+  assert.ok(onDisk.length >= 20,
+    `only ${onDisk.length} executables found on disk -- the sweep is looking in the wrong place`);
+  const unswept = onDisk.filter((f) => !checked.has(f));
+  assert.deepEqual(unswept, [],
+    `these sit in an executable directory and are not checked:\n  ${unswept.join('\n  ')}`);
+
+  /* The two named by the audit, so the regression has a face. */
+  for (const named of ['bin/agentbridge-deploy.mjs', 'scripts/check-deployed-instructions.mjs']) {
+    assert.ok(checked.has(named), `${named} is executed and documented, and is not covered`);
+  }
+
+  /* package.json bin: what npm link puts on PATH. */
+  const binMap = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8')).bin ?? {};
+  for (const [name, target] of Object.entries(binMap)) {
+    for (const t of mjsTokens(String(target))) {
+      assert.ok(checked.has(t), `package.json bin.${name} -> ${t} is not covered`);
+    }
+  }
+});
+
+test('A HOOK DECLARED ONLY IN settings.local.json IS STILL A HOOK', (t) => {
+  /*
+   * scripts/claude-stop-gate.mjs iterates BOTH settings files to find its
+   * own hook declarations, and src/auditLedger.mjs lists the local one as a
+   * control. This gate read only settings.json, so a hook declared in the
+   * local file -- which exists in this worktree, untracked and gitignored --
+   * was invisible to it.
+   *
+   * The fixture puts the broken hook in a directory that is NEITHER swept
+   * directory, so it can only be found through the local settings file. If
+   * the sweep were doing the work here, this would pass for the wrong
+   * reason.
+   */
+  const root = mkdtempSync(path.join(tmpdir(), 'entrylocal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  mkdirSync(path.join(root, '.claude'), { recursive: true });
+  mkdirSync(path.join(root, 'hooks'), { recursive: true });
+  writeFileSync(path.join(root, 'hooks', 'local-only.mjs'), 'const H = `x `y` z`;\n');
+  writeFileSync(path.join(root, '.claude', 'settings.local.json'), JSON.stringify({
+    hooks: {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/hooks/local-only.mjs"' }] }],
+    },
+  }));
+
+  const { checked } = executed(root, []);
+  assert.equal(checked.has('hooks/local-only.mjs'), true,
+    'a hook declared only in settings.local.json was not picked up');
+  assert.equal(parses(path.join(root, 'hooks', 'local-only.mjs')).ok, false,
+    'the fixture hook must be broken, or this proves nothing');
 });
 
 test('the check can FAIL, so a green result means something (rule 1)', (t) => {
