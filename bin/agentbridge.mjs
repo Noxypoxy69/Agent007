@@ -3442,6 +3442,7 @@ try {
        */
       const {
         auditJobsFor, mergeQueue, claimJob, authorSessionFrom, satisfiesGate, JOB,
+        makeAuthorResolver, AUTHOR_UNAVAILABLE,
       } = await import('../src/auditJob.mjs');
       const { auditCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
       const { runGit: rgA } = await import('../src/safeGit.mjs');
@@ -3481,13 +3482,17 @@ try {
        * would silently resolve every author to null while looking like it had
        * asked.
        */
-      const authorSessionFor = (c) => {
-        try {
-          return authorSessionFrom(String(rgA(['-C', repo, 'log', '-1', '--format=%B', c], {
-            encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-          })));
-        } catch { return null; }
-      };
+      /*
+       * THE SHARED RESOLVER. This used to swallow the throw itself and return
+       * null, so the library's throw-to-unavailable mapping was never reached
+       * and a git failure was recorded as "this commit has no trailer".
+       * Fourth-lap blind audit H1.
+       */
+      const authorSessionFor = makeAuthorResolver((c) => String(
+        rgA(['-C', repo, 'log', '-1', '--format=%B', c], {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        }),
+      ));
       const computed = auditJobsFor(coverage, {
         treeShaFor, authorSessionFor, now: new Date().toISOString(),
       });
@@ -3596,12 +3601,26 @@ try {
           authorSession = authoritative.id;
           authorSource = authoritative.source === 'authoritative' ? 'authoritative' : 'observed';
         } else {
-          try {
-            authorSession = authorSessionFrom(String(rgA(['-C', repo, 'log', '-1', '--format=%B', job?.candidate_sha ?? ''], {
+          /*
+           * THE CLAIM PATH, AND IT WAS THE WORST OF THE THREE. Fourth-lap
+           * blind audit H1: it never touches auditJobsFor, so on a git
+           * failure it handed claimJob `authorSession: null, authorSource:
+           * null` and the author-cannot-audit check could not fire AT THE
+           * MOMENT A CLAIM IS GRANTED -- the one instant it exists for.
+           */
+          const resolved = makeAuthorResolver((c) => String(
+            rgA(['-C', repo, 'log', '-1', '--format=%B', c], {
               encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-            })));
-          } catch { authorSession = null; }
-          if (authorSession) authorSource = 'trailer';
+            }),
+          ))(job?.candidate_sha ?? '');
+
+          if (resolved === AUTHOR_UNAVAILABLE) {
+            authorSession = null;
+            authorSource = AUTHOR_UNAVAILABLE;
+          } else {
+            authorSession = resolved;
+            if (authorSession) authorSource = 'trailer';
+          }
         }
 
         const r = claimJob(job, { by, bySource, authorSession, authorSource, now: Date.now() });

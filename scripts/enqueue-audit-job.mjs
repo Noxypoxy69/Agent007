@@ -77,7 +77,7 @@ try {
   const range = hasParent ? `${commit}~1..${commit}` : commit;
 
   const { auditCoverage } = await import('../src/auditLedger.mjs');
-  const { auditJobsFor, mergeQueue, authorSessionFrom } = await import('../src/auditJob.mjs');
+  const { auditJobsFor, mergeQueue, makeAuthorResolver } = await import('../src/auditJob.mjs');
   const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
 
   let ledgerText = '';
@@ -106,7 +106,14 @@ try {
      * %B, not %s: the trailer is in the BODY, and asking for the subject
      * resolves every author to null while looking like it asked.
      */
-    authorSessionFor: (c) => authorSessionFrom(git(['log', '-1', '--format=%B', c]) ?? ''),
+    /*
+     * THE SHARED RESOLVER, because this line was the finding. It read
+     * `authorSessionFrom(git(...) ?? '')`, and `git()` returns null on ANY
+     * failure -- so `?? ''` turned "could not look" into "looked, no trailer",
+     * which is the measured-absence state and licenses erasing a known author.
+     * Fourth-lap blind audit H1, on the primary producer.
+     */
+    authorSessionFor: makeAuthorResolver((c) => git(['log', '-1', '--format=%B', c])),
     now: new Date().toISOString(),
   });
   if (computed.error) {
