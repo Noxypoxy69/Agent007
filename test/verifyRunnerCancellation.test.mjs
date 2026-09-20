@@ -89,6 +89,57 @@ test('EVERY NON-INTEGER EXIT CODE IS A FAILURE, not just null', () => {
   }
 });
 
+test('A SHARD THE OS REFUSED TO START IS NOT A VERDICT ABOUT THE TREE', () => {
+  /*
+   * MEASURED ON THIS MACHINE, not invented: two shards came back
+   * `exit 3221225794, tests 0`. That is 0xC0000142, STATUS_DLL_INIT_FAILED --
+   * Windows refusing to launch the process because the box was out of
+   * resources. The suite never ran. The gate reported VERIFY_FAILED, which is
+   * a statement about the CODE, and a completed FAILED record is REUSED --
+   * so one memory-starved run would pin a permanent red on a tree nobody
+   * tested.
+   *
+   * Same trap as the cancellation path, in the same function. Rule 8.
+   */
+  const v = aggregateShards([
+    { index: 1, exitCode: 1, tests: 494, fail: 18 },
+    { index: 2, exitCode: 1, tests: 245, fail: 71 },
+    { index: 3, exitCode: 3221225794, tests: 0, fail: 0 },
+    { index: 4, exitCode: 3221225794, tests: 0, fail: 0 },
+  ], { total: 4 });
+
+  assert.equal(v.state, VERIFY.PARTIAL,
+    `a machine that could not launch the test process produced a verdict about the code: ${v.state} — ${v.why}`);
+  assert.notEqual(v.state, VERIFY.FAILED, 'a resource failure was recorded as a failure of the tree, and FAILED is reused');
+  assert.match(v.why, /could not start/);
+
+  /* THE FAR END: the decision layer must not reuse it. */
+  const d = decideVerify({ ...v, key: 'k'.repeat(32), finished_at: Date.now() }, { key: 'k'.repeat(32), now: Date.now() });
+  assert.notEqual(d.action, 'REUSE', `a could-not-start record was reused: ${d.why}`);
+});
+
+test('A REAL RED IS STILL RED: zero tests with an ordinary exit is not excused', () => {
+  /*
+   * Rule 5, and the direction that would make the fix above dangerous. A test
+   * file with a syntax error also reports zero tests, and that IS a genuine
+   * failure of the tree -- it exits 1, not with an NTSTATUS code. If this
+   * started returning PARTIAL, a broken test file would stop blocking.
+   */
+  const broken = aggregateShards([
+    { index: 1, exitCode: 1, tests: 0, fail: 0 },
+    { index: 2, exitCode: 0, tests: 500, fail: 0 },
+  ], { total: 2 });
+  assert.equal(broken.state, VERIFY.FAILED,
+    `a shard that exited 1 having run nothing was excused as an environment problem: ${broken.why}`);
+
+  /* And an ordinary failing suite is still FAILED, not downgraded. */
+  const red = aggregateShards([
+    { index: 1, exitCode: 1, tests: 500, fail: 3 },
+    { index: 2, exitCode: 0, tests: 500, fail: 0 },
+  ], { total: 2 });
+  assert.equal(red.state, VERIFY.FAILED, red.why);
+});
+
 /* ── cancellation really kills the children ──────────────────────────── */
 
 /**

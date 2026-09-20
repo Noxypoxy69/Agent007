@@ -294,6 +294,39 @@ export function aggregateShards(results, { total = 0 } = {}) {
    * src/verifyRunner.mjs -- two spellings of one predicate is the pair nobody
    * watches when they disagree.
    */
+  /*
+   * A SHARD THE OS REFUSED TO START IS NOT EVIDENCE ABOUT THE CODE.
+   *
+   * Measured on this machine: two shards came back
+   *
+   *   exit 3221225794   tests 0   fail 0
+   *
+   * 3221225794 is 0xC0000142, STATUS_DLL_INIT_FAILED -- Windows telling us
+   * the process could not initialise because the box was out of resources.
+   * It never ran a line of the suite. The other two shards, running under the
+   * same pressure, produced 89 failures where a healthy run of the same tree
+   * produced 3.
+   *
+   * Counting that as FAILED makes the gate answer a question it was never
+   * asked. "The machine could not run the tests" and "the tests failed" are
+   * different answers, and only one of them is about the tree -- and because
+   * `decideVerify` REUSES a completed FAILED result, the wrong one pins a
+   * permanent red on code nobody tested. That is the identical trap the
+   * cancellation path had, in this same function, and I fixed it there and
+   * did not generalise it. Rule 8: fix the matcher, not the one value the
+   * prober happened to try.
+   *
+   * THE DISCRIMINATOR IS DELIBERATELY NARROW. A test file with a syntax
+   * error also reports zero tests, and that IS a real red -- but it exits 1
+   * with a stack trace on stderr. Only a code in the NTSTATUS failure range
+   * means the process itself never got off the ground, and only then with
+   * nothing produced. Both conditions are required.
+   */
+  const NTSTATUS_FAILURE = 0xC0000000;
+  const couldNotStart = rows.filter((r) => Number.isInteger(r.exitCode)
+    && r.exitCode >= NTSTATUS_FAILURE
+    && (Number(r.tests) || 0) === 0);
+
   const failed = rows.filter((r) => !Number.isInteger(r.exitCode) || r.exitCode !== 0);
   const tests = rows.reduce((n, r) => n + (Number(r.tests) || 0), 0);
   const fail = rows.reduce((n, r) => n + (Number(r.fail) || 0), 0);
@@ -303,6 +336,23 @@ export function aggregateShards(results, { total = 0 } = {}) {
       state: VERIFY.PARTIAL,
       why: `shard(s) ${missing.join(', ')} of ${expected} never reported, so "green" would mean `
         + 'only that the ones which ran were green',
+      tests,
+      fail,
+    };
+  }
+  /*
+   * CHECKED BEFORE `failed`, because a shard the OS refused to start is also
+   * a non-zero exit and would otherwise be counted as a verdict about the
+   * tree. PARTIAL, not FAILED, so it is never reused: "could not measure" has
+   * to stay distinguishable from "measured a failure", and the other shards'
+   * numbers are not trustworthy either when the box is in that state.
+   */
+  if (couldNotStart.length) {
+    return {
+      state: VERIFY.PARTIAL,
+      why: `${couldNotStart.length} of ${expected} shard(s) could not start at all `
+        + `(exit ${couldNotStart[0].exitCode}, no tests run) -- the machine refused to launch the process, `
+        + 'so this run says nothing about the tree and must not be reused as if it did',
       tests,
       fail,
     };
