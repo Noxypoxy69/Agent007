@@ -205,12 +205,41 @@ test('the gate refuses before the hook deadline instead of being killed into a s
    * the suite), so the count is the far end: a number greater than zero means
    * live children were found and killed.
    */
-  assert.match(verdict.reason, /killed rather than orphaned/,
-    `this must be the post-run deadline, not the pre-run budget refusal -- otherwise the reap is untested: ${verdict.reason}`);
-  const reaped = Number(/(\d+) suite process\(es\) were killed/.exec(verdict.reason)?.[1] ?? -1);
-  assert.ok(reaped >= 1,
-    `the gate answered the deadline without reaping any suite process (reaped=${reaped}). Every timed-out `
-    + `Stop then leaks a full suite per shard, unbounded across turns: ${verdict.reason}`);
+  /*
+   * WHICH DEADLINE BRANCH FIRES IS A PROPERTY OF THE MACHINE, NOT THE CODE,
+   * AND PINNING ONE WAS A RULE 21 DEFECT I SHIPPED HERE.
+   *
+   * The gate has three refusals that all name stop-deadline: two PRE-RUN
+   * budget checks (claude-stop-gate.mjs:966 and :1100, both firing when what
+   * is left drops under MIN_SUITE_MS) and the POST-RUN reap. With a 20s
+   * budget, whether the work before verification leaves 5s decides which one
+   * you get -- so on an idle machine this reached the reap, and under
+   * full-suite load it reached the pre-run branch.
+   *
+   * I asserted the post-run branch unconditionally. It passed 5/5 standalone
+   * and went red in the full suite, which is exactly the shape rule 21
+   * describes: a test encoding an accident of the machine that wrote it.
+   *
+   * So this asserts what is TRUE OF THE CODE on every machine -- it refuses,
+   * it names a deadline, it is not killed -- and additionally checks the reap
+   * whenever the post-run branch is the one that ran. That last clause is a
+   * conditional, which rule 6 normally forbids; it is acceptable here ONLY
+   * because the reap is pinned unconditionally elsewhere, at the unit level,
+   * in test/verifyRunnerCancellation.test.mjs ("ABORTING A RUN SIGKILLS ITS
+   * CHILDREN" and "killLiveShards REAPS A CHILD THE ABORT DID NOT"). Without
+   * that, this would be a guard dressed as an assertion.
+   */
+  const postRun = /killed rather than orphaned/.test(verdict.reason);
+  if (postRun) {
+    const reaped = Number(/(\d+) suite process\(es\) were killed/.exec(verdict.reason)?.[1] ?? -1);
+    assert.ok(reaped >= 1,
+      `the gate reached the post-run deadline and reaped nothing (reaped=${reaped}). Every timed-out Stop `
+      + `then leaks a full suite per shard, unbounded across turns: ${verdict.reason}`);
+  } else {
+    assert.match(verdict.reason, /less than the|cannot finish|NOTHING WAS VERIFIED/,
+      `the refusal is a deadline but matches neither known branch, so the gate has grown a third path `
+      + `nobody is asserting on: ${verdict.reason}`);
+  }
 });
 
 test('a green suite inside the budget is still approved', (t) => {
