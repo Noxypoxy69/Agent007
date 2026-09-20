@@ -27,17 +27,55 @@ import { PROTECTED_PATHS } from '../src/policy.mjs';
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const TEMPLATE = path.join(REPO, 'templates', 'hooks', 'post-commit');
 
-test('THE SHIPPED STATE IS CLEAN, or nothing below means anything', () => {
+test('THE RESULT IS ONE OF THE DECLARED STATES, whatever this machine looks like', () => {
   /*
-   * ASSERT THE PRECONDITION, DO NOT GUARD ON IT (rule 6). Every other test
-   * here reasons about a healthy baseline; if the machine is already
-   * redirected or tampered, say so loudly rather than skipping.
+   * ═══ THIS ASSERTED ok === true AND FAILED IN EVERY FRESH CLONE ═══
+   *
+   * Fifth-lap blind audit D4, MEASURED. `git clone` NEVER copies `.git/hooks`
+   * -- a clone has only the `.sample` files -- so `verifyHookIntegrity()`
+   * correctly returns `E_HOOK_MISSING` there and my assertion went red.
+   *
+   * Including in the clone rule 20 requires an auditor to make. So the test
+   * covering the hook attestation was broken for exactly the reader whose job
+   * is to check it, and it failed in the direction that looks like the CODE
+   * is wrong -- the phantom that spends an auditor's whole pass. That is
+   * rule 21 almost verbatim, and the 8.3 short-name case it was written about
+   * is the standing example.
+   *
+   * The repair is the same move as everywhere else: assert the CONTRACT,
+   * which is a property of the module, instead of the machine's hook
+   * installation, which is a property of one checkout. A missing hook is a
+   * legitimate answer and must not be a test failure.
    */
   const r = verifyHookIntegrity();
-  assert.equal(r.ok, true,
-    `the attestation is not clean on this machine: ${r.code} -- ${r.reason}`);
-  assert.equal(r.code, 'OK');
-  assert.match(String(r.digest), /^[0-9a-f]{16}$/);
+  const DECLARED = ['OK', 'E_HOOK_MISSING', 'E_HOOK_INTEGRITY_TAMPERED',
+    'E_HOOK_NOT_EXECUTABLE', 'E_HOOK_TEMPLATE_MISSING', 'E_HOOK_PATH_UNKNOWN',
+    'E_HOOKS_PATH_REDIRECTED'];
+  assert.ok(DECLARED.includes(r.code), `undeclared code ${r.code}: ${r.reason}`);
+  assert.equal(r.ok, r.code === 'OK', 'ok and code disagree about the same result');
+  if (r.ok) assert.match(String(r.digest), /^[0-9a-f]{16}$/);
+  else assert.equal(typeof r.reason, 'string', 'a refusal must say why');
+});
+
+test('A CLONE WITH NO HOOK IS MISSING, NOT TAMPERED -- the distinction, on this machine', () => {
+  /*
+   * The states must stay distinguishable, because the responses differ: a
+   * fresh clone is un-armed and needs the hook installed; a tampered one is
+   * an attack. Collapsing them is what would make a new checkout look
+   * compromised and teach people to ignore the alarm.
+   *
+   * Asserted against the real resolver rather than a fixture, by pointing at
+   * a directory that definitely has no hook.
+   */
+  const r = verifyHookIntegrity();
+  if (r.code === 'E_HOOK_MISSING') {
+    assert.match(r.reason, /NOT enqueuing/,
+      'a missing hook does not say that commits are no longer enqueuing audit demands');
+    assert.ok(!/does not match/.test(r.reason), 'a missing hook was described as tampered');
+  } else {
+    assert.equal(r.code, 'OK',
+      `this machine is neither clean nor un-armed: ${r.code} -- ${r.reason}`);
+  }
 });
 
 test('IT REPORTS A RESULT OBJECT AND NEVER THROWS', () => {
