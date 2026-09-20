@@ -87,6 +87,13 @@ export const DEFAULT_ENTRY_POINTS = [
    * for the same reason as the two above: from the graph an entry point and an
    * orphan are identical, and the difference has to be stated by a person. */
   'scripts/verify-run.mjs',
+  /* THE LAUNCHER'S WORKSPACE RESOLVER. `agent.cmd` invokes it before Claude
+   * starts, to put each agent in its own worktree -- so src/agentWorkspace.mjs
+   * is shipped, not test-only. It is declared here for the reason the three
+   * above are: from the graph an entry point and an orphan are identical, and
+   * a launcher is the one caller the graph structurally cannot see, because
+   * .cmd is not JavaScript. */
+  'scripts/agent-worktree.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
