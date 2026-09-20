@@ -43,7 +43,7 @@
  * nobody can take is returned in `unassigned` with a reason, never marked
  * failed, never silently dropped, and never left looking claimed.
  */
-import { CLAIM_LEASE_MS, JOB } from './auditJob.mjs';
+import { CLAIM_LEASE_MS, JOB, AUTHOR_UNAVAILABLE } from './auditJob.mjs';
 
 const str = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -53,6 +53,7 @@ export const UNPLACED = Object.freeze({
   NO_LIVE_SEAT: 'no_live_seat',
   ONLY_AUTHOR_AVAILABLE: 'only_author_available',
   ALL_SEATS_BUSY: 'all_seats_busy',
+  AUTHOR_UNKNOWN: 'author_unknown',
 });
 
 /**
@@ -186,6 +187,42 @@ export function proposeAudit({
      * seat" -- a live seat sitting idle beside a job it could legally take.
      * The refusal is the same; the OUTCOME is completely different.
      */
+    /*
+     * ═══ "NOBODY COULD LOOK" IS NOT "THERE IS NO AUTHOR" ═══
+     *
+     * Fifth-lap blind audit D5. `if (!author) return true` made EVERY seat
+     * eligible -- the author's own included -- whenever the author was
+     * unknown. Two commits claimed to have closed that fail-open and neither
+     * touched this line: `claimJob` compares the SESSION, which is still
+     * null, and this function never reads `author_source` at all. So a
+     * transient git failure still handed a candidate to whoever wrote it.
+     *
+     * The distinction the rest of the module spent three commits building
+     * arrives here: `author_source === 'unavailable'` means nobody
+     * established who the author is. Rule 20 cannot be enforced against an
+     * author you cannot name, so placing the job anyway and recording the
+     * result as an independent review is exactly the laundering rule 20
+     * exists to prevent.
+     *
+     * FAIL CLOSED, and accept the cost. The job stays PENDING with a reason,
+     * and it is picked up on the next tick once the lookup succeeds. If the
+     * lookup NEVER succeeds nothing dispatches -- which is the honest
+     * outcome, loud in `unassigned`, rather than a queue of reviews nobody
+     * can trust. A measured absence (`null`: git answered, this commit has
+     * no trailer) is different and still dispatches: there is no author to
+     * collide with.
+     */
+    if (str(job.author_source) === AUTHOR_UNAVAILABLE) {
+      unassigned.push({
+        audit_id: str(job.audit_id),
+        code: UNPLACED.AUTHOR_UNKNOWN,
+        why: 'the author of this candidate could not be established, so rule 20 cannot be '
+          + 'enforced against it. Dispatching anyway would risk handing the candidate to '
+          + 'whoever wrote it and calling the result independent',
+      });
+      continue;
+    }
+
     const eligible = free.filter((s) => {
       if (!author) return true;
       return s.session_id !== author && s.agent_id !== author;

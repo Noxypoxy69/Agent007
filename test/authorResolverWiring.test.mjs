@@ -25,7 +25,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { makeAuthorResolver, AUTHOR_UNAVAILABLE, auditJobsFor } from '../src/auditJob.mjs';
+
+const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 const SHA = 'a'.repeat(40);
 const BODY_WITH = 'subject\n\nClaude-Session: https://claude.ai/code/session_01ABC\n';
@@ -65,6 +71,55 @@ test('AND A REAL TRAILER STILL RESOLVES, or the refusals above prove nothing', (
 
 test('undefined IS UNAVAILABLE TOO, because a wrapper may return it', () => {
   assert.equal(makeAuthorResolver(() => undefined)(SHA), AUTHOR_UNAVAILABLE);
+});
+
+test('THE CALL SITES USE IT -- asserted on the SOURCE, because that is the half that drifts', () => {
+  /*
+   * Fifth-lap blind audit D6, and the regression it names has now recurred
+   * on four consecutive laps: the library learns something and the callers
+   * do not. Reverting any of the three call sites to `catch { return null }`
+   * left the whole suite green, because every test here builds its own
+   * resolver -- rule 4, the mechanism verified and the wiring not, which is
+   * the exact criticism this file's header levels at the commit before it.
+   *
+   * The header's defence was "there is nothing left to hand-roll". That was
+   * equally true of the library after the previous fix, and the callers
+   * drifted anyway. A promise about future authors is not a control.
+   *
+   * COMMENT-BLANKED FIRST (rule 13). This file and the call sites both
+   * DISCUSS `makeAuthorResolver` in prose, and three independent
+   * rediscoveries in this repository came from a check matching its own
+   * explanatory comment.
+   */
+  const blank = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '));
+
+  const SITES = [
+    ['bin/agentbridge.mjs', 2],
+    ['scripts/enqueue-audit-job.mjs', 1],
+  ];
+
+  for (const [rel, atLeast] of SITES) {
+    const code = blank(readFileSync(path.join(REPO, rel), 'utf8'));
+    const uses = [...code.matchAll(/makeAuthorResolver\s*\(/g)].length;
+    assert.ok(uses >= atLeast,
+      `${rel} calls makeAuthorResolver ${uses} time(s), expected at least ${atLeast}. `
+      + 'A call site that hand-rolls its own resolver launders a failed lookup into a '
+      + 'measured absence, which is the fail-open four audits have now found');
+  }
+
+  /*
+   * AND THE HAND-ROLLED SHAPE IS GONE. The positive above passes if somebody
+   * adds a call and leaves the old one beside it, which is how this drifted
+   * the first time.
+   */
+  for (const [rel] of SITES) {
+    const code = blank(readFileSync(path.join(REPO, rel), 'utf8'));
+    assert.doesNotMatch(code, /catch\s*\{\s*return null;?\s*\}/,
+      `${rel} still contains a bare catch-to-null, which is how a git failure becomes `
+      + 'a measured absence');
+  }
 });
 
 test('END TO END: a failed reader produces a job marked unavailable, not absent', () => {
