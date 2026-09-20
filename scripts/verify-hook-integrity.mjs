@@ -49,6 +49,7 @@
  * a payload in a carriage return.
  */
 import { readFileSync, statSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,7 +61,19 @@ const TEMPLATE = path.join(REPO, 'templates', 'hooks', 'post-commit');
 
 /** Content identity, insensitive to eol and to a missing trailing newline. */
 const digest = (buf) => createHash('sha256')
-  .update(buf.toString('utf8').replace(/\r\n/g, '\n').replace(/\n+$/, '\n'))
+  /*
+   * `\n*$` AND NOT `\n+$`. Fourth-lap blind audit L15: the header claims this
+   * is "insensitive to eol and to a missing trailing newline", and `\n+$`
+   * only matches when at least one newline is PRESENT. So "exit 0\n"
+   * normalised to itself and "exit 0" stayed bare -- different digests, and a
+   * hook byte-identical to the template but for a missing final newline
+   * reported E_HOOK_INTEGRITY_TAMPERED.
+   *
+   * That is rule 16 in the worst direction for a security control: an alarm
+   * that fires on a clean hook is one people learn to switch off, and this
+   * one would have fired on a checkout whose editor trimmed the last line.
+   */
+  .update(buf.toString('utf8').replace(/\r\n/g, '\n').replace(/\n*$/, '\n'))
   .digest('hex');
 
 /**
@@ -98,7 +111,60 @@ function hookPath() {
   }
 }
 
+/**
+ * IS GIT BEING POINTED SOMEWHERE ELSE ENTIRELY?
+ *
+ * Fourth-lap blind audit H3, and it is the sharpest kind of finding: this
+ * script's own prologue names `core.hooksPath` as the attack -- "runs a
+ * command of the writer's choosing on every git operation" -- and then never
+ * read it.
+ *
+ * `553724b` moved to `--git-common-dir` precisely BECAUSE it is unaffected by
+ * `hooksPath`, which fixed a real bug (`runGit` hardens with
+ * `core.hooksPath=/dev/null`, so `--git-path` answered `/dev/null/...`). But
+ * it made the checker validate `<common>/hooks/post-commit` UNCONDITIONALLY,
+ * whether or not git would ever run that file. A recoverable bug became a
+ * permanent blind spot, and `ok: true` meant "the file I chose to look at is
+ * unchanged" while git ran something else.
+ *
+ * ASKED WITHOUT THE HARDENING, deliberately. `runGit` injects
+ * `-c core.hooksPath=/dev/null`, which would mask the very setting being
+ * looked for -- so this reads the CONFIG rather than the resolved path, and
+ * `--local --get` cannot execute anything. A global or system setting is
+ * caught too, because `hooks/pre-commit` in this repository tells readers to
+ * run `git config --global core.hooksPath ~/.githooks`: the repo documents
+ * the step that disarms its own attestation.
+ */
+function hooksPathOverride() {
+  for (const scope of ['--local', '--global', '--system']) {
+    try {
+      const v = String(execFileSync('git', ['config', scope, '--get', 'core.hooksPath'], {
+        cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      })).trim();
+      if (v) return { scope: scope.replace('--', ''), value: v };
+    } catch { /* unset in this scope: git exits 1, which is the common case */ }
+  }
+  return null;
+}
+
 export function verifyHookIntegrity() {
+  /*
+   * CHECKED FIRST, because every answer below is about a file git may not
+   * run. Rule 15: the gate moves rather than closes -- this is its own code,
+   * not a silent pass and not a tampering claim.
+   */
+  const redirect = hooksPathOverride();
+  if (redirect) {
+    return {
+      ok: false,
+      code: 'E_HOOKS_PATH_REDIRECTED',
+      redirect,
+      reason: `core.hooksPath is set in ${redirect.scope} config to "${redirect.value}", so git runs `
+        + 'hooks from there and NOT from the directory this attestation checks. Whatever the '
+        + 'digest below would have said is about a file git ignores',
+    };
+  }
+
   if (!existsSync(TEMPLATE)) {
     return { ok: false, code: 'E_HOOK_TEMPLATE_MISSING', reason: `no pinned template at ${TEMPLATE}: there is nothing to compare against, which is not the same as a clean hook` };
   }
