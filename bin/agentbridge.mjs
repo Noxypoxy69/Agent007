@@ -3338,8 +3338,31 @@ try {
         } catch { return null; }
       };
 
-      const principal = str_(process.env.AGENTBRIDGE_PRINCIPAL_ID);
-      const session = str_(process.env.AGENTBRIDGE_SESSION_ID) ?? str_(process.env.AGENTBRIDGE_AGENT_ID);
+      /*
+       * P0-5. THE ENVIRONMENT LABELS; IT NO LONGER AUTHENTICATES.
+       *
+       * This read AGENTBRIDGE_PRINCIPAL_ID and wrote IDENTITY.CREDENTIAL if it
+       * was merely non-empty, so an author minted a gate-satisfying self-audit
+       * by exporting two variables. `resolvePrincipal` now decides, and it
+       * cannot reach `credential` without a lease the SERVER verified --
+       * something an agent cannot produce, because the server mints the token
+       * inside the claim transaction and refuses a non-holder on return.
+       *
+       * No lease verification is performed here yet: `candidate-record` runs
+       * outside any claim, so the honest result is OBSERVED. That is the point.
+       * The marker now reports the truth instead of the environment.
+       */
+      const { resolvePrincipal, mayWriteCredential, SOURCE } = await import('../src/principalResolution.mjs');
+      const resolution = resolvePrincipal({
+        lease: null,
+        env: {
+          session: str_(process.env.AGENTBRIDGE_SESSION_ID) ?? str_(process.env.AGENTBRIDGE_AGENT_ID),
+          principal: str_(process.env.AGENTBRIDGE_PRINCIPAL_ID),
+          agent: str_(process.env.AGENTBRIDGE_AGENT_ID),
+        },
+      });
+      const principal = resolution.source === SOURCE.CREDENTIAL ? resolution.session : null;
+      const session = resolution.session;
       const store = repoStorePath(repo, 'candidates', '.jsonl');
 
       const candidate = read(at);
@@ -3369,7 +3392,7 @@ try {
          * alone is where the process thinks it is running, not proof of who is
          * running it.
          */
-        identity_source: principal ? IDENTITY.CREDENTIAL : IDENTITY.OBSERVED,
+        identity_source: mayWriteCredential(resolution) ? IDENTITY.CREDENTIAL : IDENTITY.OBSERVED,
       }, { existing, now: new Date().toISOString() });
 
       if (!r.ok) {
