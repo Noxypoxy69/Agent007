@@ -73,8 +73,26 @@ const digest = (buf) => createHash('sha256')
  */
 function hookPath() {
   try {
-    const p = String(runGit(['rev-parse', '--git-path', 'hooks/post-commit'], { cwd: REPO })).trim();
-    return p ? path.resolve(REPO, p) : null;
+    /*
+     * `--git-path hooks/post-commit` IS THE OBVIOUS QUERY AND IT IS WRONG
+     * HERE, because `runGit` hardens every call with
+     * `-c core.hooksPath=/dev/null` -- so git helpfully resolves against the
+     * OVERRIDE and answers `/dev/null/post-commit`. Caught on this script's
+     * very first run, which reported the hook missing at
+     * `C:\dev\null\post-commit`.
+     *
+     * That is worth keeping visible: the hardening that makes git safe to
+     * call is the same thing that made it lie about where hooks live, and a
+     * checker reporting E_HOOK_MISSING for that reason would have read as
+     * "the trigger is not installed" on a machine where it was.
+     *
+     * `--git-common-dir` is unaffected by hooksPath, and it is also the
+     * CORRECT source in a linked worktree: hooks live in the main
+     * repository's admin directory, not the worktree's, so a per-worktree
+     * answer would check a file git never runs.
+     */
+    const common = String(runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: REPO })).trim();
+    return common ? path.join(common, 'hooks', 'post-commit') : null;
   } catch {
     return null;
   }
