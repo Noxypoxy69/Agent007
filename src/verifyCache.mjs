@@ -318,9 +318,30 @@ export function aggregateShards(results, { total = 0 } = {}) {
    *
    * THE DISCRIMINATOR IS DELIBERATELY NARROW. A test file with a syntax
    * error also reports zero tests, and that IS a real red -- but it exits 1
-   * with a stack trace on stderr. Only a code in the NTSTATUS failure range
-   * means the process itself never got off the ground, and only then with
-   * nothing produced. Both conditions are required.
+   * with a stack trace on stderr. An NTSTATUS-range code with nothing
+   * produced means the process died before it reported a single test. Both
+   * conditions are required.
+   *
+   * IT DOES NOT MEAN THE OS REFUSED TO START IT, and an audit of this
+   * commit measured the difference. The range holds more than the loader:
+   *
+   *     0xC0000142  DLL_INIT_FAILED     the loader, what was observed here
+   *     0xC0000005  access violation    the process CRASHED
+   *     0xC00000FD  stack overflow      the process CRASHED
+   *
+   * All three arrive as "could not start at all (exit N)", and for the last
+   * two that sentence is false -- they got off the ground and then died. The
+   * verdict is still right: PARTIAL, never reused, because a process that
+   * died before reporting anything has told us nothing about the tree
+   * either way, and a fatal out-of-memory on a loaded box looks exactly like
+   * this. Only the stated CAUSE was wrong, and a durable record that asserts
+   * an unestablished cause is the defect this repository keeps writing down.
+   *
+   * Node itself does not hand a test file this range: a throw, an explicit
+   * process.exit(0xC0000005) and unbounded recursion were all measured
+   * arriving as exit 1 with one failing test, because node --test wraps
+   * them. So this path is reachable by the machine and by native crashes,
+   * not by ordinary test code.
    */
   const NTSTATUS_FAILURE = 0xC0000000;
   const couldNotStart = rows.filter((r) => Number.isInteger(r.exitCode)
@@ -350,9 +371,10 @@ export function aggregateShards(results, { total = 0 } = {}) {
   if (couldNotStart.length) {
     return {
       state: VERIFY.PARTIAL,
-      why: `${couldNotStart.length} of ${expected} shard(s) could not start at all `
-        + `(exit ${couldNotStart[0].exitCode}, no tests run) -- the machine refused to launch the process, `
-        + 'so this run says nothing about the tree and must not be reused as if it did',
+      why: `${couldNotStart.length} of ${expected} shard(s) died before reporting a single test `
+        + `(exit ${couldNotStart[0].exitCode}, which is an NTSTATUS failure code -- the loader refusing to `
+        + 'start the process, or the process crashing) -- so this run says nothing about the tree either '
+        + 'way and must not be reused as if it did',
       tests,
       fail,
     };

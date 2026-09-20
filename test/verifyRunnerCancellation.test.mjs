@@ -111,7 +111,42 @@ test('A SHARD THE OS REFUSED TO START IS NOT A VERDICT ABOUT THE TREE', () => {
   assert.equal(v.state, VERIFY.PARTIAL,
     `a machine that could not launch the test process produced a verdict about the code: ${v.state} — ${v.why}`);
   assert.notEqual(v.state, VERIFY.FAILED, 'a resource failure was recorded as a failure of the tree, and FAILED is reused');
-  assert.match(v.why, /could not start/);
+  /*
+   * AND THE MESSAGE MUST NOT CLAIM A CAUSE IT HAS NOT ESTABLISHED. This
+   * asserted /could not start/, matching a sentence that said "the machine
+   * refused to launch the process". An audit measured the range and it
+   * holds more than the loader:
+   *
+   *     0xC0000142  DLL_INIT_FAILED     the loader, what was observed
+   *     0xC0000005  access violation    the process CRASHED
+   *     0xC00000FD  stack overflow      the process CRASHED
+   *
+   * All three reached that sentence, and for the last two it is false. The
+   * VERDICT is unchanged and still right -- PARTIAL, never reused, because
+   * a process that died before reporting anything has told us nothing about
+   * the tree, and a fatal out-of-memory looks exactly like this. Only the
+   * stated cause was wrong.
+   */
+  assert.match(v.why, /died before reporting a single test/,
+    `the refusal must describe what was observed: ${v.why}`);
+  assert.doesNotMatch(v.why, /refused to launch/,
+    `the message asserts the OS refused, which an access violation disproves: ${v.why}`);
+
+  /* The crash codes reach the same verdict, which is the point of the range. */
+  for (const code of [0xC0000005, 0xC00000FD]) {
+    const crashed = aggregateShards([
+      { index: 1, exitCode: code, tests: 0, fail: 0 },
+    ], { total: 1 });
+    assert.equal(crashed.state, VERIFY.PARTIAL,
+      `exit ${code} produced a verdict about the tree: ${crashed.state}`);
+  }
+
+  /* But a crash AFTER tests ran is a real red, or the range excuses too much. */
+  const afterwards = aggregateShards([
+    { index: 1, exitCode: 0xC0000005, tests: 40, fail: 0 },
+  ], { total: 1 });
+  assert.equal(afterwards.state, VERIFY.FAILED,
+    `a shard that ran 40 tests and then crashed was excused: ${afterwards.why}`);
 
   /* THE FAR END: the decision layer must not reuse it. */
   const d = decideVerify({ ...v, key: 'k'.repeat(32), finished_at: Date.now() }, { key: 'k'.repeat(32), now: Date.now() });
