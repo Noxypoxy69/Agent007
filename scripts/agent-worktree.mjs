@@ -23,18 +23,42 @@
  * isolation after the fact is too late anyway -- the session has already
  * loaded in whatever tree it started in.
  */
-import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { agentWorkspacePlan, startupRefusal } from '../src/agentWorkspace.mjs';
+import { runGit } from '../src/safeGit.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 const say = (s) => process.stderr.write(`${s}\n`);
 
-const git = (args, cwd = REPO) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+/*
+ * THROUGH safeGit, NOT spawnSync, AND THE SUITE ENFORCES IT.
+ *
+ * `.git/config` can name commands git runs on ordinary operations -- set
+ * core.fsmonitor to a script and a plain `git status` executes it -- and
+ * `.git/` is neither tracked nor in PROTECTED_PATHS, so such a file is
+ * invisible to every path rule we have. runGit strips that surface.
+ *
+ * I wrote this file with a bare `spawnSync('git', ...)` and
+ * test/safeGit.test.mjs caught it: "EVERY git invocation under src, bin and
+ * scripts goes through safeGit, wrapper or not". That gate exists because the
+ * flags previously lived in two places while seven other call sites had none.
+ *
+ * runGit THROWS on a non-zero exit rather than returning a status, so every
+ * call here is wrapped. Getting that wrong is how a conversion to this wrapper
+ * turns a handled failure into a crash.
+ */
+const gitOk = (args, cwd = REPO) => {
+  try {
+    runGit(args, { cwd });
+    return { ok: true, detail: '' };
+  } catch (e) {
+    return { ok: false, detail: String(e?.stderr || e?.stdout || e?.message || '').trim() };
+  }
+};
 
 const [, , rawId, ...rest] = process.argv;
 const printOnly = rest.includes('--print');
@@ -68,13 +92,18 @@ if (printOnly) {
  * pruned and recreated. That is the destroy-the-evidence failure the
  * workspace manager has a header about, arriving through a convenience flag.
  */
-const hasBranch = git(['rev-parse', '--verify', '--quiet', `refs/heads/${plan.branch}`]).status === 0;
+const hasBranch = gitOk(['rev-parse', '--verify', '--quiet', `refs/heads/${plan.branch}`]).ok;
 const add = hasBranch
-  ? git(['worktree', 'add', dir, plan.branch])
-  : git(['worktree', 'add', dir, '-b', plan.branch]);
+  ? gitOk(['worktree', 'add', dir, plan.branch])
+  : gitOk(['worktree', 'add', dir, '-b', plan.branch]);
 
-if (add.status !== 0 || !existsSync(path.join(dir, '.git'))) {
-  say(`[agentbridge:no-workspace] could not create ${dir}: ${(add.stderr || add.stdout || '').trim() || 'unknown'}`);
+/*
+ * THE DIRECTORY IS CHECKED AS WELL AS THE EXIT CODE. An exit status is a proxy
+ * for "the worktree exists"; the far end is the worktree existing. They agree
+ * until they do not, which is exactly when this matters.
+ */
+if (!add.ok || !existsSync(path.join(dir, '.git'))) {
+  say(`[agentbridge:no-workspace] could not create ${dir}: ${add.detail || 'unknown'}`);
   say('REFUSING TO START in the shared worktree: two sessions in one tree is what makes every verification '
     + 'unreliable. If the branch is checked out elsewhere, or a stale worktree holds the path, run '
     + '`git worktree prune` and try again.');
