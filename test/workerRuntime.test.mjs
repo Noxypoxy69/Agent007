@@ -471,3 +471,115 @@ test('a runtime with NO heartbeat dep still runs — local-only is legitimate', 
   // setup, and requiring the beat would make local-only impossible.
   assert.doesNotThrow(() => world({ heartbeat: undefined }));
 });
+
+// ── THE HOLD BAR, THROUGH THE REAL LOOP ────────────────────────────────────
+/*
+ * These are a SEPARATE CLAIM from test/builderHold.test.mjs. That file proves
+ * the decision is correct and that `nextAction` consults it; none of it proves
+ * the WORKER ever hands the bar an observation. A runtime that wires the gate
+ * in and then forwards nothing gets `continue` on every cycle for ever, and
+ * every unit test stays green while the control never fires once -- rule 17,
+ * which on this repository cost a deleted guard and three sessions that scored
+ * it as working.
+ */
+
+test('THE BAR FIRES THROUGH THE LOOP: a degraded builder rotates, and hands over', async () => {
+  /*
+   * Degradation accrues DURING the run, which is both the realistic shape and
+   * the only one that can rotate: before a worktree exists there is nothing
+   * committed to hand over.
+   */
+  const { deps, calls } = world({
+    pollRun: async () => ({ done: false }),
+    observe: async (w) => (w.dir ? { steps: 999 } : {}),
+  });
+  await run(deps);
+
+  const rotated = calls.log.filter((l) => l.startsWith('rotated:'));
+  assert.equal(rotated.length, 1, `the hold bar never fired through the loop: ${calls.log.join(' | ')}`);
+
+  assert.equal(calls.returned.length, 1, 'a rotation handed nothing back, so the task is stranded');
+  const body = calls.returned[0];
+  assert.equal(body.outcome, 'rotated', 'a rotation was reported as something else');
+  assert.equal(body.head_sha, 'c'.repeat(40), 'the checkpoint was not the commit git actually reported');
+  assert.equal(body.lease_token, 'tok-1', 'returned without the lease token; /return would refuse this');
+  assert.match(body.notes, /ROTATED:/);
+  assert.match(body.notes, /steps/, 'the successor is not told which signal stopped its predecessor');
+
+  /* THE HANDOVER ADVANCES THE ATTEMPT, or the successor writes under a stale fence. */
+  const handover = JSON.parse(body.notes.slice(body.notes.indexOf('{')));
+  assert.equal(handover.task_id, 't1');
+  assert.equal(handover.attempt, 1, 'the successor would write under its predecessor\'s attempt');
+
+  assert.ok(calls.cleaned.length > 0, 'the rotated worktree was left behind');
+});
+
+test('THE CONTROL: the same world without degradation returns normally', async () => {
+  /*
+   * Rule 1 and rule 5. The assertion above is worth nothing unless this same
+   * harness reaches a DIFFERENT answer when nothing is degraded -- otherwise
+   * it could be passing because the loop rotates everything.
+   */
+  const { deps, calls } = world();
+  await run(deps);
+
+  assert.equal(calls.log.filter((l) => l.startsWith('rotated:')).length, 0, 'a healthy builder was rotated');
+  assert.equal(calls.returned.length, 1);
+  assert.equal(calls.returned[0].outcome, 'completed');
+});
+
+test('CHECKPOINTABLE IS ASKED OF GIT: nothing committed means FAIL, never rotate', async () => {
+  /*
+   * THE EXPENSIVE MISTAKE THIS PREVENTS. `checkpointable` decides between
+   * handing work over and destroying it, so the worker must not take the
+   * runtime's word for it. Here the agent produced no commit -- HEAD is still
+   * the base -- and a rotation would discard the attempt silently, because
+   * rotation is the success-shaped verdict.
+   */
+  const { deps, calls } = world({
+    pollRun: async () => ({ done: false }),
+    observe: async (w) => (w.dir ? { steps: 999 } : {}),
+    headSha: async () => TASK.base_sha,
+  });
+  await run(deps);
+
+  assert.equal(calls.log.filter((l) => l.startsWith('rotated:')).length, 0,
+    'work with no commit was rotated away');
+  assert.equal(calls.returned.length, 1, 'a held attempt was not handed back at all');
+  assert.equal(calls.returned[0].outcome, 'failed');
+  assert.match(calls.returned[0].notes, /^HELD: /);
+  assert.match(calls.returned[0].notes, /cannot be checkpointed/);
+});
+
+test('THE STEP COUNT IS PER ATTEMPT, not for the life of the process', async () => {
+  /*
+   * A counter that accumulates across tasks holds the bar against a successor
+   * for its predecessor's work, and the second task of any long-lived worker
+   * is rotated on arrival. The fixture below never degrades, so the only way
+   * `steps` can run away is if it is counting the whole process.
+   */
+  const seen = [];
+  const { deps } = world({
+    pollRun: async () => ({ done: false }),
+    observe: async (w) => { seen.push(w.observed?.steps ?? null); return {}; },
+  });
+  await run(deps, 30);
+
+  assert.ok(seen.length > 0, 'observe was never called, so this test measured nothing');
+  assert.ok(seen.every((s) => typeof s === 'number' && s >= 0),
+    `steps was not a number on every cycle: ${JSON.stringify(seen)}`);
+  assert.ok(Math.max(...seen) < 30, `steps ran away to ${Math.max(...seen)} on a 30-cycle run`);
+});
+
+test('AN UNMONITORED WORKER IS NOT STALLED, and the bar says it measured nothing', async () => {
+  /*
+   * Today's production shape: no `observe` dep at all. The bar must not refuse
+   * the work -- that is the rule 19 outage that gets a control switched off --
+   * but the two states must stay distinguishable, which is what `measured`
+   * is for.
+   */
+  const { deps, calls } = world({ observe: undefined });
+  await run(deps);
+  assert.equal(calls.returned.length, 1, 'a worker with no telemetry was stalled by the hold bar');
+  assert.equal(calls.returned[0].outcome, 'completed');
+});

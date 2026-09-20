@@ -26,6 +26,7 @@
  */
 
 import { ACTION, nextAction, returnPayload, actionableEvent } from './workerLoop.mjs';
+import { rotationHandover } from './builderHold.mjs';
 import { nextCursor } from './events.mjs';
 
 const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0;
@@ -231,8 +232,61 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
       }
     }
 
+    /*
+     * MEASURE THE BUILDER, SO THE HOLD BAR HAS SOMETHING TO JUDGE.
+     *
+     * A bar wired into `nextAction` that is never handed an observation
+     * returns `continue` on every cycle and never fires once -- rule 17, a
+     * control that is consulted and concludes nothing. So this counts what it
+     * can actually see and NOTHING ELSE.
+     *
+     * WHAT IT HONESTLY KNOWS: cycles spent on this attempt, and how long the
+     * attempt has been held. Both are reset per task, because a step count
+     * that accumulates across tasks would hold the bar against a successor for
+     * its predecessor's work.
+     *
+     * WHAT IT DOES NOT: context consumption and files touched live inside the
+     * agent process, not here. They arrive from `deps.observe` when a runtime
+     * can supply them and stay absent when it cannot -- an invented number is
+     * worse than a missing one, because the bar would then fire on fiction.
+     *
+     * `checkpointable` IS ASKED OF GIT, not assumed. It is the difference
+     * between rotating and destroying an attempt's work, so it is the one
+     * field that must never be a guess.
+     */
+    if (w.task) {
+      if (w.attemptOf !== w.task.task_id) {
+        w.attemptOf = w.task.task_id;
+        w.attemptCycle0 = cycles;
+        w.attemptStartedAt = Date.parse(now);
+      }
+      const sha = nonEmpty(w.dir) ? await deps.headSha(w.dir) : null;
+      const startedAt = Number.isFinite(w.attemptStartedAt) ? w.attemptStartedAt : null;
+      const at = Date.parse(now);
+
+      w.observed = {
+        steps: cycles - w.attemptCycle0,
+        elapsedMs: startedAt !== null && Number.isFinite(at) ? at - startedAt : null,
+        rotations: Number.isInteger(w.task.attempt) ? w.task.attempt : 0,
+        /* A commit that is not the base is work this worker actually produced. */
+        checkpointable: Boolean(sha) && sha !== w.task.base_sha,
+        ...((await deps.observe?.(w)) ?? {}),
+      };
+    } else {
+      w.observed = null;
+      w.attemptOf = null;
+    }
+
     const decision = nextAction(w, { now });
     log(decision.action, decision.reason);
+
+    /*
+     * THE HOLD VERDICT TRAVELS WITH THE WORKER, because `returnPayload` has to
+     * know an attempt was stopped by the bar rather than finishing. Without it
+     * a held return is refused for having no finished run, and the decision
+     * the machine just made cannot be carried out.
+     */
+    w.hold = decision.hold ?? null;
 
     switch (decision.action) {
       case ACTION.POLL: {
@@ -318,6 +372,49 @@ export async function runWorker({ config, session_id, agent_id }, deps, { maxCyc
         // directory gets removed.
         if (nonEmpty(w.dir)) await deps.cleanupWorktree?.(w.dir);
         w.task = null; w.lease = null; w.run = null; w.dir = null; w.renewalFailed = false;
+        break;
+      }
+
+      case ACTION.ROTATE: {
+        /*
+         * HAND THE WORK OVER INTACT. A rotation is not a failure and not a
+         * completion: the task goes back to the pool with its checkpoint
+         * committed, and `claim_task` admits `returned`, so the next builder
+         * picks it up at a fresh attempt.
+         *
+         * THE CHECKPOINT IS DERIVED FROM GIT, NEVER ASSUMED. `checkpointable`
+         * is the runtime's claim that the work COULD be handed over; this is
+         * where that claim is checked against the repository. If it turns out
+         * there is no commit, rotating would discard the work -- so this falls
+         * back to abandoning loudly rather than quietly losing an attempt.
+         */
+        const sha = nonEmpty(w.dir) ? await deps.headSha(w.dir) : null;
+        const handover = rotationHandover({
+          task_id: w.task.task_id,
+          attempt: Number.isInteger(w.task.attempt) ? w.task.attempt : 0,
+          checkpoint_sha: sha ?? null,
+          findings: w.findings ?? [],
+          required_regressions: w.requiredRegressions ?? [],
+        });
+
+        if (!handover.ok) {
+          log('rotate-refused', handover.errors.join('; '));
+          done.push({ task_id: w.task.task_id, outcome: 'rotate-refused', errors: handover.errors });
+        } else {
+          const res = await deps.returnWork({
+            task_id: w.task.task_id,
+            session_id: w.session_id,
+            lease_token: w.lease.lease_token,
+            head_sha: handover.handover.checkpoint_sha,
+            outcome: 'rotated',
+            notes: `ROTATED: ${decision.reason}\nhandover: ${JSON.stringify(handover.handover)}`,
+          });
+          log('rotated', `${w.task.task_id} -> attempt ${handover.handover.attempt} ${res?.state ?? ''}`);
+          done.push({ task_id: w.task.task_id, outcome: 'rotated', handover: handover.handover, state: res?.state });
+        }
+
+        if (nonEmpty(w.dir)) await deps.cleanupWorktree?.(w.dir);
+        w.task = null; w.lease = null; w.run = null; w.dir = null; w.renewalFailed = false; w.hold = null;
         break;
       }
 
