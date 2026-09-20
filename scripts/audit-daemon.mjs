@@ -318,6 +318,16 @@ async function tick() {
   const rec = spawnSync(process.execPath, [
     path.join(REPO, 'bin', 'agentbridge.mjs'), 'audit-record',
     '--id', job.audit_id, '--verdict', verdict.verdict,
+    /*
+     * THE WRITER MUST BE NAMED, and it is the DAEMON's identity, not the
+     * session's. `recordAudit` fences on writer === claimant; the daemon is
+     * what claimed the job, so anything else is refused -- correctly. The
+     * first run failed here with "a terminal write needs its writer named",
+     * which I had predicted would be a PRE_GENESIS refusal. It was not: it
+     * was this argument missing, and I would have gone on believing the
+     * containment was doing work that a missing flag was doing.
+     */
+    '--by', BY,
   ], { cwd: REPO, encoding: 'utf8' });
 
   const out = `${rec.stdout ?? ''}${rec.stderr ?? ''}`.trim();
