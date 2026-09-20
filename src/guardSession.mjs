@@ -161,6 +161,22 @@ export const PROTECTED_PATHS = Object.freeze([
    */
   'src/auditQueueStore.mjs',
   /*
+   * THE SessionStart/SessionEnd HOOK, which .claude/settings.json wires to
+   * node and which nothing protected. Raised as a lead by the audit of
+   * 6b33d7d: it is not in the guard's import CLOSURE -- the Stop gate does
+   * not import it -- so the closure test could never have demanded it, and
+   * it was outside what that commit claimed to cover.
+   *
+   * It is still a file this repository executes on every session boundary,
+   * with whatever the guard would have refused. A session that could
+   * rewrite it owns the liveness watcher, and CLAUDE.md devotes a section
+   * to what the silent death of this exact file already cost.
+   *
+   * Being reachable-as-a-hook and being reachable-by-import are different
+   * questions, and only the second had a gate.
+   */
+  'scripts/bridge-session-poll.mjs',
+  /*
    * THE VERIFICATION LAYER, and the gate now depends on it for its loudest
    * verdict. `verifyCache` decides whether a result may be reused, and a
    * session that could rewrite it could make the gate accept a PASS for a tree

@@ -379,10 +379,18 @@ export function standingAudit(ledger, key) {
    * for the shape the convention actually produces -- the same mistake as
    * the duplicate-spelling one it replaced, one field along.
    *
-   * The ledger is append-only, so a later LINE is a later record. On a tie
-   * the LAST matching row wins, which is that fact stated rather than an
-   * accident of reduce. It is deterministic in both orderings because it
-   * does not depend on which came first, only on which came last.
+   * The rule is NEWEST TIMESTAMP, ties broken by the LAST line -- and the
+   * first version of this comment said only the second half, which an
+   * auditor measured as wider than the code:
+   *
+   *     [FAIL@00:05Z, PASS@00:04Z]  ->  FAIL wins, not the last line
+   *     [FAIL@00:05Z, PASS@""]      ->  FAIL wins, unparseable sorts lowest
+   *
+   * Both are right: a row appended later carrying an EARLIER timestamp is a
+   * late transcription of an older pass, not a newer verdict. Only for the
+   * same-minute batch tie -- the case this is actually for -- does last
+   * line decide, and there it is deterministic in both orderings because it
+   * depends on which came last, never on which came first.
    *
    * AND THE COMPARISON IS A TIMESTAMP, NOT A STRING. Lexicographic order is
    * wrong across offsets: "2026-02-01T09:00:00+09:00" is 00:00Z and sorts
