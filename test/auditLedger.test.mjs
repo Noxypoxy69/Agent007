@@ -454,9 +454,39 @@ test('THE STANDING AUDIT DOES NOT DEPEND ON THE ORDER OF THE FILE', () => {
   const key = 'abc123456789abcdef0123456789abcdef012345';
 
   for (const [label, text] of [['as written', `${early}\n${later}`], ['swapped', `${later}\n${early}`]]) {
-    const { audited } = parseLedger(text);
-    const row = standingAudit(audited, key);
+    const row = standingAudit(parseLedger(text), key);
     assert.equal(row?.found, 8, `${label}: the newer audit must stand, not whichever line came first`);
+  }
+});
+
+test('TWO ROWS SPELLED THE SAME ARE TWO ROWS, NOT ONE', () => {
+  /*
+   * THE CASE THE FIRST VERSION OF THIS RULE COULD NOT SEE, found by an
+   * auditor. parseLedger keyed a Map by the sha string, so two audits of one
+   * commit written the SAME way -- which is the house style, all 69 shipped
+   * rows are 7 characters -- collapsed to whichever line came last.
+   * standingAudit never saw a conflict, and neither did the contradiction
+   * gate below. MEASURED before the fix:
+   *
+   *     a then b   map size 1   standing found:8   (the newer)
+   *     b then a   map size 1   standing found:0   (the OLDER wins)
+   *
+   * The mismatched spellings that made d81e9643 visible were an accident.
+   * The likelier shape was the one nothing caught.
+   */
+  const older = JSON.stringify({
+    commit: 'abc1234', auditor: 'first blind pass', at: '2026-01-01T00:00:00Z', found: 0,
+  });
+  const newer = JSON.stringify({
+    commit: 'abc1234', auditor: 'second blind pass', at: '2026-02-01T00:00:00Z', found: 8,
+  });
+  const key = 'abc123456789abcdef0123456789abcdef012345';
+
+  for (const [label, text] of [['older first', `${older}\n${newer}`], ['newer first', `${newer}\n${older}`]]) {
+    const parsed = parseLedger(text);
+    assert.equal(parsed.rows.length, 2, `${label}: a row was discarded by the parser`);
+    assert.equal(standingAudit(parsed, key)?.found, 8,
+      `${label}: the older audit stood over the newer one`);
   }
 });
 
@@ -477,14 +507,13 @@ test('AND A SUPERSEDED ROW NEVER STANDS WHILE ANOTHER DOES', () => {
   const key = 'def1234abcdef0123456789abcdef0123456789a';
 
   for (const text of [`${superseded}\n${standing}`, `${standing}\n${superseded}`]) {
-    const { audited } = parseLedger(text);
-    const row = standingAudit(audited, key);
+    const row = standingAudit(parseLedger(text), key);
     assert.equal(row?.found, 5, 'the superseded row stood even though it is newer');
   }
 
   /* But a superseded row is still an audit if it is the only one there is. */
-  const { audited } = parseLedger(superseded);
-  assert.ok(standingAudit(audited, key), 'a lone superseded row must still count as audited');
+  assert.ok(standingAudit(parseLedger(superseded), key),
+    'a lone superseded row must still count as audited');
 });
 
 test('THE SHIPPED LEDGER HAS NO UNRESOLVED CONTRADICTION', async () => {
@@ -501,24 +530,28 @@ test('THE SHIPPED LEDGER HAS NO UNRESOLVED CONTRADICTION', async () => {
   const { readFileSync } = await import('node:fs');
   const { fileURLToPath } = await import('node:url');
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const { audited } = parseLedger(readFileSync(path.join(repoRoot, 'docs', 'audit-ledger.jsonl'), 'utf8'));
+  const { rows } = parseLedger(readFileSync(path.join(repoRoot, 'docs', 'audit-ledger.jsonl'), 'utf8'));
 
-  /* Group keys that are prefixes of one another: they name the same commit. */
-  const keys = [...audited.keys()].sort((a, b) => a.length - b.length);
+  /*
+   * GROUPED FROM ROWS, NOT FROM MAP KEYS, because the Map holds one row per
+   * spelling and the duplicate spelling is the likelier contradiction. The
+   * first version of this gate grouped keys and could not see it.
+   */
   const groups = new Map();
-  for (const k of keys) {
-    const parent = [...groups.keys()].find((g) => k.startsWith(g) || g.startsWith(k));
-    if (parent) groups.get(parent).push(k);
-    else groups.set(k, [k]);
+  for (const row of [...rows].sort((a, b) => String(a.commit).length - String(b.commit).length)) {
+    const k = String(row.commit).trim().toLowerCase();
+    const head = [...groups.keys()].find((g) => k.startsWith(g) || g.startsWith(k));
+    if (head) groups.get(head).push(row);
+    else groups.set(k, [row]);
   }
 
   const unresolved = [];
   for (const [head, members] of groups) {
     if (members.length < 2) continue;
-    const live = members.map((k) => audited.get(k)).filter((r) => !r.superseded_by);
+    const live = members.filter((r) => !r.superseded_by);
     const counts = new Set(live.map((r) => r.found).filter((f) => f !== undefined));
     if (counts.size > 1) {
-      unresolved.push(`${head}: ${members.join(', ')} -- live counts ${[...counts].join(' vs ')}`);
+      unresolved.push(`${head}: ${members.map((r) => r.commit).join(', ')} -- live counts ${[...counts].join(' vs ')}`);
     }
   }
 

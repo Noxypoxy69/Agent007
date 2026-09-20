@@ -77,6 +77,7 @@ export function isAuditBearing(rel) {
  */
 export function parseLedger(text) {
   const audited = new Map();
+  const rows = [];
   const malformed = [];
   const lines = String(text ?? '').split('\n');
 
@@ -98,9 +99,27 @@ export function parseLedger(text) {
       malformed.push({ line: i + 1, text: line.slice(0, 80) });
       continue;
     }
+    /*
+     * EVERY ROW IS KEPT, and the Map is no longer the record.
+     *
+     * `audited.set(key, row)` silently DISCARDS an earlier row with the same
+     * spelling. Two audits of one commit written the same way -- which is
+     * the house style, all 69 rows are 7-char shas -- collapsed to whichever
+     * came last, so the contradiction was invisible to standingAudit and to
+     * the gate that exists to find contradictions. MEASURED:
+     *
+     *     a then b   map size 1   standing found:8
+     *     b then a   map size 1   standing found:0
+     *
+     * In the second ordering the OLDER audit stands over the newer one and
+     * the newest-`at` rule never runs, because only one row survived to be
+     * compared. The Map stays for the callers that want one row per commit;
+     * `rows` is the actual record.
+     */
+    rows.push(row);
     audited.set(row.commit.trim().toLowerCase(), row);
   }
-  return { audited, malformed };
+  return { audited, rows, malformed };
 }
 
 /**
@@ -113,7 +132,8 @@ export function parseLedger(text) {
  * of prior work".
  */
 export function auditCoverage({ repoRoot, range, ledgerText }) {
-  const { audited, malformed } = parseLedger(ledgerText);
+  const ledger = parseLedger(ledgerText);
+  const { malformed } = ledger;
 
   /*
    * ONE git CALL, NOT ONE PER COMMIT.
@@ -218,7 +238,7 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
     }
 
     const key = sha.trim().toLowerCase();
-    const entry = standingAudit(audited, key);
+    const entry = standingAudit(ledger, key);
     commits.push({
       sha,
       subject: subject ?? '',
@@ -254,10 +274,22 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
  * they were not before: "d81e964" and "d81e9643" produced two separate map
  * entries, so a reader looking for a contradiction would not even see one.
  */
-export function standingAudit(audited, key) {
-  const matches = [...audited.entries()]
-    .filter(([k]) => k === key || (k.length >= 7 && key.startsWith(k)))
-    .map(([, row]) => row);
+export function standingAudit(ledger, key) {
+  /*
+   * A PARSE RESULT OR A BARE MAP. The Map form loses same-spelling
+   * duplicates before this function is reached, which is the defect an
+   * auditor found in the first version of this rule, so the parse result is
+   * the right thing to pass and the Map is accepted only for callers that
+   * still hold one.
+   */
+  const all = Array.isArray(ledger?.rows)
+    ? ledger.rows
+    : (ledger instanceof Map ? [...ledger.values()] : []);
+
+  const matches = all.filter((row) => {
+    const k = String(row?.commit ?? '').trim().toLowerCase();
+    return k !== '' && (k === key || (k.length >= 7 && key.startsWith(k)));
+  });
   if (matches.length === 0) return null;
 
   const standing = matches.filter((r) => !r.superseded_by);
