@@ -1674,16 +1674,55 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * off. The version before THAT scanned only after the --, which is
      * exactly backwards and is the hole 1f29e438 was written to close.
      */
+    /*
+     * SHORT AND LONG ARE SEPARATE SETS, AND CONFLATING THEM WAS AN
+     * ARBITRARY-EXECUTION HOLE I SHIPPED FOR ABOUT A MINUTE.
+     *
+     * Widening the inert list to close an outage, I added 'p' for
+     * `npm ls -p`. The name extractor reads /^--?([^=]*)/, so it cannot
+     * tell -p from --p -- and npm EXPANDS unambiguous long abbreviations,
+     * so --p is --prefix. `npm test --p C:/anywhere` went ALLOW: the
+     * original escape, reopened by the fix for an over-block.
+     *
+     * The existing abbreviation test caught it on the first run. That test
+     * exists because --prefi got through once before, and it is the only
+     * reason this is a paragraph rather than a hole.
+     *
+     * So a one-letter name is inert only behind a single dash, where npm
+     * treats it as a short flag and does no expansion. Behind two dashes it
+     * is an abbreviation of something, and what it abbreviates is not this
+     * file's business to guess.
+     */
+    const NPM_INERT_SHORT = new Set(['s', 'p']);
     const NPM_INERT = new Set([
       /* Output volume and formatting. None of these decide what runs. */
-      's', 'silent', 'quiet', 'loglevel', 'json', 'long', 'parseable',
+      'silent', 'quiet', 'loglevel', 'json', 'long', 'parseable',
       'color', 'no-color', 'progress', 'no-progress',
       /* Network and registry behaviour for install-type commands. */
       'prefer-offline', 'prefer-online', 'offline',
       'audit', 'no-audit', 'fund', 'no-fund',
-      /* Ordinary install shaping. */
+      /* Ordinary install shaping. None of these redirect execution. */
       'production', 'no-save', 'save', 'save-dev', 'save-exact',
       'dry-run', 'no-package-lock', 'legacy-peer-deps',
+      'omit', 'include', 'package-lock-only', 'if-present',
+      /*
+       * --ignore-scripts IS THE SHARPEST ENTRY HERE, and leaving it out was
+       * the worst thing the inversion did. An auditor measured it:
+       *
+       *     npm install                    ALLOW
+       *     npm install --ignore-scripts   DENY      <- the SAFER spelling
+       *
+       * The rail refused the flag that turns postinstall OFF while
+       * permitting the command that runs it. A control that makes the
+       * hardened spelling harder than the unhardened one does not merely
+       * inconvenience a caller, it teaches them the wrong habit -- and it
+       * is the exact inversion this file's git half was written to fix,
+       * where the mandated spelling was refused and every sweep allowed.
+       */
+      'ignore-scripts',
+      /* Listing and output shaping. */
+      'depth', 'all', 'foreground-scripts',
+      'update-notifier', 'no-update-notifier',
     ]);
 
     /* npm's own flags stop at a bare --; the rest are the script's. */
@@ -1696,8 +1735,9 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
 
     const npmRedirect = npmOwnTokens.find((t) => {
       if (!t.startsWith('-') || t === '-') return false;
+      const long = t.startsWith('--');
       const name = (/^--?([^=]*)/.exec(t)?.[1] ?? '').toLowerCase();
-      return !NPM_INERT.has(name);
+      return long ? !NPM_INERT.has(name) : !NPM_INERT_SHORT.has(name);
     });
     if (npmRedirect) {
       return {

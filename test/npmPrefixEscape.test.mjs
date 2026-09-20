@@ -230,3 +230,88 @@ test('THE LIST IS INVERTED, so a redirect nobody enumerated is still refused', (
   assert.equal(allowed('npm test --silent'), true,
     'and the exact spelling must work, or the rule is just a refusal');
 });
+
+test('THE HARDENING FLAG IS NEVER HARDER TO WRITE THAN THE UNHARDENED COMMAND', () => {
+  /*
+   * THE WORST THING THE INVERSION DID, and an auditor measured it:
+   *
+   *     npm install                    ALLOW
+   *     npm install --ignore-scripts   DENY      <- the SAFER spelling
+   *
+   * The rail refused the flag that turns postinstall off while permitting
+   * the command that runs it. That is not an inconvenience, it is a control
+   * teaching the wrong habit -- and it is the same inversion this rail's git
+   * half was written to fix, where the mandated spelling was refused and
+   * every sweep allowed.
+   *
+   * Stated as a PROPERTY rather than a row, because the row would only ever
+   * have caught the one flag: adding a safety flag to a permitted command
+   * must never turn an ALLOW into a DENY.
+   */
+  const SAFETY_FLAGS = ['--ignore-scripts', '--dry-run', '--no-save'];
+  const BASE = ['npm install', 'npm ci', 'npm test', 'npm run build'];
+
+  for (const base of BASE) {
+    if (!allowed(base)) continue;                 // only meaningful where the base passes
+    for (const flag of SAFETY_FLAGS) {
+      assert.equal(allowed(`${base} ${flag}`), true,
+        `"${base}" is permitted but "${base} ${flag}" is refused -- the rail is pushing `
+        + 'callers toward the less safe spelling');
+    }
+  }
+});
+
+test('AND THE INERT FLAGS THE INVERSION SWEPT UP ARE BACK', () => {
+  /*
+   * Inverting a denylist trades one error for its mirror: the old list was
+   * wrong about what is dangerous, the new one was wrong about what is safe.
+   * Rule 19, both directions on one surface. Each of these was measured
+   * DENY after the inversion and reaches neither execution nor config.
+   */
+  for (const cmd of [
+    'npm ls --depth=0', 'npm ls --all', 'npm ls -p',
+    'npm run build --if-present',
+    'npm ci --omit=dev', 'npm install --include=dev',
+    'npm ci --package-lock-only', 'npm test --foreground-scripts',
+    'npm ci --no-update-notifier',
+  ]) {
+    assert.equal(allowed(cmd), true, `an inert flag is refused, which is an outage: ${cmd}`);
+  }
+
+  /* And the inversion's whole point still holds in the other direction. */
+  for (const cmd of [
+    'npm test --node-options=--require=C:/x/evil.js',
+    'npm test --silent --node-options=--require=C:/x/evil.js',
+    'npm test --script-shell C:/x/evil.exe',
+    'npm test --cache C:/x/poisoned',
+  ]) {
+    assert.equal(allowed(cmd), false, `a flag that can reach execution was allowed: ${cmd}`);
+  }
+});
+
+test('A ONE-LETTER NAME IS INERT BEHIND ONE DASH ONLY, BECAUSE npm EXPANDS LONG ONES', () => {
+  /*
+   * I REOPENED THE ORIGINAL ESCAPE WHILE FIXING AN OVER-BLOCK. Widening the
+   * inert list, I added 'p' so that npm ls -p would work again. The name
+   * extractor reads /^--?([^=]*)/ and cannot tell -p from --p, and npm
+   * expands unambiguous long abbreviations, so --p IS --prefix:
+   *
+   *     npm test --p C:/anywhere     ALLOW      <- arbitrary execution, again
+   *
+   * The abbreviation test caught it on the first run after the change, which
+   * is the only reason this is a test and not an incident. That test exists
+   * because --prefi got through once before.
+   *
+   * Short and long are separate sets now, and this pins that they stay
+   * separate: behind one dash npm does no expansion, behind two it does.
+   */
+  for (const cmd of ['npm test --p C:/anywhere', 'npm test --s C:/x']) {
+    assert.equal(allowed(cmd), false,
+      `${cmd} was allowed -- a one-letter LONG flag is an abbreviation npm expands, and `
+      + 'what it expands to is not this rail to guess');
+  }
+  for (const cmd of ['npm ls -p', 'npm test -s']) {
+    assert.equal(allowed(cmd), true,
+      `${cmd} was refused -- behind a single dash npm does no expansion`);
+  }
+});
