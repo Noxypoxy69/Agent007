@@ -591,6 +591,41 @@ test('THE STEP COUNT IS PER ATTEMPT, not for the life of the process', async () 
     `the second attempt started higher than the first: t1=${JSON.stringify(t1)} t2=${JSON.stringify(t2)}`);
 });
 
+test('A ROTATED TASK COMING BACK GETS A FRESH STEP BUDGET', async () => {
+  /*
+   * THE ORDINARY CASE, AND THE ONE THE FIRST VERSION GOT WRONG. A rotated task
+   * returns to the pool and can be claimed by the same worker at a higher
+   * attempt. When the reset keyed on task_id alone the id matched, the counter
+   * was not reset, and the successor inherited its predecessor's step count --
+   * so it re-rotated within a few cycles and burned the rotation budget on
+   * work nobody had actually done yet.
+   *
+   * Two different task IDS cannot catch this; it needs the SAME id at a
+   * different attempt.
+   */
+  const seen = [];
+  let delivered = 0;
+  const { deps } = world({
+    waitForEvents: async () => {
+      delivered += 1;
+      return delivered > 2 ? [] : [{ kind: 'assigned', task_id: 't1', lease_token: 'tok-1', at: iso(NOW0) }];
+    },
+    /* Same task, second time round at attempt 1 -- exactly what a rotation produces. */
+    readTask: async () => ({ ...TASK, attempt: delivered - 1 }),
+    observe: async (w, base) => { seen.push([w.task.attempt ?? 0, base.steps]); return {}; },
+  });
+  await run(deps, 30);
+
+  const first = seen.filter(([a]) => a === 0).map(([, s]) => s);
+  const second = seen.filter(([a]) => a === 1).map(([, s]) => s);
+
+  assert.ok(first.length > 0, `attempt 0 was never observed: ${JSON.stringify(seen)}`);
+  assert.ok(second.length > 0,
+    `the task never came back at a second attempt, so this cannot distinguish anything: ${JSON.stringify(seen)}`);
+  assert.equal(second[0], 0,
+    `the re-claimed attempt inherited ${second[0]} steps from the attempt that was rotated away`);
+});
+
 test('AN UNMONITORED WORKER IS NOT STALLED, and the bar says it measured nothing', async () => {
   /*
    * Today's production shape: no `observe` dep at all. The bar must not refuse
