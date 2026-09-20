@@ -216,7 +216,19 @@ export function parseLedger(text) {
      * ignored: silence would let a typo read as "the owner waived nothing"
      * while looking like a waiver to a human reading the file.
      */
-    if (row && row.type === WAIVER_TYPE) {
+    /*
+     * TYPE MATCHED CASE-INSENSITIVELY, so a mis-spelled waiver is REFUSED
+     * rather than silently promoted.
+     *
+     * Blind audit D13. `row.type === WAIVER_TYPE` is exact, so a human writing
+     * "Owner_Bootstrap_Waiver" fell through to the audit branch and -- because
+     * a hand-written waiver naturally carries `commit` and `auditor` -- was
+     * filed as a CLEAN AUDIT. This whole feature exists because a human
+     * hand-wrote waiver rows that the parser did not recognise. The new shape
+     * had the same brittleness one field over, and it failed in the dangerous
+     * direction: not "waiver ignored" but "waiver becomes a clearance".
+     */
+    if (row && typeof row.type === 'string' && row.type.trim().toLowerCase() === WAIVER_TYPE) {
       const shas = waiverShas(row);
       if (shas === null) {
         malformed.push({ line: i + 1, text: line.slice(0, 80) });
@@ -274,10 +286,42 @@ export function parseLedger(text) {
      * mean one thing and neither can be mistaken for a review.
      */
     if (row.owner_waiver === true) {
-      waived.add(row.commit.trim().toLowerCase());
+      /*
+       * THE SAME VALIDATION AS THE TYPED FORM. Blind audit D1, HIGH, and it
+       * was mine: this branch originally honoured the row after checking only
+       * that `commit` was a non-empty string.
+       *
+       * `isWaived` prefix-matches in BOTH directions, so `{"commit":"a"}`
+       * waived every sha beginning with "a" -- about a sixteenth of history
+       * per row, forward as well as backward, and sixteen such lines waive
+       * everything permanently. Meanwhile the typed branch forty lines up
+       * refuses `grants_audit_pass: true` as "a hole with a polite name on
+       * it", which was decoration while the same field was accepted here.
+       *
+       * The module header claimed "no waiver can ever widen to cover a commit
+       * written after it" on the strength of `waiverShas`. That was true of
+       * the branch it described and false of this one. Both go through the
+       * same rules now, which is the only way the two stay honest together.
+       */
+      const c = row.commit.trim().toLowerCase();
+      const upgraded = (row.grants_audit_pass !== undefined && row.grants_audit_pass !== false)
+        || (row.audit_performed !== undefined && row.audit_performed !== false);
+      if (!SHA_ONLY.test(c) || upgraded) {
+        malformed.push({ line: i + 1, text: line.slice(0, 80) });
+        continue;
+      }
+      waived.add(c);
       waivers.push({
         type: 'owner_waiver_row',
-        commits: [row.commit.trim().toLowerCase()],
+        commits: [c],
+        /*
+         * STILL CONSTRUCTED, and D2 is why that is now safe: a row carrying
+         * either field as anything but false is malformed above and never
+         * reaches here, so these constants can no longer paper over a row
+         * that said otherwise. The on-disk assertion that reads them is
+         * therefore checking a real discrimination rather than the parser
+         * agreeing with itself.
+         */
         audit_performed: false,
         grants_audit_pass: false,
         reason: typeof row.note === 'string' ? row.note : 'owner waiver row',

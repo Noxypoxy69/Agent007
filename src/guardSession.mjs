@@ -206,6 +206,9 @@ export const PROTECTED_PATHS = Object.freeze([
    * bypass. Kept in step with src/policy.mjs. */
   'templates/hooks/post-commit',
   'scripts/verify-hook-integrity.mjs',
+  /* Selects which seat audits which candidate; see policy.mjs for why this
+   * was missing and why that is the recurring defect rather than a one-off. */
+  'src/auditDispatch.mjs',
   /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing

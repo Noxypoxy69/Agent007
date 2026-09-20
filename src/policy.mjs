@@ -134,6 +134,16 @@ export const PROTECTED_PATHS = Object.freeze([
   'templates/hooks/post-commit',
   'scripts/verify-hook-integrity.mjs',
   /*
+   * THE MODULE THAT DECIDES WHO AUDITS WHAT. Blind audit D3, HIGH, and the
+   * finding is that I reproduced a documented defect forty lines below the
+   * paragraph documenting it: AUDIT_BEARING_EXTRAS already records that
+   * src/principalResolution.mjs was "the most authority-bearing file written
+   * that day" and invisible to the audit gate. auditDispatch.mjs enforces the
+   * author exclusion at selection; unregistered, a pushed unaudited change to
+   * it never stops a turn.
+   */
+  'src/auditDispatch.mjs',
+  /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing
    * a change to"; the converse was missing. src/governor.mjs is wired at
