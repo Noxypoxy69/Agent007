@@ -109,13 +109,34 @@ test('AN UNAVAILABLE READING NEVER OVERWRITES A MEASURED ONE, in either order', 
     'stored unavailable + computed known did not adopt the author');
 });
 
-test('A MEASURED ABSENCE DOES NOT RESURRECT A STALE AUTHOR', () => {
+test('A POSITIVE FINDING OUTRANKS A LATER EMPTY ONE, because the commit is immutable', () => {
   /*
-   * The other direction, and the one that would make this a laundering
-   * mechanism if it were wrong: if a resolver LOOKS and finds no trailer, the
-   * honest record is "no author", and a previously-stored value must not
-   * silently persist as though it had been re-confirmed. Only `unavailable`
-   * defers to what is already known.
+   * ═══ I ASSERTED THE OPPOSITE HERE FIRST, AND IT WAS WRONG ═══
+   *
+   * The original version of this test demanded that a resolver finding no
+   * trailer must OVERWRITE a stored author, on the reasoning that otherwise a
+   * stale value persists and the mechanism launders rather than repairs.
+   *
+   * That reasoning does not survive the fact it ignored: A COMMIT MESSAGE IS
+   * IMMUTABLE. For one sha, `trailer` and `null` are two readings of the same
+   * unchanging input, so they cannot both be right -- and there is no "later,
+   * truer" reading to prefer. The question is only which is more likely to be
+   * the error.
+   *
+   * A false NEGATIVE is easy: git returns a partial body under memory
+   * pressure, the call is truncated, the message is re-read through a
+   * different path. A false POSITIVE requires the regex to invent a string
+   * matching `session_[A-Za-z0-9]+` out of a message that has none. The
+   * positive finding is the more trustworthy of the two, so it wins.
+   *
+   * "Stale" was never a real hazard for immutable input, and the laundering
+   * risk I wrote this test to prevent cannot occur: the only way the author of
+   * sha X legitimately changes is a rewrite, which produces a different sha
+   * and therefore a different audit_id and a different job.
+   *
+   * The genuine hazard is the opposite one, which the strength ordering now
+   * covers: a WEAKER reader overwriting a STRONGER record. See the
+   * authoritative case in test/authorResolverFailure.test.mjs.
    */
   const stored = mergeQueue([], withResolver(), { now: 't' }).queue;
   const measuredAbsent = auditJobsFor(coverage(), {
@@ -123,7 +144,26 @@ test('A MEASURED ABSENCE DOES NOT RESURRECT A STALE AUTHOR', () => {
   }).jobs;
 
   const after = mergeQueue(stored, measuredAbsent, { now: 't' }).queue;
-  assert.equal(after[0].author_session, null,
-    'a resolver that positively found no trailer was overridden by a stale stored value');
-  assert.equal(after[0].author_source, null);
+  assert.equal(after[0].author_session, AUTHOR,
+    'an empty re-read discarded a trailer that was positively found earlier, for a '
+    + 'commit whose message cannot have changed');
+  assert.equal(after[0].author_source, 'trailer');
+});
+
+test('BUT AN EQUAL-STRENGTH RE-READ DOES WIN, so a real correction can land', () => {
+  /*
+   * The ordering must not freeze the first answer for ever. Two readings at
+   * the SAME strength are both measurements, and the fresher one is the
+   * queue's current view -- otherwise a corrected resolver could never
+   * replace a wrong value and this becomes a different kind of trap.
+   */
+  const stored = mergeQueue([], withResolver(), { now: 't' }).queue;
+  const corrected = auditJobsFor(coverage(), {
+    treeShaFor: () => TREE, authorSessionFor: () => 'session_01CORRECTED', now: 't',
+  }).jobs;
+
+  const after = mergeQueue(stored, corrected, { now: 't' }).queue;
+  assert.equal(after[0].author_session, 'session_01CORRECTED',
+    'a same-strength re-read could not correct an earlier value, so the first answer '
+    + 'is frozen permanently');
 });

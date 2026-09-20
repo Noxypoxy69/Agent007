@@ -92,19 +92,29 @@ test('D-A: AND A FAILED LOOKUP MUST NOT ERASE A KNOWN AUTHOR', () => {
   }
 });
 
-test('D-A: a resolver that LOOKED and found nothing still records absence', () => {
+test('D-A: a resolver that LOOKED and found nothing records absence, not failure', () => {
   /*
-   * THE POSITIVE BESIDE THE NEGATIVES (rule 5). If every unhappy path became
-   * 'unavailable', a commit genuinely lacking a trailer would defer to a
-   * stale value for ever and this would launder rather than repair.
+   * THE POSITIVE BESIDE THE NEGATIVES (rule 5). If every unhappy path
+   * collapsed to 'unavailable', the distinction the whole fix exists for
+   * would be gone in the other direction -- a commit genuinely lacking a
+   * trailer would be indistinguishable from one nobody could read.
+   *
+   * Only the RECORDED STATE is asserted here. What the merge then does with
+   * it is a separate question, settled by strength ordering in
+   * test/authorIdentitySurvivesMerge.test.mjs: a positive finding outranks a
+   * later empty one, because the commit message is immutable and a false
+   * negative is far likelier than a fabricated session id.
    */
   const job = build(() => null)[0];
   assert.equal(job.author_source, null, 'a real absence was upgraded to unavailable');
+  assert.equal(job.author_session, null);
 
-  const stored = mergeQueue([], build(() => AUTHOR), { now: 't' }).queue;
+  /* and it still outranks "nobody looked", which is the point of the state. */
+  const stored = mergeQueue([], build(() => AUTHOR_UNAVAILABLE), { now: 't' }).queue;
   const after = mergeQueue(stored, build(() => null), { now: 't' }).queue;
-  assert.equal(after[0].author_session, null,
-    'a measured absence was overridden by a stale stored author');
+  assert.equal(after[0].author_source, null,
+    'a measured absence failed to replace an unavailable one, so nobody-looked is '
+    + 'being treated as at least as good as somebody-looked');
 });
 
 test('D-B: independenceOf KNOWS THE THIRD STATE, and grades it weakest', () => {
