@@ -438,8 +438,41 @@ test('A MERGE CARRYING A SUBJECT AND ITS TEST IS NOT SKIPPED', (t) => {
    * the merge before it could reach the fixed call site at all.
    */
   const out = runAuto(env, `${merge}^..${merge}`);
-  assert.doesNotMatch(out, /SKIP/,
-    `the merge carried src/merged.mjs and its test, and the tool saw neither.\n${out}`);
-  assert.match(out, /merged\.test\.mjs/,
-    `the test the merge carried must be named.\n${out}`);
+
+  /*
+   * THE ASSERTION IS SCOPED TO THE MERGE'S OWN LINE, and the version that
+   * was not is the reason this note exists.
+   *
+   * `merge^..merge` is "reachable from merge, not from its first parent",
+   * which is the merge AND the side commit. The side commit touches
+   * src/merged.mjs and test/merged.test.mjs itself, so a whole-output
+   * `match(/merged.test.mjs/)` was satisfied by the SIDE commit whatever
+   * the tool did with the merge -- and `doesNotMatch(out, /SKIP/)` is a
+   * total over two commits rather than a claim about either.
+   *
+   * That is rule 14: score the named assertion, not the total. The range
+   * still has to contain the side commit, because the point of range mode
+   * is that --no-merges used to drop the merge out of a range that had
+   * other commits in it. So the range stays and the assertion narrows.
+   */
+  const mergeShort = merge.slice(0, 7);
+  const line = out.split('\n').find((l) => l.startsWith(mergeShort));
+
+  assert.ok(line,
+    `the merge ${mergeShort} produced no line at all -- in range mode --no-merges `
+    + `dropped it silently, which is worse than SKIP.\n${out}`);
+  assert.doesNotMatch(line, /SKIP/,
+    `the merge carried src/merged.mjs and its test, and the tool saw neither.\n${line}\n\n${out}`);
+  assert.match(line, /merged\.test\.mjs/,
+    `the merge's own line must name the test it carried.\n${line}\n\n${out}`);
+
+  /*
+   * AND THE SIDE COMMIT IS STILL THERE, so a future change that fixes the
+   * merge by dropping everything else from the range turns this red rather
+   * than green.
+   */
+  const side = execFileSync('git', ['rev-parse', `${merge}^2`], { cwd: env.root, encoding: 'utf8' }).trim();
+  assert.ok(out.split('\n').some((l) => l.startsWith(side.slice(0, 7))),
+    `the side commit vanished from the range, so this fixture no longer reproduces `
+    + `the shape the merge defect lived in.\n${out}`);
 });
