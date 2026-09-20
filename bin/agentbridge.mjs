@@ -158,6 +158,12 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
   agentbridge workers [--registry-file <f>] [--json]
                                         the worker pool: agents, their live
                                         sessions, where each is, and capacity
+  agentbridge govern <action> [--actor <id>] [--json]
+                                        who has to decide this act. Read-only;
+                                        exits 1 when it is not yours to do.
+                                        Reports UNANCHORED while no owner
+                                        anchor exists, and there is no flag to
+                                        pretend otherwise
   agentbridge grant-path [--repo <dir>] [--json]
                                         where the guard looks for an override
                                         grant for this repository, and whether
@@ -3918,6 +3924,52 @@ try {
     }
     console.log(`recorded in ${store}`);
     process.exit(0);
+  }
+
+  if (cmd === 'govern') {
+    /*
+     * WHO HAS TO DECIDE THIS? READ-ONLY, AND IT DECIDES NOTHING ITSELF.
+     *
+     * The governor is deliberately wired here first and nowhere else. Making
+     * the fourteen existing owner-authority modules defer to it is a change
+     * to the action-authority surface, which is the one CLAUDE.md names as
+     * needing a separate auditor -- and every hole found on it on 2026-09-18
+     * was in a FIX for that same surface, twice. So this ships the answer
+     * without yet moving any control's behaviour.
+     *
+     * It is also the honest place to see the current state: with no anchor,
+     * every owner-only act reports REQUIRES_OWNER and says why, rather than
+     * an env var quietly reporting `enforced`.
+     */
+    const { govern, anchorState, isOwnerOnly } = await import('../src/governor.mjs');
+    const action = args.action ? String(args.action) : String(args._?.[1] ?? '');
+    const actor = args.actor ? String(args.actor) : null;
+
+    /*
+     * NO --proof FLAG, AND ITS ABSENCE IS THE POINT. A proof this command
+     * could accept from its own arguments would be a proof the caller typed,
+     * which is precisely the AGENTBRIDGE_PRINCIPAL_ID hole an auditor found.
+     * Until an anchor exists that agents cannot produce, this reports
+     * UNANCHORED and there is no flag to pretend otherwise.
+     */
+    const anchor = anchorState(null);
+    const r = govern({ action, actor }, {});
+
+    if (args.json) {
+      console.log(JSON.stringify({ action, actor, ownerOnly: isOwnerOnly(action), anchor, verdict: r }, null, 2));
+    } else {
+      console.log(`action      : ${action || '(none given)'}`);
+      console.log(`owner-only  : ${isOwnerOnly(action) ? 'yes' : 'no'}`);
+      console.log(`anchor      : ${anchor.state} — ${anchor.why}`);
+      console.log(`verdict     : ${r.verdict}`);
+      console.log(`why         : ${r.why}`);
+    }
+    /*
+     * EXIT 1 WHEN IT IS NOT THE CALLER'S TO DO. A diagnostic that always
+     * exits 0 is one a script cannot branch on, and this is meant to be
+     * checked before acting rather than read afterwards.
+     */
+    process.exit(r.verdict === 'allow' ? 0 : 1);
   }
 
   if (cmd === 'grant-path') {
