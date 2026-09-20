@@ -156,8 +156,22 @@ test('WORKTREE SCOPE WINS, because it overrides all three others', () => {
    * worktree is exactly where this daemon runs its reviewers, so the blind
    * spot H3 exists to close was still open in the likeliest place.
    */
+  /*
+   * THE FIXTURE ANSWERS THE SAME QUESTION PRODUCTION ASKS, and the first
+   * version of this test did not -- which is seventh-lap finding D3b in
+   * miniature. The injected reader used to be handed only hooksPath scopes,
+   * so the scope LIST was chosen by a branch no fixture could enter. When
+   * the list became conditional on `extensions.worktreeConfig`, this test
+   * went on exercising a path production reaches only when that extension
+   * is on, and would have kept passing while the real one skipped
+   * `--worktree` entirely.
+   *
+   * So the reader now fields the extensions probe too. A fixture that
+   * cannot be asked what production asks is not a fixture of production.
+   */
   const r = verifyHookIntegrity({
     readConfig: (scope) => {
+      if (scope === '--bool-extensions-worktreeConfig') return 'true';
       if (scope === '--worktree') return '/tmp/wt-hooks';
       if (scope === '--local') return '/tmp/local-hooks';
       const e = new Error('not set'); e.status = 1; throw e;
@@ -166,6 +180,22 @@ test('WORKTREE SCOPE WINS, because it overrides all three others', () => {
   assert.equal(r.code, 'E_HOOKS_PATH_REDIRECTED');
   assert.equal(r.redirect.scope, 'worktree',
     'a per-worktree override was masked by the local one, which git ignores');
+
+  /*
+   * AND WITH THE EXTENSION OFF, git ignores config.worktree -- so the local
+   * value is the effective one and reporting `worktree` would be a lie.
+   * This is the half the conditional scope list exists for.
+   */
+  const off = verifyHookIntegrity({
+    readConfig: (scope) => {
+      if (scope === '--bool-extensions-worktreeConfig') return 'false';
+      if (scope === '--worktree') return '/tmp/wt-hooks';
+      if (scope === '--local') return '/tmp/local-hooks';
+      const e = new Error('not set'); e.status = 1; throw e;
+    },
+  });
+  assert.equal(off.redirect.scope, 'local',
+    'a per-worktree value was reported as effective while git was ignoring it');
 });
 
 test('AN UNREADABLE CONFIG IS UNKNOWN, NOT CLEAN', () => {
