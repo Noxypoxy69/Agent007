@@ -559,3 +559,69 @@ test('THE SHIPPED LEDGER HAS NO UNRESOLVED CONTRADICTION', async () => {
     'a commit has two live audits that disagree, and nothing says which one stands:\n  '
     + unresolved.join('\n  '));
 });
+
+test('AN EQUAL TIMESTAMP IS THE NORMAL CASE, AND THE LAST LINE WINS (A-1)', () => {
+  /*
+   * MEASURED ON THE SHIPPED LEDGER by an auditor: 69 rows, 18 distinct `at`
+   * values, 64 of the 69 sharing theirs with another row, largest batch 15 --
+   * because passes are transcribed in batches under one minute-rounded
+   * timestamp. So a tie is the convention, not an edge case.
+   *
+   * The previous rule compared with a strict `>`, which kept whichever row
+   * the FILE listed first. That made "does not depend on the order of the
+   * file" false in exactly the shape the ledger produces -- the same defect
+   * as the duplicate-spelling one it had just replaced, one field along.
+   *
+   * The ledger is append-only, so the LAST line is the later record and wins.
+   * Asserted in both orderings: the answer must be the same row either way,
+   * and it must be the one written second.
+   */
+  const first = JSON.stringify({"commit":"abc1234","auditor":"batch row written first","at":"2026-09-20T02:10:00Z","found":0});
+  const second = JSON.stringify({"commit":"abc1234","auditor":"batch row written second","at":"2026-09-20T02:10:00Z","found":8});
+  const key = 'abc123456789abcdef0123456789abcdef012345';
+
+  assert.equal(standingAudit(parseLedger(`${first}\n${second}`), key)?.found, 8,
+    'the row written second must stand');
+  assert.equal(standingAudit(parseLedger(`${second}\n${first}`), key)?.found, 0,
+    'and reversing the file must give the row written second there -- the rule is '
+    + '"last line", which is deterministic, not "whichever came first", which is not');
+});
+
+test('AND THE TIMESTAMP IS COMPARED AS A TIME, NOT AS A STRING (A-3)', () => {
+  /*
+   * Lexicographic order is wrong across offsets. "2026-02-01T09:00:00+09:00"
+   * is midnight UTC and sorts ABOVE "2026-02-01T05:00:00Z", which is five
+   * hours genuinely later. Every shipped row is Z at second resolution, so
+   * this was latent -- and latent is not fixed.
+   */
+  const early = JSON.stringify({"commit":"def1234","auditor":"tokyo morning","at":"2026-02-01T09:00:00+09:00","found":0});
+  const later = JSON.stringify({"commit":"def1234","auditor":"five hours later","at":"2026-02-01T05:00:00Z","found":7});
+  const key = 'def1234abcdef0123456789abcdef0123456789a';
+
+  for (const text of [`${early}\n${later}`, `${later}\n${early}`]) {
+    assert.equal(standingAudit(parseLedger(text), key)?.found, 7,
+      'the genuinely later audit must stand regardless of how its offset is spelled');
+  }
+
+  /* An undated row still loses to a dated one, as it did before. */
+  const undated = JSON.stringify({"commit":"def1234","auditor":"no timestamp","found":3});
+  assert.equal(standingAudit(parseLedger(`${undated}\n${later}`), key)?.found, 7,
+    'a dated audit must beat an undated one');
+});
+
+test('A BARE MAP IS REFUSED RATHER THAN QUIETLY MISREAD (A-2)', () => {
+  /*
+   * standingAudit used to accept `parseLedger(t).audited` "for callers that
+   * still hold one". There are none, so nothing exercised it -- and a caller
+   * writing the obvious destructure would have got back the lossy
+   * one-row-per-spelling behaviour this function exists to fix, silently.
+   * An unexercised compatibility branch that reintroduces the bug is worse
+   * than no branch, so it now throws.
+   */
+  const parsed = parseLedger(JSON.stringify({"commit":"abc1234","auditor":"x","at":"2026-01-01T00:00:00Z","found":1}));
+  const key = 'abc123456789abcdef0123456789abcdef012345';
+
+  assert.ok(standingAudit(parsed, key), 'the parse result must still work');
+  assert.throws(() => standingAudit(parsed.audited, key), /not its \.audited Map/,
+    'passing the Map must fail loudly, not return a row derived from discarded data');
+});

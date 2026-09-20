@@ -22,6 +22,15 @@
  * The outage survived three commits because NOBODY RAN THE SUITE, including
  * me. This gate does not fix that and must not be read as fixing it.
  *
+ * TWO FIGURES I PUBLISHED WERE WRONG. b62e7fa's message reports the baseline
+ * as "6 pass / 0 fail" and both mutations as "5 pass / 1 fail", then closes
+ * with "7 tests in the file, 7 pass" -- contradicting itself two paragraphs
+ * apart. The tree shipped seven tests; measured, the baseline is 7 pass / 0
+ * fail and each mutation is 6 pass / 1 fail. The conclusions held and the
+ * numbers described a six-test tree that did not exist. A second auditor
+ * found it in the commit whose own section is headed "AND ONE PUBLISHED
+ * FIGURE WAS WRONG".
+ *
  * ONE FIGURE I PUBLISHED WAS WRONG, and an auditor could not reproduce it.
  * 64d0971's message reports the narrowed simulation as "5 pass / 1 fail".
  * That was a tree with the hooks and scripts REMOVED, which trips one
@@ -97,8 +106,33 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** The pair scripts/claude-stop-gate.mjs itself reads to find hooks. */
 const SETTINGS_FILES = ['settings.json', 'settings.local.json'];
 
-/** Where this repository keeps things meant to be run. */
-const EXECUTABLE_DIRS = ['bin', 'scripts'];
+/**
+ * Where this repository keeps things meant to be run.
+ *
+ * bridge/ AND mcp/ WERE ADDED AFTER AN AUDIT MEASURED WHAT bin/ + scripts/
+ * MISSED. `wrangler.toml` line 2 is `main = "bridge/oauthWorker.mjs"` and
+ * that file's own header calls it "THE PUBLIC FRONT DOOR" -- a SyntaxError in
+ * the worker `wrangler deploy` ships passed a gate whose test is named
+ * EVERYTHING THIS REPO EXECUTES PARSES. Six more were outside it:
+ * bridge/collisions.mjs, bridge/httpStore.mjs, bridge/oauth.mjs,
+ * bridge/store.mjs, mcp/toolDefs.mjs, mcp/tools.mjs.
+ *
+ * Fourth layer of one over-claim: 0712792 retracted a false root cause,
+ * 64d0971 corrected the list, b62e7fa widened it to two directories and said
+ * "everything", and the deployed worker was in neither.
+ */
+const EXECUTABLE_DIRS = ['bin', 'scripts', 'bridge', 'mcp'];
+
+/**
+ * Deploy manifests that name an entry point, read rather than assumed.
+ *
+ * The directory sweep already covers bridge/oauthWorker.mjs today. This is
+ * here for the day `main` points somewhere else: a deploy entry is executed
+ * by definition, and the manifest is the only place that says which file it
+ * is. Sweeping a directory and reading the manifest fail in different
+ * directions, which is the point of having both.
+ */
+const DEPLOY_MANIFESTS = [['wrangler.toml', /^\s*main\s*=\s*["']([^"']+)["']/m]];
 
 /**
  * `node --check` on one file: parses, or the reason it does not.
@@ -219,6 +253,15 @@ function executed(root, declared) {
    * derivation, and every .mjs sitting in bin/ or scripts/ is there to be
    * run by something even when no config names it today.
    */
+  for (const [file, pattern] of DEPLOY_MANIFESTS) {
+    const abs = path.join(root, file);
+    if (!existsSync(abs)) continue;
+    const named = pattern.exec(readFileSync(abs, 'utf8'))?.[1];
+    if (named === undefined) continue;
+    if (!/\.mjs$/.test(named)) continue;       // a .ts worker is not ours to parse
+    add(named.replace(/\\/g, '/').replace(/^\.\//, ''), 'deploy manifest', file);
+  }
+
   for (const dir of EXECUTABLE_DIRS) {
     const abs = path.join(root, dir);
     if (!existsSync(abs)) continue;
@@ -297,7 +340,20 @@ test('THE HOOKS AND THE NPM SCRIPTS ARE ACTUALLY IN THE SET', () => {
     `these sit in an executable directory and are not checked:\n  ${unswept.join('\n  ')}`);
 
   /* The two named by the audit, so the regression has a face. */
-  for (const named of ['bin/agentbridge-deploy.mjs', 'scripts/check-deployed-instructions.mjs']) {
+  /*
+   * THE DEPLOYED WORKER, named because an audit had to find it. wrangler.toml
+   * says main = bridge/oauthWorker.mjs; a SyntaxError there ships.
+   */
+  const wrangler = readFileSync(path.join(REPO, 'wrangler.toml'), 'utf8');
+  const deployMain = /^\s*main\s*=\s*["']([^"']+)["']/m.exec(wrangler)?.[1];
+  assert.ok(deployMain, 'wrangler.toml declares no main -- if that is deliberate this note is stale');
+  if (/\.mjs$/.test(deployMain)) {
+    assert.ok(checked.has(deployMain.replace(/^\.\//, '')),
+      `wrangler deploy ships ${deployMain} and this gate does not check it`);
+  }
+
+  for (const named of ['bin/agentbridge-deploy.mjs', 'scripts/check-deployed-instructions.mjs',
+    'bridge/oauthWorker.mjs', 'mcp/tools.mjs']) {
     assert.ok(checked.has(named), `${named} is executed and documented, and is not covered`);
   }
 

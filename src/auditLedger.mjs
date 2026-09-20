@@ -282,9 +282,21 @@ export function standingAudit(ledger, key) {
    * the right thing to pass and the Map is accepted only for callers that
    * still hold one.
    */
-  const all = Array.isArray(ledger?.rows)
-    ? ledger.rows
-    : (ledger instanceof Map ? [...ledger.values()] : []);
+  /*
+   * A BARE MAP IS REFUSED, NOT QUIETLY ACCEPTED. The first version took one
+   * "for callers that still hold one" -- and there are none, so nothing
+   * exercised it, while a caller writing the obvious
+   * `const { audited } = parseLedger(t); standingAudit(audited, key)` would
+   * have got back exactly the lossy behaviour this function exists to fix,
+   * with no warning. An unexercised compatibility branch that reintroduces
+   * the bug is worse than no branch.
+   */
+  if (ledger instanceof Map) {
+    throw new TypeError('standingAudit needs the parseLedger result, not its .audited Map: '
+      + 'the Map holds one row per spelling and has already discarded the duplicate '
+      + 'this function exists to compare');
+  }
+  const all = Array.isArray(ledger?.rows) ? ledger.rows : [];
 
   const matches = all.filter((row) => {
     const k = String(row?.commit ?? '').trim().toLowerCase();
@@ -294,7 +306,38 @@ export function standingAudit(ledger, key) {
 
   const standing = matches.filter((r) => !r.superseded_by);
   const pool = standing.length > 0 ? standing : matches;
-  return pool.reduce((best, r) => (String(r.at ?? '') > String(best.at ?? '') ? r : best), pool[0]);
+
+  /*
+   * TIES ARE THE NORMAL CASE HERE, NOT AN EDGE CASE, and the first version
+   * of this rule broke on them. An audit measured the shipped ledger: 69
+   * rows, 18 distinct `at` values, and 64 of the 69 share theirs with
+   * another row -- because passes are transcribed in batches under one
+   * minute-rounded timestamp. The largest batch is 15 rows on one value.
+   *
+   * With a strict `>` a tie kept whichever row the FILE listed first, so
+   * "THE STANDING AUDIT DOES NOT DEPEND ON THE ORDER OF THE FILE" was false
+   * for the shape the convention actually produces -- the same mistake as
+   * the duplicate-spelling one it replaced, one field along.
+   *
+   * The ledger is append-only, so a later LINE is a later record. On a tie
+   * the LAST matching row wins, which is that fact stated rather than an
+   * accident of reduce. It is deterministic in both orderings because it
+   * does not depend on which came first, only on which came last.
+   *
+   * AND THE COMPARISON IS A TIMESTAMP, NOT A STRING. Lexicographic order is
+   * wrong across offsets: "2026-02-01T09:00:00+09:00" is 00:00Z and sorts
+   * ABOVE "2026-02-01T05:00:00Z", which is five hours genuinely later. Every
+   * shipped row is Z with second resolution so this was latent, and latent
+   * is not fixed. An unparseable or absent `at` sorts below every real one,
+   * which preserves the previous behaviour for undated rows.
+   */
+  const when = (row) => {
+    const t = Date.parse(row?.at ?? '');
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  let best = pool[0];
+  for (const row of pool) if (when(row) >= when(best)) best = row;
+  return best;
 }
 
 /**
