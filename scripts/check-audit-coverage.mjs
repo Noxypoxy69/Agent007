@@ -90,8 +90,44 @@ if (asJson) {
   const report = formatCoverage(result);
   const bearing = result.commits.length;
   const missing = result.commits.filter((c) => !c.audited).length;
+  /*
+   * ═══ SAY THAT THE RANGE IS A WINDOW, AND HOW MUCH IT LEAVES OUT ═══
+   *
+   * Measured 2026-09-21: the default is `HEAD~50..HEAD`, and I read
+   * "of those, unaudited: 2" as a statement about my work for several
+   * hours. My work was 94 commits. Over the real span the figure was 19.
+   * The number was never wrong; it answered a narrower question than the
+   * one I was asking, and nothing on screen said so.
+   *
+   * That is this repository's own primitive -- could-not-measure reported
+   * as measured-zero -- arriving in the REPORTING layer, where it is worse
+   * than in a test: a test that lies goes red eventually, and a status line
+   * that lies is believed and repeated. I repeated it.
+   *
+   * So the banner names the window, says how many commits lie OUTSIDE it,
+   * and tells the reader the one command that widens it. Deriving the
+   * outside-count rather than just warning, because "this may be a subset"
+   * is advice and "there are 44 commits you are not looking at" is a fact.
+   */
   console.log(`range: ${range}`);
-  console.log(`commits touching a control: ${bearing}`);
+  let outside = null;
+  try {
+    const { runGit } = await import('../src/safeGit.mjs');
+    const count = (rev) => Number(String(runGit(['-C', repoRoot, 'rev-list', '--count', rev], {
+      encoding: 'utf8',
+    })).trim());
+    const seen = count(range);
+    const all = count('HEAD');
+    if (Number.isFinite(seen) && Number.isFinite(all)) outside = all - seen;
+  } catch { outside = null; }
+
+  if (outside === null) {
+    console.log('       (could not tell how much history this window omits -- that is UNKNOWN, not zero)');
+  } else if (outside > 0) {
+    console.log(`       A WINDOW, NOT THE BRANCH: ${outside} older commit(s) are not examined.`);
+    console.log('       Widen it with: node scripts/check-audit-coverage.mjs <base>..HEAD');
+  }
+  console.log(`commits touching a control: ${bearing}   (within the window above)`);
   console.log(`of those, unaudited: ${missing}`);
   if (report) console.log(`\n${report}`);
   else if (!result.error) console.log('\nevery control-touching commit in range has a ledger entry.');
