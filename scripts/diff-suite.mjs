@@ -71,16 +71,76 @@ const argv = process.argv.slice(2);
  * rule 19's "an outage gets the hook switched off" does not apply. Refusing
  * costs one re-typed command; accepting costs a false green.
  */
+/*
+ * ═══ AND THE FIRST VERSION OF THIS CHECK ONLY CLOSED TWO SPELLINGS ═══
+ *
+ * It filtered for arguments beginning with `--`. Measured 2026-09-20, after
+ * the commit whose message said the class was closed -- every one of these
+ * exits 0, selects the 6 whole-repo gates instead of the 39 files the range
+ * needed, and prints a green summary:
+ *
+ *     diff-suite.mjs -s 553724b --list          short flag, never inspected
+ *     diff-suite.mjs 553724b --list             bare positional, ignored
+ *     diff-suite.mjs --since CLAUDE.md --list   git reads it as a PATHSPEC
+ *     diff-suite.mjs --since HEAD --since X     indexOf takes the first
+ *
+ * The third is the sharpest: the output says "nothing changed against HEAD"
+ * while `--since` was on the command line. The message contradicts the
+ * invocation and still reads as success.
+ *
+ * So this is rule 8 applied to my own fix: the defect was never "unknown
+ * long-flag names", it was "an argument this script does not understand is
+ * silently discarded". CONSUME-AND-CHECK is the property -- every argument
+ * must be claimed by something, or the run is refused. That covers spellings
+ * nobody has thought of yet, which an enumeration cannot.
+ */
 const KNOWN_FLAGS = new Set(['--list', '--since']);
-const unknown = argv.filter((a) => a.startsWith('--') && !KNOWN_FLAGS.has(a));
-if (unknown.length) {
-  process.stderr.write(
-    `[diff-suite] unrecognised flag(s): ${unknown.join(', ')}\n`
-    + `  known: ${[...KNOWN_FLAGS].join(', ')}\n`
-    + '  Refusing rather than falling back to a default scope: an ignored flag\n'
-    + '  produces a narrower run than you asked for and reports it as a pass.\n',
-  );
+const VALUE_FLAGS = new Set(['--since']);
+
+const consumed = new Array(argv.length).fill(false);
+const seen = new Map();
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (!KNOWN_FLAGS.has(a)) continue;
+  consumed[i] = true;
+  seen.set(a, (seen.get(a) ?? 0) + 1);
+  if (VALUE_FLAGS.has(a) && i + 1 < argv.length && !KNOWN_FLAGS.has(argv[i + 1])) {
+    consumed[i + 1] = true;
+  }
+}
+
+const refuse = (lines) => {
+  process.stderr.write(`[diff-suite] ${lines.join('\n  ')}\n`);
   process.exit(2);
+};
+
+const leftover = argv.filter((_, i) => !consumed[i]);
+if (leftover.length) {
+  refuse([
+    `unrecognised argument(s): ${leftover.join(', ')}`,
+    `known: ${[...KNOWN_FLAGS].join(', ')}`,
+    'Refusing rather than falling back to a default scope. An argument this script',
+    'does not understand is otherwise discarded silently, which produces a NARROWER',
+    'run than you asked for and reports it as a pass. Short flags and bare',
+    'positionals are refused for the same reason long ones are.',
+  ]);
+}
+
+/*
+ * A REPEATED FLAG IS REFUSED, NOT RESOLVED. `argv.indexOf` takes the FIRST
+ * occurrence, so somebody correcting a typo by retyping the flag gets the
+ * value they replaced -- and the run looks fine. Picking the last would also
+ * be defensible; refusing is the only option that cannot be silently wrong,
+ * and this is a hand-typed operator tool where the cost is one retype.
+ */
+for (const [f, n] of seen) {
+  if (n > 1) {
+    refuse([
+      `${f} was given ${n} times`,
+      'The first occurrence wins, so a corrected retype is silently ignored and the',
+      'scope is computed from the value you meant to replace. Give it once.',
+    ]);
+  }
 }
 
 /*
@@ -91,12 +151,12 @@ if (unknown.length) {
  * instead of the way the option is read.
  */
 const sinceAt = argv.indexOf('--since');
-if (sinceAt !== -1 && (sinceAt + 1 >= argv.length || argv[sinceAt + 1].startsWith('--'))) {
-  process.stderr.write(
-    '[diff-suite] --since needs a revision after it. Given none, this would\n'
-    + '  silently scope to "working tree against HEAD" and call that a pass.\n',
-  );
-  process.exit(2);
+if (sinceAt !== -1 && (sinceAt + 1 >= argv.length || KNOWN_FLAGS.has(argv[sinceAt + 1]))) {
+  refuse([
+    '--since needs a revision after it.',
+    'Given none, this would silently scope to "working tree against HEAD" and',
+    'call that a pass.',
+  ]);
 }
 
 const LIST = argv.includes('--list');
@@ -127,9 +187,40 @@ const ALWAYS = [
 
 const { runGit } = await import('../src/safeGit.mjs');
 
+/*
+ * ASK GIT WHETHER THE VALUE IS A COMMIT, BEFORE DIFFING AGAINST IT.
+ *
+ * `git diff --name-only CLAUDE.md` is a VALID command: git reads an argument
+ * it cannot resolve as a revision as a PATHSPEC, and diffs the working tree
+ * against HEAD limited to that path. So `--since CLAUDE.md` produced an empty
+ * scope and exit 0, and the output said "nothing changed against HEAD" while
+ * `--since` was on the command line -- the message contradicting the
+ * invocation, and still reading as a pass.
+ *
+ * Arity and spelling checks cannot catch this: the argument is present, it is
+ * a string, and it is in the right place. Only the thing that OWNS the meaning
+ * can answer, which is git -- the same move as asking git what a pathspec
+ * covers rather than matching spellings.
+ *
+ * `^{commit}` and not bare `--verify`, because a tree or a blob sha verifies
+ * happily and then diffs to something meaningless.
+ */
+const since = flag('--since');
+if (since !== null) {
+  try {
+    runGit(['rev-parse', '--verify', '--quiet', `${since}^{commit}`], { cwd: REPO });
+  } catch {
+    refuse([
+      `--since ${since} does not resolve to a commit.`,
+      'git would accept it as a PATHSPEC instead, diff the working tree against',
+      'HEAD limited to that path, find nothing, and exit 0 -- a full green run',
+      'that tested six whole-repo gates and nothing else.',
+    ]);
+  }
+}
+
 /** What changed: working tree against HEAD, or against an explicit ref. */
 function changedFiles() {
-  const since = flag('--since');
   try {
     const args = since ? ['diff', '--name-only', since] : ['diff', '--name-only', 'HEAD'];
     const tracked = String(runGit(args, { cwd: REPO })).split('\n').map((s) => s.trim()).filter(Boolean);
