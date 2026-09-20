@@ -189,7 +189,7 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         --principal flag, because an author must
                                         not be able to type who it is. Without
                                         an authenticated principal the record is
-                                        `observed` and an audit of that
+                                        "observed" and an audit of that
                                         candidate can never satisfy a gate.
   agentbridge audits [--repo <dir>]     the blind-audit queue: every commit that
   agentbridge audit-claim --id <audit-..> --by <session>
