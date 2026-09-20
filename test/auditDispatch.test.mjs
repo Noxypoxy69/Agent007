@@ -22,7 +22,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { proposeAudit, isClaimable, UNPLACED } from '../src/auditDispatch.mjs';
+import {
+  proposeAudit, isClaimable, UNPLACED, MAX_REVIEW_ATTEMPTS,
+} from '../src/auditDispatch.mjs';
 import { claimJob, CLAIM_LEASE_MS, JOB, AUTHOR_UNAVAILABLE } from '../src/auditJob.mjs';
 
 const T0 = 1_000_000;
@@ -279,4 +281,123 @@ test('THE WHOLE CHAIN: eight steps, against the REAL claimJob', () => {
   // and the invariant that must survive all eight steps.
   assert.equal(reclaimed.job.satisfies_gate, false,
     'the round trip through recovery upgraded the trust of the verdict');
+});
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════
+ * THE RE-REVIEW BOUND (D-4, and the fix that did not fix it)
+ *
+ * A review whose result cannot be attributed re-queues the job at PENDING.
+ * Nothing the re-queue touches is in the sort key, so the job is
+ * head-of-queue again on the next tick and is re-reviewed at full LLM cost,
+ * forever, starving every other job.
+ *
+ * I "closed" that by writing the verdict into `last_review`. `last_review`
+ * is written at audit-daemon.mjs:691 and :806 and READ BY NOTHING -- I
+ * checked both call sites before writing this. So the loop was byte-for-byte
+ * intact and the ledger recorded it FIXED, which is worse than leaving it
+ * open because the next reader will not re-check a closed row.
+ *
+ * These three tests are the ones that would have gone red against that
+ * "fix". Two bound the spin, and the third is the rule-5 positive that the
+ * bound has not simply turned the queue off.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+
+test('A JOB REVIEWED TO THE BOUND IS NOT DISPATCHED AGAIN', () => {
+  const exhausted = job({
+    review_attempts: 3,
+    last_review: { not_recorded_because: 'worktree_dirty' },
+  });
+  const r = proposeAudit({
+    jobs: [exhausted], sessions: [seat('reviewer-one')], now: T0, isLive: allLive,
+  });
+
+  assert.equal(r.proposals.length, 0,
+    'a candidate reviewed three times without an attributable result was sent for a fourth');
+  assert.equal(r.unassigned.length, 1);
+  assert.equal(r.unassigned[0].code, UNPLACED.REVIEW_EXHAUSTED);
+  assert.equal(r.unassigned[0].audit_id, 'audit-1');
+  /* The operator has to be able to see WHY, or a silent stop is just a
+   * quieter version of the spin (rule 15: the gate moves, it does not close). */
+  assert.match(r.unassigned[0].why, /worktree_dirty/);
+});
+
+test('UNDER THE BOUND IT STILL DISPATCHES -- the positive, so the bound is not an off switch', () => {
+  /*
+   * Rule 5. "Exhausted is refused" passes just as well against a
+   * dispatcher that refuses everything, and this whole subsystem exists
+   * because 25 audits sat PENDING while nothing dispatched.
+   *
+   * Derived from MAX_REVIEW_ATTEMPTS rather than typed, so raising the
+   * bound extends the coverage instead of silently skipping it (rule 7).
+   */
+  for (let tries = 0; tries < MAX_REVIEW_ATTEMPTS; tries += 1) {
+    const r = proposeAudit({
+      jobs: [job({ review_attempts: tries, last_review: tries ? { not_recorded_because: 'x' } : null })],
+      sessions: [seat('reviewer-one')],
+      now: T0,
+      isLive: allLive,
+    });
+    assert.equal(r.proposals.length, 1,
+      `a job with ${tries} of ${MAX_REVIEW_ATTEMPTS} attempts was refused: `
+      + JSON.stringify(r.unassigned));
+  }
+
+  /* and the boundary itself is the first refusal, not one either side of it */
+  const at = proposeAudit({
+    jobs: [job({ review_attempts: MAX_REVIEW_ATTEMPTS })],
+    sessions: [seat('reviewer-one')],
+    now: T0,
+    isLive: allLive,
+  });
+  assert.equal(at.proposals.length, 0, 'the bound is off by one');
+});
+
+test('A RE-QUEUED JOB SORTS BEHIND A FRESH ONE -- this is what makes a retry a retry', () => {
+  /*
+   * The starvation half, and the half `last_review` alone could never fix.
+   * Even under the bound, a job with two attempts left is head-of-queue on
+   * every tick until it spends them -- so with ONE seat the fresh job waits
+   * behind the failing one. One seat is exactly the measured condition.
+   *
+   * The re-queued job is given the WINNING key on every other dimension --
+   * escaped, and an older first_seen_at -- so this can only pass if
+   * `last_review` is genuinely consulted first (rule 9: the fixture is the
+   * shape the re-queue actually produces, which preserves those fields).
+   */
+  const retried = job({
+    audit_id: 'audit-retried',
+    escaped: true,
+    first_seen_at: '2026-09-01T00:00:00Z',
+    review_attempts: 1,
+    last_review: { not_recorded_because: 'candidate_moved' },
+  });
+  const fresh = job({
+    audit_id: 'audit-fresh',
+    escaped: false,
+    first_seen_at: '2026-09-20T00:00:00Z',
+  });
+
+  const r = proposeAudit({
+    jobs: [retried, fresh], sessions: [seat('only-seat')], now: T0, isLive: allLive,
+  });
+
+  assert.equal(r.proposals.length, 1, 'the single seat took more than one job');
+  assert.equal(r.proposals[0].audit_id, 'audit-fresh',
+    'the already-reviewed candidate took the only seat again, which is the spin: '
+    + 'it outranks an unreviewed job on escaped AND on age, so nothing else ever runs');
+
+  /* THE PREMISE, asserted rather than assumed (rule 6): without the
+   * last_review tiebreak `retried` really would win, so this test is
+   * measuring the tiebreak and not an accident of the fixture. */
+  const withoutRetryMark = proposeAudit({
+    jobs: [{ ...retried, last_review: null, review_attempts: 0 }, fresh],
+    sessions: [seat('only-seat')],
+    now: T0,
+    isLive: allLive,
+  });
+  assert.equal(withoutRetryMark.proposals[0].audit_id, 'audit-retried',
+    'PREMISE FAILED: the retried job does not outrank the fresh one on the other keys, '
+    + 'so the test above would pass with no tiebreak at all');
 });

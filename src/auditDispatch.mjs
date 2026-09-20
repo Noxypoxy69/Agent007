@@ -54,7 +54,31 @@ export const UNPLACED = Object.freeze({
   ONLY_AUTHOR_AVAILABLE: 'only_author_available',
   ALL_SEATS_BUSY: 'all_seats_busy',
   AUTHOR_UNKNOWN: 'author_unknown',
+  REVIEW_EXHAUSTED: 'review_exhausted',
 });
+
+/**
+ * How many times one candidate may be reviewed without the result landing.
+ *
+ * ═══ WHY A BOUND EXISTS AT ALL ═══
+ *
+ * A review that completes but cannot be attributed -- a dirty worktree, a
+ * moved candidate -- puts the job back at PENDING. `byUrgency` sorts on
+ * `escaped`, then `first_seen_at`, then `audit_id`, none of which the
+ * re-queue changes, so the job is head-of-queue again on the next tick and
+ * is re-reviewed AT FULL LLM COST. Forever.
+ *
+ * That was raised as D-4, and my fix wrote the verdict into `last_review`
+ * and changed nothing else -- `last_review` is read by nothing, and the
+ * loop was byte-for-byte still there. Preserving the evidence was worth
+ * doing and was not the finding. The finding was the unbounded retry.
+ *
+ * Three, because the failure modes are real but transient-ish: a reviewer
+ * killed mid-mutation, an `npm install` touching a lockfile. One attempt
+ * would discard work for a hiccup; unbounded spends the budget on a job
+ * that will never land.
+ */
+export const MAX_REVIEW_ATTEMPTS = 3;
 
 /**
  * Is this job available to somebody other than its current holder?
@@ -90,6 +114,18 @@ export function isClaimable(job, { now, leaseMs = CLAIM_LEASE_MS } = {}) {
  * unreproducible and nobody can debug it.
  */
 function byUrgency(a, b) {
+  /*
+   * A JOB THAT HAS ALREADY BEEN REVIEWED WAITS BEHIND ONE THAT HAS NOT.
+   *
+   * Without this the re-queued job is head-of-queue again immediately --
+   * nothing the re-queue touches is in the sort key -- so one
+   * unattributable candidate starves every other job in the queue while
+   * burning a full LLM review per tick. Sorting it back is what turns a
+   * spin into a retry.
+   */
+  const tried = Number(Boolean(a?.last_review)) - Number(Boolean(b?.last_review));
+  if (tried !== 0) return tried;
+
   const esc = Number(Boolean(b?.escaped)) - Number(Boolean(a?.escaped));
   if (esc !== 0) return esc;
   const at = String(a?.first_seen_at ?? '');
@@ -212,6 +248,25 @@ export function proposeAudit({
      * no trailer) is different and still dispatches: there is no author to
      * collide with.
      */
+    /*
+     * EXHAUSTED IS NOT DISPATCHABLE. The bound is what makes the retry a
+     * retry rather than a spin -- see MAX_REVIEW_ATTEMPTS. The job stays in
+     * the queue and says why, so an operator can see a candidate that keeps
+     * producing unattributable reviews instead of watching the daemon
+     * silently burn passes on it.
+     */
+    const tries = Number(job.review_attempts ?? 0);
+    if (Number.isFinite(tries) && tries >= MAX_REVIEW_ATTEMPTS) {
+      unassigned.push({
+        audit_id: str(job.audit_id),
+        code: UNPLACED.REVIEW_EXHAUSTED,
+        why: `reviewed ${tries} times without the result being attributable `
+          + `(last: ${job.last_review?.not_recorded_because ?? 'unknown'}). Not re-dispatching: `
+          + 'a candidate that cannot be pinned will not become pinnable by being reviewed again',
+      });
+      continue;
+    }
+
     if (str(job.author_source) === AUTHOR_UNAVAILABLE) {
       unassigned.push({
         audit_id: str(job.audit_id),

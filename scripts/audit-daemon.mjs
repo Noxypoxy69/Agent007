@@ -688,6 +688,13 @@ async function tick() {
           state: JOB.PENDING,
           claimed_by: null,
           claimed_at: null,
+          /*
+           * COUNTED, so the retry is bounded. `last_review` alone was
+           * write-only -- nothing read it, and the job returned to
+           * head-of-queue to be re-reviewed at full LLM cost for ever.
+           * `proposeAudit` reads this and stops at MAX_REVIEW_ATTEMPTS.
+           */
+          review_attempts: Number(r.review_attempts ?? 0) + 1,
           last_review: {
             verdict: verdict.verdict,
             findings: verdict.findings ?? [],
@@ -698,7 +705,30 @@ async function tick() {
         }
         : r));
       writeQueue(REPO, kept);
-      releaseWorkspace(ws.allocation, { runGit, repoRoot: REPO });
+
+      /*
+       * THE BRIEF GOES TOO, AND THE TEARDOWN RESULT IS REPORTED.
+       *
+       * Two findings from the blind pass, both of them defects this very
+       * commit was written to close, reproduced in its own new code:
+       *
+       *   the brief directory holds the run NONCE, and this was a FOURTH
+       *   exit from tick() occurring after mkdirSync -- the only one that
+       *   did not remove it. Before this path existed the dirty case went
+       *   through release(), which did. So every tick hitting what this
+       *   file's own comment calls "the expected case" left a nonce-named
+       *   directory in TEMP for ever, and falsified a claim a previous
+       *   auditor had verified TRUE one lap earlier.
+       *
+       *   and the release result was DISCARDED here while the other two
+       *   call sites report it -- which is verbatim the defect that pass
+       *   raised against releaseWorkspace ("the only field carrying the
+       *   truth was read by nobody"), on the path the module says fails
+       *   routinely on Windows held handles.
+       */
+      try { rmSync(briefDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      const relDirty = releaseWorkspace(ws.allocation, { runGit, repoRoot: REPO });
+      if (!relDirty.ok) say(`[audit-daemon] could not remove ${ws.dir}: ${relDirty.why}`);
       return false;
     }
   }
@@ -780,6 +810,20 @@ async function tick() {
         state: JOB.PENDING,
         claimed_by: null,
         claimed_at: null,
+        /*
+         * COUNTED HERE TOO. I added the bound at the dirty-worktree
+         * re-queue above and left this one alone, which is a half-closed
+         * gate of exactly the kind this file keeps producing: both paths
+         * return the job to PENDING, so an uncounted one spins for ever
+         * while the counted one is bounded, and the spin is the defect.
+         *
+         * This path's cause -- PRE_GENESIS refusing the terminal write --
+         * is not transient, so it hits the bound quickly and says so,
+         * which is the correct outcome: an operator sees a candidate
+         * whose review cannot land instead of a daemon quietly burning a
+         * pass on it every tick.
+         */
+        review_attempts: Number(r.review_attempts ?? 0) + 1,
         last_review: {
           verdict: verdict.verdict,
           findings: verdict.findings ?? [],

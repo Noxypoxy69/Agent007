@@ -196,16 +196,33 @@ export function releaseWorkspace(allocation, { runGit, repoRoot } = {}) {
   try { rmSync(dir, { recursive: true, force: true }); } catch (e) { fsWhy = String(e?.message ?? e); }
 
   /*
-   * AND THE ADMIN RECORD, WHICH NOTHING WAS RECONCILING. The previous
-   * comment here said "`git worktree prune` reconciles the admin records
-   * afterwards" -- in the passive voice, and nothing ran it. Measured:
-   * seven stale `audit-<sha12>` entries still registered in
-   * `.git/worktrees` from the pre-identity naming scheme. A sentence
-   * describing a step nobody performs is how those accumulated.
+   * ═══ NO REPO-GLOBAL PRUNE. THIS REPOSITORY ALREADY RULED ON IT. ═══
+   *
+   * I added `git worktree prune` here to reconcile admin records, and the
+   * blind pass caught it as two separate mistakes.
+   *
+   * IT IS DANGEROUS. `test/startAgentLauncher.test.mjs` says, verbatim:
+   * "NO REPO-GLOBAL PRUNE. That first version ended with an unconditional
+   * `git worktree prune` against REPO, and the auditor showed it destroying
+   * a PRUNABLE registration the run never created -- admin directory, HEAD
+   * and any in-progress rebase state with it." That was written about a
+   * checkout carrying 36 registrations; it carries 41 today, 28 of them
+   * live agent worktrees and 5 belonging to another session. `prune` takes
+   * no argument naming what to prune -- it removes everything prunable,
+   * which is the opposite of the identity discipline this module is for.
+   *
+   * IT ALSO DID NOT WORK. The seven stale `audit-<sha12>` records I cited
+   * as motivation are NOT prunable: their directories and `.git` link
+   * files are all present, and `prune` only removes a registration whose
+   * worktree is MISSING. So it was a no-op for its stated purpose and a
+   * global hazard for everything else. Those seven accumulated because
+   * teardown never deleted the DIRECTORIES -- a different defect, which
+   * `releaseWorkspace` now fixes directly.
+   *
+   * `git worktree remove --force` already deregisters the one it removes.
+   * When it fails, the honest outcome is the `ok:false` below, not a
+   * repo-wide sweep to paper over it.
    */
-  if (!gitRemoved && typeof runGit === 'function') {
-    try { runGit(['worktree', 'prune'], { cwd: repoRoot ?? allocation.repo_root }); } catch { /* best effort */ }
-  }
 
   /*
    * ═══ ok MEANS THE WORKSPACE IS GONE, NOT "WE TRIED" ═══

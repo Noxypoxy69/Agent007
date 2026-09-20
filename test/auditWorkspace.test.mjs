@@ -21,7 +21,10 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import {
+  mkdtempSync, rmSync, existsSync, mkdirSync, readdirSync,
+  writeFileSync, openSync, closeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -130,6 +133,102 @@ test('TEARDOWN REFUSES A SHA, AND A TAMPERED ALLOCATION', () => {
 
   /* THE POSITIVE (rule 5): the untampered one still releases. */
   assert.equal(releaseWorkspace(mine.allocation, { runGit, repoRoot: root }).ok, true);
+});
+
+test('ok:false WHEN THE DIRECTORY SURVIVES -- the whole point, and it was untested', () => {
+  /*
+   * Blind pass D-5. Three behaviours shipped with no test, and this is the
+   * one the change existed for: `ok` is supposed to mean the workspace is
+   * GONE. Every assertion in this file was `ok === true`, so the false
+   * branch had never been watched fire (rule 1) -- in the fix for a defect
+   * that WAS "reported success when it removed nothing".
+   *
+   * THE CASE HAS TO BE REAL (rule 9). The module's own comment says the
+   * common cause is a dying reviewer holding handles on Windows, so that is
+   * what is built: a file inside the workspace, held open, which is what
+   * makes `rmSync` fail here. `existsSync` is the far end (rule 4) and the
+   * only thing `ok` is allowed to mean.
+   *
+   * If a platform deletes it anyway the PRECONDITION assertion below fails
+   * and names why, rather than the test passing by not exercising the
+   * branch (rule 6). That failure is an environment finding, not a defect
+   * in releaseWorkspace -- said here so an auditor does not spend a pass on
+   * it (rule 21).
+   */
+  const runGit = recorder();
+  const a = allocateWorkspace({ candidateSha: SHA, runGit, repoRoot: root, tmpRoot: root });
+
+  const held = path.join(a.allocation.dir, 'reviewer-holds-this');
+  writeFileSync(held, 'x');
+  const fd = openSync(held, 'r+');
+  try {
+    const r = releaseWorkspace(a.allocation, { runGit, repoRoot: root });
+
+    assert.equal(existsSync(a.allocation.dir), true,
+      'PRECONDITION: this platform removed a directory with an open handle inside it, '
+      + 'so the surviving-directory case could not be constructed here. Environment, not defect.');
+    assert.equal(r.ok, false,
+      'the workspace is still on disk and teardown reported ok -- the exact defect D-1 fixed');
+    assert.match(r.why, /still present after teardown/);
+  } finally { closeSync(fd); }
+
+  /* THE POSITIVE (rule 5): with the handle released the same call succeeds. */
+  const after = releaseWorkspace(a.allocation, { runGit, repoRoot: root });
+  assert.equal(after.ok, true, after.why);
+  assert.equal(existsSync(a.allocation.dir), false);
+});
+
+test('A FAILING git REMOVAL IS REPORTED, not swallowed into ok:true', () => {
+  /*
+   * The case the module's own comment calls ROUTINE on Windows. git fails,
+   * the directory removal still runs, and the caller must be able to tell
+   * whether git deregistered it -- the previous version returned a literal
+   * true and reported nothing.
+   */
+  const throwing = (args) => {
+    if (args[0] === 'worktree' && args[1] === 'remove') {
+      throw Object.assign(new Error('fail'), { stderr: 'fatal: still in use' });
+    }
+    return '';
+  };
+  const a = allocateWorkspace({ candidateSha: SHA, runGit: recorder(), repoRoot: root, tmpRoot: root });
+  const r = releaseWorkspace(a.allocation, { runGit: throwing, repoRoot: root });
+
+  /* The directory still goes, so ok is true -- but gitRemoved says the rest. */
+  assert.equal(existsSync(a.allocation.dir), false, 'the directory survived a git failure');
+  assert.equal(r.ok, true);
+  assert.equal(r.gitRemoved, false,
+    'a failed git deregistration was reported as removed, so a stale admin record is invisible');
+});
+
+test('NO REPO-GLOBAL PRUNE, ever -- this repository already ruled on it', () => {
+  /*
+   * I added `git worktree prune` here and the blind pass caught it as two
+   * mistakes at once. It is DANGEROUS -- test/startAgentLauncher.test.mjs
+   * records an auditor watching a repo-global prune destroy a prunable
+   * registration the run never created, on a checkout that now carries 41
+   * of them. And it was a NO-OP for its stated purpose, because the stale
+   * records it cited are not prunable: their directories still exist.
+   *
+   * Asserted on the git calls rather than the source, so a future edit
+   * that reintroduces it by any spelling fails here.
+   */
+  const runGit = recorder();
+  const a = allocateWorkspace({ candidateSha: SHA, runGit, repoRoot: root, tmpRoot: root });
+  releaseWorkspace(a.allocation, { runGit, repoRoot: root });
+
+  const failing = (args) => {
+    if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('fail');
+    runGit(args);
+    return '';
+  };
+  const b = allocateWorkspace({ candidateSha: SHA, runGit, repoRoot: root, tmpRoot: root });
+  releaseWorkspace(b.allocation, { runGit: failing, repoRoot: root });
+
+  const prunes = runGit.calls.filter((c) => c[0] === 'worktree' && c[1] === 'prune');
+  assert.deepEqual(prunes, [],
+    'a repo-global `git worktree prune` was issued. It removes EVERY prunable '
+    + 'registration, including live worktrees belonging to other sessions');
 });
 
 test('A FAILED worktree add LEAVES NOTHING BEHIND', () => {
