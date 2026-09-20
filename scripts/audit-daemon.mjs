@@ -42,8 +42,8 @@
  * fires an LLM session per control commit unattended is how you find that out
  * the expensive way. Measure the volume first.
  */
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { existsSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -164,6 +164,18 @@ function brief(job, dir) {
     '',
     'REPORT: defects ranked by severity, each with the command that demonstrates it; SEPARATELY the',
     'claims you checked and found TRUE; and what you could not check and why.',
+    '',
+    'THEN WRITE YOUR VERDICT AS A FILE, because prose cannot be read by a machine without',
+    'guessing, and a guess that lands on PASS is a forged clearance:',
+    '',
+    `  ${path.join(dir, '.audit', 'VERDICT.json')}`,
+    '',
+    '  {"verdict":"PASS"|"FAIL","findings":["short line each"],"checked_true":["short line each"],',
+    '   "could_not_check":["short line each"]}',
+    '',
+    'PASS means you tried to break it and could not. FAIL means you found a defect. If you could not',
+    'establish either, write no file at all -- absence is read as "nothing was proved", which is the',
+    'honest answer and is never treated as a pass.',
   ].join('\n');
 }
 
@@ -242,7 +254,56 @@ async function tick() {
     return false;
   }
 
-  say(`[audit-daemon] reviewer exited for ${job.audit_id}. Record with: agentbridge audit-record --id ${job.audit_id} --verdict <PASS|FAIL>`);
+  /*
+   * THE VERDICT IS READ FROM A FILE, NOT PARSED OUT OF PROSE.
+   *
+   * The obvious implementation greps the reviewer's output for PASS or FAIL.
+   * Prose has infinite shapes, a regex has one, and the failure direction is
+   * catastrophic: a mis-parse that lands on PASS is a forged clearance for a
+   * control nobody reviewed. So the reviewer writes JSON, and anything this
+   * cannot read is NOT A PASS.
+   *
+   * ABSENCE IS "NOTHING WAS PROVED". A reviewer that exits cleanly without
+   * writing a verdict has told us nothing, which is different from telling us
+   * the tree is fine -- the same distinction as a shard that could not start,
+   * and as `measured: false` on the hold bar.
+   */
+  let verdict = null;
+  try {
+    const raw = readFileSync(path.join(briefDir, 'VERDICT.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    const v = typeof parsed?.verdict === 'string' ? parsed.verdict.trim().toUpperCase() : null;
+    if (v === 'PASS' || v === 'FAIL') verdict = { ...parsed, verdict: v };
+  } catch { verdict = null; }
+
+  if (!verdict) {
+    release('the reviewer recorded no readable verdict, so nothing was proved');
+    return false;
+  }
+
+  say(`[audit-daemon] ${job.audit_id}: ${verdict.verdict}`);
+  for (const f of (verdict.findings ?? []).slice(0, 8)) say(`    finding: ${f}`);
+
+  /*
+   * THE TERMINAL WRITE IS ATTEMPTED, AND ITS REFUSAL IS REPORTED RATHER THAN
+   * WORKED AROUND. `recordAudit` holds the fences -- the writer must be the
+   * claimant, the lease must be live, the candidate must not have moved, and
+   * independence must be `enforced`. Under PRE_GENESIS the last one refuses,
+   * correctly: evidence accumulates, promotion does not. A daemon that
+   * "helpfully" relaxed that would be minting clearances.
+   */
+  const rec = spawnSync(process.execPath, [
+    path.join(REPO, 'bin', 'agentbridge.mjs'), 'audit-record',
+    '--id', job.audit_id, '--verdict', verdict.verdict,
+  ], { cwd: REPO, encoding: 'utf8' });
+
+  const out = `${rec.stdout ?? ''}${rec.stderr ?? ''}`.trim();
+  if (rec.status === 0) {
+    say(`[audit-daemon] recorded ${job.audit_id} as ${verdict.verdict}`);
+  } else {
+    say(`[audit-daemon] verdict produced but NOT recorded: ${out.split('\n')[0] ?? `exit ${rec.status}`}`);
+    say('               The finding still stands; only the terminal write was refused.');
+  }
   return true;
 }
 
