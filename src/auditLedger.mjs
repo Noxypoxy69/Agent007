@@ -130,10 +130,71 @@ export function isAuditBearing(rel) {
  * which is indistinguishable from "everything is audited". Bad lines are
  * returned so the caller can say so.
  */
+/** A 7-to-40 character hex sha, and nothing else. No wildcards, ever. */
+const SHA_ONLY = /^[0-9a-f]{7,40}$/;
+
+export const WAIVER_TYPE = 'owner_bootstrap_waiver';
+
+/**
+ * IS THIS ROW AN OWNER BOOTSTRAP WAIVER, and is it safe to honour?
+ *
+ * ═══ WHAT A WAIVER MEANS, AND THE FOUR THINGS IT DOES NOT ═══
+ *
+ * Danny's decision, 2026-09-20, with the escaped backlog unclearable: under
+ * PRE_GENESIS no review can reach `enforced` independence, so the Stop gate
+ * was demanding a clearance the trust layer structurally cannot issue. That
+ * is rule 16 -- a red gate nobody can turn green is a countdown, and the
+ * countdown ends with somebody switching the gate off.
+ *
+ * So a waiver says exactly one thing: THE STOP GATE MAY STOP BLOCKING ON
+ * THESE NAMED HISTORICAL COMMITS. It does NOT say they were audited, it does
+ * NOT say they passed, it does NOT set any verdict, and it does NOT exempt
+ * anything committed afterwards.
+ *
+ * ═══ WHY IT IS A SEPARATE SHAPE AND NOT AN `auditor` STRING ═══
+ *
+ * The obvious implementation is a normal row reading
+ * `{"commit":"...","auditor":"OWNER WAIVER -- NOT AN AUDIT"}`. That is what
+ * the gate's own help text invites, and it is wrong: `audited` is
+ * `Boolean(entry)`, so the moment such a row parses, the commit is AUDITED as
+ * far as every consumer is concerned, and the disclaimer lives only in a
+ * string nothing reads. A structural distinction cannot be lost that way --
+ * `audited` stays false and these commits keep appearing in the report as
+ * unaudited, which is true.
+ *
+ * ═══ FAIL CLOSED ON EVERY DEVIATION ═══
+ *
+ * A waiver that grants anything beyond suppression is refused OUTRIGHT rather
+ * than partially honoured. In particular `grants_audit_pass: true` does not
+ * make it stronger, it makes it MALFORMED -- a file that can be edited into a
+ * blanket pass is a hole with a polite name on it. Same for a missing
+ * `audit_performed: false`, a non-array `commits`, an empty list, and any
+ * entry that is not a bare hex sha, which is what keeps `"*"` from ever
+ * meaning anything here.
+ */
+function waiverShas(row) {
+  if (!row || row.type !== WAIVER_TYPE) return null;
+  if (row.audit_performed !== false) return null;
+  if (row.grants_audit_pass !== false) return null;
+  if (typeof row.reason !== 'string' || row.reason.trim() === '') return null;
+  if (!Array.isArray(row.commits) || row.commits.length === 0) return null;
+
+  const shas = [];
+  for (const c of row.commits) {
+    if (typeof c !== 'string') return null;
+    const s = c.trim().toLowerCase();
+    if (!SHA_ONLY.test(s)) return null;   // refuses '*', '', globs, refs, ranges
+    shas.push(s);
+  }
+  return shas;
+}
+
 export function parseLedger(text) {
   const audited = new Map();
   const rows = [];
   const malformed = [];
+  const waived = new Set();
+  const waivers = [];
   const lines = String(text ?? '').split('\n');
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -144,6 +205,25 @@ export function parseLedger(text) {
       row = JSON.parse(line);
     } catch {
       malformed.push({ line: i + 1, text: line.slice(0, 80) });
+      continue;
+    }
+    /*
+     * CHECKED BEFORE THE AUDIT-ROW VALIDATION, because a waiver legitimately
+     * carries neither `commit` nor `auditor` and would otherwise be filed as
+     * malformed -- which is how this would have silently done nothing.
+     *
+     * A row CLAIMING to be a waiver and failing the shape is malformed, not
+     * ignored: silence would let a typo read as "the owner waived nothing"
+     * while looking like a waiver to a human reading the file.
+     */
+    if (row && row.type === WAIVER_TYPE) {
+      const shas = waiverShas(row);
+      if (shas === null) {
+        malformed.push({ line: i + 1, text: line.slice(0, 80) });
+        continue;
+      }
+      for (const s of shas) waived.add(s);
+      waivers.push({ ...row, commits: shas });
       continue;
     }
     if (!row || typeof row.commit !== 'string' || row.commit.trim() === '') {
@@ -174,7 +254,9 @@ export function parseLedger(text) {
     rows.push(row);
     audited.set(row.commit.trim().toLowerCase(), row);
   }
-  return { audited, rows, malformed };
+  return {
+    audited, rows, malformed, waived, waivers,
+  };
 }
 
 /**
@@ -300,6 +382,18 @@ export function auditCoverage({ repoRoot, range, ledgerText }) {
       touched,
       audited: Boolean(entry),
       auditor: entry?.auditor ?? null,
+      /*
+       * A SEPARATE FIELD, AND `audited` ABOVE IS DELIBERATELY UNTOUCHED.
+       *
+       * A waived commit is still an UNAUDITED commit and every report must go
+       * on saying so. All this records is that the owner accepted the
+       * historical backlog it names, so the Stop gate need not block the turn
+       * on it. Collapsing the two into `audited: true` would erase the
+       * difference between "somebody read this" and "the owner decided to
+       * proceed without anybody reading it", which is the one distinction the
+       * whole module exists to keep.
+       */
+      waived: isWaived(ledger, key),
     });
   }
 
@@ -901,6 +995,30 @@ export function isBlockingControl(rel) {
   return !PROSE_OR_DEPENDENCY.test(p);
 }
 
+/**
+ * IS THIS COMMIT NAMED BY AN OWNER BOOTSTRAP WAIVER?
+ *
+ * PREFIX MATCHING IN BOTH DIRECTIONS, because the house style in
+ * docs/audit-ledger.jsonl is 7-character shas while `git log` hands this
+ * module 40. An exact-equality check would make every hand-written waiver
+ * silently cover nothing -- the same defect as the parser rejecting the
+ * waiver row outright, one step further along, and just as invisible.
+ *
+ * A waiver entry is already constrained to 7-40 hex characters by
+ * `waiverShas`, so neither direction can be satisfied by a wildcard or an
+ * empty string.
+ */
+export function isWaived(ledger, sha) {
+  const key = String(sha ?? '').trim().toLowerCase();
+  if (key === '') return false;
+  const set = ledger?.waived;
+  if (!(set instanceof Set) || set.size === 0) return false;
+  for (const w of set) {
+    if (w === key || key.startsWith(w) || w.startsWith(key)) return true;
+  }
+  return false;
+}
+
 /** Does this commit touch decision logic, as opposed to prose or dependencies? */
 export function touchesBlockingControl(touched) {
   return (Array.isArray(touched) ? touched : []).some(isBlockingControl);
@@ -942,6 +1060,19 @@ export function auditEscalation(coverage, unpushed) {
   const local = new Set(unpushed.map((s) => String(s).trim().toLowerCase()));
   const escaped = missing
     .filter((c) => !local.has(String(c.sha).trim().toLowerCase()))
+    /*
+     * THE OWNER BOOTSTRAP WAIVER, AND IT SUPPRESSES ONLY THE BLOCK.
+     *
+     * These commits are still in `missing`, so `formatCoverage` below still
+     * reports them as unaudited -- which they are. All that changes is that
+     * the turn is not stopped on a backlog that, under PRE_GENESIS, cannot
+     * obtain a gate-satisfying review no matter how much is spent on it.
+     *
+     * Bound to explicit shas by construction: see `waiverShas`, which refuses
+     * anything that is not bare hex, so no waiver can ever widen to cover a
+     * commit written after it. A control commit made tomorrow blocks normally.
+     */
+    .filter((c) => !c?.waived)
     /*
      * Only DECISION LOGIC stops a turn. A pushed, unaudited CLAUDE.md edit is
      * still reported in the notice below; it does not block. See
