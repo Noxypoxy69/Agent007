@@ -31,7 +31,8 @@
  * omitted them would read as complete and be wrong.
  */
 import {
-  readdirSync, statSync, existsSync, mkdirSync, createReadStream, writeFileSync, appendFileSync,
+  readdirSync, statSync, existsSync, mkdirSync, createReadStream, createWriteStream,
+  writeFileSync, appendFileSync, readFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
@@ -80,9 +81,30 @@ for (const p of readdirSync(SRC, { withFileTypes: true }).filter((x) => x.isDire
 
 /* ── 2. one pass per file: hash, chronology, split into raw/ ──────────── */
 
+/*
+ * WRITTEN INCREMENTALLY, BECAUSE THIS JOB GETS KILLED.
+ *
+ * The first version accumulated chronology and checksums in memory and wrote
+ * them after the whole loop. The box reaped it for memory partway through
+ * 627 MB, and everything was lost -- manifest/ was empty and raw/ was a
+ * partial tree with no record of what had been done. A 600 MB job on a machine
+ * that kills long-running processes has to be resumable, and the cheapest
+ * resumability is: append each file's row the moment it is finished.
+ */
 const manifestDir = dir('manifest');
-const chronology = [['session', 'project', 'kind', 'first_ts', 'last_ts', 'lines', 'bytes', 'sha256', 'raw_parts', 'source_file'].join(',')];
-const checksums = [];
+const CHRON = path.join(manifestDir, 'chronology.csv');
+const SUMS = path.join(manifestDir, 'checksums.sha256');
+const DONE = path.join(manifestDir, 'completed-sources.txt');
+
+/* Which source files are already fully archived, so a killed run resumes. */
+const alreadyDone = new Set(
+  existsSync(DONE) ? readFileSync(DONE, 'utf8').split('\n').filter(Boolean) : [],
+);
+
+if (!existsSync(CHRON)) {
+  writeFileSync(CHRON, `${['session', 'project', 'kind', 'first_ts', 'last_ts', 'lines', 'bytes', 'sha256', 'raw_parts', 'source_file'].join(',')}\n`);
+}
+if (!existsSync(SUMS)) writeFileSync(SUMS, '');
 const rows = [];
 
 const csv = (v) => {
@@ -91,11 +113,22 @@ const csv = (v) => {
 };
 
 for (const f of files) {
+  if (alreadyDone.has(f.file)) continue; // resumed: this source is already archived
+
   const hash = createHash('sha256');
   let lines = 0;
   let firstTs = null;
   let lastTs = null;
   let sessionId = null;
+  /*
+   * PARSE ONLY UNTIL THE METADATA IS KNOWN. The first version ran JSON.parse
+   * on every line of 627 MB to learn two facts -- the session id and the first
+   * timestamp -- both of which appear in the opening records. After that the
+   * loop only needs the LAST timestamp, so parsing continues cheaply and
+   * everything else is a byte copy.
+   */
+  let needMeta = true;
+  let stream = null;
 
   /* Session id and dates come from the CONTENT, not the filename, because a
    * filename is a fact about how something was saved. Falls back to the
@@ -110,37 +143,53 @@ for (const f of files) {
   for await (const line of rl) {
     hash.update(line); hash.update('\n');
     lines += 1;
-    let rec = null;
-    try { rec = JSON.parse(line); } catch { /* keep the bytes regardless */ }
-    if (rec) {
-      sessionId ??= rec.sessionId ?? null;
-      const ts = rec.timestamp ?? null;
-      if (typeof ts === 'string') { firstTs ??= ts; lastTs = ts; }
+
+    /*
+     * A CHEAP SUBSTRING TEST BEFORE THE PARSE. Most lines carry neither field,
+     * and `JSON.parse` on a multi-megabyte assistant message to discover that
+     * is what made this job unfinishable on this machine.
+     */
+    if (needMeta || line.includes('"timestamp"')) {
+      let rec = null;
+      try { rec = JSON.parse(line); } catch { /* keep the bytes regardless */ }
+      if (rec) {
+        sessionId ??= rec.sessionId ?? null;
+        const ts = rec.timestamp ?? null;
+        if (typeof ts === 'string') { firstTs ??= ts; lastTs = ts; }
+        if (sessionId && firstTs) needMeta = false;
+      }
     }
+
     if (partPath === null || partBytes >= PART_BYTES) {
+      if (stream) stream.end();
       partIdx += 1; partBytes = 0;
       const sid = sessionId ?? path.basename(f.file, '.jsonl');
       const day = (firstTs ?? new Date(statSync(f.file).mtime).toISOString()).slice(0, 10);
       const holder = f.kind === 'subagent' ? `subagent_${path.basename(f.file, '.jsonl')}` : `session_${sid}`;
       partPath = path.join(dir('raw', 'claude', f.project, holder), `${day}_part${String(partIdx).padStart(3, '0')}.jsonl`);
-      writeFileSync(partPath, '');
+      /* A STREAM, NOT appendFileSync PER LINE. The first version opened,
+       * wrote and closed the file once per line across 627 MB. */
+      stream = createWriteStream(partPath);
       parts.push(partPath);
     }
-    appendFileSync(partPath, `${line}\n`);
+    if (!stream.write(`${line}\n`)) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => stream.once('drain', r)); // respect backpressure
+    }
     partBytes += Buffer.byteLength(line) + 1;
   }
+  if (stream) { stream.end(); await new Promise((r) => stream.on('close', r)); }
 
   const sha = hash.digest('hex');
   const sid = sessionId ?? path.basename(f.file, '.jsonl');
   rows.push({ ...f, sessionId: sid, firstTs, lastTs, lines, sha, parts });
-  chronology.push([sid, f.project, f.kind, firstTs ?? '', lastTs ?? '', lines, f.bytes, sha, parts.length, f.file].map(csv).join(','));
-  checksums.push(`${sha}  ${f.file}`);
-}
 
-/* Chronological, because the archive's job is to show order. */
-const body = chronology.slice(1).sort();
-writeFileSync(path.join(manifestDir, 'chronology.csv'), `${[chronology[0], ...body].join('\n')}\n`);
-writeFileSync(path.join(manifestDir, 'checksums.sha256'), `${checksums.join('\n')}\n`);
+  /* APPENDED NOW, not after the loop, so a reap keeps what was finished. */
+  appendFileSync(CHRON, `${[sid, f.project, f.kind, firstTs ?? '', lastTs ?? '', lines, f.bytes, sha, parts.length, f.file].map(csv).join(',')}\n`);
+  appendFileSync(SUMS, `${sha}  ${f.file}\n`);
+  appendFileSync(DONE, `${f.file}\n`);
+  process.stderr.write(`archived ${path.basename(f.file)} (${(f.bytes / 1024 / 1024).toFixed(1)} MB)\n`);
+}
 
 const total = files.reduce((n, x) => n + x.bytes, 0);
 writeFileSync(path.join(manifestDir, 'agent007-transcripts-full-manifest.txt'), [
