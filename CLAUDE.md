@@ -461,11 +461,31 @@ NUL sits: git's binary detection scans only the first 8000 bytes, and
 line 618. **So the four files do not behave alike, and "it is a NUL file" does
 not tell you which tools go blind.** Ask the tool, per file.
 
+**AND THE `Grep` TOOL IS BLIND TO THEM REPO-WIDE, SILENTLY.** I wrote the
+opposite here first, and the rebuttal was wrong because I tested the wrong
+thing: a *path-scoped* `Grep` at one of these files returns partial results
+**and a binary-file notice**, so it looks fine. A **repo-wide** `Grep` — which
+is what an audit sweep actually runs — omits the file with **no notice at
+all**. Measured 2026-09-20:
+
+| query | result |
+|---|---|
+| `Grep "satisfies_gate"` repo-wide | 7 files — **`src/auditJob.mjs` absent** |
+| `grep -acn satisfies_gate src/auditJob.mjs` | 3 matches |
+| `Grep "export const PROTECTED_PATHS"` repo-wide | **`src/guardSession.mjs` absent** |
+
+So a repo-wide `Grep` hides the audit-queue module and the guard's central
+module from any sweep. **That is the failure mode that produces a confident
+"no other call site exists"** — and it is how the fourth-lap auditor nearly
+missed a HIGH finding, which it found only by cross-checking with `grep -a`.
+
+**Use `grep -a` for any sweep whose conclusion is an absence.** A `Grep` that
+returns nothing is not evidence that nothing is there.
+
 Found by a blind auditor, which is the point: it degraded that audit before it
-was noticed. One claim in its report did **not** reproduce — it said the
-ripgrep-based `Grep` tool returns nothing for these files, and a `Grep` for
-`authorSessionFrom` in `auditJob.mjs` found it here. Verify before repeating,
-including a finding you commissioned.
+was noticed, and the auditor before it reported the same thing and I talked
+myself out of it on a bad test. Verify before repeating — and verify before
+*rebutting*, which is the half I got wrong.
 
 **THE COUNT WENT 2 → 3 → 4 IN ONE AFTERNOON, AND THAT IS THE ACTUAL LESSON.**
 The third was found by accident while checking that two `PROTECTED_PATHS` lists
