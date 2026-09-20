@@ -230,3 +230,72 @@ than a commit message: **a repair that moves who supplies the unchecked claim ha
 not removed the unchecked claim.** Any future blocker, gate or verdict must be
 read for WHO asserts the thing it trusts, and a boolean or string from an
 argument is never an answer.
+
+---
+
+## Record 3 — INCIDENT OVERRIDE: code-b repaired another agent's committed file
+
+**2026-09-19. Recorded at the owner's instruction, because "I found something
+worse" must not silently become unlimited scope.**
+
+### What was done
+
+`code-b` edited and committed `bin/agentbridge.mjs` (`07fba97`), a file it did
+not write, was not assigned, and had no task for. The file had been committed
+with a SyntaxError at `1a1a35c` and had not parsed for three commits.
+
+### Why it was taken rather than routed
+
+- The CLI is a declared entry point. Everything that shells out to it was dead,
+  including `register-session`, which the SessionStart poll hook spawns — so
+  sessions had silently stopped registering and the roster emptied. The symptom
+  had already been misread as a liveness problem for hours.
+- The working tree was clean for that file, so no one was mid-edit in it.
+- Every other agent was past the liveness window (2h to 39h silent) and could
+  not be asked. Messages sent to all four that day were stored, not delivered.
+- The repair was one line: two backticks inside a template literal, replaced
+  with double quotes. No behaviour change; the sentence reads identically.
+
+### What authorised it
+
+A live owner grant, `paths: ["*"]`, `granted_by: danny`, expiring
+2026-09-21T23:00Z, reason *"full access for code-a, code-b and fixer, directed
+by Danny repeatedly"*. Verified with `agentbridge grant-path` at the time,
+not assumed.
+
+**The grant permitted the write. It did not decide that the write was code-b's
+to make.** Those are different questions and only the first is mechanical.
+
+### The boundary this record sets
+
+A wildcard grant removes the RAIL, not the LANE. The conditions that made this
+defensible are all four together, and they should be stated when claiming it
+again:
+
+1. a committed outage on a shipped entry point, not a latent defect
+2. the file is not dirty, so nobody is mid-edit
+3. the owning agent is unreachable, measured rather than assumed
+4. the repair is minimal and reversible, and the author is told
+
+Absent any one of them the work is routed, not taken. Finding something worse
+while looking at something else is a reason to REPORT, and only these
+conditions turn it into a reason to act.
+
+### Still owed
+
+The author of `1a1a35c` should read the repair: the help text is theirs and
+code-b only made it parse.
+
+### What was built from it
+
+`test/entryPointsParse.test.mjs` (`4f6dd79`) — `node --check` over every
+declared entry point. Proven against the real history: green at `cba3c0d`,
+red at `1a1a35c`, `9039393` and `ad93995`, green at the fix.
+
+The deeper finding is a hollow-gate shape worth naming: **the existing tests
+spawned the CLI and asserted on its stdout, so a process that died at parse
+time produced no output and read as "did not match" rather than "is broken".
+The check asked whether it saw what it wanted before asking whether the
+program ran at all.** That is rule 3 pointed one layer further back, at
+startup, and it is why a syntactically dead entry point survived three commits
+and a green suite.
