@@ -120,14 +120,21 @@ test('D14: A LEGACY ROW WITH AN AUTHOR IS NOT OVERWRITTEN BY A FAILED LOOKUP', (
    * Rows with no `author_source` are the pre-fix shape, so this is the
    * migration case: it must not cost an author that was genuinely recorded.
    */
-  const legacy = [{
-    audit_id: 'audit-1',
-    candidate_sha: SHA,
-    candidate_tree_sha: TREE,
-    state: 'PENDING',
-    author_session: 'session_01LEGACY',
-    /* deliberately NO author_source -- that is what makes it legacy */
-  }];
+  /*
+   * DERIVED FROM THE REAL PRODUCER, NOT TYPED. My first version of this
+   * fixture used `audit_id: 'audit-1'`, which never matches the computed
+   * packet's hashed id -- so the rows never merged at all, the legacy row
+   * was simply dropped as resolved, and the test failed for a reason that
+   * had nothing to do with the defect. Hollow gate 9, in a test I wrote to
+   * catch a merge bug: a fixture the system cannot produce.
+   *
+   * So: take a real job and strip `author_source`, which is exactly what a
+   * row written before that field existed looks like.
+   */
+  const legacy = withResolver().map((j) => {
+    const { author_source, ...rest } = j;
+    return { ...rest, author_session: 'session_01LEGACY' };
+  });
   const stored = mergeQueue([], legacy, { now: 't' }).queue;
   assert.equal(stored[0].author_session, 'session_01LEGACY');
   assert.equal(stored[0].author_source, undefined, 'the fixture is not the legacy shape');
