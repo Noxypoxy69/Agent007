@@ -50,6 +50,55 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const argv = process.argv.slice(2);
+
+/**
+ * AN UNRECOGNISED FLAG IS AN ERROR, NOT A DEFAULT.
+ *
+ * Measured 2026-09-20: `--since` is the flag and somebody invoked
+ * `--base 553724b`. Nothing complained. The unknown pair was ignored, the
+ * scope silently fell back to "working tree against HEAD", and the run
+ * reported 66/66 GREEN having selected SIX of the thirty-three test files the
+ * real range needed. A narrower green than you asked for, announced as a
+ * pass.
+ *
+ * That is the hollow-gate signature exactly: the check ran, concluded
+ * cheerfully, and proved something other than what was asked. And it is worse
+ * on a scoping tool than anywhere else, because the whole point of this script
+ * is to decide what gets checked -- a silent mis-scope removes coverage
+ * everywhere downstream while looking like a fast suite.
+ *
+ * Strict, and deliberately so: this is an operator tool, not the rail, so
+ * rule 19's "an outage gets the hook switched off" does not apply. Refusing
+ * costs one re-typed command; accepting costs a false green.
+ */
+const KNOWN_FLAGS = new Set(['--list', '--since']);
+const unknown = argv.filter((a) => a.startsWith('--') && !KNOWN_FLAGS.has(a));
+if (unknown.length) {
+  process.stderr.write(
+    `[diff-suite] unrecognised flag(s): ${unknown.join(', ')}\n`
+    + `  known: ${[...KNOWN_FLAGS].join(', ')}\n`
+    + '  Refusing rather than falling back to a default scope: an ignored flag\n'
+    + '  produces a narrower run than you asked for and reports it as a pass.\n',
+  );
+  process.exit(2);
+}
+
+/*
+ * SAME DEFECT, SECOND SPELLING. `--since` with nothing after it -- a shell
+ * that swallowed the ref, a trailing flag -- makes `flag()` return its
+ * default, which is the HEAD fallback again. Fixing only the unknown-name
+ * case would be rule 8: patching the strings the prober happened to try
+ * instead of the way the option is read.
+ */
+const sinceAt = argv.indexOf('--since');
+if (sinceAt !== -1 && (sinceAt + 1 >= argv.length || argv[sinceAt + 1].startsWith('--'))) {
+  process.stderr.write(
+    '[diff-suite] --since needs a revision after it. Given none, this would\n'
+    + '  silently scope to "working tree against HEAD" and call that a pass.\n',
+  );
+  process.exit(2);
+}
+
 const LIST = argv.includes('--list');
 const flag = (n, d = null) => {
   const i = argv.indexOf(n);

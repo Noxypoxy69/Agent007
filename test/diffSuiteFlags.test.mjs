@@ -70,7 +70,16 @@ test('--since WITH NO REVISION is refused too -- the same defect, second spellin
    * as the final argument, or followed by another flag, makes the option
    * reader return its default, which is the HEAD fallback again.
    */
-  for (const args of [['--since'], ['--since', '--list']]) {
+  /*
+   * BOTH SHAPES CARRY `--list`, AND THAT IS NOT COSMETIC. Watching this test
+   * fail means running the script with the refusal removed, and without
+   * `--list` the trailing-`--since` case then falls through to an ACTUAL
+   * suite run nested inside this one. Node's recursion guard caught it, which
+   * is luck, not design. `--list` keeps the mutation cheap; the shapes under
+   * test -- a trailing flag, and a flag where a revision should be -- are
+   * unchanged.
+   */
+  for (const args of [['--list', '--since'], ['--since', '--list']]) {
     const r = run(args);
     assert.equal(r.code, 2,
       `${JSON.stringify(args)} should be refused, got ${r.code}. stderr: ${r.err}`);
