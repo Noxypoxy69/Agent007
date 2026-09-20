@@ -188,6 +188,29 @@ test('the gate refuses before the hook deadline instead of being killed into a s
     `the refusal must name the deadline so it is actionable, got: ${verdict.reason}`);
   assert.ok(verdict.elapsedMs < HOOK_TIMEOUT_S * 1000,
     `the gate must speak BEFORE the deadline, not race it (${verdict.elapsedMs}ms of ${HOOK_TIMEOUT_S * 1000}ms)`);
+
+  /*
+   * AND THE SUITE PROCESSES WERE ACTUALLY REAPED.
+   *
+   * THIS FILE AGREED WITH THE BROKEN CODE FOR AS LONG AS THE BUG EXISTED. An
+   * auditor reverted the abort-and-reap to the pre-fix state -- the version
+   * where `Promise.race` cancelled nothing and every timed-out Stop orphaned a
+   * full suite per shard -- and this file stayed 5/5 GREEN. `/stop-deadline/`
+   * is printed by BOTH deadline branches, the pre-run "too little budget"
+   * refusal and the post-run reap, so the assertion above cannot tell a gate
+   * that killed its children from one that abandoned them. Rule 4: a proxy
+   * agrees with the truth right up until something unusual happens.
+   *
+   * This run DOES reach the post-run branch (it spends most of its budget in
+   * the suite), so the count is the far end: a number greater than zero means
+   * live children were found and killed.
+   */
+  assert.match(verdict.reason, /killed rather than orphaned/,
+    `this must be the post-run deadline, not the pre-run budget refusal -- otherwise the reap is untested: ${verdict.reason}`);
+  const reaped = Number(/(\d+) suite process\(es\) were killed/.exec(verdict.reason)?.[1] ?? -1);
+  assert.ok(reaped >= 1,
+    `the gate answered the deadline without reaping any suite process (reaped=${reaped}). Every timed-out `
+    + `Stop then leaks a full suite per shard, unbounded across turns: ${verdict.reason}`);
 });
 
 test('a green suite inside the budget is still approved', (t) => {

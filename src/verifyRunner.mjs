@@ -95,11 +95,47 @@ function countFrom(output, label) {
  */
 const live = new Set();
 
-export function killLiveShards() {
-  for (const child of live) {
-    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+/**
+ * KILL THE TREE, NOT THE PARENT. An auditor found this one level too shallow.
+ *
+ * `node --test` runs each test file in its OWN SUBPROCESS -- this repository
+ * documents the fact itself, at test/stopGateDeadline.test.mjs:126, where
+ * inheriting `NODE_TEST_CONTEXT=child-v8` broke the gate. So SIGKILL on the
+ * shard supervisor reaps the supervisor and leaves up to one worker per test
+ * file alive, and THE WORKERS ARE THE PROCESSES THAT HOLD `cwd` -- which is
+ * the exact EPERM symptom the whole cancellation fix was written for.
+ *
+ * Killing the parent and calling the orphan class closed is the shape of the
+ * first fix: correct as far as it went, and it did not go far enough.
+ *
+ * `detached` is deliberately NOT used to make a process group. On Windows it
+ * spawns a new console and makes the child SURVIVE the parent, which is the
+ * opposite of what is wanted here, and a detached spawn was already withdrawn
+ * from this path once for causing the EPERM it was meant to prevent.
+ */
+export function defaultKillTree(child) {
+  const pid = child?.pid;
+  if (Number.isInteger(pid) && pid > 0) {
+    if (process.platform === 'win32') {
+      /* /T is the whole tree, /F is without asking. Fire and forget: if the
+       * tree is already gone taskkill exits non-zero and that is fine. */
+      try { spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* best effort */ }
+    } else {
+      /* Negative pid is the process group. Works when the child leads one;
+       * harmless when it does not, and the direct kill below still lands. */
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* not a group leader */ }
+    }
   }
+  /* ALWAYS the direct kill too, so the supervisor dies even if the tree
+   * sweep could not run. Belt and braces, in that order. */
+  try { child.kill('SIGKILL'); } catch { /* already gone */ }
+}
+
+export function killLiveShards() {
   const n = live.size;
+  for (const entry of live) {
+    try { entry.killTree(entry.child); } catch { /* already gone */ }
+  }
   live.clear();
   return n;
 }
@@ -118,21 +154,22 @@ export function killLiveShards() {
  * dangerous logic where a test can reach it, rather than behind an effect only
  * production can produce.
  */
-function runShard(root, shard, signal, spawnFn = spawn) {
+function runShard(root, shard, signal, spawnFn = spawn, killTree = defaultKillTree) {
   return new Promise((resolve) => {
     if (signal?.aborted) {
       resolve({ index: shard.index, exitCode: 1, tests: 0, fail: 0, output: 'cancelled before start' });
       return;
     }
     const child = spawnFn(process.execPath, ['--test', shard.arg, 'test/**/*.test.mjs'], { cwd: root });
-    live.add(child);
-    const onAbort = () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } };
+    const entry = { child, killTree };
+    live.add(entry);
+    const onAbort = () => { try { killTree(child); } catch { /* already gone */ } };
     signal?.addEventListener?.('abort', onAbort, { once: true });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
     const done = () => {
-      live.delete(child);
+      live.delete(entry);
       signal?.removeEventListener?.('abort', onAbort);
     };
     child.on('error', (e) => {
@@ -170,7 +207,7 @@ function runShard(root, shard, signal, spawnFn = spawn) {
  */
 export async function runVerification({
   root, key, identity, shards = 4, concurrency = 2, home = undefined, now = () => Date.now(),
-  signal = undefined, spawnFn = spawn,
+  signal = undefined, spawnFn = spawn, killTree = defaultKillTree,
 } = {}) {
   /*
    * THE SHARD COUNT IS CLAMPED TO THE FILES THAT EXIST, and the caller's number
@@ -229,7 +266,7 @@ export async function runVerification({
     while (queue.length) {
       const shard = queue.shift();
       // eslint-disable-next-line no-await-in-loop
-      results.push(await runShard(root, shard, signal, spawnFn));
+      results.push(await runShard(root, shard, signal, spawnFn, killTree));
     }
   };
 
@@ -241,7 +278,33 @@ export async function runVerification({
     clearInterval(beat);
   }
 
-  const verdict = aggregateShards(results, { total: plan.shards.length });
+  /*
+   * A CANCELLED RUN MUST NOT RECORD A REUSABLE VERDICT.
+   *
+   * Cancelling kills the shards, so every result comes back non-zero and
+   * `aggregateShards` says VERIFY_FAILED -- a completed, decided answer. And
+   * `decideVerify` REUSES a completed FAILED result; test/verifyCache.test.mjs
+   * pins exactly that ("A COMPLETED RESULT IS REUSED -- including a FAILED
+   * one"), correctly, because a real red is worth keeping.
+   *
+   * Put together, a cancellation would write a permanent red verdict for a
+   * tree that was never tested, and every later reader would trust it. Found
+   * by an auditor of the cancellation fix itself: the seam that made
+   * cancellation possible is what planted this.
+   *
+   * PARTIAL is the honest state -- "this proved nothing" -- and it is not
+   * reusable.
+   */
+  const cancelled = signal?.aborted === true;
+  const verdict = cancelled
+    ? {
+      state: VERIFY.PARTIAL,
+      why: 'the run was cancelled before it finished, so nothing was proved. This is not a failure of the '
+        + 'tree under test and must never be reused as one',
+      tests: 0,
+      fail: 0,
+    }
+    : aggregateShards(results, { total: plan.shards.length });
   const final = {
     ...base,
     state: verdict.state,

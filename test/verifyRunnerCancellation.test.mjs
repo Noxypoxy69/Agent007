@@ -45,7 +45,7 @@ import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { aggregateShards, VERIFY } from '../src/verifyCache.mjs';
+import { aggregateShards, decideVerify, VERIFY } from '../src/verifyCache.mjs';
 import { runVerification, killLiveShards } from '../src/verifyRunner.mjs';
 
 /* ── a killed shard is not a green shard ─────────────────────────────── */
@@ -95,20 +95,39 @@ test('EVERY NON-INTEGER EXIT CODE IS A FAILURE, not just null', () => {
  * A child that behaves like a long-running `node --test`: it produces nothing
  * and never exits until it is killed, and it records the signal it got.
  */
-function fakeChildFactory(log) {
+function fakeChildFactory(log, { selfCloseMs = 2500 } = {}) {
   return () => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    child.pid = 10_000 + (log.spawned ?? 0);
     child.killed = false;
+    const close = (code) => {
+      if (child.killed) return;
+      child.killed = true;
+      setImmediate(() => child.emit('close', code));
+    };
     child.kill = (sig) => {
       if (child.killed) return false;
-      child.killed = true;
       log.push(sig);
       /* A real child closes asynchronously after the signal, with code null. */
-      setImmediate(() => child.emit('close', null));
+      close(null);
       return true;
     };
+    /*
+     * IT LETS GO ON ITS OWN, AND THAT IS THE POINT.
+     *
+     * The first version only closed when killed, so ANY mutation that broke
+     * the kill path made `await run` never settle -- the central defect could
+     * not be watched failing, it could only be watched hanging, and in a full
+     * suite that is the wedged run this whole mechanism exists to avoid. The
+     * rail also refuses `--test-timeout`, so no caller could bound it.
+     * Found by an auditor mutating exactly that line and waiting 90 seconds.
+     *
+     * Self-closing turns the same mutation into a RED with a named message.
+     */
+    const t = setTimeout(() => close(0), selfCloseMs);
+    t.unref?.();
     log.spawned = (log.spawned ?? 0) + 1;
     return child;
   };
@@ -202,6 +221,115 @@ test('A REAPED SET IS EMPTY AFTERWARDS, so a second call cannot double-count', a
   killLiveShards();
   assert.equal(killLiveShards(), 0, 'a second reap counted children that were already dead');
   await run;
+});
+
+test('THE KILL GOES TO THE TREE, not just the supervisor', async (t) => {
+  /*
+   * `node --test` runs each test file in its OWN SUBPROCESS -- this repo
+   * documents it at test/stopGateDeadline.test.mjs:126. So killing the shard
+   * supervisor leaves up to one worker per file alive, and THOSE are the
+   * processes holding `cwd`, which is the EPERM this whole fix exists for.
+   * The first version of the fix killed the parent and called the orphan
+   * class closed.
+   */
+  const home = await fixtureHome();
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
+
+  const log = [];
+  const trees = [];
+  const control = new AbortController();
+  const run = runVerification({
+    root: process.cwd(),
+    key: 't'.repeat(32),
+    identity: { t: 1 },
+    shards: 2,
+    concurrency: 2,
+    home,
+    signal: control.signal,
+    spawnFn: fakeChildFactory(log),
+    killTree: (child) => { trees.push(child.pid); child.kill('SIGKILL'); },
+  });
+
+  await new Promise((r) => { setImmediate(r); });
+  control.abort();
+  await run;
+
+  assert.ok(log.spawned >= 1, 'no child was spawned, so nothing is proved');
+  assert.ok(trees.length >= 1, 'the abort killed the supervisor directly and never swept the tree');
+  assert.ok(trees.every((pid) => Number.isInteger(pid)),
+    `the tree sweep was handed no pid to sweep: ${JSON.stringify(trees)}`);
+});
+
+test('A CANCELLED RUN IS NOT RECORDED AS A FAILURE OF THE TREE', async (t) => {
+  /*
+   * THE LANDMINE THE SEAM PLANTED. Cancelling kills the shards, so every
+   * result is non-zero and aggregateShards says VERIFY_FAILED -- a completed,
+   * decided answer. And decideVerify REUSES a completed FAILED result, which
+   * test/verifyCache.test.mjs pins deliberately and correctly.
+   *
+   * So without this, a cancellation writes a PERMANENT RED VERDICT for a tree
+   * nobody ever tested, and every later reader trusts it. Worse than the
+   * orphan it was fixing.
+   */
+  const home = await fixtureHome();
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
+
+  const log = [];
+  const control = new AbortController();
+  const run = runVerification({
+    root: process.cwd(), key: 'c'.repeat(32), identity: { t: 1 }, shards: 2, concurrency: 2, home,
+    signal: control.signal, spawnFn: fakeChildFactory(log),
+  });
+  await new Promise((r) => { setImmediate(r); });
+  control.abort();
+  const rec = await run;
+
+  assert.notEqual(rec.state, VERIFY.PASSED, 'a cancelled run recorded a pass');
+  assert.notEqual(rec.state, VERIFY.FAILED,
+    'a cancelled run was recorded as a FAILURE OF THE TREE, and a completed FAILED record is reused -- '
+    + 'so this would pin a permanent red on code nobody tested');
+  assert.match(rec.why, /cancelled/);
+
+  /* THE FAR END: the decision layer must not reuse it. */
+  const d = decideVerify(rec, { key: 'c'.repeat(32), now: Date.now() });
+  assert.notEqual(d.action, 'REUSE', `a cancelled record was reused: ${d.why}`);
+});
+
+test('A SHARD THAT CLOSES WITH A NON-INTEGER CODE IS RECORDED AS FAILED', async (t) => {
+  /*
+   * D5: `exitCode: Number.isInteger(code) ? code : 1` in runShard had no test
+   * -- an auditor deleted the coercion and all seven passed, because
+   * aggregateShards now catches non-integers too. Redundant today, and rule
+   * 11 says test the mechanism anyway, because the redundancy holds only
+   * until the conditions change. The visible symptom of the gap:
+   * scripts/verify-run.mjs prints "exit -" instead of "exit 1".
+   */
+  const home = await fixtureHome();
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
+
+  const rec = await runVerification({
+    root: process.cwd(),
+    key: 'n'.repeat(32),
+    identity: { t: 1 },
+    shards: 1,
+    concurrency: 1,
+    home,
+    spawnFn: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.pid = 4242;
+      child.kill = () => true;
+      setImmediate(() => child.emit('close', null)); // killed by a signal
+      return child;
+    },
+  });
+
+  assert.ok(Array.isArray(rec.shards) && rec.shards.length >= 1, 'no shard was recorded');
+  assert.equal(rec.shards[0].exitCode, 1,
+    `a signal-killed shard was recorded as exitCode ${JSON.stringify(rec.shards[0].exitCode)}; `
+    + 'null reads as 0 to every consumer that coerces');
+  assert.notEqual(rec.state, VERIFY.PASSED);
 });
 
 test('A RUN ABORTED BEFORE IT STARTS NEVER SPAWNS, and still is not a pass', async (t) => {
