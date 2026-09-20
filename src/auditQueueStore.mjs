@@ -66,10 +66,60 @@ export function readQueue(repoRoot, home = undefined) {
   return { rows: [...byId.values()], malformed, file };
 }
 
-/** Append the current queue. Callers pass the whole merged set. */
+/**
+ * Append the current queue. Callers pass the whole merged set.
+ *
+ * ═══ ONLY THE ROWS THAT ACTUALLY CHANGED ARE APPENDED ═══
+ *
+ * Fourth-lap blind audit M11. Every caller passes its WHOLE snapshot, and
+ * the read dedupes last-write-wins -- so a writer re-asserted stale values
+ * for every row it had never touched. That is a lost update, and on a
+ * machine that commits constantly it is not theoretical:
+ *
+ *   - `scripts/audit-daemon.mjs` reads at `nextJob()`, then runs
+ *     `git worktree add` (seconds), then appends its pre-allocation snapshot.
+ *   - `scripts/enqueue-audit-job.mjs` runs on EVERY COMMIT and appends its
+ *     own whole snapshot after `auditCoverage` (also seconds of git).
+ *
+ * A commit landing while the daemon allocates appended a stale PENDING row
+ * for the job the daemon had just claimed, last write won, and the claim
+ * evaporated while the reviewer was still running. Symmetrically, a hook run
+ * could revert a row the CLI had just recorded.
+ *
+ * Re-reading here and filtering to genuinely-changed rows removes that
+ * entirely: a writer can no longer clobber a row it did not modify, because
+ * it no longer writes one. It also stops the file growing by the whole queue
+ * on every commit, which is why it was 1400+ rows for ~34 jobs.
+ *
+ * ═══ WHAT THIS DOES NOT FIX, SAID PLAINLY ═══
+ *
+ * It is NOT a lock. Two writers changing THE SAME row within the same
+ * read-modify-write window can still interleave, and the later append wins.
+ * That window is now microseconds (a read and a compare) instead of the
+ * seconds a `git worktree add` takes, but it is not zero. Closing it needs
+ * an advisory lock or a compare-and-set, which is a bigger change than a
+ * finding this size warrants -- and pretending otherwise in a comment is how
+ * the last four of these got missed.
+ */
 export function writeQueue(repoRoot, rows, home = undefined) {
   const file = auditQueuePath(repoRoot, home);
   mkdirSync(dirname(file), { recursive: true });
-  appendFileSync(file, `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8');
+
+  const current = new Map();
+  for (const r of readQueue(repoRoot, home).rows) current.set(r.audit_id, JSON.stringify(r));
+
+  const changed = (Array.isArray(rows) ? rows : []).filter((r) => {
+    if (!r || typeof r.audit_id !== 'string') return false;
+    return current.get(r.audit_id) !== JSON.stringify(r);
+  });
+
+  /*
+   * NOTHING TO SAY IS NOT AN ERROR, and writing an empty line would add a
+   * malformed row that `readQueue` then counts -- turning a no-op into a
+   * report of a broken store.
+   */
+  if (changed.length === 0) return file;
+
+  appendFileSync(file, `${changed.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8');
   return file;
 }
