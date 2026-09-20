@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseImports, resolveSpecifier } from '../src/moduleGraph.mjs';
@@ -120,4 +120,95 @@ test('PROTECTED_PATHS names the guard dependencies explicitly, so a reader can s
     assert.ok(PROTECTED_PATHS.includes(dep),
       `${dep} is a guard dependency and belongs in the list a human reads, not only in the closure`);
   }
+});
+
+test('EVERY SCRIPT THE MACHINE IS WIRED TO RUN IS PROTECTED', () => {
+  /*
+   * DERIVED FROM THE WIRING, BECAUSE THE LIST KEPT LOSING. The closure test
+   * above answers "can the guard IMPORT it". This answers the other way in:
+   * "is something configured to EXECUTE it". Two ways to reach a file, and
+   * only the first had a gate.
+   *
+   * Both instances were found by auditors rather than by anything here.
+   * scripts/bridge-session-poll.mjs is a SessionStart/SessionEnd hook and
+   * was unprotected until ac59b22; scripts/enqueue-audit-job.mjs runs from
+   * .git/hooks/post-commit on EVERY COMMIT and was still unprotected after
+   * it, because that sweep read .claude/settings.json and never thought of
+   * .git/hooks. A hand-typed list loses this race every time (rule 19), so
+   * the set is read from the two places that do the wiring.
+   *
+   * .git/hooks IS NOT TRACKED, so this reads whatever is installed on the
+   * machine it runs on. That is deliberate: an uninstalled hook cannot
+   * execute, and a hook somebody installs locally is exactly the case a
+   * tracked list cannot know about. The test can therefore find more on one
+   * machine than another, which is the opposite of rule 21's hazard -- the
+   * risk is a machine having MORE wiring, not the test encoding the
+   * author's.
+   */
+  const wired = new Map();          // rel -> where it came from
+
+  const fromCommand = (cmd, origin) => {
+    /*
+     * THE $ STAYS IN THE TOKEN. The first version of this excluded it, so
+     * `node "$ROOT/scripts/enqueue-audit-job.mjs"` was collected as
+     * `ROOT/scripts/...`, failed to resolve, and was dropped by the filter
+     * below -- every wired path silently discarded. It passed, and it
+     * passed with the entry it was written for REMOVED from
+     * PROTECTED_PATHS, which is how I found out (rule 1).
+     */
+    for (const m of String(cmd).matchAll(/[^\s"';|&]*\.mjs/g)) {
+      const rel = m[0].replace(/\\/g, '/')
+        .replace(/^\$\{[^}]+\}\//, '')
+        .replace(/^\$[A-Za-z_][A-Za-z0-9_]*\//, '')
+        .replace(/^\.\//, '');
+      if (rel && !wired.has(rel)) wired.set(rel, origin);
+    }
+  };
+
+  /* 1. what Claude Code is told to spawn */
+  for (const file of ['settings.json', 'settings.local.json']) {
+    const abs = path.join(REPO, '.claude', file);
+    if (!existsSync(abs)) continue;
+    let parsed;
+    try { parsed = JSON.parse(readFileSync(abs, 'utf8')); } catch { continue; }
+    (function walk(node) {
+      if (Array.isArray(node)) { node.forEach(walk); return; }
+      if (!node || typeof node !== 'object') return;
+      for (const [k, v] of Object.entries(node)) {
+        if (k === 'command' && typeof v === 'string') fromCommand(v, `.claude/${file}`);
+        else walk(v);
+      }
+    }(parsed));
+  }
+
+  /* 2. what git is told to run, untracked and executed all the same */
+  const hooksDir = path.join(REPO, '.git', 'hooks');
+  if (existsSync(hooksDir)) {
+    for (const name of readdirSync(hooksDir)) {
+      if (name.endsWith('.sample')) continue;
+      let body = '';
+      try { body = readFileSync(path.join(hooksDir, name), 'utf8'); } catch { continue; }
+      fromCommand(body, `.git/hooks/${name}`);
+    }
+  }
+
+  assert.ok(wired.size > 0,
+    'no wired script was found at all -- the extractor is broken, not the repository');
+
+  /*
+   * RESOLUTION IS ASSERTED SEPARATELY FROM COLLECTION, because `wired.size`
+   * is counted before resolution and so did not catch the hollowness above.
+   */
+  const resolved = [...wired].filter(([rel]) => existsSync(path.join(REPO, rel)));
+  assert.ok(resolved.length > 0,
+    'every wired path failed to resolve to a file, so the check below would compare an '
+    + `empty list against an empty list:\n  ${[...wired.keys()].join('\n  ')}`);
+
+  const unprotected = resolved
+    .filter(([rel]) => !isProtectedRelPath(rel))
+    .map(([rel, origin]) => `${rel}  (wired by ${origin})`);
+
+  assert.deepEqual(unprotected, [],
+    'these are configured to execute and are writable without a grant, so a session can '
+    + `rewrite what runs on its own machine:\n  ${unprotected.join('\n  ')}`);
 });

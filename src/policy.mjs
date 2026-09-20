@@ -85,6 +85,16 @@ export const PROTECTED_PATHS = Object.freeze([
    */
   'scripts/bridge-session-poll.mjs',
   /*
+   * RUN BY .git/hooks/post-commit ON EVERY COMMIT ON THIS MACHINE, and
+   * unprotected until an auditor looked. ac59b22 swept ".claude/settings.json"
+   * for hooks and found one; it did not think to sweep .git/hooks, so the
+   * sweep missed a file that executes strictly more often than the one it
+   * added. The hook's own header argues it belongs there because "every
+   * commit reaches this hook regardless of which tool issued it" -- which is
+   * the argument for protecting it.
+   */
+  'scripts/enqueue-audit-job.mjs',
+  /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing
    * a change to"; the converse was missing. src/governor.mjs is wired at
@@ -178,9 +188,36 @@ const NESTED_CONTROL_DIR = /(^|\/)\.claude\//i;
  * list; a spelling nobody enumerated is covered because case folding is a
  * property, not a set.
  */
+/**
+ * Directories no session may write into, refused WITHOUT being hashed.
+ *
+ * `.git/` is arbitrary execution and nothing covered it. Measured by a blind
+ * auditor through the shipped hook binary:
+ *
+ *     Write .git/hooks/post-commit   allowed
+ *     Write .git/hooks/pre-commit    allowed
+ *     Write .git/config              allowed
+ *
+ * `core.hooksPath` in that config file runs a command of the writer's
+ * choosing on every git operation, and a hook file runs on every commit.
+ * Neither is reachable through any path rule this repository had.
+ *
+ * WHY IT IS NOT A PROTECTED_PATHS PREFIX ENTRY, which is where it obviously
+ * belongs: `protectedFilesIn` EXPANDS a trailing-slash entry by walking the
+ * directory into the hashed baseline. `.git/` changes on every commit, every
+ * fetch and every index update, so the snapshot would drift constantly and
+ * the Stop gate would report protected-control drift on a repository nobody
+ * touched -- an alarm that fires every session is one people switch off
+ * (rule 16). It is a refusal, not a thing to fingerprint, so it is checked
+ * separately and never enters the digest.
+ */
+export const NEVER_WRITABLE_DIRS = Object.freeze(['.git/']);
+
 export function isProtectedRelPath(rel) {
   if (typeof rel !== 'string' || rel === '') return false;
   const norm = rel.split(path.sep).join('/').replace(/^\.\//, '').toLowerCase();
+  /* Refused outright, and deliberately not part of the hashed set. */
+  if (NEVER_WRITABLE_DIRS.some((d) => norm === d.slice(0, -1) || norm.startsWith(d))) return true;
   const exempt = PROTECTION_EXEMPT_PREFIXES.find((p) => norm.startsWith(p.toLowerCase()));
   if (exempt && !NESTED_CONTROL_DIR.test(norm.slice(exempt.length))) return false;
   return PROTECTED_PATHS.some((e) => {
