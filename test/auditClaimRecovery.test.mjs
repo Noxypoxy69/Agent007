@@ -67,9 +67,11 @@ test('THE FULL RECOVERY PATH: reviewer claims, dies, lease expires, a second rev
   assert.equal(afterATurn[0].state, JOB.CLAIMED, 'the merge reset a live claim to PENDING');
   assert.equal(afterATurn[0].claimed_by, 'reviewer-one', 'the merge forgot who holds it');
   assert.equal(afterATurn[0].claimed_at, CLAIMED_AT,
-    'THE STALENESS CLOCK DID NOT SURVIVE THE MERGE. Every subsequent claim sees a '
-    + 'fresh timestamp, so the lease never expires and the job is a permanent tombstone '
-    + 'while claimJob keeps passing its own unit tests.');
+    'THE STALENESS CLOCK DID NOT SURVIVE THE MERGE, and it breaks BOTH ways. '
+    + 'Reset it to now on each merge and the lease never expires: a permanent '
+    + 'tombstone, with claimJob still passing its own unit tests throughout. Drop it '
+    + 'to null and every live claim is instantly stealable instead. Both were watched '
+    + 'failing here on 2026-09-20; the first takes 5 of these 6 tests red, the second 2.');
 
   /* 3. Inside the lease, a second reviewer is correctly refused. */
   const tooSoon = claimJob(afterATurn[0], {
