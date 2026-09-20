@@ -905,8 +905,24 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    * class of error as measuring a dirty worktree. The baseline is taken
    * after reaping, and the stub is reaped again afterwards.
    */
-  const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-'));
-  const home = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-home-'));
+  /*
+   * C-3: box AND home LOSE THE PREFIX TOO, and the comment that said
+   * "neither literal appears anywhere for a launcher to match on" was only
+   * true of the image and the vault. box is the cwd, the head of PATH, and
+   * the directory holding claude.cmd -- which names the vault image by
+   * absolute path in plaintext. So %TEMP%\agentcmd-ptree-*\claude.cmd was
+   * still a glob that finds this run's image, and the C-2 litter below
+   * proves such directories survive.
+   *
+   * An auditor could not turn that into a forged pass, because livePids()
+   * filters on this run's random image name and the descent check means a
+   * launcher that starts it has in fact started a process. The property
+   * held; the sentence was wider than what was asserted. Both are fixed
+   * rather than only the sentence.
+   */
+  const nonce = () => randomBytes(9).toString('hex');
+  const box = mkdtempSync(path.join(tmpdir(), `${nonce()}-`));
+  const home = mkdtempSync(path.join(tmpdir(), `${nonce()}-`));
   /*
    * CLEANUP IS BEST-EFFORT AND SAYS SO. A launcher under test can leave a
    * detached process holding a handle on `box`, and rmSync then throws
@@ -914,12 +930,32 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    * do with what it asserts. A gate that goes red on its own tidying is one
    * people learn to ignore (rule 16).
    */
-  const sweep = (d) => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try { rmSync(d, { recursive: true, force: true }); return; } catch { /* handle still open */ }
+  /*
+   * C-2: REAP FIRST, THEN SWEEP, AND WAIT BETWEEN ATTEMPTS.
+   *
+   * 15a90b3's message said "no leftover directories or processes after the
+   * run". An auditor caught a run that left both behind, and its derived
+   * explanation was right on both counts: node's t.after hooks run in
+   * REGISTRATION order, so the sweeps were registered before reap() and ran
+   * while a launcher-started process still held a handle on box; and the
+   * retry loop fired three rmSync calls within microseconds, which cannot
+   * outlast a handle that is about to close.
+   *
+   * It reproduced under concurrency and not on a solo run, which is why the
+   * original claim looked true -- rule 21, in the probe rather than the
+   * subject.
+   *
+   * One hook now, registered after reap exists, so the order is a fact about
+   * this code rather than about hook registration. Cleanup stays best-effort:
+   * a gate that goes red on its own tidying is one people ignore (rule 16).
+   */
+  const sweep = async (d) => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try { rmSync(d, { recursive: true, force: true }); return true; } catch { /* handle open */ }
+      await new Promise((r) => { setTimeout(r, 150 * (attempt + 1)); });
     }
+    return false;
   };
-  t.after(() => { for (const d of [box, home]) sweep(d); });
 
   /*
    * A DISTINCTLY NAMED IMAGE, derived from process.execPath rather than
@@ -958,12 +994,10 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    * Making the image hard to stumble upon is defence against an accident, not
    * the proof.
    */
-  const nonce = () => randomBytes(9).toString('hex');
   const image = `${nonce()}.exe`;
 
   const vault = path.join(tmpdir(), nonce());
   mkdirSync(vault, { recursive: true });
-  t.after(() => sweep(vault));
   const imagePath = path.join(vault, image);
   try { linkSync(process.execPath, imagePath); } catch { cpSync(process.execPath, imagePath); }
 
@@ -1018,7 +1052,16 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
   };
   const reap = () => ps(`Get-Process -Name '${image.replace(/\.exe$/, '')}' -ErrorAction SilentlyContinue `
     + '| Stop-Process -Force');
-  t.after(reap);
+  /*
+   * THE ONLY CLEANUP HOOK, and it is registered here because reap must be
+   * defined first. Kill what the run started, let the handles close, then
+   * remove the directories.
+   */
+  t.after(async () => {
+    reap();
+    await new Promise((r) => { setTimeout(r, 300); });
+    for (const d of [box, home, vault]) await sweep(d);
+  });
 
   /** Spawn a launcher and answer one question: did a NEW claude appear? */
   const launched = async (launcherPath, afterSpawn = null) => {
@@ -1177,7 +1220,8 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    * match on, and that is a fact about two strings. Asserting it directly
    * is deterministic, costs nothing, and cannot pick up somebody's leftovers.
    */
-  for (const [what, value] of [['the image name', image], ['the vault path', vault]]) {
+  for (const [what, value] of [['the image name', image], ['the vault path', vault],
+    ['the box path', box], ['the home path', home]]) {
     for (const literal of ['claudeproc_', 'agentcmd-ptree-img-']) {
       assert.ok(!value.includes(literal),
         `${what} still contains the literal "${literal}" -- a launcher can glob for it, `

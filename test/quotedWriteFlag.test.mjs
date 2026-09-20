@@ -314,9 +314,41 @@ test('AN UNMEASURABLE RELAXATION IS NOT TAKEN: jq stays off the value table (L1)
   assert.equal(judge(`jq -f evil.jq package.json`).allowed, false,
     'the plain pattern-file form must stay refused');
 
-  /* And the cost is bounded: the separated form still works. */
-  assert.equal(judge(`jq -L dir package.json`).allowed, true,
-    'jq -L with a separated value reads no side file and must stay allowed');
-  assert.equal(judge(`jq .name package.json`).allowed, true,
-    'ordinary jq must keep working');
+  /*
+   * THE COST, MEASURED, AND WIDER THAN I FIRST WROTE IT.
+   *
+   * 849e202's message said "The cost is a glued -L<dir> behind another flag;
+   * jq -L dir and ordinary jq are unaffected, and both are asserted so the
+   * cost stays bounded." An auditor measured that the two assertions did not
+   * bound what they claimed to, and it is right. With jq off the value table
+   * nothing stops clusterTakesFile scanning past the L, so ANY glued -L<dir>
+   * whose directory name reaches an f before a non-letter is refused -- not
+   * only one "behind another flag":
+   *
+   *     jq -Lfixtures .name package.json    DENY    <- the f in "fixtures"
+   *     jq -Llibfoo   .name package.json    DENY    <- the f in "libfoo"
+   *     jq -Lmodules  .name package.json    ALLOW
+   *     jq -Lsrc      .name package.json    ALLOW
+   *     jq -L./modules .name package.json   ALLOW   <- the . stops the scan
+   *     jq -L modules .name package.json    ALLOW   <- separated
+   *
+   * That is rule 19's outage direction, and it is a real cost rather than a
+   * theoretical one. It is still the trade I would make: jq is not installed
+   * on this machine, jq does not use GNU getopt so the table's premise may
+   * not hold for it at all, and the alternative is an unmeasurable
+   * relaxation on a pattern-file flag. But the boundary is now asserted
+   * where it actually falls, so nobody has to re-derive it from a sentence.
+   */
+  for (const refused of ['jq -Lfixtures .name package.json', 'jq -Llibfoo .name package.json']) {
+    assert.equal(judge(refused).allowed, false,
+      `${refused} is expected to be refused -- if this now passes, jq is back on the `
+      + 'value table and the unmeasurable relaxation came with it');
+  }
+  for (const allowed of ['jq -Lmodules .name package.json', 'jq -Lsrc .name package.json',
+    'jq -L./modules .name package.json', 'jq -L modules .name package.json',
+    'jq .name package.json']) {
+    assert.equal(judge(allowed).allowed, true,
+      `${allowed} reads no side file and must stay allowed -- the cost of removing jq `
+      + 'from the value table is bounded to glued -L values containing an f');
+  }
 });

@@ -274,6 +274,22 @@ const TOOL_VALUE_SHORT = new Map([
    * hold for it. An auditor raised that and could not test it; jq is not
    * installed on this machine either, so neither could I.
    *
+   * THE SUITE FIGURE PUBLISHED WITH THIS CHANGE WAS WRONG. 849e202's message
+   * says "268 pass across all 18 files importing shellAllowlist". It added
+   * exactly one test and carried its parent's number forward; the real
+   * figure at that commit was 269. Third published-figure error in four
+   * commits, which makes it a habit rather than a slip: I wrote the number
+   * I expected instead of the number the runner printed. Recorded here
+   * because a commit message cannot be amended.
+   *
+   * THE COST OF THIS REMOVAL IS ALSO WIDER THAN THAT MESSAGE SAID. It reads
+   * "the cost is a glued -L<dir> behind another flag". With jq off the value
+   * table nothing stops the cluster scan past the L, so any glued -L<dir>
+   * reaching an f before a non-letter is refused: jq -Lfixtures and
+   * jq -Llibfoo are DENY, while -Lmodules, -Lsrc, -L./modules and -L modules
+   * are ALLOW. The boundary is asserted in test/quotedWriteFlag.test.mjs
+   * rather than described, because describing it is what went wrong.
+   *
    * The twelve rg relaxations WERE measurable and were measured against
    * ripgrep 14.1.1: -ef -Af -Bf -Cf -mf -gf -tf -Tf -Mf -jf -rf -Ef, and not
    * one of them read a file named f. Every letter consumed it as its own
