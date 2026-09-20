@@ -107,11 +107,44 @@ test('D1: A RECOMPUTED PACKET IS NOT A CHANGED ROW -- created_at must not drift'
   writeQueue(REPO, first, home);
   const before = readFileSync(auditQueuePath(REPO, home), 'utf8');
 
+  /*
+   * READ BACK FROM DISK, WHICH IS WHAT PRODUCTION DOES. Focused-pass
+   * finding D-10: this used the in-memory array, while every real caller
+   * does `mergeQueue(readQueue(...).rows, ...)`. A JSON round trip DROPS
+   * UNDEFINED-VALUED KEYS and fixes key order -- and key order is exactly
+   * what `writeQueue`'s `JSON.stringify` comparison is sensitive to.
+   *
+   * So the in-memory version could have passed while the shape production
+   * actually produces failed. That is the same "the fixture is not what
+   * the system makes" defect this file was written to close, one layer
+   * along, and it is one line from being right.
+   */
+  const stored = readQueue(REPO, home).rows;
+  assert.equal(stored[0].created_at, first[0].created_at,
+    'the round trip through disk changed created_at, so the comparison below would '
+    + 'be measuring serialisation rather than the merge');
+
   /* The SAME candidate, recomputed a minute later. Nothing about it changed. */
-  const again = mergeQueue(first, compute('2026-09-21T00:01:00Z'), { now: 'b' }).queue;
+  const again = mergeQueue(stored, compute('2026-09-21T00:01:00Z'), { now: 'b' }).queue;
   assert.equal(again[0].created_at, first[0].created_at,
     'a recomputed packet moved created_at, so every row looks changed and the '
     + 'no-op filter can never fire');
+
+  /*
+   * AND A ROW THAT NEVER HAD ONE DOES NOT ACQUIRE A DRIFTING ONE. The
+   * preservation is `was.created_at ?? job.created_at ?? str(now)`, and
+   * `job.created_at` is a fresh timestamp from auditJobsFor -- so a stored
+   * row lacking the field would take the fresh value on every merge and
+   * look changed for ever. Measured as 0 of 1618 live rows today, which is
+   * why it is latent rather than live; it stops being latent the moment a
+   * row is written by anything that does not stamp it.
+   */
+  const legacy = stored.map(({ created_at, ...rest }) => rest);
+  const a = mergeQueue(legacy, compute('2026-09-21T00:02:00Z'), { now: 'c' }).queue[0].created_at;
+  const b = mergeQueue(legacy, compute('2026-09-21T00:03:00Z'), { now: 'd' }).queue[0].created_at;
+  assert.equal(a, b,
+    'a row with no created_at takes a fresh timestamp on every merge, so it looks '
+    + 'changed every run and the filter never fires for it');
 
   writeQueue(REPO, again, home);
   assert.equal(readFileSync(auditQueuePath(REPO, home), 'utf8'), before,
