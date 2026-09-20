@@ -2,9 +2,15 @@
  * WHICH LIVE SEAT SHOULD TAKE WHICH QUEUED AUDIT.
  *
  * P0 item 2, Danny 2026-09-20. The measured state that produced it: 33 audit
- * jobs, 25 PENDING, 8 CLAIMED by `audit-daemon@DESKTOP-VPIUDEF`, and that
+ * jobs, 25 PENDING, 8 CLAIMED by a single `audit-daemon@<host>` seat, and that
  * daemon dead. Enqueueing worked; consumption did not, because consumption
  * depended on a process somebody had to remember to start.
+ *
+ * (The host is elided on purpose. The first version of this comment pasted the
+ * operator's real machine name in, and test/leakRegression.test.mjs caught it
+ * -- this repository is published, and a hostname is an identity. Same scrub
+ * as the operator's home directory, which CLAUDE.md records for the same
+ * reason.)
  *
  *     "Audit jobs must be consumed by the existing task/worker dispatcher, or
  *      by the same authoritative worker-liveness mechanism. Do not add another
