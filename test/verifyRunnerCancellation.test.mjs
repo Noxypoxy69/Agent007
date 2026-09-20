@@ -120,15 +120,19 @@ test('ABORTING A RUN KILLS ITS CHILDREN, so nothing is orphaned', async (t) => {
   control.abort();
   const reaped = killLiveShards();
 
-  await run;
+  const rec = await run;
   const elapsed = Date.now() - started;
+  /* A failure here must say WHY the shards ended, or the next reader guesses as I did. */
+  const shardDetail = `state=${rec?.state} why=${rec?.why} shards=${JSON.stringify(rec?.shards)} `
+    + `out=${String(rec?.failing_output ?? '').slice(0, 400)}`;
 
   /*
    * THE PRECONDITION IS ASSERTED, NOT GUARDED ON (rule 6). If the child never
    * started, this test proves nothing about killing it and must fail rather
    * than pass quietly.
    */
-  assert.ok(reaped >= 1, `no live shard was tracked, so nothing was killed and nothing is proved (reaped=${reaped})`);
+  assert.ok(reaped >= 1,
+    `no live shard was tracked, so nothing was killed and nothing is proved (reaped=${reaped}). ${shardDetail}`);
   assert.ok(elapsed < 60_000, `the run outlived its cancellation by ${elapsed}ms: the abort did not stop it`);
 
   /*
