@@ -58,16 +58,21 @@ test('AN ID CANNOT WALK OUT OF THE WORKTREE ROOT', () => {
 
 test('AN ID OF ONLY DOTS IS REFUSED, although dots are otherwise legal', () => {
   /*
-   * `.` is legal in an ordinary id, so the shape check alone lets `..`
-   * through -- it is dots. That is the one spelling that traverses, so it is
-   * refused separately and the reason says why.
+   * THIS TEST DELETED A GUARD. I had written a dedicated `^\.+$` refusal for
+   * `..` with its own message, and asserted the message here. It went red,
+   * because `..` never reaches that line: the shape check refuses it first,
+   * for starting with a dot. The dedicated guard could not fire.
+   *
+   * So the assertion is now on the OUTCOME, not on which rule produced it.
+   * Pinning the reason was what made the dead code look alive, and an
+   * unreachable guard is worse than none -- it tells the next reader that
+   * traversal is handled somewhere it is not.
    */
   assert.equal(validateAgentId('a.b').ok, true, 'a dot in an ordinary id was refused');
+  assert.equal(validateAgentId('1.2.3').ok, true, 'dots inside an id are legal and traverse nothing');
   for (const dots of ['.', '..', '...', '....']) {
-    const v = validateAgentId(dots);
-    assert.equal(v.ok, false, `"${dots}" was accepted as an agent id`);
+    assert.equal(validateAgentId(dots).ok, false, `"${dots}" was accepted as an agent id`);
   }
-  assert.match(validateAgentId('..').why, /traverses/);
 });
 
 test('THE cmd.exe METACHARACTERS THAT ONCE EXECUTED ARE REFUSED AS IDS', () => {

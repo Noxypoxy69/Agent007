@@ -59,14 +59,20 @@ export function validateAgentId(id) {
     };
   }
   /*
-   * REFUSED SEPARATELY AND DELIBERATELY. `..` passes the shape above -- it is
-   * dots, which ordinary ids may contain -- and it is the one spelling that
-   * walks out of the worktree root. A name consisting only of dots is never a
-   * real agent.
+   * THERE IS NO SEPARATE `..` CHECK, AND THAT IS DELIBERATE.
+   *
+   * I wrote one. My own test then proved it could never run: `..` fails the
+   * shape above, because an id must START with a letter or digit. A guard
+   * that cannot fire is not defence in depth, it is a line that makes the
+   * next reader believe traversal is handled somewhere other than where it
+   * actually is.
+   *
+   * Traversal is impossible here for two structural reasons, which is the
+   * argument worth leaving behind: the shape admits no `/` or `\`, so no id
+   * can be more than one path component; and it forbids a leading dot, so no
+   * id can BE `..`. `a..b` is permitted and is simply a directory called
+   * `wt-a..b`, which traverses nothing.
    */
-  if (/^\.+$/.test(s)) {
-    return { ok: false, why: `"${s}" traverses rather than names; an id of only dots is not an agent` };
-  }
   return { ok: true, id: s };
 }
 
