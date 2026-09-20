@@ -324,8 +324,52 @@ async function tick() {
   if (rec.status === 0) {
     say(`[audit-daemon] recorded ${job.audit_id} as ${verdict.verdict}`);
   } else {
+    /*
+     * REVIEWED, RECORD REFUSED. A THIRD STATE, AND IT NEEDS SAYING.
+     *
+     * Under PRE_GENESIS `recordAudit` refuses every write, so holding the
+     * claim jams the queue after a handful of reviews -- and the job reads as
+     * "somebody is working on it" when the work is finished. Releasing it
+     * plainly is worse: the review is lost and the next pass pays for it
+     * again.
+     *
+     * So it goes back to PENDING carrying what was learned. A later run, once
+     * an anchor exists, can record without re-reviewing, and `audits` can show
+     * the difference between never-looked-at and looked-at-but-unrecordable.
+     */
     say(`[audit-daemon] verdict produced but NOT recorded: ${out.split('\n')[0] ?? `exit ${rec.status}`}`);
     say('               The finding still stands; only the terminal write was refused.');
+    const withReview = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
+      ? {
+        ...r,
+        state: JOB.PENDING,
+        claimed_by: null,
+        claimed_at: null,
+        last_review: {
+          verdict: verdict.verdict,
+          findings: verdict.findings ?? [],
+          by: BY,
+          at: new Date().toISOString(),
+          not_recorded_because: out.split('\n')[0] ?? `exit ${rec.status}`,
+        },
+      }
+      : r));
+    writeQueue(REPO, withReview);
+  }
+
+  /*
+   * TEARDOWN. Thirteen worktrees had accumulated in TEMP before this existed,
+   * because the daemon allocated and never released. The findings live in the
+   * captured transcript, not in the worktree, so removing it loses nothing --
+   * and `git worktree remove` is used rather than a directory delete so git's
+   * administrative records go too, instead of leaving entries that only
+   * `prune` can clear.
+   */
+  try {
+    runGit(['worktree', 'remove', '--force', ws.dir], { cwd: REPO });
+    say(`[audit-daemon] removed ${ws.dir}`);
+  } catch (e) {
+    say(`[audit-daemon] could not remove ${ws.dir}: ${String(e?.stderr || e?.message || e).trim().split('\n')[0]}`);
   }
   return true;
 }
