@@ -109,22 +109,52 @@ if (asJson) {
    * outside-count rather than just warning, because "this may be a subset"
    * is advice and "there are 44 commits you are not looking at" is a fact.
    */
+  /*
+   * ═══ AND SAY WHICH DIRECTION, BECAUSE "older" WAS A GUESS ═══
+   *
+   * The first version printed `all - seen` and called every one of them
+   * OLDER. That holds only when the window's tip is HEAD, which is the
+   * default and so was the only case I looked at. For any window ending
+   * short of HEAD -- `HEAD~50..HEAD~10`, or a range naming two tags --
+   * the excluded commits are the NEWEST ones on the branch, and the
+   * banner told the reader they were behind them. That is the same defect
+   * the banner was added to fix, one line further on: a number answering
+   * a different question than the one it appears to answer.
+   *
+   * So each direction is counted by git separately, and neither is
+   * inferred by subtracting. A count that cannot be taken prints as
+   * unknown on its own rather than being folded into the other.
+   */
   console.log(`range: ${range}`);
-  let outside = null;
+  const [base, tip] = range.includes('..')
+    ? [range.slice(0, range.indexOf('..')), range.slice(range.lastIndexOf('..') + 2) || 'HEAD']
+    : [range, 'HEAD'];
+
+  let older = null;
+  let newer = null;
   try {
     const { runGit } = await import('../src/safeGit.mjs');
-    const count = (rev) => Number(String(runGit(['-C', repoRoot, 'rev-list', '--count', rev], {
-      encoding: 'utf8',
-    })).trim());
-    const seen = count(range);
-    const all = count('HEAD');
-    if (Number.isFinite(seen) && Number.isFinite(all)) outside = all - seen;
-  } catch { outside = null; }
+    const count = (...revs) => {
+      const n = Number(String(runGit(['-C', repoRoot, 'rev-list', '--count', ...revs], {
+        encoding: 'utf8',
+      })).trim());
+      return Number.isFinite(n) ? n : null;
+    };
+    /* Behind the window: everything the base already contains. */
+    try { older = count(base); } catch { older = null; }
+    /* Ahead of it: on HEAD, not reachable from the window's tip. Zero when
+     * the tip IS HEAD, which is the case the old line assumed universally. */
+    try { newer = count('HEAD', `^${tip}`); } catch { newer = null; }
+  } catch { /* safeGit itself unavailable; both stay null */ }
 
-  if (outside === null) {
-    console.log('       (could not tell how much history this window omits -- that is UNKNOWN, not zero)');
-  } else if (outside > 0) {
-    console.log(`       A WINDOW, NOT THE BRANCH: ${outside} older commit(s) are not examined.`);
+  const parts = [];
+  if (older === null) parts.push('an UNKNOWN number behind it');
+  else if (older > 0) parts.push(`${older} behind it`);
+  if (newer === null) parts.push('an UNKNOWN number ahead of it');
+  else if (newer > 0) parts.push(`${newer} AHEAD of it, i.e. newer than anything examined`);
+
+  if (parts.length > 0) {
+    console.log(`       A WINDOW, NOT THE BRANCH: ${parts.join(', and ')}.`);
     console.log('       Widen it with: node scripts/check-audit-coverage.mjs <base>..HEAD');
   }
   console.log(`commits touching a control: ${bearing}   (within the window above)`);
