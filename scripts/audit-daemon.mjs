@@ -75,12 +75,54 @@ const { claimJob, JOB, REQUIRED_PROOFS } = await import('../src/auditJob.mjs');
  */
 const BY = flag('--by', `audit-daemon@${os.hostname()}`);
 
+/**
+ * HAS THIS CANDIDATE LEFT THE MACHINE?
+ *
+ * An escaped commit is on other clones already, so the moment to audit it has
+ * passed and every hour it stays unaudited is an hour somebody can build on
+ * it. A merely-queued one is still local and recoverable. They are not equally
+ * urgent and the queue did not know the difference.
+ *
+ * ASKED OF GIT, not inferred: is the candidate an ancestor of the remote
+ * tracking branch. An unreadable ref answers `false` and SAYS so -- treating
+ * "I could not tell" as "escaped" would promote everything and destroy the
+ * ordering, and treating it as fact would hide it.
+ */
+function hasEscaped(sha, upstream) {
+  if (!upstream) return false;
+  try {
+    runGit(['merge-base', '--is-ancestor', sha, upstream], { cwd: REPO });
+    return true;
+  } catch { return false; }
+}
+
 function nextJob() {
   const { rows } = readQueue(REPO);
-  const pending = rows
-    .filter((j) => (j.state ?? JOB.PENDING) === JOB.PENDING)
-    .sort((a, b) => String(a.first_seen_at ?? '').localeCompare(String(b.first_seen_at ?? '')));
-  return { rows, job: pending[0] ?? null, pendingCount: pending.length };
+  const pending = rows.filter((j) => (j.state ?? JOB.PENDING) === JOB.PENDING);
+
+  let upstream = null;
+  try {
+    upstream = String(runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], { cwd: REPO })).trim();
+  } catch {
+    say('[audit-daemon] no upstream ref readable: cannot tell escaped from queued, so ordering is by age alone');
+  }
+
+  /*
+   * ESCAPED FIRST, THEN OLDEST. A RULE, NOT A PICK -- which is the whole point
+   * of the daemon. The maker does not choose which of its commits get
+   * reviewed; it does not get to choose the order either, and "already on
+   * other machines outranks still local" is a property of the candidate rather
+   * than a preference of whoever is watching.
+   */
+  const ranked = pending
+    .map((j) => ({ j, escaped: hasEscaped(j.candidate_sha, upstream) }))
+    .sort((a, b) => (Number(b.escaped) - Number(a.escaped))
+      || String(a.j.first_seen_at ?? '').localeCompare(String(b.j.first_seen_at ?? '')));
+
+  const escapedCount = ranked.filter((r) => r.escaped).length;
+  if (escapedCount) say(`[audit-daemon] ${escapedCount} of ${pending.length} pending have already left the machine; taking those first`);
+
+  return { rows, job: ranked[0]?.j ?? null, pendingCount: pending.length };
 }
 
 /** A detached worktree at the exact candidate, via the manager's own pattern. */
