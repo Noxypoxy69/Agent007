@@ -1,0 +1,36 @@
+#!/bin/sh
+# DETERMINISTIC AUDIT ENQUEUE. Not a check, not a suite -- a demand.
+#
+# Installed because §7.1 says the maker must not have to remember to request an
+# audit, and the maker demonstrably does not: on 2026-09-20 the author read the
+# escaped list, chose which of its own commits to audit, and launched the
+# reviewers. Git plumbing has no memory and no completion instinct.
+#
+# WHY HERE AND NOT A HARNESS HOOK. A PostToolUse matcher on "Bash" misses every
+# commit made through the PowerShell tool, and that is measured on this machine:
+# CLAUDE.md rule 17 records a session deleting src/claudeGuard.mjs with no
+# refusal, because the matcher named tools instead of matching the shape of the
+# call. Every commit reaches this hook regardless of which tool issued it.
+#
+# ENQUEUE ONLY, AND NEVER BLOCKING:
+#   - the suite is ~537s against a ~400s Stop budget, on a box that has killed
+#     three background processes for memory today. A synchronous check per
+#     commit would make committing unusable -- and committing is the behaviour
+#     this system wants MORE of.
+#   - a post-commit hook cannot un-commit anything, so failing here would only
+#     turn every commit into an error the agent then tries to "fix".
+#   - and no script can discharge a §7.2 audit anyway: that is an adversarial
+#     second party, told what to attack and not what the commit claims.
+#
+# So: record the demand, say nothing when there is none, never fail the commit.
+
+REV=$(git rev-parse HEAD 2>/dev/null) || exit 0
+[ -n "$REV" ] || exit 0
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+if [ -f "$ROOT/scripts/enqueue-audit-job.mjs" ]; then
+  node "$ROOT/scripts/enqueue-audit-job.mjs" --commit "$REV" || true
+fi
+
+exit 0
