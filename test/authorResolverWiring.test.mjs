@@ -110,15 +110,30 @@ test('THE CALL SITES USE IT -- asserted on the SOURCE, because that is the half 
   }
 
   /*
-   * AND THE HAND-ROLLED SHAPE IS GONE. The positive above passes if somebody
-   * adds a call and leaves the old one beside it, which is how this drifted
-   * the first time.
+   * AND NOBODY ELSE CALLS `authorSessionFrom`. The count above passes if
+   * somebody adds a call and leaves the old resolver beside it, which is how
+   * this drifted the first time.
+   *
+   * THE FIRST VERSION OF THIS ASSERTION BANNED `catch { return null }`
+   * ANYWHERE IN THE FILE, and it went red on a 200k-character CLI full of
+   * unrelated, perfectly correct instances. That is rule 19 -- an
+   * over-block, refusing things that were never the problem -- and an
+   * over-broad gate gets deleted by the next person it inconveniences,
+   * which loses the real check with it.
+   *
+   * The precise invariant is narrower and stronger: `authorSessionFrom` is
+   * the raw trailer parser, and the ONLY legitimate caller is
+   * `makeAuthorResolver` inside src/auditJob.mjs. A call anywhere in bin/ or
+   * scripts/ IS a hand-rolled resolver by definition, whatever its error
+   * handling looks like.
    */
   for (const [rel] of SITES) {
     const code = blank(readFileSync(path.join(REPO, rel), 'utf8'));
-    assert.doesNotMatch(code, /catch\s*\{\s*return null;?\s*\}/,
-      `${rel} still contains a bare catch-to-null, which is how a git failure becomes `
-      + 'a measured absence');
+    const calls = [...code.matchAll(/authorSessionFrom\s*\(/g)].length;
+    assert.equal(calls, 0,
+      `${rel} calls authorSessionFrom ${calls} time(s). That parser is raw -- it cannot `
+      + 'tell a failed lookup from an absent trailer -- so any caller outside '
+      + 'makeAuthorResolver is a hand-rolled resolver and reintroduces the fail-open');
   }
 });
 

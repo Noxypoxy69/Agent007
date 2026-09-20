@@ -3441,7 +3441,7 @@ try {
        * for one repository share one derivation (see repoStorePath).
        */
       const {
-        auditJobsFor, mergeQueue, claimJob, authorSessionFrom, satisfiesGate, JOB,
+        auditJobsFor, mergeQueue, claimJob, satisfiesGate, JOB,
         makeAuthorResolver, AUTHOR_UNAVAILABLE,
       } = await import('../src/auditJob.mjs');
       const { auditCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
