@@ -1445,6 +1445,50 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
       return { allowed: false, reason: `"npm ${tokens[1] ?? '(none)'}" is not an approved shape` };
     }
     /*
+     * A DIRECTORY REDIRECT TURNS AN APPROVED VERB INTO ARBITRARY EXECUTION,
+     * IN ONE CALL, WITH NO COMMIT.
+     *
+     *   npm test --prefix C:/anywhere      ALLOW   <- measured
+     *
+     * npm resolves package.json relative to --prefix and runs THAT file's
+     * `test` script in THAT directory. So the whole node gate -- hardened
+     * over five rounds to require that a file be tracked and unmodified
+     * before this session may execute it -- is bypassed by a flag, and the
+     * payload does not even have to be inside the repository. CLAUDE.md
+     * already documents `npm test`'s unjudged glob as the open execution
+     * channel; this is strictly worse, because that one at least required
+     * the file to sit in `test/`.
+     *
+     * It reached here because the branch judged `tokens[1]` and then only
+     * looked at tokens AFTER a literal `--`. `--prefix` is not `--`, so
+     * `sep === -1` and the function returned allowed having inspected
+     * nothing else.
+     *
+     * A PRIOR AUDIT RECORDED THIS SURFACE AS SAFE.
+     * docs/GUARD_FINDINGS_2026-09-17_fixer.md:94 says npm "fails CLOSED
+     * (`npm --prefix /elsewhere ...`)". It fails open, and did when that was
+     * written. A control documented as holding is worse than one documented
+     * as absent, because nobody re-checks it.
+     *
+     * ROUTED ON SHAPE, NOT ON A ROSTER OF NAMES (rule 19): the property is
+     * "this flag relocates where npm resolves and executes", which is true of
+     * the flag regardless of what npm calls it next release. `-C` is npm's
+     * own alias for --prefix, and the `=` form is the spelling that has
+     * slipped past every filter in this file at least once.
+     *
+     * NOT AN OUTAGE: agent.cmd's own `npm --prefix "%~dp0" run agent` is the
+     * LAUNCHER, which starts the session and is never judged by this rail.
+     */
+    const npmRedirect = tokens.slice(1).find((t) => /^(--prefix|--cwd|-C)(=|$)/.test(t.replace(/^['"]|['"]$/g, '')));
+    if (npmRedirect) {
+      return {
+        allowed: false,
+        reason: `"${npmRedirect}" relocates where npm resolves package.json and runs its scripts, which turns `
+          + 'an approved verb into arbitrary execution in a directory this rail never judged. Run npm in the '
+          + 'repository it belongs to',
+      };
+    }
+    /*
      * npm FORWARDS EVERYTHING AFTER `--` TO THE SCRIPT, so judging tokens[1]
      * alone left the node gate one spelling away from useless:
      *
