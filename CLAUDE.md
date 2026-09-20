@@ -441,9 +441,31 @@ file as binary and **suppresses the matching lines**:
 
 So any repo-wide audit built on grep has a **four**-file blind spot, and the
 new members are the guard's central module and the audit queue — the two files
-an audit is most likely to be sweeping. `grep -a` works, and so does the `Grep`
-tool, which is ripgrep, and ripgrep is the only one that *names the offset*:
+an audit is most likely to be sweeping. `grep -a` works, and ripgrep is the
+only one that *names the offset*:
 `binary file matches (found "\0" byte around offset 4050)`.
+
+**AND `src/auditJob.mjs` IS THE STRICT ONE: GIT ITSELF WILL NOT DIFF IT.**
+Measured 2026-09-20, on a commit that rewrote its author-resolution logic:
+
+    git show 674653a --stat -- src/auditJob.mjs
+     src/auditJob.mjs | Bin 41038 -> 43414 bytes
+     1 file changed, 0 insertions(+), 0 deletions(-)
+
+The whole substantive change is invisible to default `git show`, `git log -p`
+and `git diff`, and **any churn or line-count gate sees zero lines changed in
+the audit-queue module.** `--text` is required. This is NOT true of
+`guardSession.mjs`, which still diffs normally — the difference is where the
+NUL sits: git's binary detection scans only the first 8000 bytes, and
+`auditJob.mjs` has one inside that window while `guardSession.mjs`'s is at
+line 618. **So the four files do not behave alike, and "it is a NUL file" does
+not tell you which tools go blind.** Ask the tool, per file.
+
+Found by a blind auditor, which is the point: it degraded that audit before it
+was noticed. One claim in its report did **not** reproduce — it said the
+ripgrep-based `Grep` tool returns nothing for these files, and a `Grep` for
+`authorSessionFrom` in `auditJob.mjs` found it here. Verify before repeating,
+including a finding you commissioned.
 
 **THE COUNT WENT 2 → 3 → 4 IN ONE AFTERNOON, AND THAT IS THE ACTUAL LESSON.**
 The third was found by accident while checking that two `PROTECTED_PATHS` lists
