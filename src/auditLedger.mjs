@@ -68,9 +68,11 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
 ]);
 
 /**
- * DECISION LOGIC IS AUDIT-BEARING BY DEFAULT, not by prior registration.
+ * A NEW CONTROL FILE IS EXEMPT UNTIL SOMEBODY REGISTERS IT. That is the
+ * current, unfixed state, and it is stated first so nobody reads the reasoning
+ * below as a description of a repair.
  *
- * THE DEFECT THIS REPLACES, MEASURED. This matched only names already written
+ * THE DEFECT, MEASURED. This matches only names already written
  * into PROTECTED_PATHS or the list above, so a control was auditable ONLY IF
  * SOMEBODY HAD REMEMBERED TO REGISTER IT. Which means a brand-new control was
  * exempt by construction, and the incentive ran exactly backwards: the more
@@ -86,13 +88,6 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
  * tool-name matcher that missed the PowerShell tool (rule 17, a real guard
  * deletion), and the npm flag roster that lost three separate rounds. A list
  * of known names fails in both directions and loses to anything new.
- *
- * SO THE DEFAULT INVERTS: everything under `src/` is decision logic unless it
- * is prose or a dependency, which `isBlockingControl` already filters. `bin/`
- * and `scripts/` are NOT included wholesale -- they are mostly one-shot
- * operator tooling, and sweeping them in would flag every report and probe,
- * which is the rule 19 outage that gets a gate switched off. Named entries in
- * AUDIT_BEARING_EXTRAS still cover the ones that live outside `src/`.
  *
  * WHAT I TRIED AND WITHDREW, because the withdrawal is the useful part: making
  * everything under `src/` audit-bearing. The suite refused it immediately --
