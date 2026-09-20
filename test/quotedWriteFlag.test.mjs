@@ -28,7 +28,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { judgeShellCommand } from '../src/shellAllowlist.mjs';
+import { judgeShellCommand, clusterTakesFile } from '../src/shellAllowlist.mjs';
 
 const judge = (c) => judgeShellCommand(c);
 
@@ -260,4 +260,37 @@ test('THE GIT ROW IS LOAD-BEARING FOR READS, AND NOT FOR THE REASON IT CLAIMED (
   /* The row is an EMPTY set, so a glued path must still be caught tool-agnostically. */
   assert.equal(judge('git blame -fsrc/shellAllowlist.mjs').allowed, false,
     'a glued path after -f is a side file whatever the tool');
+});
+
+test('THE FILE LETTER IS CHECKED BEFORE THE VALUE LETTER, and that ordering is the rule (D7/F6)', () => {
+  /*
+   * AN AUDITOR MUTATED THE ORDERING AND NOTHING WENT RED. Swapping the two
+   * checks inside clusterTakesFile is a no-op against the shipped tables,
+   * because no tool has a letter in both of them -- so the property the
+   * table's own comment calls load-bearing was, in fact, untested.
+   *
+   * It is not hypothetical. The day someone adds a letter to TOOL_VALUE_SHORT
+   * that is already a file letter for that tool -- the natural mistake, since
+   * a file option DOES take a value -- the ordering decides whether the rail
+   * refuses the file or waves it through. So it is asserted directly, on sets
+   * that overlap, which the shipped tables do not.
+   */
+  const fileLetters = new Set(['f']);
+  const valueLetters = new Set(['e', 'f']);   // 'f' deliberately in BOTH
+
+  assert.equal(clusterTakesFile('-f', fileLetters, valueLetters), true,
+    'the file letter must win when a letter is in both sets -- erring toward refusal');
+  assert.equal(clusterTakesFile('-fpatterns.txt', fileLetters, valueLetters), true,
+    'a glued path after an overlapping letter must still be caught');
+  assert.equal(clusterTakesFile('-ef', fileLetters, valueLetters), false,
+    'a value letter that comes FIRST still owns the rest of the cluster');
+
+  /* And the plain behaviour the shipped tables rely on, so this is not
+   * only about the overlap case. */
+  assert.equal(clusterTakesFile('-eself', new Set(['f']), new Set(['e'])), false,
+    'the f inside a pattern value must not read as a file flag');
+  assert.equal(clusterTakesFile('-fe', new Set(['f']), new Set(['e'])), true,
+    'the file letter first means e is its path');
+  assert.equal(clusterTakesFile('--output', new Set(['o']), new Set()), false,
+    'a long flag is not a short cluster');
 });

@@ -281,8 +281,18 @@ const TOOL_VALUE_SHORT = new Map([
  * The scan stops at the first letter that takes a value of its own, because
  * from there on the characters are that value and not options. See
  * TOOL_VALUE_SHORT.
+ *
+ * EXPORTED ONLY SO THE ORDERING CAN BE TESTED, and an auditor is the reason.
+ * Every tool's two sets are currently DISJOINT, so swapping the two checks
+ * inside the loop is a provable no-op -- the auditor made that mutation and
+ * all eleven tests stayed green. The ordering is the property the commit
+ * message called "what makes the table safe rather than merely
+ * permissive", and it was untested because it is, today, redundant. Rule 11
+ * is about exactly that: a protection nothing exercises has already stopped
+ * being one, and this becomes live the day a letter appears in both sets
+ * for one tool.
  */
-function clusterTakesFile(token, letters, valueLetters) {
+export function clusterTakesFile(token, letters, valueLetters) {
   if (!/^-[A-Za-z]/.test(token) || token.startsWith('--')) return false;
   for (const ch of token.slice(1)) {
     if (letters.has(ch)) return true;

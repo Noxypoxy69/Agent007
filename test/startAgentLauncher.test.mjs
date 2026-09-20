@@ -40,6 +40,7 @@ import assert from 'node:assert/strict';
 import { spawnSync, spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, realpathSync, existsSync, linkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -530,8 +531,53 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
   const spell = (chars) => chars.filter((x) => !x.quote).map((x) => x.c).join('');
 
   /** What cmd.exe would actually run: statements, minus the inert ones. */
+  /*
+   * VARIABLE INDIRECTION, WHICH THE CARET FIX LEFT OPEN AND AN AUDITOR
+   * WALKED THROUGH. v6 modelled cmd.exe's escape phase and stopped there;
+   * cmd expands %VAR% before it reads the command name just as surely as it
+   * removes a caret. MEASURED through a real cmd.exe with a marker-writing
+   * stub npm.cmd -- every one of these RAN npm while the matcher said the
+   * text was clean:
+   *
+   *     set A=n / set B=pm / call %A%%B% run x       NPM RAN
+   *     set A=n / set B=pm / %A%%B% run x            NPM RAN   (no call)
+   *     set P=n / set Q=p / set R=m / %P%%Q%%R%      NPM RAN
+   *     set V=np / set V=%V%m / call %V% run x       NPM RAN   (self-append)
+   *     setlocal enabledelayedexpansion
+   *       set A=n / set B=pm / call !A!!B! run x     NPM RAN   (delayed)
+   *
+   * v6's own table listed `set "N=npm" / call %N%` as RAN, and the matcher
+   * caught it only INCIDENTALLY -- the literal "npm" survives in the `set`
+   * line. Split across two variables and nothing is left to match. That is
+   * rule 8 again: the caret was fixed at the matcher and the indirection
+   * class was extended by one example.
+   *
+   * The delayed form is expanded too, though `!A!` is literal without
+   * `setlocal enabledelayedexpansion`. Over-approximating costs a false
+   * refusal only for a launcher that writes `!NAME!` AND defines NAME, and
+   * an over-refusal here is visible immediately.
+   *
+   * NOT CLOSED, AND SAID SO RATHER THAN DISCOVERED LATER: a value read from
+   * a FILE or from the environment (`set /p`, `for /f`) is not derivable
+   * from the text, and no static matcher can be. The negative control
+   * below (`%A%%B%hing` -> `nothing`) is there so the expansion cannot
+   * quietly start refusing everything instead.
+   */
+  const expandVars = (st, vars) => {
+    let out = st;
+    for (let pass = 0; pass < 8; pass += 1) {
+      const next = out.replace(/[%!]([A-Za-z_][A-Za-z0-9_]*)[%!]/g,
+        (whole, name) => (vars.has(name.toUpperCase()) ? vars.get(name.toUpperCase()) : whole));
+      if (next === out) break;
+      out = next;
+    }
+    return out;
+  };
+
   const executableStatements = (text) => {
     const kept = [];
+    /* set NAME=VALUE, carried across statements the way cmd carries it. */
+    const vars = new Map();
 
     /* Lines, split only on newlines the caret phase left standing. */
     const lines = [[]];
@@ -556,9 +602,17 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
       }
 
       for (const part of parts) {
-        const st = spell(part).replace(/^\s*@?\s*/, '').trim();
-        if (st === '') continue;
-        if (/^(?:rem\b|::)/i.test(st)) continue;
+        const raw = spell(part).replace(/^\s*@?\s*/, '').trim();
+        if (raw === '') continue;
+        if (/^(?:rem\b|::)/i.test(raw)) continue;
+
+        /* Expansion happens BEFORE the assignment is recorded, so that
+         * `set V=%V%m` reads the OLD V, exactly as cmd does. */
+        const st = expandVars(raw, vars);
+
+        const assign = /^set\s+(?:\/[aA]\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(st);
+        if (assign) vars.set(assign[1].toUpperCase(), assign[2].trim());
+
         /* "echo whatever" and "echo." PRINT their payload; they run nothing. */
         if (/^echo(?:\b|\.)/i.test(st)) continue;
         kept.push(st);
@@ -607,6 +661,12 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     '"npm" run start-agent',
     'npm.ps1 run agent',
     'node "%APPDATA%\\npm\\node_modules\\npm\\bin\\npm-cli.js" run agent',
+    /* variable indirection, each MEASURED through a real cmd.exe to run npm */
+    'set A=n\r\nset B=pm\r\ncall %A%%B% run x',
+    'set A=n\r\nset B=pm\r\n%A%%B% run x',
+    'set P=n\r\nset Q=p\r\nset R=m\r\ncall %P%%Q%%R% run x',
+    'set V=np\r\nset V=%V%m\r\ncall %V% run x',
+    'setlocal enabledelayedexpansion\r\nset A=n\r\nset B=pm\r\ncall !A!!B! run x',
     /* the caret and quote spellings, each MEASURED to execute npm */
     'n^pm run x',
     'n^p^m run x',
@@ -635,6 +695,9 @@ test('agent.cmd does not route through npm, which pipes stdin and starts claude 
     ':: npm is deliberately not used',
     'rem  A & npm run TAIL',
     'echo   Run  npm run agent:check -- %1 --print',
+    /* MEASURED inert: expansion must not turn into refusing everything */
+    'set A=n\r\nset B=ot\r\ncall %A%%B%hing run x',
+    'set A=n\r\ncall %A%ode --version',
     /* MEASURED inert: the caret means something different in each of these */
     '"n^pm" run x',
     'echo a ^& npm run x',
@@ -696,40 +759,63 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    */
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-'));
   const home = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-home-'));
-  t.after(() => {
-    for (const d of [box, home]) rmSync(d, { recursive: true, force: true });
-  });
+  /*
+   * CLEANUP IS BEST-EFFORT AND SAYS SO. A launcher under test can leave a
+   * detached process holding a handle on `box`, and rmSync then throws
+   * EPERM -- which failed the whole test for a reason that has nothing to
+   * do with what it asserts. A gate that goes red on its own tidying is one
+   * people learn to ignore (rule 16).
+   */
+  const sweep = (d) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try { rmSync(d, { recursive: true, force: true }); return; } catch { /* handle still open */ }
+    }
+  };
+  t.after(() => { for (const d of [box, home]) sweep(d); });
 
   /*
    * A DISTINCTLY NAMED IMAGE, derived from process.execPath rather than
    * built, so the process-table question has one unambiguous answer and
    * cannot collide with any other node on this machine (rule 21).
    */
-  const image = `claudeproc_${Math.random().toString(36).slice(2, 8)}.exe`;
-
   /*
-   * THE IMAGE LIVES OUTSIDE THE LAUNCHER'S REACH, and the version that put
-   * it in `box` handed the subject the answer. `box` is both the cwd and
-   * the head of PATH, so a launcher that wanted to pass without running
-   * claude could have globbed `claudeproc_*.exe` beside itself and started
-   * it. The random name was doing all the work, and a random name is not a
-   * boundary -- it is an obscurity.
+   * NO LITERAL LEFT TO GLOB, and the previous version of this comment was
+   * wrong about its own reasoning.
    *
-   * Now claude.cmd is the only thing in `box`, and it names the image by an
-   * absolute path in a directory that is neither the cwd nor on PATH.
+   * It said the image now sat in "a third directory that is neither the cwd
+   * nor on PATH" and treated that as a boundary -- having argued, four lines
+   * earlier, that a random FILENAME was "obscurity, not a boundary". It had
+   * replaced a random filename under the fixed prefix `claudeproc_` with a
+   * random DIRECTORY under the fixed prefix `agentcmd-ptree-img-`: the same
+   * class, one directory along. An auditor demonstrated it rather than
+   * arguing it:
    *
-   * WHAT THIS STILL DOES NOT BOUND, stated rather than left for the next
-   * auditor: a launcher can READ claude.cmd -- it has to be readable to be
-   * runnable -- and start the image itself. That is not a hole in the
-   * property being tested. The claim here is "this launcher started a
-   * process rather than only writing a file about one", and a launcher that
-   * reads the path and starts the image has done exactly that. No test can
-   * distinguish launching a program from launching that same program by
-   * another route, and pretending otherwise is how the report-based version
-   * of this gate came to be believed.
+   *     for /d %%d in ("%TEMP%\agentcmd-ptree-img-*") do
+   *       for %%f in ("%%d\claudeproc_*.exe") do start "" "%%f"
+   *
+   *     AUDIT-PROBE tempglobber: pid=30160 timedOut=false  => PASSED THE GATE
+   *
+   * Both prefixes are gone. The directory and the image are named from
+   * randomBytes, so neither literal appears anywhere for a launcher to match
+   * on, and the tempglobber case below pins that.
+   *
+   * WHAT IS ACTUALLY THE BOUNDARY, since hiding is not one. The claim this
+   * gate makes is "the launcher started a process rather than only writing a
+   * file about one", and what establishes it is DESCENT: the observed process
+   * must be a child of the launcher we spawned. A launcher determined to find
+   * the image can read claude.cmd -- it has to be readable to be runnable --
+   * and a launcher that reads the path and starts the image HAS started a
+   * process, which is the thing being asserted. No test distinguishes
+   * launching a program from launching that same program by another route.
+   * Making the image hard to stumble upon is defence against an accident, not
+   * the proof.
    */
-  const vault = mkdtempSync(path.join(tmpdir(), 'agentcmd-ptree-img-'));
-  t.after(() => rmSync(vault, { recursive: true, force: true }));
+  const nonce = () => randomBytes(9).toString('hex');
+  const image = `${nonce()}.exe`;
+
+  const vault = path.join(tmpdir(), nonce());
+  mkdirSync(vault, { recursive: true });
+  t.after(() => sweep(vault));
   const imagePath = path.join(vault, image);
   try { linkSync(process.execPath, imagePath); } catch { cpSync(process.execPath, imagePath); }
 
@@ -926,6 +1012,30 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
     'exit /b 0',
     '',
   ].join('\r\n'));
+
+  /*
+   * THE FIXED-PREFIX CLASS, ASSERTED RATHER THAN RE-ATTACKED.
+   *
+   * My first version of this case was a launcher that globbed %TEMP% for
+   * the two old prefixes and tried to start what it found. It went wrong
+   * in the way this file keeps teaching: it found a vault left behind by an
+   * EARLIER run of this very test, started a process from inside `box`,
+   * and the open handle made the cleanup fail with EPERM. The run went red
+   * on litter rather than on the subject -- rule 21, in the probe again --
+   * and the machine had 18 stale directories and 18 stray processes on it,
+   * all mine.
+   *
+   * The property is simply that no fixed literal survives for a launcher to
+   * match on, and that is a fact about two strings. Asserting it directly
+   * is deterministic, costs nothing, and cannot pick up somebody's leftovers.
+   */
+  for (const [what, value] of [['the image name', image], ['the vault path', vault]]) {
+    for (const literal of ['claudeproc_', 'agentcmd-ptree-img-']) {
+      assert.ok(!value.includes(literal),
+        `${what} still contains the literal "${literal}" -- a launcher can glob for it, `
+        + 'which is what made the previous arrangement forgeable');
+    }
+  }
 
   const globbed = await launched(globber);
   assert.equal(globbed.timedOut, false,
