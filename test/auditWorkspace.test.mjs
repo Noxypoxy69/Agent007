@@ -23,7 +23,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdtempSync, rmSync, existsSync, mkdirSync, readdirSync,
-  writeFileSync, openSync, closeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -143,36 +142,37 @@ test('ok:false WHEN THE DIRECTORY SURVIVES -- the whole point, and it was untest
    * branch had never been watched fire (rule 1) -- in the fix for a defect
    * that WAS "reported success when it removed nothing".
    *
-   * THE CASE HAS TO BE REAL (rule 9). The module's own comment says the
-   * common cause is a dying reviewer holding handles on Windows, so that is
-   * what is built: a file inside the workspace, held open, which is what
-   * makes `rmSync` fail here. `existsSync` is the far end (rule 4) and the
-   * only thing `ok` is allowed to mean.
+   * THE FIRST VERSION OF THIS TEST COULD NOT BUILD THE CASE, and said so
+   * instead of passing. It held an open file handle inside the workspace,
+   * on the module's own account that a dying reviewer's handles are what
+   * make removal fail on Windows. Measured: the directory was removed
+   * anyway, because libuv opens with FILE_SHARE_DELETE. The precondition
+   * assertion fired, which is the only reason that is written down here
+   * rather than shipped as a green test over a branch nobody ran.
    *
-   * If a platform deletes it anyway the PRECONDITION assertion below fails
-   * and names why, rather than the test passing by not exercising the
-   * branch (rule 6). That failure is an environment finding, not a defect
-   * in releaseWorkspace -- said here so an auditor does not spend a pass on
-   * it (rule 21).
+   * Every other way to wedge a real removal is a property of the machine
+   * -- a process cwd, an ACL, a mount -- and rule 21 forbids encoding one.
+   * So the removal is injected, as `runGit` already is. What is NOT
+   * injected is `existsSync`: the verdict still comes from asking the
+   * filesystem whether the directory is there (rule 4), so this cannot
+   * pass by agreeing with itself.
    */
   const runGit = recorder();
   const a = allocateWorkspace({ candidateSha: SHA, runGit, repoRoot: root, tmpRoot: root });
 
-  const held = path.join(a.allocation.dir, 'reviewer-holds-this');
-  writeFileSync(held, 'x');
-  const fd = openSync(held, 'r+');
-  try {
-    const r = releaseWorkspace(a.allocation, { runGit, repoRoot: root });
+  /* A removal that fails the way Windows fails: EBUSY, directory intact. */
+  const stuck = () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); };
+  const r = releaseWorkspace(a.allocation, { runGit, repoRoot: root, rm: stuck });
 
-    assert.equal(existsSync(a.allocation.dir), true,
-      'PRECONDITION: this platform removed a directory with an open handle inside it, '
-      + 'so the surviving-directory case could not be constructed here. Environment, not defect.');
-    assert.equal(r.ok, false,
-      'the workspace is still on disk and teardown reported ok -- the exact defect D-1 fixed');
-    assert.match(r.why, /still present after teardown/);
-  } finally { closeSync(fd); }
+  assert.equal(existsSync(a.allocation.dir), true, 'the fixture removed the directory itself');
+  assert.equal(r.ok, false,
+    'the workspace is still on disk and teardown reported ok -- the exact defect this fixed, '
+    + 'and the case the module says is ROUTINE on Windows');
+  assert.match(r.why, /still present after teardown/);
+  assert.match(r.why, /EBUSY/, 'the operator is told ok:false but not what went wrong');
 
-  /* THE POSITIVE (rule 5): with the handle released the same call succeeds. */
+  /* THE POSITIVE (rule 5): the same call with a working removal succeeds,
+   * so `ok:false` is a measurement and not a constant. */
   const after = releaseWorkspace(a.allocation, { runGit, repoRoot: root });
   assert.equal(after.ok, true, after.why);
   assert.equal(existsSync(a.allocation.dir), false);

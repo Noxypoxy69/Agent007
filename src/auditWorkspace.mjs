@@ -163,7 +163,7 @@ export function allocateWorkspace({
  *
  * @returns {{ok:boolean, why?:string}}
  */
-export function releaseWorkspace(allocation, { runGit, repoRoot } = {}) {
+export function releaseWorkspace(allocation, { runGit, repoRoot, rm = rmSync } = {}) {
   const dir = allocation && typeof allocation.dir === 'string' ? allocation.dir : null;
   const id = allocation && typeof allocation.workspace_id === 'string' ? allocation.workspace_id : null;
   if (!dir || !id) return { ok: false, why: 'releaseWorkspace needs the allocation it is removing, not a sha' };
@@ -192,8 +192,26 @@ export function releaseWorkspace(allocation, { runGit, repoRoot } = {}) {
    * routinely -- that is how thirteen of these accumulated before teardown
    * existed at all.
    */
+  /*
+   * `rm` IS INJECTABLE, AND ONLY SO THE FAILURE BRANCH CAN BE WATCHED.
+   *
+   * The `ok:false` path below is the entire reason this function was
+   * changed, and it had no test -- because a removal that FAILS could not
+   * be constructed from the suite. The obvious attempt does not work: a
+   * held file handle does not block deletion on Windows, since libuv opens
+   * with FILE_SHARE_DELETE. Measured, not assumed -- the first version of
+   * the test tried exactly that and its precondition assertion fired.
+   *
+   * The remaining ways are all machine properties (a process whose cwd is
+   * the directory, an ACL, a mount) and rule 21 says a test must not
+   * encode one. So the seam moves into the code, the way `runGit` already
+   * is: the test supplies a removal that fails the way Windows fails, and
+   * the DECISION -- ask the filesystem, report what git said and what rm
+   * said -- is then exercised for real. `existsSync` is still the far end
+   * and is never injected, so `ok` cannot be talked into lying.
+   */
   let fsWhy = null;
-  try { rmSync(dir, { recursive: true, force: true }); } catch (e) { fsWhy = String(e?.message ?? e); }
+  try { rm(dir, { recursive: true, force: true }); } catch (e) { fsWhy = String(e?.message ?? e); }
 
   /*
    * ═══ NO REPO-GLOBAL PRUNE. THIS REPOSITORY ALREADY RULED ON IT. ═══
