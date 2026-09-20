@@ -33,7 +33,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { judgeShellCommand } from '../src/shellAllowlist.mjs';
+import { judgeShellCommand, NPM_SHAPE } from '../src/shellAllowlist.mjs';
 
 const allowed = (cmd) => judgeShellCommand(cmd).allowed;
 
@@ -248,8 +248,28 @@ test('THE HARDENING FLAG IS NEVER HARDER TO WRITE THAN THE UNHARDENED COMMAND', 
    * have caught the one flag: adding a safety flag to a permitted command
    * must never turn an ALLOW into a DENY.
    */
-  const SAFETY_FLAGS = ['--ignore-scripts', '--dry-run', '--no-save'];
-  const BASE = ['npm install', 'npm ci', 'npm test', 'npm run build'];
+  /*
+   * THE BASES ARE DERIVED FROM THE SHIPPED VERB LIST, NOT TYPED. The first
+   * version used four hand-written bases and three hand-written flags, and
+   * an auditor found four counterexamples it could not reach -- including
+   * `npm version patch --no-git-tag-version`, where the permitted spelling
+   * writes a commit and a tag and the suppressing one was refused.
+   *
+   * A property asserted over a list somebody typed is a row, not a
+   * property. NPM_SHAPE is the real vocabulary, so every verb the rail
+   * admits is crossed with every safety flag here.
+   *
+   * THE FLAG SIDE IS STILL A LIST and that is the honest residual: npm has
+   * ~175 config keys and this names a dozen. What it can no longer do is
+   * miss a VERB.
+   */
+  const SAFETY_FLAGS = [
+    '--ignore-scripts', '--dry-run', '--no-save',
+    '--no-bin-links', '--no-git-tag-version', '--strict-peer-deps',
+    '--no-audit', '--no-fund', '--no-update-notifier', '--package-lock-only',
+  ];
+  const VERBS = NPM_SHAPE.source.replace(/^\^\(|\)\$/g, '').split('|');
+  const BASE = VERBS.map((v) => (v === 'run' ? 'npm run build' : v === 'version' ? 'npm version patch' : `npm ${v}`));
 
   for (const base of BASE) {
     if (!allowed(base)) continue;                 // only meaningful where the base passes

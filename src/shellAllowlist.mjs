@@ -839,7 +839,7 @@ function gitOptionTokens(tokens, verb) {
   return out;
 }
 
-const NPM_SHAPE = /^(test|install|ci|run|list|ls|view|why|outdated|audit|version)$/;
+export const NPM_SHAPE = /^(test|install|ci|run|list|ls|view|why|outdated|audit|version)$/;
 
 /*
  * `node <file>` is allowed and `node -e` is not, which looks inconsistent until
@@ -1723,6 +1723,27 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
       /* Listing and output shaping. */
       'depth', 'all', 'foreground-scripts',
       'update-notifier', 'no-update-notifier',
+      /*
+       * FOUR MORE THE INVERSION WAS STILL REFUSING, each a real npm 11.16.0
+       * flag an auditor verified against `npm config ls -l`, and each
+       * producing the same inversion ea9ac3c was written to fix:
+       *
+       *     ALLOW npm install       -> DENY npm install --no-bin-links
+       *     ALLOW npm version patch -> DENY npm version patch --no-git-tag-version
+       *     ALLOW npm ci            -> DENY npm ci --strict-peer-deps
+       *     ALLOW npm audit         -> DENY npm audit --audit-level=high
+       *
+       * The second is the sharpest. `npm version patch` is permitted and
+       * writes a commit and a tag; the spelling that suppresses both was
+       * refused. That is the hardening-flag inversion again, one flag name
+       * along, in the commit that added a property test claiming to have
+       * closed it -- because the property iterated three flags somebody
+       * thought of (rule 8).
+       */
+      'bin-links', 'no-bin-links',
+      'git-tag-version', 'no-git-tag-version',
+      'strict-peer-deps', 'no-strict-peer-deps',
+      'audit-level',
     ]);
 
     /* npm's own flags stop at a bare --; the rest are the script's. */
