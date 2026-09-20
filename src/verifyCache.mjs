@@ -280,7 +280,21 @@ export function aggregateShards(results, { total = 0 } = {}) {
   const missing = [];
   for (let i = 1; i <= expected; i += 1) if (!seen.has(i)) missing.push(i);
 
-  const failed = rows.filter((r) => Number(r.exitCode) !== 0);
+  /*
+   * A SHARD WITHOUT AN INTEGER EXIT CODE IS A FAILED SHARD, NEVER A GREEN ONE.
+   *
+   * `Number(null) === 0`, and node sets `code = null` when a child dies by
+   * SIGNAL -- the OOM killer, or a cancellation. Under the old `Number()` the
+   * killed shard was not counted as failed, and if any surviving shard
+   * reported tests the whole run aggregated to VERIFY_PASSED. A forged pass,
+   * produced by the machine being under exactly the load that makes a suite
+   * get killed.
+   *
+   * Strict, and it matches how the same question is already asked at
+   * src/verifyRunner.mjs -- two spellings of one predicate is the pair nobody
+   * watches when they disagree.
+   */
+  const failed = rows.filter((r) => !Number.isInteger(r.exitCode) || r.exitCode !== 0);
   const tests = rows.reduce((n, r) => n + (Number(r.tests) || 0), 0);
   const fail = rows.reduce((n, r) => n + (Number(r.fail) || 0), 0);
 

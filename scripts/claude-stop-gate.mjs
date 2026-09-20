@@ -1113,29 +1113,46 @@ if (decision.action === ACTION.START) {
    * `guardDependenciesProtected` exist to prevent; a spawn by filename is
    * outside both.
    */
-  const { runVerification } = await import('../src/verifyRunner.mjs');
+  const { runVerification, killLiveShards } = await import('../src/verifyRunner.mjs');
 
   /*
-   * A DEADLINE HERE IS A REFUSAL, NOT A PASS. The run is awaited against the
-   * remaining budget; whichever settles first decides, and a timeout leaves the
-   * RUNNING record behind with a heartbeat that goes stale, so the next turn
-   * treats it as dead and starts fresh rather than waiting on a corpse.
+   * A DEADLINE HERE IS A REFUSAL, NOT A PASS -- AND IT MUST ALSO STOP THE RUN.
+   *
+   * The first version raced the run against a timer and answered when the
+   * timer won. `Promise.race` CANCELS NOTHING: this gate printed its refusal,
+   * called process.exit(0), and left a full `node --test` per shard still
+   * running. Unbounded across turns, which is precisely the duplicate-suite
+   * load this whole mechanism exists to remove, arriving through a different
+   * door -- and an orphan holding `cwd` reinstates the Windows EPERM that the
+   * detached spawn was withdrawn for.
+   *
+   * So the deadline ABORTS the run and the children are reaped before this
+   * process leaves. Found by an independent auditor reading the diff.
    */
+  const control = new AbortController();
   const timedOut = Symbol('timed-out');
   let produced = null;
+  let timer = null;
   try {
     produced = await Promise.race([
-      runVerification({ root, key: keyed.key, identity: ident }),
-      new Promise((resolve) => { setTimeout(() => resolve(timedOut), left).unref?.(); }),
+      runVerification({ root, key: keyed.key, identity: ident, signal: control.signal }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(timedOut), left); timer.unref?.(); }),
     ]);
   } catch (e) {
+    control.abort();
+    killLiveShards();
     out(`[agentbridge:verify-threw] Verification could not be produced (${e?.message ?? e}). NOTHING WAS VERIFIED.`);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
   if (produced === timedOut) {
+    control.abort();
+    const reaped = killLiveShards();
     out(`[agentbridge:stop-deadline] Verification was still running after ${left}ms and this gate answered so its `
-      + 'verdict is not discarded. NOTHING WAS VERIFIED, so this turn is not approved. A healthy run finishes far '
-      + 'inside this; one that does not is a machine to fix, not a reason to approve unverified work.');
+      + `verdict is not discarded; ${reaped} suite process(es) were killed rather than orphaned. NOTHING WAS `
+      + 'VERIFIED, so this turn is not approved. A healthy run finishes far inside this; one that does not is a '
+      + 'machine to fix, not a reason to approve unverified work.');
   }
 
   /*

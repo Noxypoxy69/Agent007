@@ -74,22 +74,74 @@ function countFrom(output, label) {
   return m ? Number(m[1]) : 0;
 }
 
-function runShard(root, shard) {
+/**
+ * A RUN MUST BE CANCELLABLE, OR THE DEADLINE IS A LIE.
+ *
+ * The Stop gate awaits this against its remaining budget and answers when the
+ * budget runs out. `Promise.race` cancels NOTHING: the gate printed its
+ * refusal, called `process.exit(0)`, and left a full `node --test` suite per
+ * shard still running -- unbounded across turns, which is exactly the
+ * duplicate-suite load this whole mechanism exists to remove, arriving through
+ * a different door. It also reinstated the Windows EPERM that the detached
+ * spawn was withdrawn for: an orphan holding `cwd` blocks the fixture cleanup,
+ * and `rmSync(force)` suppresses ENOENT, not EPERM.
+ *
+ * So live children are tracked and `signal` really kills them. SIGKILL, not
+ * SIGTERM: a node test runner asked politely can take longer to die than the
+ * budget that is already exhausted.
+ *
+ * Found by an independent auditor reading the diff -- it could not run
+ * anything, and did not need to.
+ */
+const live = new Set();
+
+export function killLiveShards() {
+  for (const child of live) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+  const n = live.size;
+  live.clear();
+  return n;
+}
+
+function runShard(root, shard, signal) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ index: shard.index, exitCode: 1, tests: 0, fail: 0, output: 'cancelled before start' });
+      return;
+    }
     const child = spawn(process.execPath, ['--test', shard.arg, 'test/**/*.test.mjs'], { cwd: root });
+    live.add(child);
+    const onAbort = () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
-    child.on('error', (e) => resolve({
-      index: shard.index, exitCode: 1, tests: 0, fail: 0, output: `spawn failed: ${e?.message ?? e}`,
-    }));
-    child.on('close', (code) => resolve({
-      index: shard.index,
-      exitCode: code,
-      tests: countFrom(out, 'tests'),
-      fail: countFrom(out, 'fail'),
-      output: out.slice(-6000),
-    }));
+    const done = () => {
+      live.delete(child);
+      signal?.removeEventListener?.('abort', onAbort);
+    };
+    child.on('error', (e) => {
+      done();
+      resolve({ index: shard.index, exitCode: 1, tests: 0, fail: 0, output: `spawn failed: ${e?.message ?? e}` });
+    });
+    child.on('close', (code) => {
+      done();
+      resolve({
+        index: shard.index,
+        /*
+         * A CHILD KILLED BY A SIGNAL EXITS WITH code === null, AND
+         * `Number(null) === 0`. Downstream that read as a green shard, so a
+         * suite killed by the OOM killer -- or by the cancellation above --
+         * could carry the whole run to VERIFY_PASSED as long as one other
+         * shard reported tests. A forged pass. Non-integer means failed.
+         */
+        exitCode: Number.isInteger(code) ? code : 1,
+        tests: countFrom(out, 'tests'),
+        fail: countFrom(out, 'fail'),
+        output: out.slice(-6000),
+      });
+    });
   });
 }
 
@@ -104,6 +156,7 @@ function runShard(root, shard) {
  */
 export async function runVerification({
   root, key, identity, shards = 4, concurrency = 2, home = undefined, now = () => Date.now(),
+  signal = undefined,
 } = {}) {
   /*
    * THE SHARD COUNT IS CLAMPED TO THE FILES THAT EXIST, and the caller's number
@@ -162,7 +215,7 @@ export async function runVerification({
     while (queue.length) {
       const shard = queue.shift();
       // eslint-disable-next-line no-await-in-loop
-      results.push(await runShard(root, shard));
+      results.push(await runShard(root, shard, signal));
     }
   };
 
