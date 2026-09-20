@@ -95,6 +95,34 @@ export const PROTECTED_PATHS = Object.freeze([
    */
   'scripts/enqueue-audit-job.mjs',
   /*
+   * A TOURNIQUET, NOT A FIX, AND SAYING SO IS THE POINT.
+   *
+   * Found by a sweep on 2026-09-20 after two blind audits reached the general
+   * class. `scripts/audit-daemon.mjs` invokes
+   * `agentbridge audit-record --verdict <v> --by <who>`, so ONE WRITE TO IT
+   * MINTS ARBITRARY PASS VERDICTS for any candidate. It was written the same
+   * day and never registered -- while `enqueue-audit-job.mjs` directly above
+   * WAS. That is the roster failing exactly as rosters do: the newest and most
+   * authority-bearing file is the one least likely to be on a list written
+   * before it existed.
+   *
+   * `diff-suite.mjs` reports green or red and `verify-run.mjs` writes the
+   * VERIFY_PASSED record the gate consumes. Both influence a verdict; neither
+   * was protected.
+   *
+   * THE REAL FIX IS docs/P0_EXECUTABLE_DEPENDENCY_BLINDNESS.md: trust closure
+   * follows INFLUENCE, not merely imports, with declared execution edges and a
+   * consistency checker that fails closed on an undeclared one. These three
+   * lines close a live forgery hole tonight and close nothing else.
+   *
+   * AND THEY CANNOT COVER `.git/hooks/post-commit`, which executes on every
+   * commit and is untracked by git's own design, so no repo-relative list can
+   * reach it.
+   */
+  'scripts/audit-daemon.mjs',
+  'scripts/diff-suite.mjs',
+  'scripts/verify-run.mjs',
+  /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing
    * a change to"; the converse was missing. src/governor.mjs is wired at

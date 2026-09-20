@@ -187,6 +187,21 @@ export const PROTECTED_PATHS = Object.freeze([
    */
   'scripts/enqueue-audit-job.mjs',
   /*
+   * A TOURNIQUET. `scripts/audit-daemon.mjs` calls
+   * `agentbridge audit-record --verdict <v> --by <who>`, so one write to it
+   * mints arbitrary PASS verdicts; `diff-suite.mjs` reports green or red; and
+   * `verify-run.mjs` writes the record the Stop gate consumes. All three
+   * influence a verdict and none was registered.
+   *
+   * Kept in step with src/policy.mjs, which protectedPathParity enforces.
+   * The real fix is docs/P0_EXECUTABLE_DEPENDENCY_BLINDNESS.md -- trust
+   * closure follows influence, not imports -- and these lines close one live
+   * hole, not the class.
+   */
+  'scripts/audit-daemon.mjs',
+  'scripts/diff-suite.mjs',
+  'scripts/verify-run.mjs',
+  /*
    * REGISTERED AS CONTROLS BY 69de290 AND LEFT WRITABLE. This module's own
    * principle is "a file worth refusing a write to is a file worth auditing
    * a change to"; the converse was missing. src/governor.mjs is wired at
