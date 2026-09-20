@@ -13,16 +13,20 @@
  * spawns -- so sessions silently stopped registering and the roster emptied.
  * The symptom was read as a liveness problem for hours.
  *
- * WHY THE EXISTING TESTS WERE GREEN, which is the part worth keeping. They
- * spawn the CLI as a subprocess and assert on its stdout. A process that dies
- * at parse time produces no stdout, so the assertion "did I see the expected
- * text" cannot distinguish BROKEN from DID NOT MATCH. Several such tests
- * passed the whole time.
+ * WHY IT SURVIVED, CORRECTED. I first wrote here that the existing suites
+ * stayed green because they assert on stdout and a dead process produces
+ * none. A blind audit measured that and it is FALSE -- with the broken CLI
+ * restored, taskChecklistCli goes 0 pass / 6 fail and cliDiscoverable 2/1.
+ * They were never hollow. I reproduced it before accepting it.
  *
- * That is the hollow-gate shape in its purest form: the check asked whether
- * it saw what it wanted BEFORE asking whether the program ran at all. It is
- * the same error as rule 3 -- a non-zero exit is not evidence a test ran --
- * pointed one layer further back, at startup.
+ * The outage survived three commits because NOBODY RAN THE SUITE, including
+ * me. This gate does not fix that and must not be read as fixing it.
+ *
+ * It is still worth having for a different and smaller reason: it is the
+ * cheapest possible question, it needs no fixture, and it answers before any
+ * behavioural test spends a second -- a program that cannot parse should
+ * never reach one. Verified against real history: green at cba3c0d, red at
+ * 1a1a35c and the two commits after, green at the fix.
  *
  * So this gate asks the cheapest possible question, structurally, and asks it
  * of the DECLARED list rather than a list typed here: does every shipped

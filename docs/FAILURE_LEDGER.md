@@ -292,10 +292,37 @@ code-b only made it parse.
 declared entry point. Proven against the real history: green at `cba3c0d`,
 red at `1a1a35c`, `9039393` and `ad93995`, green at the fix.
 
-The deeper finding is a hollow-gate shape worth naming: **the existing tests
-spawned the CLI and asserted on its stdout, so a process that died at parse
-time produced no output and read as "did not match" rather than "is broken".
-The check asked whether it saw what it wanted before asking whether the
-program ran at all.** That is rule 3 pointed one layer further back, at
-startup, and it is why a syntactically dead entry point survived three commits
-and a green suite.
+### CORRECTION, 2026-09-19 — the root cause recorded here was FALSE
+
+**This record originally said:** *"the existing tests spawned the CLI and
+asserted on its stdout, so a process that died at parse time produced no
+output and read as 'did not match' rather than 'is broken' … it is why a
+syntactically dead entry point survived three commits and a green suite."*
+
+A blind audit measured it and it is wrong. The CLI test files are
+byte-identical across the whole broken window, so measuring at HEAD measures
+the window exactly. With the broken CLI restored:
+
+    taskChecklistCli      0 pass / 6 fail     hard red
+    cliDiscoverable       2 pass / 1 fail
+    candidateAuthorship  12 pass / 0 fail
+
+I reproduced this myself before accepting it. **The suites went hard red.
+They were never hollow.**
+
+So the outage did not survive three commits because a gate was weak. It
+survived because **NOBODY RAN THE SUITE** — including me, across those three
+commits and the two sessions around them. That cause is untouched by
+everything built in response, and it is the one worth carrying.
+
+Why this matters more than the original wording: a false lesson in a durable
+record is worse than no lesson, because the next reader trusts it and goes
+looking for hollow gates instead of asking who last ran the tests. I wrote
+the wrong diagnosis into a permanent record and into two commit messages
+(07fba97, 4f6dd79) while the evidence was one command away.
+
+The gate built alongside it (`test/entryPointsParse.test.mjs`, 4f6dd79) is
+still worth having — it fires on the breaking commit and is silent either
+side, verified against real history. But it is a cheap structural check, not
+the repair for the actual cause, and it was justified here by a claim that
+measurement refutes.
