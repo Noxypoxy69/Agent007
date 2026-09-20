@@ -73,6 +73,46 @@ function runLauncher(args, home) {
   return { status: r.status, signal: r.signal, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
+/**
+ * Remove the agent worktree a test created, and nothing else.
+ *
+ * WHY THIS IS A HELPER AND NOT A BLOCK IN ONE TEST. The first version lived
+ * inside "agent.cmd IS EXECUTED" and its commit claimed "left behind false".
+ * An auditor measured the whole file and the claim was FALSE for the file it
+ * was about: "THE PROCESS TABLE, NOT THE REPORT" runs the shipped agent.cmd
+ * too, its after-hook never touched the worktree, and a fresh clone still
+ * ended with wt-code-a registered and on disk. Two identical litter sources
+ * in one file and I closed one -- rule 8, in the fix for a litter defect.
+ *
+ * NO REPO-GLOBAL PRUNE. That first version ended with an unconditional
+ * `git worktree prune` against REPO, and the auditor showed it destroying a
+ * PRUNABLE registration the run never created -- admin directory, HEAD and
+ * any in-progress rebase state with it. The shared checkout carries 36
+ * registrations. `git worktree remove --force` already deregisters the one
+ * it removes, so the prune was belt-and-braces that reached past the belt.
+ *
+ * The ownership test is a snapshot taken before the launcher runs. It is a
+ * snapshot and not a proof: an auditor measured the window between it and
+ * the spawn at 6 ms, and could not land anything in it. Recorded as the
+ * bound rather than claimed away.
+ */
+function removeOnlyTheWorktreeThisRunCreates(t, id = 'code-a') {
+  const wt = path.join(path.dirname(REPO), `wt-${id}`);
+  const preexisted = existsSync(wt);
+
+  t.after(async () => {
+    if (preexisted || !existsSync(wt)) return;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      spawnSync('git', ['worktree', 'remove', '--force', wt], { cwd: REPO, encoding: 'utf8' });
+      try { rmSync(wt, { recursive: true, force: true }); } catch { /* handle open */ }
+      if (!existsSync(wt)) return;
+      await new Promise((r) => { setTimeout(r, 200 * (attempt + 1)); });
+    }
+    process.stderr.write(`[startAgentLauncher] could not remove ${wt} -- it is litter, and a `
+      + 'later run against it fails on the missing .claude/settings.json\n');
+  });
+}
+
 test('the launcher consults AGENTBRIDGE_HOME, not the machine it is running on', () => {
   const home = storeWith(['zeta-not-a-real-agent']);
   try {
@@ -208,33 +248,7 @@ test('agent.cmd IS EXECUTED, and must really set the id and really land in the r
    * workspace and must be left completely alone; in a fresh clone it never
    * pre-exists, so the clone cleans up after itself.
    */
-  const agentWt = path.join(path.dirname(REPO), 'wt-code-a');
-  const wtPreexisted = existsSync(agentWt);
-  t.after(async () => {
-    if (wtPreexisted || !existsSync(agentWt)) return;
-    /*
-     * THE FIRST VERSION OF THIS TRIED ONCE AND SILENTLY DID NOTHING. I
-     * measured it in a clone: worktree left behind true, still registered
-     * true. agent.cmd leaves a process holding the directory for a moment
-     * after the test returns, so a single remove races it -- the same
-     * mistake as the three-rmSync-calls-in-a-microsecond sweep, made again
-     * one hook along.
-     *
-     * A cleanup that claims to work and does not is worse than none,
-     * because the litter then has a paragraph saying it cannot exist.
-     */
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      spawnSync('git', ['worktree', 'remove', '--force', agentWt], { cwd: REPO, encoding: 'utf8' });
-      try { rmSync(agentWt, { recursive: true, force: true }); } catch { /* handle open */ }
-      if (!existsSync(agentWt)) break;
-      await new Promise((r) => { setTimeout(r, 200 * (attempt + 1)); });
-    }
-    spawnSync('git', ['worktree', 'prune'], { cwd: REPO, encoding: 'utf8' });
-    if (existsSync(agentWt)) {
-      process.stderr.write(`[startAgentLauncher] could not remove ${agentWt} -- it is litter, `
-        + 'and a later run against it will fail on the missing .claude/settings.json\n');
-    }
-  });
+  removeOnlyTheWorktreeThisRunCreates(t);
 
   const box = mkdtempSync(path.join(tmpdir(), 'agentcmd-exec-'));
   const elsewhere = mkdtempSync(path.join(tmpdir(), 'agentcmd-cwd-'));
@@ -986,6 +1000,8 @@ test('THE PROCESS TABLE, NOT THE REPORT: a forged report does not prove claude r
    * held; the sentence was wider than what was asserted. Both are fixed
    * rather than only the sentence.
    */
+  removeOnlyTheWorktreeThisRunCreates(t);
+
   const nonce = () => randomBytes(9).toString('hex');
   const box = mkdtempSync(path.join(tmpdir(), `${nonce()}-`));
   const home = mkdtempSync(path.join(tmpdir(), `${nonce()}-`));
