@@ -37,6 +37,37 @@ import { judgeShellCommand } from '../src/shellAllowlist.mjs';
 
 const allowed = (cmd) => judgeShellCommand(cmd).allowed;
 
+test('AN ABBREVIATION IS A SPELLING, and npm expands them', () => {
+  /*
+   * THE FIRST VERSION OF THIS FIX WAS ONE CHARACTER FROM OPEN, and its own
+   * comment claimed it was "routed on shape, not a roster of names". It was a
+   * roster of three names. npm's parser expands unambiguous abbreviations and
+   * says so out loud -- "Expanding --prefi to --prefix" -- so:
+   *
+   *   npm ls   --prefix C:/x     DENY
+   *   npm test --prefi  C:/x     ALLOW      <- measured, same execution
+   *
+   * Hollow gate 8 shipped inside the commit that cited hollow gate 8. Found
+   * by the auditor of that commit.
+   *
+   * GENERATED FROM THE FLAG NAME, not typed: every prefix of every
+   * redirecting flag, so a new redirect added to the list arrives with its
+   * abbreviations already covered.
+   */
+  for (const full of ['prefix', 'cwd']) {
+    for (let n = 1; n <= full.length; n += 1) {
+      const abbrev = `--${full.slice(0, n)}`;
+      assert.equal(allowed(`npm test ${abbrev} C:/anywhere`), false,
+        `ARBITRARY EXECUTION via abbreviation: npm test ${abbrev} C:/anywhere`);
+      assert.equal(allowed(`npm test ${abbrev}=C:/anywhere`), false,
+        `ARBITRARY EXECUTION via abbreviation: npm test ${abbrev}=C:/anywhere`);
+    }
+  }
+  /* Case, because npm's config keys are case-insensitive in practice. */
+  assert.equal(allowed('npm test --PREFIX C:/x'), false);
+  assert.equal(allowed('npm test --Prefi C:/x'), false);
+});
+
 test('THE ESCAPE IS CLOSED, in every spelling of the redirect', () => {
   /*
    * Rule 8: fix the matcher, not the string the prober happened to try.
@@ -104,7 +135,33 @@ test('A FLAG THAT MERELY CONTAINS THE LETTERS IS NOT A REDIRECT', () => {
    * wearing a fix. `--prefer-offline` starts with the same five characters as
    * `--prefix` up to the x, and `-c` is not `-C`.
    */
-  for (const cmd of ['npm install --prefer-offline', 'npm test --color', 'npm run build --config x']) {
+  for (const cmd of [
+    'npm install --prefer-offline',
+    'npm test --color',
+    'npm run build --config x',
+    'npm install --production',
+    'npm test --coverage',
+    'npm ci --cache C:/x',
+  ]) {
     assert.equal(allowed(cmd), true, `an unrelated flag was caught by the redirect matcher: ${cmd}`);
+  }
+});
+
+test('THE MATCHER CANNOT BE OUT-SPELLED, and it is asked rather than enumerated', () => {
+  /*
+   * The property, stated directly: a token is a redirect if its name is a
+   * PREFIX of a redirecting flag's name. That is what npm's own expansion
+   * does, so it cannot be defeated by a spelling nobody here thought of --
+   * which is the failure both previous versions of this matcher had.
+   *
+   * Both directions, because a matcher that says yes to everything would
+   * satisfy the abbreviation test above perfectly.
+   */
+  const isRedirect = (flag) => !allowed(`npm test ${flag} C:/x`);
+  for (const yes of ['--p', '--pr', '--pre', '--pref', '--prefi', '--prefix', '--c', '--cw', '--cwd', '-C']) {
+    assert.equal(isRedirect(yes), true, `${yes} was not treated as a redirect`);
+  }
+  for (const no of ['--prefer-offline', '--production', '--color', '--cache', '--config', '--silent', '-c']) {
+    assert.equal(isRedirect(no), false, `${no} was wrongly treated as a redirect`);
   }
 });

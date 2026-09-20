@@ -1557,7 +1557,42 @@ function judgeOneSegment(segment, isOverridden = () => false, mayExecute = () =>
      * NOT AN OUTAGE: agent.cmd's own `npm --prefix "%~dp0" run agent` is the
      * LAUNCHER, which starts the session and is never judged by this rail.
      */
-    const npmRedirect = tokens.slice(1).find((t) => /^(--prefix|--cwd|-C)(=|$)/.test(t.replace(/^['"]|['"]$/g, '')));
+    /*
+     * AND npm EXPANDS ABBREVIATIONS, SO A LIST OF SPELLINGS LOSES.
+     *
+     * The first version of this matched the three literal strings --prefix,
+     * --cwd and -C, and its own comment claimed it was "routed on shape, not
+     * a roster of names". It was a roster of names, and npm's parser (nopt)
+     * accepts more of them:
+     *
+     *   npm ls   --prefix C:/x     DENY
+     *   npm test --prefi  C:/x     ALLOW   <- measured, same execution
+     *
+     * npm itself warns "Expanding --prefi to --prefix" and proceeds. So the
+     * fix for hollow gate 8 shipped with hollow gate 8 in it, which is the
+     * fix-introduces-the-same-hole pattern this repository keeps producing.
+     * Found by the auditor of that very commit.
+     *
+     * ASK WHAT npm ACCEPTS, DO NOT ENUMERATE IT. Any non-empty prefix of a
+     * redirecting flag's name is a spelling npm may expand, so the test is
+     * `'prefix'.startsWith(name)` rather than equality. That is the shape,
+     * and it cannot be out-spelled.
+     *
+     * NOT AN OVER-BLOCK: a real flag is only caught if its whole name is a
+     * prefix of "prefix" or "cwd". --prefer-offline, --production, --color
+     * and --config are unaffected, and each is asserted. The abbreviations
+     * this does refuse that npm would have called ambiguous (--pre, --c) have
+     * no legitimate meaning anyway, so refusing them costs nothing.
+     */
+    const REDIRECTS = ['prefix', 'cwd'];
+    const npmRedirect = tokens.slice(1).find((raw) => {
+      const t = raw.replace(/^['"]|['"]$/g, '');
+      if (t === '-C' || t.startsWith('-C=')) return true;
+      const m = /^--([^=]+)/.exec(t);
+      if (!m) return false;
+      const name = m[1].toLowerCase();
+      return REDIRECTS.some((full) => full.startsWith(name));
+    });
     if (npmRedirect) {
       return {
         allowed: false,
