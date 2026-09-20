@@ -3393,7 +3393,20 @@ try {
       process.exit(0);
     }
 
-    if (cmd === 'audits' || cmd === 'audit-claim') {
+    /*
+     * `audit-record` BELONGS IN THIS BLOCK, AND ITS ABSENCE MADE IT DEAD CODE.
+     *
+     * It was admitted by the outer store-bearing dispatch above and then
+     * excluded here, so the handler below could never run: the command fell
+     * through the whole chain and landed on `finding-add`'s usage error.
+     * Measured: `agentbridge audit-record --id <id> --verdict PASS` printed
+     * "finding-add: --from <file.json> is required."
+     *
+     * Same shape as hollow gate 6 -- a tool listed, documented and scope-gated
+     * that threw on every call it ever received. P0-3's write path, the one
+     * step that closes the audit loop, was unreachable from the day it landed.
+     */
+    if (cmd === 'audits' || cmd === 'audit-claim' || cmd === 'audit-record') {
       /*
        * THE QUEUE, PERSISTED. Until now the §7.1 trigger computed the blind
        * packets and printed them into whichever session ended a turn, so
@@ -3409,24 +3422,21 @@ try {
       } = await import('../src/auditJob.mjs');
       const { auditCoverage, defaultAuditRange } = await import('../src/auditLedger.mjs');
       const { runGit: rgA } = await import('../src/safeGit.mjs');
-      const qStore = repoStorePath(repo, 'audits', '.jsonl');
-
-      const readQueue = () => {
-        if (!existsSync(qStore)) return [];
-        const byId = new Map();
-        for (const line of String(rf(qStore, 'utf8')).split('\n')) {
-          if (line.trim() === '') continue;
-          try {
-            const rec = JSON.parse(line);
-            if (rec?.audit_id) byId.set(rec.audit_id, rec);
-          } catch { /* a malformed line is skipped; readAll's counter covers findings, not this */ }
-        }
-        return [...byId.values()];
-      };
-      const writeQueue = (rows) => {
-        mkdirSync(dirname(qStore), { recursive: true });
-        appendFileSync(qStore, `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8');
-      };
+      /*
+       * THE STORE IS SHARED NOW, NOT A LOCAL CLOSURE.
+       *
+       * These were defined here, which is why the Stop gate could not persist
+       * the queue: it had no way to reach them, so §7.1's trigger computed the
+       * packets and printed them into one session's output -- the exact
+       * behaviour its own commit message said it had replaced.
+       *
+       * Moving them to src/auditQueueStore.mjs means the gate and the CLI read
+       * and write ONE store. A copy would have been the pair nobody watches.
+       */
+      const { readQueue: readQ, writeQueue: writeQ, auditQueuePath } = await import('../src/auditQueueStore.mjs');
+      const qStore = auditQueuePath(repo);
+      const readQueue = () => readQ(repo).rows;
+      const writeQueue = (rows) => writeQ(repo, rows);
 
       let ledgerText = '';
       try { ledgerText = rf(`${repo}/docs/audit-ledger.jsonl`, 'utf8'); } catch { ledgerText = ''; }

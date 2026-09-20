@@ -351,9 +351,44 @@ try {
       return null;   // unreadable is reported by auditJobsFor, never dropped
     }
   };
-  const queued = formatAuditJobs(auditJobsFor(coverage, {
-    treeShaFor, now: new Date().toISOString(),
-  }));
+  const nowIso = new Date().toISOString();
+  const computedJobs = auditJobsFor(coverage, { treeShaFor, now: nowIso });
+
+  /*
+   * PERSIST, DO NOT ONLY PRINT. THIS WAS THE HEADLINE CLAIM AND IT WAS FALSE.
+   *
+   * The commit that introduced the queue said: "the trigger computed the
+   * packets on every Stop and printed them into whichever session ended the
+   * turn... A demand that lives in one session's output is a log line. This
+   * makes it a queue."
+   *
+   * It did not. This block imported `auditJobsFor` and `formatAuditJobs` and
+   * nothing else -- no `mergeQueue`, no store -- and appended to the session's
+   * own notice. Byte-identical to the behaviour it claimed to replace. The
+   * persisted queue existed only when a human typed `agentbridge audits`, and
+   * a repo-wide grep finds no hook, script, doc or launcher that tells anyone
+   * to. §7.1 requires that "the worker must not have to remember to request
+   * one"; as shipped, the queue existed only when a worker remembered.
+   *
+   * Found by a blind auditor reading the diff against the message.
+   *
+   * WRAPPED, BECAUSE A TRIGGER MUST NOT BE ABLE TO BLOCK THE GATE. Writing the
+   * queue is bookkeeping; a failure here must not take down the verification
+   * path, which is the one that actually refuses unsafe turns. A throw is
+   * reported in the notice and the gate continues.
+   */
+  try {
+    const { mergeQueue: mq } = await import('../src/auditJob.mjs');
+    const { readQueue: rq, writeQueue: wq } = await import('../src/auditQueueStore.mjs');
+    const merged = mq(rq(root).rows, computedJobs, { now: nowIso });
+    if (merged.added.length || merged.stranded.length) wq(root, merged.queue);
+  } catch (e) {
+    carriedNotice = `${carriedNotice ? `${carriedNotice}\n` : ''}`
+      + `[agentbridge:audit-queue-unwritten] the audit queue could not be persisted (${e?.message ?? e}). `
+      + 'The demand below exists only in this session\'s output until it is.';
+  }
+
+  const queued = formatAuditJobs(computedJobs);
   if (queued) carriedNotice = carriedNotice ? `${carriedNotice}\n${queued}` : queued;
   /*
    * DEFERRED, NOT IMMEDIATE -- BLOCKING HERE SUPPRESSED THE WHOLE GATE.
