@@ -70,6 +70,7 @@ const {
 } = await import('../src/auditJob.mjs');
 const { proposeAudit, isClaimable } = await import('../src/auditDispatch.mjs');
 const { allocateWorkspace, releaseWorkspace } = await import('../src/auditWorkspace.mjs');
+const { measureReviewed, attributionHolds, ATTRIBUTION } = await import('../src/auditAttribution.mjs');
 
 /*
  * THE DAEMON'S IDENTITY IS ITS OWN, NOT THE SESSION'S.
@@ -645,12 +646,18 @@ async function tick() {
    * job is released rather than recorded: a verdict about a tree nobody can
    * identify is exactly the shape this fence exists to refuse.
    */
-  let reviewed;
-  try {
-    const g = (args) => String(runGit(args, { cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'] })).trim();
-    reviewed = { sha: g(['rev-parse', 'HEAD']), tree: g(['rev-parse', 'HEAD^{tree}']) };
-    const dirt = g(['status', '--porcelain']);
-    if (dirt !== '') {
+  /*
+   * MEASURED BY src/auditAttribution.mjs, NOT HERE. Focused-pass D-3: this
+   * logic lived in a script nothing can import, so nobody had watched any
+   * of its three branches fire. Moved to src/ and given nine tests, the
+   * same move `src/auditWorkspace.mjs` got for the same reason.
+   */
+  const measured = measureReviewed({ dir: ws.dir, runGit });
+  const attribution = attributionHolds(measured, job);
+  const reviewed = measured.ok ? measured : null;
+
+  {
+    if (measured.code === ATTRIBUTION.DIRTY) {
       /*
        * THE VERDICT IS KEPT, NOT DISCARDED. Focused-pass finding D-4.
        *
@@ -673,8 +680,7 @@ async function tick() {
        * PENDING, and a later run can record it without paying for the
        * review again.
        */
-      const why = `the reviewer left ${dirt.split('\n').length} uncommitted change(s) in the `
-        + 'worktree, so what was reviewed is not the candidate the claim named';
+      const why = measured.why;
       say(`[audit-daemon] ${job.audit_id}: verdict produced but NOT attributable: ${why}`);
       const kept = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
         ? {
@@ -695,20 +701,16 @@ async function tick() {
       releaseWorkspace(ws.allocation, { runGit, repoRoot: REPO });
       return false;
     }
-  } catch (e) {
-    release(`could not read what was actually reviewed from ${ws.dir} `
-      + `(${String(e?.stderr || e?.message || e).trim().split('\n')[0]}), so the verdict cannot be pinned`);
-    return false;
   }
 
-  if (reviewed.sha !== String(job.candidate_sha) || reviewed.tree !== String(job.candidate_tree_sha)) {
+  if (!attribution.ok) {
     /*
-     * THE FENCE FIRING, LOCALLY. `recordAudit` would refuse this too, and
-     * saying it here names the worktree -- the CLI only sees two shas.
+     * UNREADABLE OR MOVED. Both release: a verdict about a tree nobody can
+     * identify, and a verdict about a tree that is not the one claimed, are
+     * equally unattributable. `recordAudit` would refuse the moved case too,
+     * and saying it here names the worktree -- the CLI only sees two shas.
      */
-    release(`the worktree was at ${reviewed.sha.slice(0, 8)}/${reviewed.tree.slice(0, 8)} but the claim `
-      + `named ${String(job.candidate_sha).slice(0, 8)}/${String(job.candidate_tree_sha).slice(0, 8)}; `
-      + 'the candidate moved under the audit, so the verdict is about something else');
+    release(attribution.why);
     return false;
   }
 
