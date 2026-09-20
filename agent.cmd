@@ -41,6 +41,32 @@ cd /d "%~dp0"
 set "AGENTBRIDGE_AGENT_ID=%~1"
 if not "%~2"=="" set "AGENTBRIDGE_LANE=%~2"
 
+rem  ONE WORKTREE PER AGENT, AND NO FALLBACK IF IT CANNOT BE MADE.
+rem
+rem  Every session used to start here, in the shared tree. On 2026-09-20 that
+rem  cost: two agents editing one file with no lock or message; a verification
+rem  that PASSED against a tree which had ceased to exist before the run
+rem  finished; and four Stop gates blown in a row, ~400s of suite each, because
+rem  the tree digest moved every time somebody saved.
+rem
+rem  THE DECISION IS IN src/agentWorkspace.mjs AND IS TESTED. It has to be:
+rem  the agent id becomes a DIRECTORY NAME, this file already carries a blind
+rem  audit scar about an id that executed as script, and the fix for that was
+rem  quoting -- which does nothing about "..". A launcher cannot be covered by
+rem  the suite, because running it starts a session.
+rem
+rem  REFUSING IS THE POINT. Carrying on in the shared tree with a warning is
+rem  the shape this repo keeps shipping: a control that reports a problem and
+rem  then does the unsafe thing, invisibly, because everything still runs.
+for /f "delims=" %%p in ('node "%~dp0scripts\agent-worktree.mjs" "%AGENTBRIDGE_AGENT_ID%"') do set "AGENT_WT=%%p"
+if not defined AGENT_WT (
+  echo.
+  echo   no workspace, so this session will NOT start.
+  echo   Two sessions in one worktree is what makes every verification unreliable.
+  exit /b 1
+)
+cd /d "%AGENT_WT%"
+
 rem  QUOTED, BECAUSE AN AGENT ID IS DATA AND cmd.exe TREATS IT AS SCRIPT.
 rem  Unquoted, the shell metacharacters in an id are live to cmd.exe:
 rem  an id of the form a-AMP-echo-PWNED executed that echo. Found by blind
