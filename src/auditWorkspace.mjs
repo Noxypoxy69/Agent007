@@ -38,6 +38,22 @@
  * -- the threat here is a local process PREDICTING the path, which makes
  * this a guessability question rather than a uniqueness one. `randomUUID`
  * is a CSPRNG and says so.
+ *
+ * ═══ WHAT THIS ENFORCES, STATED NARROWLY ═══
+ *
+ * Focused-pass finding D-6: the header used to say `releaseWorkspace`
+ * "refuses an allocation it did not get", and that is more than the code
+ * does. There is no registry of issued allocations; the check is INTERNAL
+ * SELF-CONSISTENCY -- the directory's basename must be the one this
+ * identity would produce. Every field is derivable from the path, so a
+ * caller holding another run's path can construct an allocation that
+ * passes.
+ *
+ * The property actually enforced is: A CALLER THAT RECOMPUTED THE PATH FROM
+ * THE CANDIDATE IS REFUSED. That is the failure mode a per-run id creates
+ * and it is worth closing. The unpredictability of the id is what stops an
+ * unrelated process finding the path at all, and it is doing the real work
+ * -- anyone already holding it could delete the directory directly.
  */
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -79,30 +95,51 @@ export function allocateWorkspace({
   const dir = path.join(tmpRoot, workspaceName(sha, runId));
 
   /*
-   * IF THIS EXISTS, SOMETHING IS VERY WRONG -- and it is still refused
-   * rather than adopted. A collision on a CSPRNG id is not a thing that
-   * happens; if it does, the honest response is to stop, not to reuse.
-   * D9 was created by adopting.
+   * CREATED ATOMICALLY, so "refuse rather than adopt" is enforced by the
+   * filesystem instead of by a check racing it.
+   *
+   * Focused-pass finding D-7: this was `existsSync` then
+   * `mkdirSync(recursive: true)`, and `recursive` SUCCEEDS SILENTLY on an
+   * existing directory -- so the guard was a TOCTOU window, not a refusal,
+   * and the comment claiming it refused was relying on the unguessability
+   * it said it did not rely on. Without `recursive`, `mkdirSync` throws
+   * EEXIST atomically and the claim is free.
+   *
+   * A collision on a CSPRNG id does not happen; if it somehow does, the
+   * honest response is to stop rather than reuse. D9 was created by
+   * adopting.
    */
-  if (existsSync(dir)) {
-    return { ok: false, why: `${dir} already exists, which a per-run id makes impossible. Refusing to adopt it` };
-  }
-
   try {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir);
   } catch (e) {
+    if (e?.code === 'EEXIST') {
+      return { ok: false, why: `${dir} already exists, which a per-run id makes impossible. Refusing to adopt it` };
+    }
     return { ok: false, why: `could not create ${dir}: ${String(e?.message ?? e)}` };
   }
 
   try {
     /*
-     * `--force` because mkdirSync just created the directory and `worktree
-     * add` refuses a non-empty target. It is ours, brand new and empty, so
-     * there is nothing here for --force to destroy -- which was NOT true of
-     * the old adopt-an-existing-directory path, and is the difference
-     * between this flag being safe and being D11.
+     * NO `--force`, AND I HAD ALREADY RECORDED WHY BEFORE WRITING IT AGAIN.
+     *
+     * Focused-pass finding D-5. The justification I carried into this
+     * module -- "`--force` because mkdirSync just created the directory and
+     * `worktree add` refuses a non-empty target" -- is false in both
+     * halves: git dies only on a NON-EMPTY path, and that die is not gated
+     * on `--force`. An empty directory needs no flag. What `--force`
+     * actually buys is overriding a registered worktree's admin record at
+     * that path, which is a safeguard removal, not a convenience.
+     *
+     * The galling part: lap 7 measured this as D8 and the ledger row I
+     * wrote for `13b2d69` says "BOTH halves of my justifying comment were
+     * false ... D8 REMAINS OPEN" -- and the very next commit copied the
+     * disproven sentence into new source. Writing a finding down is not the
+     * same as reading it.
+     *
+     * With per-run ids the one thing `--force` did do -- reclaiming a stale
+     * `audit-<sha12>` record -- is unreachable, so it is purely inert. Gone.
      */
-    runGit(['worktree', 'add', '--detach', '--force', dir, sha], { cwd: repoRoot });
+    runGit(['worktree', 'add', '--detach', dir, sha], { cwd: repoRoot });
   } catch (e) {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
     return { ok: false, why: String(e?.stderr || e?.message || e).trim() };
@@ -140,22 +177,60 @@ export function releaseWorkspace(allocation, { runGit, repoRoot } = {}) {
     return { ok: false, why: `${dir} does not match the identity ${id} it claims; refusing to remove it` };
   }
 
-  let removed = false;
+  let gitRemoved = false;
+  let gitWhy = null;
   try {
     if (typeof runGit === 'function') {
       runGit(['worktree', 'remove', '--force', dir], { cwd: repoRoot ?? allocation.repo_root });
-      removed = true;
+      gitRemoved = true;
     }
-  } catch { /* fall through to the directory removal and report below */ }
+  } catch (e) { gitWhy = String(e?.stderr || e?.message || e).trim().split('\n')[0]; }
 
   /*
    * THE DIRECTORY GOES EVEN IF GIT WOULD NOT REMOVE THE WORKTREE, because
    * on Windows a dying reviewer holds handles and `worktree remove` fails
    * routinely -- that is how thirteen of these accumulated before teardown
-   * existed at all. `git worktree prune` reconciles the admin records
-   * afterwards; a directory nobody deletes is the thing that actually
-   * accumulates.
+   * existed at all.
    */
-  try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  return { ok: true, gitRemoved: removed };
+  let fsWhy = null;
+  try { rmSync(dir, { recursive: true, force: true }); } catch (e) { fsWhy = String(e?.message ?? e); }
+
+  /*
+   * AND THE ADMIN RECORD, WHICH NOTHING WAS RECONCILING. The previous
+   * comment here said "`git worktree prune` reconciles the admin records
+   * afterwards" -- in the passive voice, and nothing ran it. Measured:
+   * seven stale `audit-<sha12>` entries still registered in
+   * `.git/worktrees` from the pre-identity naming scheme. A sentence
+   * describing a step nobody performs is how those accumulated.
+   */
+  if (!gitRemoved && typeof runGit === 'function') {
+    try { runGit(['worktree', 'prune'], { cwd: repoRoot ?? allocation.repo_root }); } catch { /* best effort */ }
+  }
+
+  /*
+   * ═══ ok MEANS THE WORKSPACE IS GONE, NOT "WE TRIED" ═══
+   *
+   * Focused-pass finding D-1. This returned a literal `ok: true` on every
+   * path past the basename check, swallowing both failures, and the only
+   * field carrying the truth -- `gitRemoved` -- was read by nobody. So the
+   * daemon printed "removed <dir>" for a directory still sitting there.
+   *
+   * Worse than cosmetic, and the module's own comment says why: on Windows
+   * a dying reviewer holds handles and the removal fails ROUTINELY. `rmSync`
+   * fails on those same handles, so the documented-common case is exactly
+   * the one that reported success -- and by the daemon's own note each
+   * leftover worktree adds permanent Stop-gate drift. The operator lost the
+   * only signal that a control was degrading, and the previous code (a bare
+   * try/catch in the daemon) had reported it with git's reason.
+   *
+   * The far end is the filesystem, so that is what is asked (rule 4).
+   */
+  const gone = !existsSync(dir);
+  if (gone) return { ok: true, gitRemoved };
+  return {
+    ok: false,
+    gitRemoved,
+    why: `${dir} is still present after teardown`
+      + `${gitWhy ? `; git said: ${gitWhy}` : ''}${fsWhy ? `; rm said: ${fsWhy}` : ''}`,
+  };
 }

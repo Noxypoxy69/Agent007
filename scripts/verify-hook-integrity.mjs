@@ -172,7 +172,22 @@ export function worktreeConfigEnabled({ cwd = REPO, readConfig = null } = {}) {
   try {
     const raw = typeof readConfig === 'function'
       ? readConfig('--bool-extensions-worktreeConfig')
-      : runGit(['config', '--bool', '--get', 'extensions.worktreeConfig'], {
+      /*
+       * `--local`, BECAUSE THAT IS THE ONLY SCOPE GIT HONOURS FOR THIS KEY.
+       *
+       * Focused-pass finding D-9. An unscoped `--get` searches system,
+       * global and local -- but git reads `extensions.*` only from the
+       * REPOSITORY config. So `extensions.worktreeConfig = true` in
+       * `~/.gitconfig` made this return true while git ignored it, and the
+       * consequences are both wrong: a local hooksPath gets reported under
+       * `scope: "worktree"`, and in a repo with multiple worktrees --
+       * this one has 39 registered -- `git config --worktree --get` with
+       * the extension actually off exits 128, which `hooksPathOverride`
+       * maps to E_HOOKS_PATH_UNREADABLE. A false alarm on the entire
+       * attestation, from asking the wrong scope a question git only
+       * answers in one place.
+       */
+      : runGit(['config', '--local', '--bool', '--get', 'extensions.worktreeConfig'], {
         cwd, stdio: ['ignore', 'pipe', 'pipe'],
       });
     return String(raw ?? '').trim().toLowerCase() === 'true';

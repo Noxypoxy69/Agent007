@@ -43,7 +43,7 @@
  * the expensive way. Measure the volume first.
  */
 import {
-  existsSync, writeFileSync, mkdirSync, readFileSync, rmSync, mkdtempSync,
+  existsSync, writeFileSync, mkdirSync, readFileSync, rmSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
@@ -222,7 +222,7 @@ function nextJob() {
  *   D11 teardown `--force`-removed a directory the daemon may not have
  *       created, destroying a review in progress left by the `!LAUNCH` path.
  *
- * `mkdtempSync` removes all three at once: the path is unguessable, so it is
+ * A per-run CSPRNG id removes all three at once: the path is unguessable, so it is
  * never pre-created, never adopted, never someone else's. No reuse logic
  * remains to be got wrong, and the verification it needed is gone rather
  * than improved -- which is the better outcome, because two of its three
@@ -651,8 +651,48 @@ async function tick() {
     reviewed = { sha: g(['rev-parse', 'HEAD']), tree: g(['rev-parse', 'HEAD^{tree}']) };
     const dirt = g(['status', '--porcelain']);
     if (dirt !== '') {
-      release(`the reviewer left ${dirt.split('\n').length} uncommitted change(s) in the worktree, `
-        + 'so what was reviewed is not the candidate and the verdict cannot be attributed to it');
+      /*
+       * THE VERDICT IS KEPT, NOT DISCARDED. Focused-pass finding D-4.
+       *
+       * A plain `release` here threw away a COMPLETED review -- including a
+       * FAIL carrying real findings -- and put the job back at PENDING with
+       * no attempt counter anywhere, so `nextJob` re-selects head-of-queue
+       * and the whole thing runs again. Forever, at one LLM review per
+       * tick. That is D10's unbounded-wedge shape, reopened sixty lines
+       * below a header congratulating itself on closing it.
+       *
+       * And the trigger is not exotic: the brief TELLS the reviewer to
+       * "prove any mutation landed with git diff ... and restore it
+       * afterwards", so an imperfect restore is the expected case, and an
+       * `npm install` touching the lockfile does it too.
+       *
+       * "Could not measure is not a pass" was the right instinct. "Could
+       * not measure implies infinite retry" is not. So this reuses the
+       * reviewed-but-unrecordable path that already exists: the finding is
+       * preserved in `last_review` with the reason, the job returns to
+       * PENDING, and a later run can record it without paying for the
+       * review again.
+       */
+      const why = `the reviewer left ${dirt.split('\n').length} uncommitted change(s) in the `
+        + 'worktree, so what was reviewed is not the candidate the claim named';
+      say(`[audit-daemon] ${job.audit_id}: verdict produced but NOT attributable: ${why}`);
+      const kept = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
+        ? {
+          ...r,
+          state: JOB.PENDING,
+          claimed_by: null,
+          claimed_at: null,
+          last_review: {
+            verdict: verdict.verdict,
+            findings: verdict.findings ?? [],
+            by: BY,
+            at: new Date().toISOString(),
+            not_recorded_because: why,
+          },
+        }
+        : r));
+      writeQueue(REPO, kept);
+      releaseWorkspace(ws.allocation, { runGit, repoRoot: REPO });
       return false;
     }
   } catch (e) {
