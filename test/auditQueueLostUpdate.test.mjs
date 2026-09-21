@@ -146,6 +146,36 @@ test('D1: A RECOMPUTED PACKET IS NOT A CHANGED ROW -- created_at must not drift'
     'a row with no created_at takes a fresh timestamp on every merge, so it looks '
     + 'changed every run and the filter never fires for it');
 
+  /*
+   * AND A ROW MISSING **BOTH** FIELDS, which is the case the strip above
+   * structurally cannot reach. Blind audit L2: the fallback chain was
+   * `was.created_at ?? was.first_seen_at ?? job.created_at ?? str(now)`,
+   * so removing only `created_at` left `was.first_seen_at` to catch it and
+   * the test passed over a defect that was still live one field along.
+   *
+   * A fixture that can only construct the case that was already fixed is
+   * hollow gate 9, and this one was mine, written in the commit that
+   * claimed to close the drift.
+   */
+  const barest = stored.map(({ created_at, first_seen_at, ...rest }) => rest);
+  const c = mergeQueue(barest, compute('2026-09-21T00:04:00Z'), { now: 'e' }).queue[0];
+  const d = mergeQueue(barest, compute('2026-09-21T00:05:00Z'), { now: 'f' }).queue[0];
+  assert.equal(c.created_at, d.created_at,
+    'a row carrying NEITHER created_at nor first_seen_at still drifts: it takes a fresh '
+    + 'stamp on every merge, so it looks changed for ever and the no-op filter never fires');
+
+  /* The two fields must also AGREE, or the row claims it was created before
+   * the queue first saw it -- which is the inconsistency that made the
+   * fallback chain read the stored field instead of the computed one. */
+  assert.equal(c.created_at, c.first_seen_at,
+    'created_at and first_seen_at disagree for a row that had neither, so they were '
+    + 'resolved independently and can drift apart again');
+
+  /* THE POSITIVE (rule 5): once persisted, the value is stable rather than
+   * simply absent -- a row that settles on nothing would pass the equality
+   * above for the wrong reason. */
+  assert.ok(c.created_at, 'the row settled on no created_at at all, so the equality above is vacuous');
+
   writeQueue(REPO, again, home);
   assert.equal(readFileSync(auditQueuePath(REPO, home), 'utf8'), before,
     'recomputing an unchanged queue appended rows -- the store grows by the whole '

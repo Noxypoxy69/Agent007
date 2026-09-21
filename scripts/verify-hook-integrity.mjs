@@ -169,7 +169,21 @@ function hookPath() {
  * that `--worktree` is an alias for `--local` when the extension is off, so
  * nothing is lost.
  */
-export function worktreeConfigEnabled({ cwd = REPO, readConfig = null } = {}) {
+/*
+ * `env` IS ACCEPTED SO THE SCOPE CLAIM CAN BE TESTED AT ALL.
+ *
+ * Blind audit M4: the `--local` flag below exists because git honours
+ * `extensions.*` only from the repository config, and NOTHING tested it.
+ * No test set a GLOBAL value, so `--local` and unscoped agreed in every
+ * case covered and deleting the flag left the suite green -- except on a
+ * machine whose real `~/.gitconfig` happened to carry the key, which is
+ * rule 21 deciding whether a guard is covered.
+ *
+ * Proving it needs a global that is NOT the operator's, which is what
+ * `GIT_CONFIG_GLOBAL` is for. Passing it through is the whole change; the
+ * default is unchanged, so production behaviour is identical.
+ */
+export function worktreeConfigEnabled({ cwd = REPO, readConfig = null, env = undefined } = {}) {
   try {
     const raw = typeof readConfig === 'function'
       ? readConfig('--bool-extensions-worktreeConfig')
@@ -189,7 +203,7 @@ export function worktreeConfigEnabled({ cwd = REPO, readConfig = null } = {}) {
        * answers in one place.
        */
       : runGit(['config', '--local', '--bool', '--get', 'extensions.worktreeConfig'], {
-        cwd, stdio: ['ignore', 'pipe', 'pipe'],
+        cwd, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}),
       });
     return String(raw ?? '').trim().toLowerCase() === 'true';
   } catch {

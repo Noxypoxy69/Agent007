@@ -129,3 +129,47 @@ test('THE GUARD IS NOT VACUOUSLY FALSE -- it can return true (rule 5)', () => {
   git(['config', 'extensions.worktreeConfig', 'true']);
   assert.equal(worktreeConfigEnabled({ cwd: repo }), true);
 });
+
+test('A GLOBAL SETTING DOES NOT ENABLE IT -- what --local is FOR (M4)', () => {
+  /*
+   * Blind audit M4: the whole point of `--local` is that git honours
+   * `extensions.worktreeConfig` ONLY from the repository config, so a
+   * GLOBAL value of true must not make this function say true. Nothing in
+   * this file set a global, so `--local` and unscoped agreed in every case
+   * covered and deleting the flag left all tests green -- except on a
+   * machine whose real ~/.gitconfig happened to carry the key, which is
+   * rule 21's machine property deciding whether a guard is tested.
+   *
+   * GIT_CONFIG_GLOBAL points git at a scratch file, so the operator's own
+   * config is never read or written. The technique was already in
+   * src/safeGit.mjs and simply had not been used here.
+   */
+  const globalCfg = path.join(repo, 'fake-global-gitconfig');
+  writeFileSync(globalCfg, '[extensions]\n\tworktreeConfig = true\n');
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: globalCfg, GIT_CONFIG_NOSYSTEM: '1' };
+
+  /*
+   * PRECONDITION, ASSERTED NOT ASSUMED (rule 6): the scratch global must
+   * actually be in effect, or this test passes by pointing git at nothing.
+   */
+  const unscoped = git(['config', '--bool', '--get', 'extensions.worktreeConfig'], { env }).trim();
+  assert.equal(unscoped, 'true',
+    'PRECONDITION: the scratch global config was not honoured, so the case below is not built');
+
+  /* THE CLAIM: local is unset, so the answer is false despite the global. */
+  assert.equal(worktreeConfigEnabled({ cwd: repo, env }), false,
+    'a GLOBAL extensions.worktreeConfig made the guard say true. git reads this key from '
+    + 'the repository config only, so the attestation would query a --worktree scope git '
+    + 'itself ignores -- or skip one it honours');
+
+  /* THE POSITIVE (rule 5), with the global still true: setting it LOCALLY
+   * does flip the answer, so the false above is about scope and not about
+   * the env being broken. */
+  git(['config', '--local', 'extensions.worktreeConfig', 'true'], { env });
+  assert.equal(worktreeConfigEnabled({ cwd: repo, env }), true);
+
+  /* And a local FALSE beats a global true, which is the direction an
+   * attacker would want the other way round. */
+  git(['config', '--local', 'extensions.worktreeConfig', 'false'], { env });
+  assert.equal(worktreeConfigEnabled({ cwd: repo, env }), false);
+});
