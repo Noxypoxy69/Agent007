@@ -270,6 +270,33 @@ test('THE PACKAGER REFUSES A LINK THAT ESCAPES THE STORE', async () => {
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test('THE MANIFEST DESCRIBES THE VERIFIER IT ACTUALLY SHIPS WITH', async () => {
+  /*
+   * The manifest promised that migration-verify "computes the destination key
+   * and names the rename". For a kind carrying two files it does the opposite —
+   * it refuses, on purpose, because a rename there overwrites one authority file
+   * with another. The real package on this machine hits that branch, so an
+   * operator reading the old sentence would have read a correct refusal as a
+   * broken tool.
+   *
+   * Differenced: the one-file shape must still get the rename sentence, or
+   * "the note warns about ambiguity" would be satisfied by warning always.
+   */
+  const { storeKeyNote } = await import('../scripts/migration-package.mjs');
+  const one = [{ source_relative_to_agentbridge_home: 'findings/aaaaaaaaaaaaaaaa.jsonl' }];
+  const two = [...one, { source_relative_to_agentbridge_home: 'findings/bbbbbbbbbbbbbbbb.jsonl' }];
+
+  assert.match(storeKeyNote(one), /names the rename/,
+    'the unambiguous shape lost the rename instruction, which is the only thing that stops a silently empty queue');
+  assert.doesNotMatch(storeKeyNote(one), /REFUSE/,
+    'a package with one file per kind was warned about an ambiguity it does not have');
+
+  assert.match(storeKeyNote(two), /will REFUSE to name a rename/,
+    'a package carrying two files under one kind was told the verifier would name a rename — it will not, and following that advice destroys an authority file');
+  assert.match(storeKeyNote(two), /findings\/ \(2 files\)/,
+    'the note does not name the kind that is ambiguous, so the operator cannot tell which decision is theirs');
+});
+
 test('THE INCLUDE LIST CARRIES NOTHING FROM THE NEVER LIST', async () => {
   /*
    * Rule 7: generated from the real lists, so adding an item to either extends

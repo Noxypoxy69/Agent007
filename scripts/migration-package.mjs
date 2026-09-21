@@ -47,7 +47,10 @@
  * **the queue reads as EMPTY rather than erroring**. That is the failure mode
  * that looks like success, so the manifest records the source key explicitly
  * and scripts/migration-verify.mjs computes the destination key and names the
- * rename.
+ * rename -- EXCEPT where a kind carries more than one file, where it refuses
+ * and says so, because a rename there overwrites one authority file with
+ * another. The manifest note is derived from what was packaged so it cannot
+ * describe the wrong one.
  *
  * ═══ INTEGRITY ═══
  *
@@ -360,6 +363,51 @@ function assertNothingForbidden(files) {
   }
 }
 
+/**
+ * The manifest's store-key paragraph, DERIVED from what was actually packaged.
+ *
+ * THE OLD SENTENCE WAS TYPED, AND ON THIS MACHINE IT WAS FALSE. It promised that
+ * "migration-verify computes the destination key and names the rename". For a
+ * kind carrying TWO files the verifier does no such thing -- it REFUSES,
+ * deliberately, because naming a rename there instructs the operator to
+ * overwrite one authority file with another on a machine where the source may
+ * already be gone. That refusal was added precisely so this could not happen,
+ * and the manifest went on promising the behaviour it replaced.
+ *
+ * A manifest describing a tool's old behaviour is the stale-claim failure this
+ * package exists to prevent. It also mattered practically: on the real package
+ * the verifier exits 1 for this reason, and an operator holding a manifest that
+ * says it will name a rename reads a correct refusal as a broken tool.
+ *
+ * Exported so the branch can be exercised -- the packager itself only ever runs
+ * against one machine's real store, which is the one shape a test must not need.
+ *
+ * @param rows manifest items, each with `source_relative_to_agentbridge_home`
+ */
+export function storeKeyNote(rows) {
+  const counts = new Map();
+  for (const r of rows) {
+    const rel = r.source_relative_to_agentbridge_home;
+    if (!rel.includes('/')) continue;
+    const kind = rel.split('/')[0];
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  const ambiguous = [...counts].filter(([, n]) => n > 1).map(([kind, n]) => `${kind}/ (${n} files)`);
+
+  const head = 'The store key above is a fact about the SOURCE checkout path. If the destination checkout path '
+    + 'differs, audits/<key>.jsonl and findings/<key>.jsonl must be RENAMED to the destination key or the queue '
+    + 'reads as EMPTY rather than erroring. ';
+
+  if (!ambiguous.length) {
+    return `${head}scripts/migration-verify.mjs computes the destination key and names the rename.`;
+  }
+  return `${head}This package carries more than one file under ${ambiguous.join(' and ')}, so `
+    + 'scripts/migration-verify.mjs will REFUSE to name a rename for it and will report installation as FAILED '
+    + 'until a person decides which file is this repository\'s store. That refusal is the tool working: only one '
+    + 'file can occupy the destination name, and renaming both destroys one. Integrity and resolution are reported '
+    + 'separately and still verify normally.';
+}
+
 function build() {
 const files = collect();
 assertNothingForbidden(files);
@@ -465,6 +513,8 @@ const keys = [...new Set(rows
   .filter((r) => r.source_relative_to_agentbridge_home.includes('/'))
   .map((r) => path.basename(r.source_relative_to_agentbridge_home, '.jsonl')))];
 
+const keyNote = storeKeyNote(rows);
+
 const manifest = {
   kind: 'agent007-migration-package',
   manifest_version: 1,
@@ -482,7 +532,7 @@ const manifest = {
   notes: [
     'Contains NO credentials, NO DPAPI material, NO machineId, NO registrations, NO override grants.',
     'Historical session ids appear inside the audit ledger as authority history. They are records of who did what, not machine identity, and removing them would falsify the ledger.',
-    'The store key above is a fact about the SOURCE checkout path. If the destination checkout path differs, audits/<key>.jsonl and findings/<key>.jsonl must be RENAMED to the destination key or the queue reads as EMPTY rather than erroring. scripts/migration-verify.mjs computes the destination key and names the rename.',
+    keyNote,
   ],
 };
 
