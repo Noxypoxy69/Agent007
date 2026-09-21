@@ -126,35 +126,29 @@ if (asJson) {
    * unknown on its own rather than being folded into the other.
    */
   console.log(`range: ${range}`);
-  const [base, tip] = range.includes('..')
-    ? [range.slice(0, range.indexOf('..')), range.slice(range.lastIndexOf('..') + 2) || 'HEAD']
-    : [range, 'HEAD'];
-
-  let older = null;
-  let newer = null;
+  /*
+   * THE DECISION LIVES IN src/, WHERE THE SUITE CAN REACH IT. Blind audit
+   * M3 (rule 10) and M2 (the bare-rev branch was wrong and unwatched).
+   * This file keeps only the printing.
+   */
+  const { windowSpan, describeWindow } = await import('../src/auditWindow.mjs');
+  let span = { behind: null, ahead: null, kind: 'unknown' };
   try {
     const { runGit } = await import('../src/safeGit.mjs');
     const count = (...revs) => {
-      const n = Number(String(runGit(['-C', repoRoot, 'rev-list', '--count', ...revs], {
-        encoding: 'utf8',
-      })).trim());
-      return Number.isFinite(n) ? n : null;
+      try {
+        const n = Number(String(runGit(['-C', repoRoot, 'rev-list', '--count', ...revs], {
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        })).trim());
+        return Number.isFinite(n) ? n : null;
+      } catch { return null; }
     };
-    /* Behind the window: everything the base already contains. */
-    try { older = count(base); } catch { older = null; }
-    /* Ahead of it: on HEAD, not reachable from the window's tip. Zero when
-     * the tip IS HEAD, which is the case the old line assumed universally. */
-    try { newer = count('HEAD', `^${tip}`); } catch { newer = null; }
-  } catch { /* safeGit itself unavailable; both stay null */ }
+    span = windowSpan(range, count);
+  } catch { /* safeGit itself unavailable; both directions stay null */ }
 
-  const parts = [];
-  if (older === null) parts.push('an UNKNOWN number behind it');
-  else if (older > 0) parts.push(`${older} behind it`);
-  if (newer === null) parts.push('an UNKNOWN number ahead of it');
-  else if (newer > 0) parts.push(`${newer} AHEAD of it, i.e. newer than anything examined`);
-
-  if (parts.length > 0) {
-    console.log(`       A WINDOW, NOT THE BRANCH: ${parts.join(', and ')}.`);
+  const sentence = describeWindow(span);
+  if (sentence) {
+    console.log(`       ${sentence}`);
     console.log('       Widen it with: node scripts/check-audit-coverage.mjs <base>..HEAD');
   }
   console.log(`commits touching a control: ${bearing}   (within the window above)`);

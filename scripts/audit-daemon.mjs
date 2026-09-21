@@ -442,9 +442,54 @@ async function tick() {
    * step later. A consumer that claims work it then abandons is starvation
    * wearing a claim, which is worse than never having claimed it.
    */
-  const release = (why) => {
+  /*
+   * ═══ A RELEASE AFTER A PAID REVIEW MUST COUNT, AND FOUR OF FIVE DID NOT ═══
+   *
+   * Blind audit M1. D-4 was "re-queued with no attempt counter ANYWHERE, so
+   * the job is head-of-queue again every tick at one LLM pass each". I
+   * closed that at the two re-queue sites I happened to be editing and left
+   * this helper -- which owns the other five -- writing nothing at all.
+   *
+   * The sharpest is line 743, the `!attribution.ok` branch: the review has
+   * COMPLETED and been paid for, and the job goes back with neither a
+   * counter toward MAX_REVIEW_ATTEMPTS nor a `last_review` for `byUrgency`
+   * to demote on. So neither half of the fix applied, and `:624` -- "the
+   * reviewer recorded no readable verdict" -- is not even a transient
+   * shape: a reviewer that reliably emits the wrong format spins for ever.
+   *
+   * ═══ BUT COUNTING EVERY RELEASE WOULD BE AN OUTAGE ═══
+   *
+   * `:524` is "the reviewer could not be STARTED". That is an environment
+   * failure -- node missing, a full disk -- and it hits every job equally.
+   * Counting it would march the entire queue to REVIEW_EXHAUSTED during a
+   * transient outage and leave it permanently unauditable afterwards. That
+   * is rule 19's second direction: a bound that becomes an outage gets the
+   * whole layer switched off.
+   *
+   * So the attempt is counted where a review was actually ATTEMPTED AT
+   * COST, and the caller says which it is rather than this helper guessing
+   * from the message string.
+   */
+  const release = (why, { reviewed = false } = {}) => {
     const back = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
-      ? { ...r, state: JOB.PENDING, claimed_by: null, claimed_at: null }
+      ? {
+        ...r,
+        state: JOB.PENDING,
+        claimed_by: null,
+        claimed_at: null,
+        ...(reviewed
+          ? {
+            review_attempts: Number(r.review_attempts ?? 0) + 1,
+            /*
+             * NO VERDICT TO PRESERVE HERE -- that is what went wrong -- but
+             * the field must still be written, because `byUrgency` demotes
+             * on its PRESENCE. Without it the bound eventually fires while
+             * the job keeps taking the only seat until it does.
+             */
+            last_review: { by: BY, at: new Date().toISOString(), not_recorded_because: why },
+          }
+          : {}),
+      }
       : r));
     writeQueue(REPO, back);
     say(`[audit-daemon] released ${job.audit_id} back to PENDING: ${why}`);
@@ -527,7 +572,9 @@ async function tick() {
 
   if (code === null) return false;
   if (code !== 0) {
-    release(`the reviewer exited ${code} without recording a verdict`);
+    /* The reviewer RAN, so the pass was paid for even though nothing landed.
+     * Contrast the 'error' handler above, which is a failure to start. */
+    release(`the reviewer exited ${code} without recording a verdict`, { reviewed: true });
     return false;
   }
 
@@ -582,7 +629,7 @@ async function tick() {
   const blocks = [...String(transcript).matchAll(marker)];
   if (blocks.length > 1) {
     release(`the transcript carried ${blocks.length} verdict blocks for this run's nonce; `
-      + 'taking either one would be a guess, so nothing was proved');
+      + 'taking either one would be a guess, so nothing was proved', { reviewed: true });
     return false;
   }
   if (blocks.length === 1) {
@@ -621,7 +668,9 @@ async function tick() {
    */
 
   if (!verdict) {
-    release('the reviewer recorded no readable verdict, so nothing was proved');
+    /* NOT a transient shape: a reviewer that reliably emits the wrong
+     * format spins for ever unless this counts. Named by blind audit M1. */
+    release('the reviewer recorded no readable verdict, so nothing was proved', { reviewed: true });
     return false;
   }
 
@@ -740,7 +789,9 @@ async function tick() {
      * equally unattributable. `recordAudit` would refuse the moved case too,
      * and saying it here names the worktree -- the CLI only sees two shas.
      */
-    release(attribution.why);
+    /* THE SHARPEST OF THE FIVE: the review has completed and been paid for,
+     * and only the attribution failed. Uncounted, this is D-4 verbatim. */
+    release(attribution.why, { reviewed: true });
     return false;
   }
 
