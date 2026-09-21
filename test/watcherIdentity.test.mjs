@@ -5,20 +5,32 @@ import { resolveAgentId, sameSession, SOURCE, SAFE_ID } from '../src/watcherIden
 /**
  * THE CASE THIS EXISTS FOR, TAKEN FROM THE LIVE STORE.
  *
- * Copied from C:\Users\DANNY GARCIA\.agentbridge\registrations.json on
- * 2026-09-21, trimmed to the fields that decide anything. Three agents have
- * registered in the Agent007 worktree -- which is what makes the ambiguous case
- * REAL here rather than invented, and it is why sole-occupant must refuse on
- * this machine.
+ * SHAPE copied from %USERPROFILE%\.agentbridge\registrations.json, VALUES NOT.
+ * Trimmed to the fields that decide anything. Three agents have registered in
+ * the Agent007 worktree -- which is what makes the ambiguous case REAL here
+ * rather than invented, and it is why sole-occupant must refuse on this machine.
+ *
+ * THE OPERATOR'S NAME AND MACHINE ID ARE NOT COMMITTED, and the first version of
+ * this file committed both. `test/leakRegression.test.mjs` scans src, test,
+ * scripts, bin, docs and root markdown for exactly that, and it caught this --
+ * in an audit clone first, then locally, so it is a defect and not an
+ * environment finding. This repository is on GitHub; a home directory names the
+ * operator and a session id built from a first name does the same.
+ *
+ * WHAT HAD TO SURVIVE THE SCRUB, because the fixture is worthless otherwise:
+ * the row SHAPE, the three-occupant ambiguity, one agent holding two sessions,
+ * a second repo whose rows must be filtered out, and a session id stored
+ * WITHOUT the `claude-` prefix. Those are the properties the resolver decides
+ * on. A name is not one of them.
  */
-const MACHINE = 'ed745954-0c44-4f85-bca7-113f2a01bd2f';
+const MACHINE = 'machine-0000-fixture-0000-000000000000';
 const LIVE_ROWS = [
   { agent_id: 'probe-bug-a', session_id: 'bugA-watch', repo_id: 'agentbridge', worktree_id: 'agentbridge', machine_id: MACHINE },
   { agent_id: 'fixer', session_id: 'claude-probe-watcher-4', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
   { agent_id: 'code-a', session_id: 'code-a-62f8283a', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
-  { agent_id: 'code-c', session_id: 'danny-win-10', repo_id: 'agentbridge', worktree_id: 'agentbridge', machine_id: MACHINE },
-  { agent_id: 'code-b', session_id: 'danny-win-b-live', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
-  { agent_id: 'fixer', session_id: 'danny-win-fixer', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
+  { agent_id: 'code-c', session_id: 'op-win-10', repo_id: 'agentbridge', worktree_id: 'agentbridge', machine_id: MACHINE },
+  { agent_id: 'code-b', session_id: 'op-win-b-live', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
+  { agent_id: 'fixer', session_id: 'op-win-fixer', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
   { agent_id: 'code-b', session_id: 'session_01Y8egWiyweM7m64nvHVeFoy', repo_id: 'Agent007', worktree_id: 'Agent007', machine_id: MACHINE },
 ];
 

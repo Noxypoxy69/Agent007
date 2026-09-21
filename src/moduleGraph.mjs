@@ -118,6 +118,22 @@ export const DEFAULT_ENTRY_POINTS = [
    * the entry list second. Declared now, so the next extraction out of this
    * file does not rediscover it a third time. */
   'scripts/check-audit-coverage.mjs',
+  /* THE POLL SUPERVISOR, and the note two entries above predicted this one too.
+   *
+   * Claude Code invokes it from SessionStart and SessionEnd hooks, which is the
+   * same authority `scripts/claude-stop-gate.mjs` is declared under and the same
+   * structural blind spot: a hook config is not JavaScript, so the graph cannot
+   * see the caller.
+   *
+   * Declared because src/watcherIdentity.mjs read as `test-only` the moment it
+   * was extracted -- the third time a module has been called an orphan for the
+   * absence of its ONLY caller from this list, after src/auditWorkspace.mjs and
+   * src/auditWindow.mjs. The gate was right that nothing shipped reached it and
+   * wrong about why, and the answer is the same as both previous times: declare
+   * the entry, do not allowlist the module. An allowlist entry here would have
+   * recorded a WIRED module as a permitted orphan, which is the snooze button
+   * the list below exists to refuse. */
+  'scripts/bridge-session-poll.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',

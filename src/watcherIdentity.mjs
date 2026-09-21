@@ -4,7 +4,7 @@
  * ═══ THE DEFECT, MEASURED ON THIS MACHINE 2026-09-21 ═══
  *
  *     node scripts/bridge-session-poll.mjs --status
- *     no poll records in C:\Users\DANNY GARCIA\.agentbridge\polls
+ *     no poll records in %USERPROFILE%\.agentbridge\polls
  *     NOTHING IS WATCHING. No session is registered to be polled, though 2 log
  *     file(s) from earlier sessions remain.                          exit 1
  *
