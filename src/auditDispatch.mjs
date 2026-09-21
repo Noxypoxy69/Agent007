@@ -115,19 +115,36 @@ export function isClaimable(job, { now, leaseMs = CLAIM_LEASE_MS } = {}) {
  */
 function byUrgency(a, b) {
   /*
-   * A JOB THAT HAS ALREADY BEEN REVIEWED WAITS BEHIND ONE THAT HAS NOT.
+   * ESCAPED STILL COMES FIRST. Blind audit L5, and I had this inverted.
    *
-   * Without this the re-queued job is head-of-queue again immediately --
-   * nothing the re-queue touches is in the sort key -- so one
-   * unattributable candidate starves every other job in the queue while
-   * burning a full LLM review per tick. Sorting it back is what turns a
-   * spin into a retry.
+   * My first version compared `last_review` BEFORE `escaped`, so a single
+   * unattributable review pushed an ALREADY-PUSHED candidate below every
+   * local job in the queue. That is backwards: an escaped commit is one
+   * other clones can already build on, which is the whole reason it
+   * outranks a local one, and a failed review does not make it less
+   * urgent -- if anything it makes it more.
+   *
+   * The starvation it was written to stop is bounded now by
+   * MAX_REVIEW_ATTEMPTS, so the worst an escaped candidate can do is take
+   * the seat three times and then be reported as REVIEW_EXHAUSTED. Three
+   * passes to protect the priority order is the right trade; indefinite
+   * demotion of the urgent class to protect against three is not.
+   */
+  const esc = Number(Boolean(b?.escaped)) - Number(Boolean(a?.escaped));
+  if (esc !== 0) return esc;
+
+  /*
+   * WITHIN ONE URGENCY CLASS, A JOB ALREADY REVIEWED WAITS BEHIND ONE THAT
+   * HAS NOT.
+   *
+   * Nothing the re-queue touches is otherwise in the sort key, so without
+   * this the re-queued job is head-of-queue again on the very next tick
+   * and burns a full LLM review every time. Sorting it behind its PEERS is
+   * what turns a spin into a retry, and doing it here rather than above
+   * means it can no longer reorder the classes themselves.
    */
   const tried = Number(Boolean(a?.last_review)) - Number(Boolean(b?.last_review));
   if (tried !== 0) return tried;
-
-  const esc = Number(Boolean(b?.escaped)) - Number(Boolean(a?.escaped));
-  if (esc !== 0) return esc;
   const at = String(a?.first_seen_at ?? '');
   const bt = String(b?.first_seen_at ?? '');
   if (at !== bt) return at < bt ? -1 : 1;
@@ -255,14 +272,35 @@ export function proposeAudit({
      * producing unattributable reviews instead of watching the daemon
      * silently burn passes on it.
      */
-    const tries = Number(job.review_attempts ?? 0);
-    if (Number.isFinite(tries) && tries >= MAX_REVIEW_ATTEMPTS) {
+    /*
+     * A COUNTER THAT CANNOT BE READ IS EXHAUSTED, NOT ZERO.
+     *
+     * This was `Number.isFinite(tries) && tries >= MAX`, so a NaN -- from a
+     * null, a string, an object, or the daemon's own `Number(x) + 1` over a
+     * corrupt value -- failed the finite test and fell through to DISPATCH.
+     * The one shape that means "this counter is broken" was the one shape
+     * that bypassed the bound, which is the fail-open direction and exactly
+     * the presence-guard habit this repository keeps catching.
+     *
+     * Unreadable now fails CLOSED: the job is refused and the message says
+     * the counter is the reason, so an operator sees a corrupt row instead
+     * of a candidate quietly being reviewed for ever. Refusing one job is
+     * recoverable; an unbounded spin is the defect the bound exists for.
+     */
+    const raw = job.review_attempts ?? 0;
+    const tries = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
+    const unreadable = !Number.isFinite(tries);
+    if (unreadable || tries >= MAX_REVIEW_ATTEMPTS) {
       unassigned.push({
         audit_id: str(job.audit_id),
         code: UNPLACED.REVIEW_EXHAUSTED,
-        why: `reviewed ${tries} times without the result being attributable `
-          + `(last: ${job.last_review?.not_recorded_because ?? 'unknown'}). Not re-dispatching: `
-          + 'a candidate that cannot be pinned will not become pinnable by being reviewed again',
+        why: unreadable
+          ? `review_attempts is ${JSON.stringify(raw)}, which is not a count. Refusing to `
+            + 'dispatch: an unreadable counter cannot bound anything, and treating it as zero '
+            + 'is how one corrupt row gets reviewed for ever'
+          : `reviewed ${tries} times without the result being attributable `
+            + `(last: ${job.last_review?.not_recorded_because ?? 'unknown'}). Not re-dispatching: `
+            + 'a candidate that cannot be pinned will not become pinnable by being reviewed again',
       });
       continue;
     }

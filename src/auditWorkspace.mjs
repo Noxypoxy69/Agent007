@@ -29,7 +29,9 @@
  *
  * So `allocate` MINTS an identity and returns it, and `release` CONSUMES
  * that identity. Nothing downstream is given the sha and asked to work the
- * path out. `releaseWorkspace` refuses an allocation it did not get.
+ * path out. `releaseWorkspace` refuses an allocation whose path was
+ * RECOMPUTED rather than carried -- see the narrow statement below, which
+ * is the exact claim and replaces a broader one this line used to make.
  *
  * ═══ crypto, NOT Math.random, AND NOT mkdtemp's SUFFIX EITHER ═══
  *
@@ -156,10 +158,17 @@ export function allocateWorkspace({
 /**
  * Remove exactly the workspace an allocation names.
  *
- * REFUSES ANYTHING IT WAS NOT HANDED. Teardown that recomputes a path from
- * the candidate can delete a sibling run's workspace for the same
- * candidate -- which a per-run id makes possible for the first time, so
- * unpredictability without this would trade one defect for another.
+ * REFUSES A PATH THAT DOES NOT MATCH ITS OWN IDENTITY -- which is NOT the
+ * same as "refuses anything it was not handed", a stronger claim this
+ * comment used to make and the header still had to walk back forty lines
+ * later. There is no registry of issued allocations; the check is internal
+ * self-consistency, so a caller holding another run's path can still
+ * construct an allocation that passes.
+ *
+ * What it does close is the failure a per-run id creates: teardown that
+ * RECOMPUTES a path from the candidate can delete a sibling run's
+ * workspace for the same candidate, so unpredictability without this would
+ * trade one defect for another.
  *
  * @returns {{ok:boolean, why?:string}}
  */

@@ -18,6 +18,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as childProcess from 'node:child_process';
 
 import { measureReviewed, attributionHolds, ATTRIBUTION } from '../src/auditAttribution.mjs';
 
@@ -131,15 +132,47 @@ test('AN ABSENT OR MALFORMED CLAIM IS NOT A MATCH', () => {
   }
 });
 
-test('attributionHolds IS PURE -- it reads nothing and calls nothing', () => {
+test('attributionHolds DECIDES FROM ITS ARGUMENTS ALONE -- no git, measured', () => {
   /*
-   * The comparison is the half worth exhausting, and it can only be
-   * exhausted if it has no dependencies. Asserted by handing it a
-   * measurement built by hand: if it ever reaches for git, this throws.
+   * THE TITLE USED TO SAY "IS PURE -- it reads nothing and calls nothing",
+   * and the body proved neither. Blind audit L4: it handed the function a
+   * hand-built measurement and asserted two return values, with a comment
+   * claiming "if it ever reaches for git, this throws" -- it would not
+   * have thrown, it would have called the real runGit and quietly passed.
+   * A name and a comment advertising coverage the assertions do not carry
+   * is rule 4 inside a test file about rule 4.
+   *
+   * So the property is now MEASURED the only way it can be: every module
+   * the function could reach git through is stubbed to throw, and the call
+   * is made inside that. If it reaches for any of them the test fails with
+   * the stub's own message rather than passing silently.
    */
   const handBuilt = { ok: true, sha: SHA, tree: TREE };
-  assert.equal(attributionHolds(handBuilt, job()).ok, true);
-  assert.equal(attributionHolds(handBuilt, job({ candidate_sha: OTHER })).ok, false);
+
+  const tripwires = [];
+  for (const name of ['execFileSync', 'execSync', 'spawnSync', 'execFile', 'spawn', 'exec']) {
+    const original = childProcess[name];
+    tripwires.push([name, original]);
+    childProcess[name] = () => {
+      throw new Error(`attributionHolds reached child_process.${name} -- it is not a pure comparison`);
+    };
+  }
+  try {
+    assert.equal(attributionHolds(handBuilt, job()).ok, true);
+    assert.equal(attributionHolds(handBuilt, job({ candidate_sha: OTHER })).ok, false);
+  } finally {
+    for (const [name, original] of tripwires) childProcess[name] = original;
+  }
+
+  /* THE TRIPWIRE ITSELF WORKS (rule 5): with the stubs in place a function
+   * that DOES shell out must fail, or the block above proves nothing. */
+  let tripped = false;
+  const original = childProcess.execFileSync;
+  childProcess.execFileSync = () => { throw new Error('tripwire'); };
+  try { childProcess.execFileSync('git', ['--version']); } catch { tripped = true; } finally {
+    childProcess.execFileSync = original;
+  }
+  assert.equal(tripped, true, 'the tripwire does not fire, so the assertions above measured nothing');
 });
 
 test('MEASUREMENT MAKES EXACTLY THE THREE READS, in the worktree', () => {

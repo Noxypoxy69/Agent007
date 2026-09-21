@@ -361,10 +361,17 @@ test('A RE-QUEUED JOB SORTS BEHIND A FRESH ONE -- this is what makes a retry a r
    * every tick until it spends them -- so with ONE seat the fresh job waits
    * behind the failing one. One seat is exactly the measured condition.
    *
-   * The re-queued job is given the WINNING key on every other dimension --
-   * escaped, and an older first_seen_at -- so this can only pass if
-   * `last_review` is genuinely consulted first (rule 9: the fixture is the
-   * shape the re-queue actually produces, which preserves those fields).
+   * BOTH JOBS ARE ESCAPED, because the tiebreak works WITHIN an urgency
+   * class and must not reorder the classes. Blind audit L5 caught the
+   * first version of this test asserting the opposite: it paired a
+   * retried ESCAPED job against a fresh LOCAL one and demanded the local
+   * one win, which encoded "a failed review demotes a pushed commit below
+   * everything" as the desired behaviour. It is not -- escaped outranks
+   * local, and the spin is bounded by MAX_REVIEW_ATTEMPTS instead.
+   *
+   * The retried job still holds the winning key on AGE, so this can only
+   * pass if `last_review` is genuinely consulted (rule 9: the fixture is
+   * the shape the re-queue actually produces, which preserves that field).
    */
   const retried = job({
     audit_id: 'audit-retried',
@@ -375,7 +382,7 @@ test('A RE-QUEUED JOB SORTS BEHIND A FRESH ONE -- this is what makes a retry a r
   });
   const fresh = job({
     audit_id: 'audit-fresh',
-    escaped: false,
+    escaped: true,
     first_seen_at: '2026-09-20T00:00:00Z',
   });
 
@@ -400,4 +407,71 @@ test('A RE-QUEUED JOB SORTS BEHIND A FRESH ONE -- this is what makes a retry a r
   assert.equal(withoutRetryMark.proposals[0].audit_id, 'audit-retried',
     'PREMISE FAILED: the retried job does not outrank the fresh one on the other keys, '
     + 'so the test above would pass with no tiebreak at all');
+});
+
+test('A FAILED REVIEW DOES NOT DEMOTE AN ESCAPED JOB BELOW A LOCAL ONE (L5)', () => {
+  /*
+   * The class order must survive the tiebreak. An escaped candidate is one
+   * other clones can already build on; a failed review does not make it
+   * less urgent, and demoting it below every local job is a priority
+   * inversion that lasts as long as the queue does.
+   *
+   * This is the case my first tiebreak got backwards, so it is pinned in
+   * the direction that was wrong rather than described in a comment.
+   */
+  const escapedRetried = job({
+    audit_id: 'audit-escaped-retried',
+    escaped: true,
+    first_seen_at: '2026-09-20T00:00:00Z',
+    review_attempts: 1,
+    last_review: { not_recorded_because: 'worktree_dirty' },
+  });
+  const localFresh = job({
+    audit_id: 'audit-local-fresh',
+    escaped: false,
+    first_seen_at: '2026-09-01T00:00:00Z',
+  });
+
+  const r = proposeAudit({
+    jobs: [localFresh, escapedRetried], sessions: [seat('only-seat')], now: T0, isLive: allLive,
+  });
+  assert.equal(r.proposals[0].audit_id, 'audit-escaped-retried',
+    'a single failed review pushed an ALREADY-PUSHED candidate behind a local one');
+});
+
+test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
+  /*
+   * The bound was `Number.isFinite(tries) && tries >= MAX`, so every value
+   * that means "this counter is broken" -- a string, an object, a null
+   * that survived the ?? -- failed the finite test and DISPATCHED. The one
+   * shape signalling corruption was the one shape that bypassed the bound.
+   *
+   * Generated from the hostile shapes rather than the one I happened to
+   * think of (rule 7), and each is a value JSON.parse can actually yield
+   * from a queue file (rule 9).
+   */
+  for (const bad of ['', 'three', {}, [], true, null, NaN, -1, Infinity]) {
+    const r = proposeAudit({
+      jobs: [job({ review_attempts: bad })],
+      sessions: [seat('reviewer-one')],
+      now: T0,
+      isLive: allLive,
+    });
+    assert.equal(r.proposals.length, 0,
+      `review_attempts ${JSON.stringify(bad)} walked past the bound and dispatched`);
+    assert.equal(r.unassigned[0].code, UNPLACED.REVIEW_EXHAUSTED);
+  }
+
+  /* THE POSITIVE (rule 5): a readable count under the bound still runs,
+   * including the two spellings a JSON round-trip really produces. */
+  for (const ok of [0, 1, '2', undefined]) {
+    const r = proposeAudit({
+      jobs: [job({ review_attempts: ok })],
+      sessions: [seat('reviewer-one')],
+      now: T0,
+      isLive: allLive,
+    });
+    assert.equal(r.proposals.length, 1,
+      `review_attempts ${JSON.stringify(ok)} was refused: ${JSON.stringify(r.unassigned)}`);
+  }
 });

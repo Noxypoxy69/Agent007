@@ -63,12 +63,32 @@ const ONCE = has('--once');
 const LAUNCH = has('--launch');
 const say = (s) => process.stderr.write(`${s}\n`);
 
+/**
+ * The next review-attempt count, from a stored value that may be anything.
+ *
+ * `Number(r.review_attempts ?? 0) + 1` produced NaN for a string, an object
+ * or a null that survived the `??`, and `JSON.stringify` writes NaN as
+ * `null` -- which the next read turned back into 0 through its own `?? 0`.
+ * So ONE corrupt value reset the counter permanently and the bound could
+ * never be reached. Blind audit L3.
+ *
+ * An unreadable stored value is treated as "already at the bound" rather
+ * than as zero, matching `proposeAudit`, which now refuses to dispatch on
+ * an unreadable counter. Both ends fail the same way, in the safe
+ * direction, because a bound enforced at one end only is not a bound.
+ */
+const nextAttempt = (stored) => {
+  const n = typeof stored === 'number' || typeof stored === 'string' ? Number(stored) : NaN;
+  if (!Number.isFinite(n) || n < 0) return MAX_REVIEW_ATTEMPTS;
+  return Math.floor(n) + 1;
+};
+
 const { runGit } = await import('../src/safeGit.mjs');
 const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
 const {
   claimJob, JOB, REQUIRED_PROOFS, makeAuthorResolver, AUTHOR_UNAVAILABLE,
 } = await import('../src/auditJob.mjs');
-const { proposeAudit, isClaimable } = await import('../src/auditDispatch.mjs');
+const { proposeAudit, isClaimable, MAX_REVIEW_ATTEMPTS } = await import('../src/auditDispatch.mjs');
 const { allocateWorkspace, releaseWorkspace } = await import('../src/auditWorkspace.mjs');
 const { measureReviewed, attributionHolds, ATTRIBUTION } = await import('../src/auditAttribution.mjs');
 
@@ -479,7 +499,7 @@ async function tick() {
         claimed_at: null,
         ...(reviewed
           ? {
-            review_attempts: Number(r.review_attempts ?? 0) + 1,
+            review_attempts: nextAttempt(r.review_attempts),
             /*
              * NO VERDICT TO PRESERVE HERE -- that is what went wrong -- but
              * the field must still be written, because `byUrgency` demotes
@@ -743,7 +763,7 @@ async function tick() {
            * head-of-queue to be re-reviewed at full LLM cost for ever.
            * `proposeAudit` reads this and stops at MAX_REVIEW_ATTEMPTS.
            */
-          review_attempts: Number(r.review_attempts ?? 0) + 1,
+          review_attempts: nextAttempt(r.review_attempts),
           last_review: {
             verdict: verdict.verdict,
             findings: verdict.findings ?? [],
@@ -874,7 +894,7 @@ async function tick() {
          * whose review cannot land instead of a daemon quietly burning a
          * pass on it every tick.
          */
-        review_attempts: Number(r.review_attempts ?? 0) + 1,
+        review_attempts: nextAttempt(r.review_attempts),
         last_review: {
           verdict: verdict.verdict,
           findings: verdict.findings ?? [],
