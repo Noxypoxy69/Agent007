@@ -221,8 +221,23 @@ export function nextAction(state = {}, opts = {}) {
     return {
       action: LOOP_ACTION.STOP,
       code: LOOP_STOP.BUDGET,
-      why: `${ticksUsed} of ${o.maxTicks} ticks used. Each one is a paid review, so this `
-        + 'is a hard stop rather than a pause. Raise --max-ticks deliberately',
+      /*
+       * THE MESSAGE MUST NOT CLAIM A SPEND THAT DID NOT HAPPEN.
+       *
+       * Blind audit M-4. This said "Each one is a paid review" on every
+       * path -- including the DEFAULT mode, which prepares a workspace and
+       * launches no reviewer, so nothing is paid at all. Telling an
+       * operator they exhausted a spend budget over zero spend is the same
+       * class of wrong as reporting a starved queue as drained, and it is
+       * in a message whose whole job is to justify a hard stop.
+       *
+       * `spends` is what the caller knows and this module does not.
+       */
+      why: `${ticksUsed} of ${o.maxTicks} tick(s) used. ${o.spends === false
+        ? 'This mode launches no reviewer, so nothing was spent -- the bound is on work '
+          + 'prepared, not money.'
+        : 'Each one is a paid review, so this is a hard stop rather than a pause.'} `
+        + 'Raise --max-ticks deliberately',
     };
   }
 

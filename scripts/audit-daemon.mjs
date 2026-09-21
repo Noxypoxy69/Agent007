@@ -529,7 +529,7 @@ async function tick() {
    * COST, and the caller says which it is rather than this helper guessing
    * from the message string.
    */
-  const release = (why, { reviewed = false, keepWorkspace = false } = {}) => {
+  const release = (why, { reviewed = false, keepWorkspace = false, prepared = false } = {}) => {
     const back = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
       ? {
         ...r,
@@ -553,7 +553,22 @@ async function tick() {
          * `prepared_at` is what `byUrgency` now demotes on, so a supervised
          * prepare run WALKS the queue instead of grinding one row.
          */
-        ...(reviewed ? {} : { prepared_at: new Date().toISOString() }),
+        /*
+         * STAMPED ONLY WHERE A WORKSPACE WAS ACTUALLY PREPARED.
+         *
+         * Blind audit M-5. This read `...(reviewed ? {} : {...})`, so it
+         * fired on EVERY not-reviewed release -- including ":the reviewer
+         * could not be STARTED", which is an environment failure that hits
+         * every job equally. A missing `claude` binary would therefore have
+         * walked the whole queue stamping the demotion key, which is the
+         * same "an outage marches the queue" reasoning the comment fifteen
+         * lines above uses to argue that path must NOT count an attempt.
+         * I wrote that argument and then did not apply it to the key I
+         * added.
+         *
+         * The caller states which it is, exactly as `reviewed` does.
+         */
+        ...(prepared ? { prepared_at: new Date().toISOString() } : {}),
         ...(reviewed
           ? {
             review_attempts: nextAttempt(r.review_attempts),
@@ -657,7 +672,8 @@ async function tick() {
     say('               --launch spawns one; it is opt-in because an unattended LLM per control commit');
     say('               is how a memory-starved machine falls over.');
     release('prepared only -- no reviewer was launched, so holding the claim '
-      + 'would block every other job in the queue', { reviewed: false, keepWorkspace: true });
+      + 'would block every other job in the queue',
+    { reviewed: false, keepWorkspace: true, prepared: true });
     return true;
   }
 
@@ -1102,7 +1118,14 @@ for (;;) {
     {
       ticksUsed, consecutiveNoProgress, queueDepth, backoffServed, startedAt, now: Date.now(),
     },
-    { intervalMs: INTERVAL_MS, maxTicks: MAX_TICKS, deadlineMs: DEADLINE_MS },
+    {
+      intervalMs: INTERVAL_MS,
+      maxTicks: MAX_TICKS,
+      deadlineMs: DEADLINE_MS,
+      /* Whether a tick costs money, which only the caller knows -- see the
+       * BUDGET message in src/auditLoop.mjs (blind audit M-4). */
+      spends: LAUNCH,
+    },
   );
 
   if (decision.action === LOOP_ACTION.STOP) {

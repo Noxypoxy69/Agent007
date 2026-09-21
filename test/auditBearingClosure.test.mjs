@@ -267,9 +267,24 @@ test('the reached-but-not-a-control list may only SHRINK', () => {
    * `noOrphanModules` has one: an entry for something that no longer needs
    * it is permission nobody asked for, quietly widening over time.
    *
-   * It also stops the obvious abuse of the gate above -- making a red test
-   * green by adding a line -- from going unnoticed, because a stale line
-   * fails here.
+   * ═══ WHAT IT DOES NOT DO, CORRECTED ═══
+   *
+   * This comment used to claim it "stops the obvious abuse of the gate
+   * above -- making a red test green by adding a line -- from going
+   * unnoticed, because a stale line fails here." Blind audit M-7: IT DOES
+   * NOT. A line added to silence the red gate is, by construction, for a
+   * module that IS currently reached and IS currently unregistered -- so
+   * it is not stale, and it passes all three assertions below. The only
+   * cost of the abuse is writing a reason over forty characters.
+   *
+   * What this actually catches is an entry that has gone stale LATER:
+   * the module deleted, no longer reached, or since registered. That is
+   * worth having and it is what the name means. It is not a barrier to
+   * adding one, and the size of the list is not frozen anywhere.
+   *
+   * A test name is a claim, and this one was making a claim the code did
+   * not support -- in a file whose subject is gates that cover less than
+   * they say.
    */
   const { graph } = buildGraph(ROOT);
   const controls = controlModules();

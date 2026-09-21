@@ -445,7 +445,40 @@ an audit is most likely to be sweeping. `grep -a` works, and ripgrep is the
 only one that *names the offset*:
 `binary file matches (found "\0" byte around offset 4050)`.
 
-**AND `src/auditJob.mjs` IS THE STRICT ONE: GIT ITSELF WILL NOT DIFF IT.**
+**ENUMERATED AT LAST, 2026-09-21, BY A BLIND AUDITOR. THERE ARE SEVEN, AND
+THE COUNT ABOVE IS WRONG RATHER THAN MERELY A FLOOR.** One command does it,
+and nobody had run it:
+
+    grep -rLI "" src test scripts bin bridge
+
+    src/auditJob.mjs            src/guardSession.mjs
+    src/auditRange.mjs          test/auditJob.test.mjs
+    src/deployGate.mjs          test/invokedDirectly.test.mjs
+    src/findingRegistry.mjs
+
+**AND THREE ARE STRICT, NOT ONE.** Which ones git refuses to diff is a
+separate question from which ones carry a NUL, and it has to be asked per
+file — the answer depends on whether the NUL falls inside git's first 8000
+bytes:
+
+    git diff --numstat 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD -- <the seven>
+
+    -  -   src/auditJob.mjs              712  0  src/findingRegistry.mjs
+    228 0  src/auditRange.mjs           2272  0  src/guardSession.mjs
+    -  -   src/deployGate.mjs            636  0  test/auditJob.test.mjs
+    -  -   test/invokedDirectly.test.mjs
+
+So **`src/deployGate.mjs` — the deploy gate — does not diff**, and neither
+does the only test covering `invokedDirectly`. A diff review of a commit
+touching the deploy gate shows NOTHING without `--text`, and any churn or
+line-count gate sees zero lines changed.
+
+The practical bite, measured: a repo-wide `Grep` for `invokedDirectly`
+returns nine files and **omits its own test file**. So a sweep asking "is
+this module tested?" answers *no*, wrongly, about the module that decides
+whether the deploy gate runs at all.
+
+**AND `src/auditJob.mjs` IS NOT THE STRICT ONE, IT IS ONE OF THREE:**
 Measured 2026-09-20, on a commit that rewrote its author-resolution logic:
 
     git show 674653a --stat -- src/auditJob.mjs
