@@ -51,35 +51,31 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
+import { flagValue, posIntArg, nextAttempt as nextAttemptOf } from '../src/daemonArgs.mjs';
+
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 /*
- * A FLAG PRESENT WITH NO VALUE IS FATAL, FOR EVERY FLAG.
+ * PARSING LIVES IN src/daemonArgs.mjs, WHERE THE SUITE CAN REACH IT.
  *
- * Blind audit M-3. The first version of this guard lived inside `posInt`,
- * which covers `--interval`, `--max-ticks` and `--deadline` -- and left
- * `--by`, the only remaining raw caller, with the original behaviour:
- * silently returning its default when the name is the last argv entry.
+ * This file has no test and cannot have one -- importing it consumes a
+ * job -- and four findings across two blind audits lived in exactly these
+ * few lines (M-6 a trailing numeric flag defaulting silently, M-3 the fix
+ * for it missing `--by`, L3 a malformed counter resetting the bound).
+ * Every one was found by reading, because nothing could run them.
  *
- * That is not a cosmetic label. `--by` is the identity the daemon claims
- * work as, and `claimJob` refuses a claim on `author === who`. An operator
- * passing `--by <their own session id>` precisely SO the
- * author-cannot-audit exclusion fires gets `audit-daemon@<hostname>`
- * instead, which equals no commit trailer, so the check cannot fire at
- * all. Fail-open on rule 20's core property, from a trailing flag.
- *
- * Guarding inside the value-parser was fixing the spelling; the guard
- * belongs here, where every flag passes (rule 8).
+ * Rule 10. The decisions are pure functions that RETURN a refusal; this
+ * file turns a refusal into an exit code, which is the only part that
+ * cannot be tested.
  */
-const flag = (n, d = null) => {
-  const i = argv.indexOf(n);
-  if (i !== -1 && i + 1 >= argv.length) {
-    process.stderr.write(`[audit-daemon] ${n} was given with no value. Refusing to guess it.\n`);
-    process.exit(2);
-  }
-  return i === -1 ? d : argv[i + 1];
+const refuse = (r) => {
+  if (r.ok) return r.value;
+  process.stderr.write(`[audit-daemon] ${r.why}\n`);
+  process.exit(2);
+  return undefined;
 };
+const flag = (n, d = null) => refuse(flagValue(argv, n, d));
 
 const ONCE = has('--once');
 const LAUNCH = has('--launch');
@@ -90,17 +86,7 @@ const SUPERVISE = has('--supervise');
  * spend and getting another, which is the one mistake here that costs
  * money rather than correctness.
  */
-const posInt = (name, dflt) => {
-  /* The missing-value case is handled in `flag` itself now, so it covers
-   * every flag rather than only the numeric ones -- see M-3 there. */
-  const raw = flag(name, null);
-  if (raw === null) return dflt;
-  if (!/^\d+$/.test(String(raw).trim())) {
-    say(`[audit-daemon] ${name} must be a whole number, got ${JSON.stringify(raw)}`);
-    process.exit(2);
-  }
-  return Number(String(raw).trim());
-};
+const posInt = (name, dflt) => refuse(posIntArg(argv, name, dflt));
 const say = (s) => process.stderr.write(`${s}\n`);
 
 /**
@@ -117,11 +103,7 @@ const say = (s) => process.stderr.write(`${s}\n`);
  * an unreadable counter. Both ends fail the same way, in the safe
  * direction, because a bound enforced at one end only is not a bound.
  */
-const nextAttempt = (stored) => {
-  const n = typeof stored === 'number' || typeof stored === 'string' ? Number(stored) : NaN;
-  if (!Number.isFinite(n) || n < 0) return MAX_REVIEW_ATTEMPTS;
-  return Math.floor(n) + 1;
-};
+const nextAttempt = (stored) => nextAttemptOf(stored, MAX_REVIEW_ATTEMPTS);
 
 const { runGit } = await import('../src/safeGit.mjs');
 const { readQueue, writeQueue } = await import('../src/auditQueueStore.mjs');
