@@ -796,6 +796,13 @@ async function tick() {
    * since each tests for `=== false` or a non-empty branch.
    */
   const launch = agentLaunch('claude-code', {
+    /*
+     * THE ENGINE ID IS NOT THE BINARY NAME. `agentLaunch` returns
+     * `file: binary ?? engine`, so omitting this spawned `claude-code`,
+     * which is not a command: "'claude-code' is not recognized as an
+     * internal or external command". Caught by running it.
+     */
+    binary: 'claude',
     scope: permissionScope({
       isDisposable: true,
       branch: `detached/${String(job.candidate_sha).slice(0, 12)}`,
