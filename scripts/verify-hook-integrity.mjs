@@ -54,6 +54,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runGit } from '../src/safeGit.mjs';
+import { invokedDirectly } from '../src/invokedDirectly.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const TEMPLATE = path.join(REPO, 'templates', 'hooks', 'post-commit');
@@ -377,7 +378,9 @@ export function verifyHookIntegrity({ readConfig = null } = {}) {
 }
 
 /* Run directly: print and exit. Imported: just the function. */
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+/* path.resolve does not collapse an 8.3 short name, so this was a no-op
+ * under the audit clone's temp path. See src/invokedDirectly.mjs. */
+if (invokedDirectly(process.argv[1], import.meta.url)) {
   const r = verifyHookIntegrity();
   if (process.argv.includes('--json')) {
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);

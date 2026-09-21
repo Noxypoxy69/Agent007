@@ -59,6 +59,8 @@
 
 import { readFile, readdir } from 'node:fs/promises';
 
+import { invokedDirectly } from '../src/invokedDirectly.mjs';
+
 const lf = (s) => s.replace(/\r\n/g, '\n');
 
 /** Lines present in `a` and not in `b`, counted with multiplicity. */
@@ -215,9 +217,14 @@ export async function main(deployedDir, incomingDir, expectRemoved = 0) {
     return 0;
   }
 
-const invokedDirectly = process.argv[1]
-  && import.meta.url === new URL(`file://${process.argv[1]}`).href;
-if (invokedDirectly) {
+/*
+ * THIS LINE USED TO BE `new URL(`file://${process.argv[1]}`).href`, and
+ * under an 8.3 short path it made the entire gate a no-op that exited 0.
+ * See src/invokedDirectly.mjs for the measurement -- twelve deploy tests
+ * failing in every audit clone with "a deploy that reverts a line was
+ * allowed", because this script was never running its body.
+ */
+if (invokedDirectly(process.argv[1], import.meta.url)) {
   const args = process.argv.slice(2);
   const at = args.indexOf('--expect-removed');
   const expect = at === -1 ? 0 : Number(args[at + 1]);
