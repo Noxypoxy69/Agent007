@@ -128,7 +128,26 @@ export async function run(pkgDir) {
   let queue = null;
   let queueErr;
   try { queue = readQueue(REPO); } catch (e) { queueErr = e?.message; }
-  const expectedAudits = srcKeys.map((k) => expect(`audits/${k}.jsonl`)).find((n) => n != null) ?? null;
+  /**
+   * WHICH SOURCE FILE THIS DESTINATION KEY CORRESPONDS TO.
+   *
+   * When the key has NOT moved, the answer is the file with the same key --
+   * not "the first source key that has a count". This mattered immediately:
+   * the findings store has TWO files, and one of them is named with a
+   * FIFTEEN-character key rather than sixteen. Scanning source keys in order
+   * compared a correctly-resolved 3 against that stray file's 1 and reported a
+   * healthy store SHORT BY 2.
+   *
+   * The stray key is a real anomaly in whatever wrote it and is recorded as a
+   * migration finding; it must not also be allowed to corrupt the comparison.
+   */
+  const expectFor = (kind) => {
+    const exact = expect(`${kind}/${destKey}.jsonl`);
+    if (exact != null) return exact;
+    return srcKeys.map((k) => expect(`${kind}/${k}.jsonl`)).find((n) => n != null) ?? null;
+  };
+
+  const expectedAudits = expectFor('audits');
   results.push(check('audit queue', Array.isArray(queue?.rows) ? queue.rows.length : null, expectedAudits,
     queueErr ?? 'readQueue returned no rows array'));
   if (queue?.malformed) {
@@ -141,9 +160,21 @@ export async function run(pkgDir) {
   try {
     findings = readFileSync(findingsPath, 'utf8').split('\n').filter((l) => l.trim()).length;
   } catch { findings = null; }
-  const expectedFindings = srcKeys.map((k) => expect(`findings/${k}.jsonl`)).find((n) => n != null) ?? null;
-  results.push(check('finding registry', findings, expectedFindings,
+  results.push(check('finding registry', findings, expectFor('findings'),
     `nothing readable at the destination key ${destKey}`));
+
+  /*
+   * A KEY THAT IS NOT SIXTEEN HEX CHARACTERS DID NOT COME FROM repoStorePath.
+   * Reported rather than ignored: it is carried by the package so nothing is
+   * lost, but something wrote it and that is worth knowing before it is
+   * mistaken for a second repository's store.
+   */
+  for (const k of srcKeys.filter((s) => !/^[0-9a-f]{16}$/.test(s))) {
+    results.push({
+      name: 'store key shape', ok: false,
+      why: `source key "${k}" is ${k.length} characters, not 16 -- not a repoStorePath key. Carried, but investigate what wrote it.`,
+    });
+  }
 
   // ── the flat provenance stores ─────────────────────────────────────────
   for (const [name, read, rel] of [
