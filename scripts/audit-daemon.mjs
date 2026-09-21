@@ -54,9 +54,31 @@ import { fileURLToPath } from 'node:url';
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
+/*
+ * A FLAG PRESENT WITH NO VALUE IS FATAL, FOR EVERY FLAG.
+ *
+ * Blind audit M-3. The first version of this guard lived inside `posInt`,
+ * which covers `--interval`, `--max-ticks` and `--deadline` -- and left
+ * `--by`, the only remaining raw caller, with the original behaviour:
+ * silently returning its default when the name is the last argv entry.
+ *
+ * That is not a cosmetic label. `--by` is the identity the daemon claims
+ * work as, and `claimJob` refuses a claim on `author === who`. An operator
+ * passing `--by <their own session id>` precisely SO the
+ * author-cannot-audit exclusion fires gets `audit-daemon@<hostname>`
+ * instead, which equals no commit trailer, so the check cannot fire at
+ * all. Fail-open on rule 20's core property, from a trailing flag.
+ *
+ * Guarding inside the value-parser was fixing the spelling; the guard
+ * belongs here, where every flag passes (rule 8).
+ */
 const flag = (n, d = null) => {
   const i = argv.indexOf(n);
-  return i === -1 || i + 1 >= argv.length ? d : argv[i + 1];
+  if (i !== -1 && i + 1 >= argv.length) {
+    process.stderr.write(`[audit-daemon] ${n} was given with no value. Refusing to guess it.\n`);
+    process.exit(2);
+  }
+  return i === -1 ? d : argv[i + 1];
 };
 
 const ONCE = has('--once');
@@ -69,21 +91,8 @@ const SUPERVISE = has('--supervise');
  * money rather than correctness.
  */
 const posInt = (name, dflt) => {
-  /*
-   * A FLAG PRESENT WITH NO VALUE IS AN ERROR, NOT THE DEFAULT.
-   *
-   * Blind audit M-6. `flag()` returns its default when the name is the
-   * LAST argv entry, so `--max-ticks` typed at the end of the line
-   * silently became 5. That is verbatim the mistake this function's own
-   * comment says it exists to stop -- "an operator asking for one spend
-   * and silently getting another" -- reachable by a plausible typing
-   * order. `--max-ticks --launch` was already caught, because the next
-   * token fails the digit test; only the end-of-argv case leaked.
-   */
-  if (argv.includes(name) && argv.indexOf(name) + 1 >= argv.length) {
-    say(`[audit-daemon] ${name} was given with no value. Refusing to guess a spend.`);
-    process.exit(2);
-  }
+  /* The missing-value case is handled in `flag` itself now, so it covers
+   * every flag rather than only the numeric ones -- see M-3 there. */
   const raw = flag(name, null);
   if (raw === null) return dflt;
   if (!/^\d+$/.test(String(raw).trim())) {

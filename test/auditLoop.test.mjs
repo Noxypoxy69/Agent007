@@ -251,6 +251,76 @@ test('STARVED IS REACHABLE THROUGH THE REAL CALLER, not only from a hand-built s
     'starvedLimit >= maxTicks makes STARVED unreachable through the real caller');
 });
 
+test('STARVED STAYS REACHABLE AT ANY --max-ticks the operator can pass (M-1)', () => {
+  /*
+   * The premise above checks the DEFAULTS OBJECT, which is not the value
+   * the function used -- so it could not see that `--max-ticks 2` or `1`
+   * puts the budget below `starvedLimit: 3` and hands BUDGET the win
+   * again. A cost-conscious operator lowering the spend cap is the single
+   * most likely person to touch that flag, and they got back exactly the
+   * misleading "raise the spend cap" message the reorder removed.
+   *
+   * Driven through the caller's real invariant at every budget the daemon
+   * accepts, rather than asserted about a constant.
+   */
+  for (const maxTicks of [1, 2, 3, 5, 9]) {
+    let ticksUsed = 0;
+    let noProgress = 0;
+    let backoffServed = false;
+    let last = null;
+
+    for (let i = 0; i < 100; i += 1) {
+      last = nextAction(
+        { ticksUsed, consecutiveNoProgress: noProgress, queueDepth: 40, backoffServed },
+        { maxTicks },
+      );
+      if (last.action === LOOP_ACTION.STOP) break;
+      if (last.action === LOOP_ACTION.WAIT) { backoffServed = true; continue; }
+      backoffServed = false;
+      ticksUsed += 1;
+      noProgress += 1;
+    }
+
+    assert.equal(last.code, LOOP_STOP.STARVED,
+      `at --max-ticks ${maxTicks} a permanently starved queue stopped as ${last.code}. `
+      + 'If that is budget_exhausted the operator is told to raise a spend cap while '
+      + 'nothing was spent and every seat is blocked');
+  }
+
+  /* THE POSITIVE (rule 5): a queue that IS draining still reports BUDGET,
+   * so the reconciliation has not turned STARVED into the only outcome. */
+  const drained = nextAction({ ticksUsed: 5, consecutiveNoProgress: 0, queueDepth: 40 }, { maxTicks: 5 });
+  assert.equal(drained.code, LOOP_STOP.BUDGET);
+});
+
+test('deadlineMs IS VALIDATED TOO -- it was the one opts field left open (M-2)', () => {
+  /*
+   * The hardening pass routed maxTicks, starvedLimit, intervalMs and
+   * maxIntervalMs through `num` and left deadlineMs on the bare spread,
+   * where a non-number is silently ignored. `'600000'` is exactly what a
+   * caller computing `posInt(...) * 1000` could hand it, and it disabled
+   * the deadline with no word -- the same failure as maxTicks, inside the
+   * fix that said every opts field was covered.
+   */
+  const past = { queueDepth: 50, startedAt: 0, now: 10_000 };
+
+  for (const bad of ['600000', NaN, {}, [], true]) {
+    const r = nextAction(past, { deadlineMs: bad, maxTicks: 99 });
+    assert.equal(r.action, LOOP_ACTION.STOP,
+      `deadlineMs ${JSON.stringify(bad)} silently disabled the deadline`);
+    assert.equal(r.code, LOOP_STOP.DEADLINE);
+  }
+
+  /* A real number still works in both directions (rule 5). */
+  assert.equal(nextAction(past, { deadlineMs: 5_000, maxTicks: 99 }).code, LOOP_STOP.DEADLINE);
+  assert.equal(nextAction(past, { deadlineMs: 50_000, maxTicks: 99 }).action, LOOP_ACTION.TICK);
+
+  /* And ABSENT still means "no deadline", which is the documented default
+   * and must not become "stop immediately". */
+  assert.equal(nextAction(past, { maxTicks: 99 }).action, LOOP_ACTION.TICK);
+  assert.equal(nextAction(past, { deadlineMs: undefined, maxTicks: 99 }).action, LOOP_ACTION.TICK);
+});
+
 test('THE SPEND BOUND FAILS CLOSED ON A NON-NUMBER, like every state field', () => {
   /*
    * Blind audit M-2. `state` was validated and `opts` was not, and spread

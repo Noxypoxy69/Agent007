@@ -109,13 +109,42 @@ export function nextAction(state = {}, opts = {}) {
    * argued away, because the next caller will not be `posInt`.
    */
   const raw = opts ?? {};
+  const maxTicks = num(raw.maxTicks, LOOP_DEFAULTS.maxTicks);
   const o = {
     ...LOOP_DEFAULTS,
     ...raw,
-    maxTicks: num(raw.maxTicks, LOOP_DEFAULTS.maxTicks),
-    starvedLimit: num(raw.starvedLimit, LOOP_DEFAULTS.starvedLimit),
+    maxTicks,
+    /*
+     * ═══ RECONCILED WITH THE EFFECTIVE maxTicks, NOT JUST DEFAULTED ═══
+     *
+     * Blind audit M-1 (second round). `starvedLimit: 3` beats `maxTicks: 5`
+     * only for the DEFAULTS. The caller takes `--max-ticks` from argv and
+     * has no flag for `starvedLimit`, so `--max-ticks 2` or `1` puts the
+     * budget below the starve limit and BUDGET wins again -- handing a
+     * cost-conscious operator, the one person most likely to lower that
+     * flag, the exact misleading message the reorder was meant to remove.
+     *
+     * My premise assertion checked `LOOP_DEFAULTS.starvedLimit <
+     * LOOP_DEFAULTS.maxTicks`, which is the defaults object and not the
+     * effective value, so it could not see this.
+     */
+    starvedLimit: Math.max(1, Math.min(
+      num(raw.starvedLimit, LOOP_DEFAULTS.starvedLimit),
+      maxTicks > 1 ? maxTicks - 1 : 1,
+    )),
     intervalMs: num(raw.intervalMs, LOOP_DEFAULTS.intervalMs),
     maxIntervalMs: num(raw.maxIntervalMs, LOOP_DEFAULTS.maxIntervalMs),
+    /*
+     * deadlineMs WAS THE ONE opts FIELD STILL UNVALIDATED. Blind audit
+     * M-2 (second round): it arrived through the bare spread, and the
+     * check below silently ignores a non-number -- so `deadlineMs: '600000'`,
+     * which is exactly the shape a caller computing `posInt(...) * 1000`
+     * could produce, disabled the deadline with no word. Same failure as
+     * maxTicks, in the fix that claimed to close it.
+     */
+    deadlineMs: raw.deadlineMs === undefined || raw.deadlineMs === null
+      ? undefined
+      : num(raw.deadlineMs, NaN),
   };
   const ticksUsed = num(s.ticksUsed, 0);
   const noProgress = num(s.consecutiveNoProgress, 0);
