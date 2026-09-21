@@ -100,6 +100,24 @@ async function verify(dir) {
   }
 }
 
+/**
+ * Run the verifier as a CHILD against a fixture store.
+ *
+ * PHASE 3 READS THE REAL HOME, and the store root is a module constant resolved
+ * at import — so the in-process helper above cannot be used for any assertion
+ * about a resolution row: it compares the fixture's manifest against the
+ * OPERATOR'S live store, and the numbers are whatever that machine holds today.
+ * Both of this file's first drafts of the phase-3 tests failed for exactly that,
+ * which is rule 21 in miniature: the fixture had picked up a fact about the
+ * machine. Anything asserting on `resolve ...` goes through here.
+ */
+function verifyChild(pkg, home) {
+  const repo = fileURLToPath(new URL('..', import.meta.url));
+  const r = spawnSync(process.execPath, ['scripts/migration-verify.mjs', '--package', pkg],
+    { cwd: repo, encoding: 'utf8', env: { ...process.env, AGENTBRIDGE_HOME: home } });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+}
+
 /** Build a one-file package on disk and return its directory. */
 function packageWith(dir, items, keys, write) {
   for (const [rel, body] of write) {
@@ -225,23 +243,27 @@ test('A MANIFEST WITH NO USABLE COUNT FAILS RESOLUTION rather than advising', as
   const rows = JSON.stringify([{ id: 1 }, { id: 2 }]);
   const withCount = mk();
   const without = mk();
+  const home = mk();
   try {
+    writeFileSync(path.join(home, 'delegations.json'), rows);
     for (const [dir, mangle] of [[withCount, false], [without, true]]) {
-      const it = item('delegations.json', rows);
+      const it = { ...item('delegations.json', rows), records: 2 };
       if (mangle) { it.record_count = it.records; delete it.records; }
       packageWith(dir, [it], [], [['delegations.json', rows]]);
     }
-    const bad = await verify(without);
+    const bad = verifyChild(without, home);
     assert.match(bad.out, /FAIL +resolve delegations/,
       'a carried store with no usable count was waved through as an advisory');
     assert.match(bad.out, /NO usable count/);
 
-    const good = await verify(withCount);
+    const good = verifyChild(withCount, home);
     assert.doesNotMatch(good.out, /FAIL +resolve delegations/,
       'the store WITH a count also failed, so the refusal above is unconditional');
+    assert.match(good.out, /OK +resolve delegations +resolved 2, matches manifest/);
   } finally {
     rmSync(withCount, { recursive: true, force: true });
     rmSync(without, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -561,32 +583,29 @@ test('THE PASS PATH EXISTS: a well-formed, installed package reaches exit 0', ()
    * out: their destination key is a fact about the real repository path, and
    * phase 3 reads them through consumers this fixture cannot redirect per-call.
    */
-  const REPO = fileURLToPath(new URL('..', import.meta.url));
   const rows = (n) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ id: i })));
   const payloads = [
-    ['delegations.json', rows(3)],
-    ['leadWork.json', rows(2)],
-    ['tokenMeasurements.json', rows(5)],
-    ['escalations.json', rows(1)],
+    ['delegations.json', rows(3), 3],
+    ['leadWork.json', rows(2), 2],
+    ['tokenMeasurements.json', rows(5), 5],
+    ['escalations.json', rows(1), 1],
   ];
 
   const pkg = mk();
   const home = mk();
   try {
-    packageWith(pkg, payloads.map(([rel, body]) => item(rel, body)), [], payloads);
+    packageWith(pkg,
+      payloads.map(([rel, body, n]) => ({ ...item(rel, body), records: n })), [],
+      payloads.map(([rel, body]) => [rel, body]));
     for (const [rel, body] of payloads) writeFileSync(path.join(home, rel), body);
 
-    const run = () => spawnSync(process.execPath,
-      ['scripts/migration-verify.mjs', '--package', pkg],
-      { cwd: REPO, encoding: 'utf8', env: { ...process.env, AGENTBRIDGE_HOME: home } });
-
-    const good = run();
-    assert.equal(good.status, 0,
-      `a correct, installed package did not pass. The gate can refuse but cannot accept:\n${good.stdout}${good.stderr}`);
-    assert.match(good.stdout, /PACKAGE INTACT, INSTALLED, AND REACHABLE/);
-    assert.match(good.stdout, /OK +resolve delegations +resolved 3, matches manifest/,
+    const good = verifyChild(pkg, home);
+    assert.equal(good.code, 0,
+      `a correct, installed package did not pass. The gate can refuse but cannot accept:\n${good.out}`);
+    assert.match(good.out, /PACKAGE INTACT, INSTALLED, AND REACHABLE/);
+    assert.match(good.out, /OK +resolve delegations +resolved 3, matches manifest/,
       'phase 3 did not actually compare a count — an exit 0 with every resolution row advisory is the HIGH-2 shape');
-    assert.match(good.stdout, /OK +manifest completeness/);
+    assert.match(good.out, /OK +manifest completeness/);
 
     /*
      * Differenced at the far end (rule 4): change the INSTALLED bytes, not the
@@ -594,9 +613,9 @@ test('THE PASS PATH EXISTS: a well-formed, installed package reaches exit 0', ()
      * never changes would mean the 0 above was not earned.
      */
     writeFileSync(path.join(home, 'leadWork.json'), rows(2).replace('0', '9'));
-    const drifted = run();
-    assert.notEqual(drifted.status, 0, 'the installed copy differed from the package and it still passed');
-    assert.match(drifted.stdout, /FAIL +install leadWork\.json/);
+    const drifted = verifyChild(pkg, home);
+    assert.notEqual(drifted.code, 0, 'the installed copy differed from the package and it still passed');
+    assert.match(drifted.out, /FAIL +install leadWork\.json/);
   } finally {
     rmSync(pkg, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
