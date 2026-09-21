@@ -155,13 +155,41 @@ export async function run(pkgDir) {
   }
 
   // ── findings, via the same key derivation the writer uses ──────────────
+  /*
+   * FOLDED BY finding_id, BECAUSE THAT IS WHAT ITS READER DOES.
+   *
+   * This counted LINES, and reported a healthy store as short: the findings
+   * store is append-only and its consumer folds it -- "APPEND-ONLY, AND THE
+   * LAST RECORD FOR AN ID WINS" (bin/agentbridge.mjs) -- on `finding_id`, not
+   * on the `audit_id` those lines also carry. Three transitions of one finding
+   * are one finding, and a verifier that says three is not measuring what the
+   * system sees.
+   *
+   * The reader is inline in the CLI rather than exported, so this is the one
+   * place the fold is reproduced instead of imported. Reproducing a rule is
+   * hollow gate 2, so it is written to match that reader exactly and the fold
+   * key is named in the manifest so the two cannot drift silently.
+   */
   const findingsPath = repoStorePath(REPO, 'findings', '.jsonl');
   let findings = null;
+  let findingsMalformed = 0;
   try {
-    findings = readFileSync(findingsPath, 'utf8').split('\n').filter((l) => l.trim()).length;
+    const ids = new Set();
+    for (const line of readFileSync(findingsPath, 'utf8').split('\n')) {
+      if (line.trim() === '') continue;
+      try {
+        const rec = JSON.parse(line);
+        if (rec && typeof rec === 'object' && rec.finding_id) ids.add(rec.finding_id);
+        else findingsMalformed += 1;
+      } catch { findingsMalformed += 1; }
+    }
+    findings = ids.size;
   } catch { findings = null; }
   results.push(check('finding registry', findings, expectFor('findings'),
     `nothing readable at the destination key ${destKey}`));
+  if (findingsMalformed) {
+    results.push({ name: 'findings integrity', ok: false, why: `${findingsMalformed} line(s) carried no finding_id` });
+  }
 
   /*
    * A KEY THAT IS NOT SIXTEEN HEX CHARACTERS DID NOT COME FROM repoStorePath.

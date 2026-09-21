@@ -94,12 +94,21 @@ const OUT = path.resolve(flag('--out') ?? path.join(homedir(), 'agent007-migrati
  * unrecoverable, as opposed to the ones that are merely convenient.
  */
 const ITEMS = [
+  /*
+   * `foldKey` IS DECLARED, NOT SNIFFED. The first version inferred it from the
+   * presence of `audit_id` on a line and applied that to every .jsonl -- so the
+   * findings store, whose lines happen to carry an audit_id but which folds on
+   * `finding_id`, was counted under the wrong key and reported 1 where its own
+   * reader sees 3. Both stores fold ("APPEND-ONLY, AND THE LAST RECORD FOR AN
+   * ID WINS" -- bin/agentbridge.mjs, and readQueue does the same); they simply
+   * fold on different fields, and that is a fact to look up rather than detect.
+   */
   {
-    from: 'audits', glob: '.jsonl', authority: true,
+    from: 'audits', glob: '.jsonl', authority: true, foldKey: 'audit_id',
     why: 'the audit queue and its entire state history; no hosted equivalent exists on either MCP server',
   },
   {
-    from: 'findings', glob: '.jsonl', authority: true,
+    from: 'findings', glob: '.jsonl', authority: true, foldKey: 'finding_id',
     why: 'the finding registry; no hosted equivalent',
   },
   {
@@ -213,13 +222,18 @@ for (const f of present) {
    * in an append-only log and reported it as 850 jobs -- so both numbers are
    * recorded and the verifier is told which one to use.
    */
-  const distinct = lines
+  const distinct = lines && f.foldKey
     ? (() => {
         const ids = new Set();
+        let malformed = 0;
         for (const l of lines) {
-          try { const r = JSON.parse(l); if (typeof r?.audit_id === 'string') ids.add(r.audit_id); } catch { /* malformed */ }
+          try {
+            const r = JSON.parse(l);
+            if (typeof r?.[f.foldKey] === 'string') ids.add(r[f.foldKey]);
+            else malformed += 1;
+          } catch { malformed += 1; }
         }
-        return ids.size ? ids.size : null;
+        return { size: ids.size, malformed };
       })()
     : null;
 
@@ -230,8 +244,10 @@ for (const f of present) {
     records: lines
       ? lines.length
       : (() => { try { const p = JSON.parse(text); return Array.isArray(p) ? p.length : null; } catch { return null; } })(),
-    distinct_ids: distinct,
-    compare_reader_output_against: distinct != null ? 'distinct_ids' : 'records',
+    distinct_ids: distinct ? distinct.size : null,
+    fold_key: f.foldKey ?? null,
+    malformed_at_source: distinct ? distinct.malformed : null,
+    compare_reader_output_against: distinct ? 'distinct_ids' : 'records',
     sha256: srcHash,
     authority: Boolean(f.authority),
     why: f.why,
