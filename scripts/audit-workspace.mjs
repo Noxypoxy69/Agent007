@@ -156,20 +156,26 @@ const text = `${suite.stdout ?? ''}${suite.stderr ?? ''}`;
  *       NO COMMAND PRINTS A RUNTIME ASSERTION
  *
  * `fail 0` on a red suite, and 2985 + 6 = 2991 rather than 2992 -- the numbers
- * disagreed with each other and nothing said so. The cause is that tests in
- * this repository SPAWN CHILDREN, node reprints a failing test's captured
- * output in its `failing tests:` detail, and a child's own green summary lands
- * in that detail. So `fail` was read from a grandchild and `tests` from the
- * parent.
+ * disagreed with each other and nothing said so, which means they came from
+ * more than one summary.
+ *
+ * WHICH SUMMARIES, I DO NOT KNOW, and this comment used to say I did. It
+ * asserted the second block came from a child `node --test` reprinted inside
+ * the detail of `NO COMMAND PRINTS A RUNTIME ASSERTION`. That test spawns the
+ * CLI -- `grep -acn spawnSync test/probe.test.mjs` is 0 -- so it cannot emit a
+ * summary block at all. Three successive "fixes" each picked a boundary from
+ * that story and each was broken in turn.
  *
  * It matters more than an ordinary bug because of who reads it. Rule 20 sends
  * every auditor to a clone made by THIS SCRIPT, and rule 3 tells them to assert
  * the reported count rather than the exit code. The instrument was lying in the
  * direction of "everything is fine", to exactly the people told to trust it.
  *
- * src/suiteSummary.mjs reads whole contiguous blocks, reconciles the parts
- * against the total, and cross-checks against the exit status -- and REFUSES,
- * with a reason, rather than printing a number it cannot stand behind.
+ * src/suiteSummary.mjs now REFUSES when the text holds more than one complete
+ * summary, rather than choosing between them -- a choice needs a story about
+ * where the other came from, and there isn't one. It also reconciles the parts
+ * against the total and cross-checks both directions against the exit status.
+ * The failing names below print either way, so a refusal is not a blackout.
  */
 const { readSuiteSummary } = await import('../src/suiteSummary.mjs');
 const summary = readSuiteSummary(text, suite.status);
