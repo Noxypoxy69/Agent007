@@ -809,7 +809,6 @@ async function tick() {
       leaseValid: true,
       fenceCurrent: true,
     }, [], { now: new Date().toISOString() }),
-    extraArgs: [`Read "${briefPath}" and carry it out.`],
   });
   say(`[audit-daemon] reviewer rules: ${launch.rules.join(', ')}`);
 
@@ -837,8 +836,25 @@ async function tick() {
     ? launch.args.map((a) => (/\s/.test(a) && !a.includes('"') ? `"${a}"` : a))
     : launch.args;
   const child = spawn(launch.file, args, {
-    cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'], shell: shellUsed,
+    cwd: ws.dir, stdio: ['pipe', 'pipe', 'pipe'], shell: shellUsed,
   });
+
+  /*
+   * THE PROMPT GOES OVER STDIN, NOT AS AN ARGUMENT.
+   *
+   * As an argument it has to survive cmd.exe twice: it contains spaces AND
+   * a quoted path, so it cannot be wrapped without nesting quotes, and
+   * unwrapped it is split into six fragments. The CLI then reported
+   * "Input must be provided either through stdin or as a prompt argument
+   * when using --print" -- naming the channel that does not go through the
+   * shell at all.
+   *
+   * This also removes the last dependence on what the temp path looks
+   * like: a brief directory containing a space would have broken the
+   * argument form on this machine and not on another (rule 21).
+   */
+  child.stdin?.write(`Read ${briefPath} and carry it out.\n`);
+  child.stdin?.end();
   child.stdout?.on('data', (d) => { transcript += d; process.stdout.write(d); });
   child.stderr?.on('data', (d) => { transcript += d; process.stderr.write(d); });
 
