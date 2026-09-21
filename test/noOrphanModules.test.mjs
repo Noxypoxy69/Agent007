@@ -289,9 +289,13 @@ const KNOWN = {
   'src/schedule.mjs':
     'ORPHANED IN PRODUCTION. Integrated and green, imported only by its tests. ' +
     'The fifth instance of this pattern and the first found by machine. Needs a CLI caller.',
-  'src/moduleGraph.mjs':
-    'This gate itself, not yet wired to a command. Becomes test-only once its test lands, ' +
-    'and reachable when a caller exists.',
+  /*
+   * src/moduleGraph.mjs REMOVED 2026-09-21. Its own entry said "reachable when
+   * a caller exists" -- and one does now: declaring the twelve undeclared
+   * scripts made it reachable, so the ratchet correctly reported the entry as
+   * stale. Removed rather than reworded, which is what "the known list may only
+   * SHRINK" is for.
+   */
 
   /*
    * ── added 2026-09-18, and the list had been red for days ──────────────

@@ -174,6 +174,14 @@ export const DEFAULT_ENTRY_POINTS = [
   'scripts/probe-audit-due.mjs',
   'scripts/probe-dead-exports.mjs',
   'scripts/worker-wire-gate-scripts.mjs',
+  /* AND THREE MY OWN HAND-SWEEP MISSED, caught by the new gate on its first
+   * run. I grepped for `from '../src/` and these use other spellings, which is
+   * the whole reason a hand-typed list keeps being wrong and a gate does not.
+   * diff-suite and enqueue-audit-job are run by a person; pre-push-audit is a
+   * git hook. */
+  'scripts/diff-suite.mjs',
+  'scripts/enqueue-audit-job.mjs',
+  'scripts/pre-push-audit.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
