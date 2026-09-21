@@ -62,6 +62,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import { invokedDirectly } from '../src/invokedDirectly.mjs';
+
 /** Sentences that must never be missing from EITHER side. */
 export const SECURITY_INVARIANTS = [
   'shell, SQL, file writes, deploy, merge, command execution',
@@ -129,8 +131,27 @@ export function compareInstructions(liveSource, repoSource) {
 }
 
 // ── CLI ────────────────────────────────────────────────────────────────────
-const invoked = (process.argv[1] ?? '').replace(/\\/g, '/');
-if (invoked.endsWith('check-deployed-instructions.mjs')) {
+/*
+ * THE FIFTH SITE, AND MY "ALL FIVE" CLAIM WAS FOUR.
+ *
+ * Blind audit M-4. `src/invokedDirectly.mjs` enumerates five main-module
+ * checks broken by comparing path spellings. I migrated four and wrote
+ * "Both migrated. All five sites now ask realpath instead of comparing
+ * spellings." This one still compared, and the module header still listed
+ * it as unmigrated -- a false claim in a commit about a control, which is
+ * the same "fixed one site, not its siblings" pattern the finding it
+ * answered was raised about, one round later.
+ *
+ * This spelling failed in the OPPOSITE direction from the other four, and
+ * that is worth keeping straight: `endsWith(basename)` survives an 8.3
+ * short name, so it never silently no-opped. It is over-permissive
+ * instead -- ANY argv[1] ending in this basename ran the CLI body,
+ * including a different file of the same name in another directory.
+ *
+ * `invokedDirectly` resolves both sides through realpath, so it closes
+ * the over-permissive direction without reopening the 8.3 one.
+ */
+if (invokedDirectly(process.argv[1], import.meta.url)) {
   const [livePath, repoPath] = process.argv.slice(2);
   if (!livePath || !repoPath) {
     console.error('usage: check-deployed-instructions.mjs <live-_shared.js> <repo-_shared.js>');

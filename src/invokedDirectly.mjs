@@ -4,14 +4,25 @@
  * ═══ WHY THIS IS A MODULE AND NOT FIVE ONE-LINERS ═══
  *
  * It was five one-liners, in five spellings, and four of them silently
- * turn their script into a no-op under a path spelling that is the NORM
- * in this repository's own audit tooling.
+ * turned their script into a no-op under a path spelling that is the NORM
+ * in this repository's own audit tooling. ALL FIVE now call this module:
  *
- *   scripts/check-edge-deploy.mjs      new URL(`file://${argv[1]}`).href
- *   bridge/server.mjs                  pathToFileURL(argv[1]).href
- *   scripts/verify-hook-integrity.mjs  path.resolve both sides
- *   scripts/bridge-session-poll.mjs    path.resolve(argv[1]) === SELF
- *   scripts/check-deployed-instructions.mjs   endsWith(basename)
+ *   scripts/check-edge-deploy.mjs      was: new URL(`file://${argv[1]}`).href
+ *   bridge/server.mjs                  was: pathToFileURL(argv[1]).href
+ *   scripts/verify-hook-integrity.mjs  was: path.resolve both sides
+ *   scripts/bridge-session-poll.mjs    was: path.resolve(argv[1]) === SELF
+ *   scripts/check-deployed-instructions.mjs   was: endsWith(basename)
+ *
+ * THE LAST ONE TOOK A SECOND ROUND, and the commit that left it out said
+ * "All five sites now ask realpath". It was four. Blind audit M-4 -- a
+ * false claim in a commit about a control, and the same fix-one-site-not-
+ * its-siblings pattern as the finding that commit was answering.
+ *
+ * It also failed in the OPPOSITE direction from the other four, which is
+ * worth keeping straight: `endsWith(basename)` survives an 8.3 name, so it
+ * never silently no-opped. It was over-permissive instead -- any `argv[1]`
+ * ending in that basename ran the CLI body, including a different file of
+ * the same name elsewhere.
  *
  * ═══ THE FAILURE, MEASURED ═══
  *

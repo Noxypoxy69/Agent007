@@ -72,6 +72,41 @@ function controlModules() {
 }
 
 /**
+ * Resolve a registered path to the graph's own spelling of it.
+ *
+ * ═══ WHY THIS IS NEEDED, AND WHY NOTHING WENT RED ═══
+ *
+ * Blind audit M-3. `AUDIT_BEARING_EXTRAS` stores entries LOWER-CASED --
+ * `src/auditloop.mjs` -- because `isAuditBearing` folds case on both sides,
+ * so registration itself is correct. `buildGraph` keys come from
+ * `readdirSync`, so they carry the real spelling: `src/auditLoop.mjs`.
+ * `Map.get` is exact-string.
+ *
+ * So `graph.get('src/auditloop.mjs')` returned undefined and the walk hit
+ * `if (!edges) continue` -- dropping the module SILENTLY. On Windows
+ * `existsSync` is case-insensitive so the entry survived the filter and
+ * died one step later; on a case-sensitive filesystem it died one step
+ * earlier. Excluded either way, on both platforms, with no notice.
+ *
+ * The three affected were `src/auditLoop.mjs`, `src/auditWindow.mjs` and
+ * `src/invokedDirectly.mjs` -- registered only in EXTRAS and only in
+ * lowercase, which is to say the three NEWEST controls, the exact ones
+ * this gate was built to cover. `principalResolution` and `auditQueueStore`
+ * survived only because they also appear correctly cased in
+ * `PROTECTED_PATHS`.
+ *
+ * Impact today was zero -- all three import nothing but node builtins -- so
+ * it was latent, and would have stayed silent until one of them gained a
+ * local import.
+ */
+function graphKeyFor(graph, rel) {
+  if (graph.has(rel)) return rel;
+  const want = rel.toLowerCase();
+  for (const key of graph.keys()) if (key.toLowerCase() === want) return key;
+  return null;
+}
+
+/**
  * REACHED BY A CONTROL, AND ARGUED NOT TO BE ONE.
  *
  * ═══ WHY THIS LIST EXISTS AND WHY IT IS NOT THE OLD DEFECT AGAIN ═══
@@ -156,9 +191,23 @@ test('THE FIXTURE IS REAL: there are control modules and the graph sees them', (
    * rather than assumed -- my first version treated the return value itself
    * as the Map and this precondition caught it on the first run. */
   const { graph } = buildGraph(ROOT);
-  const seen = controls.filter((c) => graph.has(c));
-  assert.ok(seen.length > 5,
-    `the module graph does not contain the registered controls: ${JSON.stringify(controls.slice(0, 5))}`);
+
+  /*
+   * EVERY control module must be found, not "more than five of them".
+   *
+   * Blind audit M-3: this asserted `seen.length > 5`, which passed on the
+   * correctly-cased PROTECTED_PATHS entries while three registered
+   * controls were invisible to the walk. A precondition written to catch
+   * exactly this failure was too weak to catch it, which is worse than
+   * having none -- it reads as coverage.
+   *
+   * Naming the missing ones rather than comparing counts, because a count
+   * mismatch sends the next reader to work out WHICH.
+   */
+  const missingFromGraph = controls.filter((c) => graphKeyFor(graph, c) === null);
+  assert.deepEqual(missingFromGraph, [],
+    'these registered controls are not in the module graph, so the closure below walks '
+    + 'NONE of their imports and silently covers less than it claims');
 });
 
 test('EVERY MODULE A CONTROL IMPORTS IS ITSELF AUDIT-BEARING', () => {
@@ -178,7 +227,10 @@ test('EVERY MODULE A CONTROL IMPORTS IS ITSELF AUDIT-BEARING', () => {
   const queue = [...controls];
   while (queue.length > 0) {
     const cur = queue.pop();
-    const edges = graph.get(cur);
+    /* Resolved through the graph's own spelling -- see graphKeyFor. A bare
+     * `graph.get` dropped three registered controls without a word. */
+    const key = graphKeyFor(graph, cur);
+    const edges = key === null ? null : graph.get(key);
     if (!edges) continue;
     for (const dep of edges) {
       const r = norm(dep);
@@ -225,7 +277,8 @@ test('the reached-but-not-a-control list may only SHRINK', () => {
   const queue = [...controls];
   while (queue.length > 0) {
     const cur = queue.pop();
-    for (const dep of graph.get(cur) ?? []) {
+    const key = graphKeyFor(graph, cur);
+    for (const dep of (key === null ? [] : graph.get(key)) ?? []) {
       const r = norm(dep);
       if (seenSet.has(r)) continue;
       seenSet.add(r);
@@ -240,6 +293,41 @@ test('the reached-but-not-a-control list may only SHRINK', () => {
       `${rel} is exempted but no control reaches it any more -- remove the entry`);
     assert.equal(isAuditBearing(rel), false,
       `${rel} is now audit-bearing: delete its exemption`);
+  }
+});
+
+test('A LOWER-CASED REGISTRATION STILL REACHES THE GRAPH (M-3)', () => {
+  /*
+   * The defect, pinned in the direction it was wrong. `AUDIT_BEARING_EXTRAS`
+   * stores lower-cased paths because `isAuditBearing` folds case; the graph
+   * keys carry the real spelling from `readdirSync`; `Map.get` is exact.
+   * So three registered controls were dropped by `if (!edges) continue`
+   * with no notice, on both platforms.
+   *
+   * Derived from the REAL list (rule 7), so a future lower-cased entry is
+   * covered without anybody remembering, and asserted against the actual
+   * on-disk spelling rather than a literal (rule 21).
+   */
+  const { graph } = buildGraph(ROOT);
+
+  const lowercased = AUDIT_BEARING_EXTRAS
+    .map(norm)
+    .filter((p) => /\.(mjs|js)$/i.test(p))
+    .filter((p) => existsSync(path.join(ROOT, p)));
+
+  /* PRECONDITION (rule 6): there IS at least one entry whose registered
+   * spelling differs from the graph's, or this test proves nothing. */
+  const differing = lowercased.filter((p) => !graph.has(p) && graphKeyFor(graph, p) !== null);
+  assert.ok(differing.length > 0,
+    'no registered control is spelled differently from its graph key, so this test '
+    + 'cannot exercise the case-fold. If EXTRAS stopped being lower-cased, delete it.');
+
+  for (const p of differing) {
+    assert.equal(graph.has(p), false, `${p} is an exact graph key; it is not the case`);
+    const key = graphKeyFor(graph, p);
+    assert.ok(key, `${p} could not be resolved to a graph key -- it is invisible to the closure`);
+    assert.equal(key.toLowerCase(), p.toLowerCase());
+    assert.ok(Array.isArray(graph.get(key)), `${p} resolved to a key with no edge list`);
   }
 });
 
