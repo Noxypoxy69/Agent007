@@ -272,9 +272,10 @@ test('THE WIRING: audit-workspace actually consults this module', () => {
    * suite report "the suite did not finish reporting". That pin was added and
    * never asserted; the technique was already in this file one line above.
    */
-  for (const v of ['NO_COLOR', 'FORCE_COLOR', 'NODE_OPTIONS']) {
-    assert.match(src, new RegExp(v),
-      `${v} is not pinned in the suite spawn, so the launching environment can change what the counts say`);
+  /* By VALUE, not by name — see the note in the audit-auto wiring test. */
+  for (const [v, value] of [['NO_COLOR', "'1'"], ['FORCE_COLOR', "'0'"], ['NODE_OPTIONS', "''"]]) {
+    assert.match(src, new RegExp(`${v}\\s*:\\s*${value}`),
+      `${v} is not pinned to ${value} in the suite spawn, so the launching environment can change what the counts say`);
   }
 });
 
@@ -308,14 +309,36 @@ test('THE SECOND WIRING: audit-auto consults the module too, and its refusal rea
    * "fail -1" while writing verdict:'not-green' to the ledger -- a confident
    * claim about the commit when the truth was about the machine (M-2).
    */
-  assert.match(src, /unreadable\(/,
-    'the unreadable guard is gone, so a refusal can render as a count again');
-  assert.equal((src.match(/unreadable\(/g) ?? []).length >= 4, true,
-    'not every runTests consumer is guarded: a -1 sentinel can still reach the ledger');
+  /*
+   * EVERY runTests CONSUMER IS GUARDED — COUNTED AGAINST THE CONSUMERS, NOT
+   * AGAINST THE GUARDS.
+   *
+   * This asserted `unreadable(` appears at least 4 times and claimed that meant
+   * a fifth consumer could not go unguarded. A blind auditor showed it means
+   * nothing of the sort: the four were one DECLARATION and three call sites,
+   * the fourth consumer is guarded inline by `!after.ran` and contains no
+   * `unreadable(` at all, and adding a fifth unguarded consumer leaves the
+   * count at four. It counted the wrong noun.
+   *
+   * So count the thing the claim is about. Every `runTests(...)` result must be
+   * guarded before its `.fail`/`.pass` is read — by `unreadable()` or by an
+   * explicit `.ran` check — and the arithmetic is stated so a new consumer
+   * makes it fail rather than silently satisfying a floor.
+   */
+  const consumers = (src.match(/=\s*runTests\(/g) ?? []).length;
+  const guards = (src.match(/unreadable\(\w/g) ?? []).length + (src.match(/\.ran\b/g) ?? []).length;
+  assert.ok(consumers > 0, 'no runTests consumer found; the scan is broken, not the file');
+  assert.ok(guards >= consumers,
+    `${consumers} runTests consumer(s) but only ${guards} guard(s): a -1 sentinel can reach the ledger`);
 
-  for (const v of ['NO_COLOR', 'FORCE_COLOR', 'NODE_OPTIONS']) {
-    assert.match(src, new RegExp(v),
-      `${v} is not pinned in audit-auto's spawn, so the launching environment decides its verdicts`);
+  /*
+   * THE PIN IS ASSERTED BY VALUE, NOT BY NAME. Matching the bare name passes
+   * for `NODE_OPTIONS: process.env.NODE_OPTIONS`, which restores exactly the
+   * defect the pin was added for.
+   */
+  for (const [v, value] of [['NO_COLOR', "'1'"], ['FORCE_COLOR', "'0'"], ['NODE_OPTIONS', "''"]]) {
+    assert.match(src, new RegExp(`${v}\\s*:\\s*${value}`),
+      `${v} is not pinned to ${value} in audit-auto's spawn, so the launching environment decides its verdicts`);
   }
 });
 

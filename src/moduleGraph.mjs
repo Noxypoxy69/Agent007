@@ -188,10 +188,15 @@ export const DEFAULT_ENTRY_POINTS = [
    * it, which is the rule test/entryPointsComplete.test.mjs exists to enforce
    * and which four previous extractions learned the hard way.
    *
-   * scripts/migration-package.mjs is deliberately NOT here: it uses node
-   * builtins only and imports nothing from src/, so it creates no edge and
-   * needs no declaration. */
+   * scripts/migration-package.mjs was deliberately NOT here while it used node
+   * builtins only. It now imports src/invokedDirectly.mjs -- a blind audit
+   * found it ran its whole body at import time, which its sibling already
+   * guarded against -- so it is declared too. The stale half of this comment is
+   * corrected rather than deleted: "needs no declaration" was true when written
+   * and became false the moment the file grew an import, which is the shape
+   * test/entryPointsComplete.test.mjs exists to catch. */
   'scripts/migration-verify.mjs',
+  'scripts/migration-package.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',

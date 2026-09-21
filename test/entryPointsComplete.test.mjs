@@ -115,8 +115,25 @@ test('THE FIXTURE IS REAL: scripts do import from src, and this gate can see the
    * assertion below passes by looking at nothing.
    */
   const importers = importersOfSrc();
-  assert.ok(importers.length >= 10,
-    `only ${importers.length} importer(s) found; the scan is broken, not the repository`);
+
+  /*
+   * THE FLOOR IS DERIVED, NOT TYPED. This asserted `>= 10` against ~20 real
+   * importers, so a parseImports regression that lost HALF the spellings would
+   * still clear it — a constant that only catches a scan returning nothing.
+   * Rule 21: ask the filesystem at run time.
+   *
+   * The independent measure is a crude text search for the specifier. It is
+   * deliberately cruder than parseImports and will undercount (it cannot see a
+   * dynamic import built from a variable), so it is a FLOOR and not an equality
+   * — but it moves with the repository instead of with whoever typed 10.
+   */
+  const crude = readdirSync(SCRIPTS)
+    .filter((n) => n.endsWith('.mjs'))
+    .filter((n) => readFileSync(new URL(n, SCRIPTS), 'utf8').includes('../src/'))
+    .length;
+  assert.ok(crude > 0, 'even a crude text search finds no importer; the scan is broken, not the repository');
+  assert.ok(importers.length >= crude,
+    `parseImports found ${importers.length} importer(s) but a plain text search finds ${crude} — the parser is missing spellings`);
   assert.ok(importers.includes('scripts/audit-workspace.mjs'),
     'a known importer was not detected, so this gate is reading the wrong thing');
 });

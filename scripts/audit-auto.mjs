@@ -331,7 +331,10 @@ function unreadable(r, short, tests) {
       `         ${r.why}`,
       '         That is NOT a gate and NOT a pass: nothing was measured.',
     ],
-    finding: { sha: short, verdict: 'unknown', detail: r.why ?? 'no usable test summary' },
+    /* No `?? fallback`: readSuiteSummary sets `why` on every return path, so
+     * the right arm was unreachable -- the same dead-fallback shape removed
+     * from suiteSummary.mjs one commit earlier, reintroduced in the next. */
+    finding: { sha: short, verdict: 'unknown', detail: r.why },
   };
 }
 

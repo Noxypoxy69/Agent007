@@ -66,10 +66,11 @@
  */
 import { createHash } from 'node:crypto';
 import {
-  readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync,
+  readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { invokedDirectly } from '../src/invokedDirectly.mjs';
 
 const HOME = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge');
 
@@ -163,14 +164,40 @@ function attach(pkgDir, bundlePath) {
       process.exit(8);
     }
     const buf = readFileSync(abs);
+
+    /*
+     * THE KIND IS READ, NOT ASSERTED. The first version wrote
+     * `kind: "git bundle"` and a note about which commits it carried for
+     * WHATEVER FILE IT WAS HANDED -- a blind auditor attached `package.json`
+     * and got a manifest row claiming it was a bundle containing 3bc0722.
+     *
+     * That is the exact failure this attach mode was written to avoid one
+     * paragraph up: "a hand-written hash is a claim; this one is a reading."
+     * The hash was a reading and the three claims beside it were typed.
+     *
+     * A git bundle begins with a version banner. Checking it is two lines and
+     * turns the kind into a reading too. It is NOT a substitute for
+     * `git bundle verify`, which is the only thing that proves the objects
+     * resolve -- so that stays as the recorded method rather than as a claim
+     * this tool makes on its behalf.
+     */
+    const head = buf.subarray(0, 64).toString('latin1');
+    const looksLikeBundle = head.startsWith('# v2 git bundle') || head.startsWith('# v3 git bundle');
+    if (!looksLikeBundle) {
+      console.error(`migration-package: ${path.basename(abs)} does not begin with a git bundle banner.`);
+      console.error('  Refusing to record it as a bundle. Pass the real bundle, or attach it as a plain companion.');
+      process.exit(9);
+    }
+
     companions.push({
       name: path.basename(abs),
       location: 'BESIDE the package, not inside it',
       bytes: buf.length,
       sha256: sha256(buf),
       kind: 'git bundle',
+      kind_evidence: `file begins with "${head.split('\n')[0].trim()}"`,
       verify_with: 'git bundle verify <file>',
-      note: 'Git objects, not AgentBridge state. Carries the commits absent from origin, including 3bc0722 — see DECISIONS_PENDING.md D-1, which this does NOT resolve.',
+      note: 'Git objects, not AgentBridge state. A hash proves the bytes arrived; only `git bundle verify` proves the objects resolve. Which commits it carries is NOT asserted here — list them with `git bundle list-heads`.',
     });
   }
 
@@ -251,8 +278,17 @@ const NEVER = Object.freeze([
   'overrides', 'guard-sessions', 'verify', 'polls',
 ]);
 
-const attachTo = flag('--attach');
-if (attachTo) attach(path.resolve(attachTo), flag('--bundle'));
+/*
+ * NOTHING RUNS ON IMPORT. The first version did all of its work at module
+ * scope, so importing it -- from a test, or by accident -- would build a
+ * package. Its sibling already used `invokedDirectly`; this one did not, which
+ * is precisely the asymmetry that module exists to remove.
+ */
+function main() {
+  const attachTo = flag('--attach');
+  if (attachTo) attach(path.resolve(attachTo), flag('--bundle'));
+  build();
+}
 
 function collect() {
   const out = [];
@@ -273,21 +309,58 @@ function collect() {
   return out;
 }
 
-/*
- * THE EXCLUSION IS ASSERTED, NOT TRUSTED. A future edit to ITEMS that reached
- * one of these would be a silent secret leak, so the check is on the RESOLVED
- * file list rather than on the intent behind it.
+/**
+ * THE EXCLUSION IS ASSERTED AGAINST THE RESOLVED TARGET, NOT THE NAME.
+ *
+ * The first version compared `f.rel` -- the name under AGENTBRIDGE_HOME -- to
+ * the NEVER list. `collect()` can only ever produce names from the include
+ * list, so that intersection is EMPTY and the branch could never execute: a
+ * guard under a long comment about its importance that had never been watched
+ * fail. A blind auditor found it unreachable and then found what it could not
+ * have caught anyway.
+ *
+ * THE SHAPE THAT MATTERS IS A SYMLINK. `collect()` filters `readdirSync` by
+ * `.jsonl`, and `readFileSync` FOLLOWS LINKS. A link at
+ * `audits/anything.jsonl` pointing at `config.json` would put the DPAPI-sealed
+ * `secretStore` and the machineId into the package, labelled authority history,
+ * and a name-based check would wave it through because the NAME is `audits/...`.
+ *
+ * So every source is resolved with `realpathSync` and three things are demanded
+ * of the target: it is a REGULAR FILE, it is inside AGENTBRIDGE_HOME, and its
+ * basename is not on the never-carry list. Refuse on any of them.
  */
 function assertNothingForbidden(files) {
+  const homeReal = realpathSync(HOME);
   for (const f of files) {
-    const first = f.rel?.split('/')[0];
-    if (NEVER.includes(first) || NEVER.includes(f.rel)) {
-      console.error(`migration-package: REFUSING -- ${f.rel} is on the never-carry list.`);
+    if (f.missing) continue;
+
+    let real;
+    try { real = realpathSync(f.src); } catch {
+      console.error(`migration-package: REFUSING -- ${f.rel} cannot be resolved (broken link?).`);
+      process.exit(3);
+    }
+
+    if (!statSync(real).isFile()) {
+      console.error(`migration-package: REFUSING -- ${f.rel} does not resolve to a regular file.`);
+      process.exit(3);
+    }
+
+    const rel = path.relative(homeReal, real);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      console.error(`migration-package: REFUSING -- ${f.rel} resolves OUTSIDE the AgentBridge home.`);
+      console.error('  A link out of the store is how a secret arrives labelled as history.');
+      process.exit(3);
+    }
+
+    const parts = rel.split(path.sep);
+    if (NEVER.includes(parts[0]) || NEVER.includes(parts[parts.length - 1])) {
+      console.error(`migration-package: REFUSING -- ${f.rel} resolves to ${parts.join('/')}, which is never carried.`);
       process.exit(3);
     }
   }
 }
 
+function build() {
 const files = collect();
 assertNothingForbidden(files);
 
@@ -453,3 +526,8 @@ if (missing.length) {
 console.log('');
 console.log('NOT a completed migration. Run scripts/migration-verify.mjs on the');
 console.log('destination machine: file presence is not resolution.');
+}
+
+if (invokedDirectly(process.argv[1], import.meta.url)) main();
+
+export { collect, assertNothingForbidden, ITEMS, NEVER };
