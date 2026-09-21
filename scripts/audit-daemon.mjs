@@ -445,12 +445,6 @@ async function tick() {
   say(`[audit-daemon] workspace ${ws.dir}${ws.reused ? ' (reused)' : ''}`);
   say(`[audit-daemon] brief     ${briefPath}`);
 
-  if (!LAUNCH) {
-    say('[audit-daemon] PREPARED ONLY. To review it, run a fresh agent in that worktree with that brief.');
-    say('               --launch spawns one; it is opt-in because an unattended LLM per control commit');
-    say('               is how a memory-starved machine falls over.');
-    return true;
-  }
 
   /*
    * A CLAIM THAT CANNOT BE WORKED MUST GO BACK.
@@ -490,7 +484,7 @@ async function tick() {
    * COST, and the caller says which it is rather than this helper guessing
    * from the message string.
    */
-  const release = (why, { reviewed = false } = {}) => {
+  const release = (why, { reviewed = false, keepWorkspace = false } = {}) => {
     const back = readQueue(REPO).rows.map((r) => (r.audit_id === job.audit_id
       ? {
         ...r,
@@ -513,6 +507,23 @@ async function tick() {
       : r));
     writeQueue(REPO, back);
     say(`[audit-daemon] released ${job.audit_id} back to PENDING: ${why}`);
+
+    /*
+     * ═══ THE PREPARE PATH KEEPS ITS WORKSPACE, BECAUSE THAT IS ITS OUTPUT ═══
+     *
+     * Every other caller is a FAILURE and wants the worktree gone. The
+     * prepare-only path is the one success that still has to give the claim
+     * back: its whole deliverable is "here is a worktree and a brief, run an
+     * agent in it", so tearing them down would release the claim by
+     * destroying the thing the run exists to produce.
+     */
+    if (keepWorkspace) {
+      say(`[audit-daemon] workspace and brief KEPT for a reviewer: ${ws.dir}`);
+      say('               Whoever picks it up claims the job itself. Repeated prepare');
+      say('               runs allocate a NEW worktree each time -- use --once, and');
+      say('               remove the ones nobody worked.');
+      return;
+    }
     /*
      * AND TEAR THE WORKTREE DOWN HERE, because teardown used to sit only at
      * the END of tick(). Fourth-lap blind audit M5: every early return
@@ -547,6 +558,45 @@ async function tick() {
      */
     try { rmSync(briefDir, { recursive: true, force: true }); } catch { /* best effort */ }
   };
+
+  /*
+   * ═══ PREPARE-ONLY GIVES THE CLAIM BACK, BECAUSE NOBODY IS WORKING IT ═══
+   *
+   * MEASURED 2026-09-20, two consecutive runs of this script:
+   *
+   *   run 1 (no --launch)  claimed audit-05da5a2346e3, prepared, returned
+   *   run 2 (--launch)     STARVED: 113 claimable job(s) and none could be
+   *                        placed -- "every live seat already holds an
+   *                        unexpired claim"
+   *
+   * Eight jobs sat CLAIMED by this daemon with no reviewer on any of them.
+   * The prepare path starved the launch path, and the queue was recoverable
+   * only by waiting for leases to lapse.
+   *
+   * The rule was already written directly above, for the spawn-failure case:
+   * "A CLAIM THAT CANNOT BE WORKED MUST GO BACK ... a consumer that claims
+   * work it then abandons is starvation wearing a claim, which is worse than
+   * never having claimed it." This path is the one that can NEVER work the
+   * job -- it is defined by not launching a reviewer -- and it was the only
+   * one that kept the claim.
+   *
+   * `reviewed: false`: no review was paid for, so this must not burn an
+   * attempt against MAX_REVIEW_ATTEMPTS. `keepWorkspace: true`: the worktree
+   * and brief are what the run produced.
+   *
+   * IT SITS HERE, BELOW `release`, AND NOT AT THE EARLIER EXIT. `release` is
+   * a const, so calling it from the old position threw
+   * `ReferenceError: Cannot access 'release' before initialization` -- caught
+   * by reading the line numbers before running, not by the suite.
+   */
+  if (!LAUNCH) {
+    say('[audit-daemon] PREPARED ONLY. To review it, run a fresh agent in that worktree with that brief.');
+    say('               --launch spawns one; it is opt-in because an unattended LLM per control commit');
+    say('               is how a memory-starved machine falls over.');
+    release('prepared only -- no reviewer was launched, so holding the claim '
+      + 'would block every other job in the queue', { reviewed: false, keepWorkspace: true });
+    return true;
+  }
 
   /*
    * `shell: true` ON WINDOWS, because `claude` is a .cmd shim and a bare
