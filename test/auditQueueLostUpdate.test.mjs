@@ -158,23 +158,43 @@ test('D1: A RECOMPUTED PACKET IS NOT A CHANGED ROW -- created_at must not drift'
    * claimed to close the drift.
    */
   const barest = stored.map(({ created_at, first_seen_at, ...rest }) => rest);
-  const c = mergeQueue(barest, compute('2026-09-21T00:04:00Z'), { now: 'e' }).queue[0];
-  const d = mergeQueue(barest, compute('2026-09-21T00:05:00Z'), { now: 'f' }).queue[0];
-  assert.equal(c.created_at, d.created_at,
-    'a row carrying NEITHER created_at nor first_seen_at still drifts: it takes a fresh '
-    + 'stamp on every merge, so it looks changed for ever and the no-op filter never fires');
 
-  /* The two fields must also AGREE, or the row claims it was created before
-   * the queue first saw it -- which is the inconsistency that made the
-   * fallback chain read the stored field instead of the computed one. */
-  assert.equal(c.created_at, c.first_seen_at,
-    'created_at and first_seen_at disagree for a row that had neither, so they were '
-    + 'resolved independently and can drift apart again');
+  /*
+   * ROUND-TRIPPED, BECAUSE THAT IS ALL PRODUCTION DOES. The merge output
+   * is written and read back, so the SECOND merge sees the fields the
+   * first one wrote. My first version of this assertion merged the same
+   * fieldless input twice and demanded the two agree, which no
+   * timestamp-assigning function can satisfy -- it failed, and the fix was
+   * not the thing that was wrong. Commit 0e33aa9 in this same file is the
+   * identical lesson: a queue test that never round-trips is not testing
+   * the queue.
+   */
+  const settled = mergeQueue(barest, compute('2026-09-21T00:04:00Z'), { now: 'e' }).queue;
+  const again2 = mergeQueue(settled, compute('2026-09-21T00:05:00Z'), { now: 'f' }).queue;
+  const again3 = mergeQueue(again2, compute('2026-09-21T00:06:00Z'), { now: 'g' }).queue;
 
-  /* THE POSITIVE (rule 5): once persisted, the value is stable rather than
-   * simply absent -- a row that settles on nothing would pass the equality
-   * above for the wrong reason. */
-  assert.ok(c.created_at, 'the row settled on no created_at at all, so the equality above is vacuous');
+  assert.equal(again2[0].created_at, settled[0].created_at,
+    'a row that arrived with NEITHER field never settles: it takes a fresh stamp on '
+    + 'every merge, so it looks changed for ever and the no-op filter never fires');
+  assert.equal(again3[0].created_at, settled[0].created_at,
+    'it settled and then moved again on the third merge');
+
+  /*
+   * AND THE TWO FIELDS AGREE. This is what the change actually bought, and
+   * it is worth stating precisely because the drift above self-heals after
+   * one merge either way. Before the fix `created_at` took auditJobsFor's
+   * fresh stamp while `first_seen_at` took `now` -- two different times for
+   * one event, resolved independently, from a row that carried neither.
+   */
+  assert.equal(settled[0].created_at, settled[0].first_seen_at,
+    'created_at and first_seen_at were resolved independently for a row that had '
+    + 'neither, so the row claims it was created at a different moment than the queue '
+    + 'first saw it');
+
+  /* THE POSITIVE (rule 5): it settled on a real value, not on undefined --
+   * two undefineds would satisfy every equality above. */
+  assert.ok(settled[0].created_at,
+    'the row settled on no created_at at all, so the equalities above are vacuous');
 
   writeQueue(REPO, again, home);
   assert.equal(readFileSync(auditQueuePath(REPO, home), 'utf8'), before,
