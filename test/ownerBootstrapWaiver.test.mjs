@@ -23,7 +23,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { parseLedger, auditEscalation, isWaived, WAIVER_TYPE } from '../src/auditLedger.mjs';
+import {
+  parseLedger, auditEscalation, isWaived, WAIVER_TYPE, standingAudit,
+} from '../src/auditLedger.mjs';
 
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -208,6 +210,79 @@ test('owner_waiver MUST BE EXACTLY true, not merely truthy', () => {
     assert.equal(led.waived.size, 0, `owner_waiver:${JSON.stringify(v)} granted a waiver`);
     assert.equal(led.audited.size, 1, `owner_waiver:${JSON.stringify(v)} lost the audit row entirely`);
   }
+});
+
+test('NO ROW THAT DISCLAIMS BEING AN AUDIT IS COUNTED AS ONE -- any spelling', () => {
+  /*
+   * Blind audit H1, MEASURED, and the gate below could not have caught it:
+   * it reads `led.waivers`, and the offending rows were not waivers. A
+   * correction row carrying audit_performed:false, grants_audit_pass:false
+   * and an auditor reading "NONE -- ... not an audit" landed in `audited`
+   * and cleared 2a86d27, the commit that rewrote the re-review bound.
+   *
+   * So this asks the question the other gate cannot: over the SHIPPED
+   * file, is there any row at all whose own fields say it is not a review
+   * and which the parser nevertheless treats as one? Third instance of
+   * this exact defect -- code-a's owner_waiver rows, then mine -- so it is
+   * asserted on the SHAPE rather than on the three spellings seen so far
+   * (rule 8: fix the matcher, not the strings).
+   */
+  const text = readFileSync(new URL('../docs/audit-ledger.jsonl', import.meta.url), 'utf8');
+  const led = parseLedger(text);
+
+  const leaked = led.rows.filter(
+    (r) => r?.audit_performed === false || r?.grants_audit_pass === false,
+  );
+  assert.deepEqual(leaked.map((r) => `${r.commit}: ${r.auditor}`), [],
+    'a row declaring itself not an audit is being counted as one');
+
+  /* And it must not become the STANDING verdict either (L1): a correction
+   * written after a real audit carries a newer `at`, so if it reached
+   * `rows` it would replace genuine findings with found:0. */
+  for (const r of led.notAudits) {
+    const standing = standingAudit(led, String(r.commit).trim().toLowerCase());
+    if (standing) {
+      assert.notEqual(standing.auditor, r.auditor,
+        `the disclaiming row for ${r.commit} became the standing audit`);
+    }
+  }
+
+  /*
+   * THE POSITIVE (rule 5), and it is what stops this passing by the parser
+   * simply dropping everything. The shipped file must still yield real
+   * audits, and the disclaiming rows must actually have been recognised
+   * rather than silently absent.
+   */
+  assert.ok(led.rows.length > 0, 'the parser returned no audit rows at all');
+  assert.ok(led.notAudits.length > 0,
+    'no disclaiming row was recognised on disk -- this gate is not exercising anything');
+});
+
+test('A DISCLAIMING ROW DOES NOT CLEAR ITS COMMIT, and does not waive it either', () => {
+  /*
+   * The fixture form of the above, and the part that names the intended
+   * behaviour: not audited, AND not waived. A correction suppresses
+   * nothing, because nobody waived anything -- the commit stays blocked,
+   * which is the fail-closed reading of "this row grants nothing".
+   *
+   * Generated from the field list rather than from the one spelling I
+   * happened to write (rule 7), so a row disclaiming either way is covered.
+   */
+  for (const field of ['audit_performed', 'grants_audit_pass']) {
+    const led = parseLedger(JSON.stringify({
+      commit: 'abc1234', auditor: 'NONE -- a correction, not an audit', [field]: false,
+    }));
+    assert.equal(led.audited.size, 0, `${field}:false still cleared the commit`);
+    assert.equal(led.rows.length, 0, `${field}:false reached rows, so standingAudit can pick it`);
+    assert.equal(led.waived.size, 0, `${field}:false silently became a WAIVER`);
+    assert.equal(led.notAudits.length, 1, `${field}:false was not recorded anywhere`);
+    assert.equal(led.malformed.length, 0, `${field}:false was treated as malformed`);
+  }
+
+  /* THE POSITIVE (rule 5): an ordinary row with neither field still audits. */
+  const real = parseLedger(JSON.stringify({ commit: 'abc1234', auditor: 'a-real-reader' }));
+  assert.equal(real.audited.size, 1, 'an ordinary audit row stopped counting');
+  assert.equal(real.notAudits.length, 0);
 });
 
 test('THE REAL LEDGER CARRIES EXACTLY ONE WAIVER, and it grants no pass', () => {

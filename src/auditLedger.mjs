@@ -195,6 +195,10 @@ export function parseLedger(text) {
   const malformed = [];
   const waived = new Set();
   const waivers = [];
+  /* Rows that declare themselves not to be audits. Recorded so a reader can
+   * see them, and deliberately absent from `rows` and `audited` -- see the
+   * block above the push for why both exclusions are load-bearing. */
+  const notAudits = [];
   const lines = String(text ?? '').split('\n');
 
   for (let i = 0; i < lines.length; i += 1) {
@@ -329,11 +333,67 @@ export function parseLedger(text) {
       continue;
     }
 
+    /*
+     * ═══ A ROW THAT SAYS IT IS NOT AN AUDIT IS NOT AN AUDIT, WHATEVER IT
+     *     IS CALLED. THIS IS THE THIRD TIME. ═══
+     *
+     * Blind audit H1, MEASURED, and it was mine. Two days after the
+     * `owner_waiver` fix directly above -- whose comment reads "The rows
+     * were honest. THE PARSER WAS NOT LISTENING." -- I invented a THIRD
+     * disclaiming spelling and put it on disk:
+     *
+     *   {"commit":"2a86d27",
+     *    "auditor":"NONE -- this row is a CORRECTION ..., not an audit",
+     *    "audit_performed":false, "grants_audit_pass":false,
+     *    "note":"... THIS COMMIT IS UNAUDITED ... this row grants nothing."}
+     *
+     * It has a `commit` and an `auditor`, it is neither waiver type, so it
+     * fell straight through to `audited.set`. MEASURED at 932123b:
+     *
+     *     node scripts/check-audit-coverage.mjs HEAD~15..HEAD --json
+     *     "sha": "2a86d274...", "audited": true,
+     *     "auditor": "NONE -- this row is a CORRECTION ... not an audit"
+     *
+     * So the row cleared the most authority-bearing commit in its own
+     * range -- the one that rewrote the re-review bound -- and both
+     * `auditEscalation` consumers, the Stop gate and the pre-push gate,
+     * stopped blocking on it. Disclaiming in PROSE is worthless: the
+     * parser reads fields.
+     *
+     * THE FIX IS RULE 19. The two branches above dispatch on a known type
+     * NAME, and a list of names fails in both directions -- it leaked the
+     * moment somebody wrote a name not on it, which is the failure the
+     * `owner_waiver` branch was already the first instance of. So this
+     * routes on the SHAPE of the row instead: either disclaiming field,
+     * present and false, means the author is telling the parser this is
+     * not a review. That is a property of the row rather than of the
+     * vocabulary, so a fourth spelling is covered before anybody invents
+     * it.
+     *
+     * IT SUPPRESSES NOTHING. A waiver above sets `waived` and quiets the
+     * block; a disclaiming row does not, because nobody waived anything.
+     * The commit simply stays UNAUDITED and every gate keeps refusing it,
+     * which is the correct and fail-closed reading of "this row grants
+     * nothing".
+     *
+     * AND IT IS KEPT OUT OF `rows`, which closes L1 from the same audit:
+     * `standingAudit` takes the newest `at` from `rows`, and a correction
+     * written after a real audit of the same commit would otherwise
+     * become the standing verdict -- replacing genuine findings with
+     * `found: 0` and auditor "NONE". A correction must never outrank the
+     * audit it corrects.
+     */
+    const disclaimed = row.audit_performed === false || row.grants_audit_pass === false;
+    if (disclaimed) {
+      notAudits.push(row);
+      continue;
+    }
+
     rows.push(row);
     audited.set(row.commit.trim().toLowerCase(), row);
   }
   return {
-    audited, rows, malformed, waived, waivers,
+    audited, rows, malformed, waived, waivers, notAudits,
   };
 }
 
