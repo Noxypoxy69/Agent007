@@ -86,6 +86,114 @@ const flag = (n) => {
 
 const OUT = path.resolve(flag('--out') ?? path.join(homedir(), 'agent007-migration-package'));
 
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+
+/**
+ * ATTACH MODE — record a companion artifact in an EXISTING manifest.
+ *
+ *   node scripts/migration-package.mjs --attach <package-dir> [--bundle <file>]
+ *
+ * ═══ WHY THIS IS CODE AND NOT A HAND EDIT ═══
+ *
+ * The manifest's whole value is that every number in it was measured rather
+ * than typed. A hand-written hash is a claim; this one is a reading. Editing
+ * the file by hand would leave a document that looks machine-verified and is
+ * not, which is the exact shape this repository keeps finding in its own gates.
+ *
+ * ═══ WHAT A COMPANION IS ═══
+ *
+ * An artifact that belongs to the migration but cannot live inside the package:
+ *
+ *   the git bundle   objects, not AgentBridge state. Produced by `git bundle`,
+ *                    which the shell rail refuses by verb, so the owner runs it
+ *                    and this records what arrived.
+ *   the decision doc written after the package was built, and revised when a
+ *                    decision changes.
+ *
+ * ONLY THE BASENAME IS RECORDED. The absolute path names the operator's home
+ * directory, and a manifest is a document that travels.
+ *
+ * `state/` IS NOT TOUCHED. Attach re-reads and re-writes the manifest only, and
+ * it re-verifies every state hash while it is there -- if a state file drifted
+ * since the package was built, that is worth failing on rather than silently
+ * re-blessing.
+ */
+function attach(pkgDir, bundlePath) {
+  const manifestPath = path.join(pkgDir, 'MANIFEST.json');
+  if (!existsSync(manifestPath)) {
+    console.error(`migration-package: no MANIFEST.json under ${pkgDir}`);
+    process.exit(2);
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+
+  /* Re-verify what is already claimed, before adding a claim. */
+  const drift = [];
+  for (const item of manifest.items) {
+    const f = path.join(pkgDir, item.destination_relative_to_package);
+    if (!existsSync(f)) { drift.push(`${item.destination_relative_to_package} MISSING`); continue; }
+    if (sha256(readFileSync(f)) !== item.sha256) drift.push(`${item.destination_relative_to_package} HASH CHANGED`);
+  }
+  if (drift.length) {
+    console.error('migration-package: the package no longer matches its manifest:');
+    for (const d of drift) console.error(`  ${d}`);
+    console.error('Refusing to attach to a package that has drifted. Rebuild it.');
+    process.exit(7);
+  }
+
+  const companions = [];
+  for (const name of readdirSync(pkgDir)) {
+    if (!name.endsWith('.md')) continue;
+    const buf = readFileSync(path.join(pkgDir, name));
+    companions.push({
+      name, location: 'inside the package', bytes: buf.length, sha256: sha256(buf),
+    });
+  }
+  if (bundlePath) {
+    const abs = path.resolve(bundlePath);
+    if (!existsSync(abs)) {
+      console.error(`migration-package: no bundle at ${abs}`);
+      process.exit(8);
+    }
+    const buf = readFileSync(abs);
+    companions.push({
+      name: path.basename(abs),
+      location: 'BESIDE the package, not inside it',
+      bytes: buf.length,
+      sha256: sha256(buf),
+      kind: 'git bundle',
+      verify_with: 'git bundle verify <file>',
+      note: 'Git objects, not AgentBridge state. Carries the commits absent from origin, including 3bc0722 — see DECISIONS_PENDING.md D-1, which this does NOT resolve.',
+    });
+  }
+
+  manifest.companions = companions;
+  manifest.companions_attached_at = new Date().toISOString();
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const mdPath = path.join(pkgDir, 'MANIFEST.md');
+  const extra = [
+    '',
+    '## Companions',
+    '',
+    'Artifacts belonging to this migration that are not AgentBridge state.',
+    '',
+    '| file | where | bytes | sha256 |',
+    '|---|---|---|---|',
+    ...companions.map((c) => `| \`${c.name}\` | ${c.location} | ${c.bytes} | \`${c.sha256}\` |`),
+    '',
+    'The bundle is git objects and must be checked with `git bundle verify`, not',
+    'by hash alone: a hash proves the bytes arrived, not that the objects resolve.',
+    '',
+  ].join('\n');
+  const md = readFileSync(mdPath, 'utf8').replace(/\n## Companions[\s\S]*$/, '\n');
+  writeFileSync(mdPath, `${md.trimEnd()}\n${extra}`);
+
+  console.log(`attached to : ${pkgDir}`);
+  console.log(`state       : ${manifest.items.length} file(s) re-verified against the manifest, all match`);
+  for (const c of companions) console.log(`companion   : ${c.name}  ${c.bytes} B  ${c.sha256.slice(0, 16)}…`);
+  process.exit(0);
+}
+
 /**
  * EXACTLY WHAT MOVES. Named one by one on purpose.
  *
@@ -135,7 +243,8 @@ const NEVER = Object.freeze([
   'overrides', 'guard-sessions', 'verify', 'polls',
 ]);
 
-const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+const attachTo = flag('--attach');
+if (attachTo) attach(path.resolve(attachTo), flag('--bundle'));
 
 function collect() {
   const out = [];
