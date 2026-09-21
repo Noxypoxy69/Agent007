@@ -52,6 +52,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { flagValue, posIntArg, nextAttempt as nextAttemptOf } from '../src/daemonArgs.mjs';
+import { agentLaunch, permissionScope } from '../src/agentPermissions.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const argv = process.argv.slice(2);
@@ -779,7 +780,32 @@ async function tick() {
    * selects on win32, and harmless in the prompt text on other platforms
    * where no shell is used at all.
    */
-  const child = spawn('claude', ['-p', `Read "${briefPath}" and carry it out.`], {
+  /*
+   * THE RULES COME FROM THE GUARD, via src/agentPermissions.mjs.
+   *
+   * This spawned with `-p` and no rules, so every tool the reviewer needed
+   * was refused -- there is nobody to answer a prompt in a non-interactive
+   * run. It wrote prose instead of a verdict and `readVerdict` refused it,
+   * which is why the store holds zero COMPLETED rows.
+   *
+   * `permissionScope` asks `guardExecution` about each candidate command,
+   * so the reviewer is allowed what the guard would allow it anyway and
+   * `assertRulesDoNotCoverDenied` proves no rule is broader than a refusal.
+   * The placement is the worktree just allocated: disposable, detached,
+   * claim held. Passing `{}` here would skip three of the guard's checks,
+   * since each tests for `=== false` or a non-empty branch.
+   */
+  const launch = agentLaunch('claude-code', {
+    scope: permissionScope({
+      isDisposable: true,
+      branch: `detached/${String(job.candidate_sha).slice(0, 12)}`,
+      leaseValid: true,
+      fenceCurrent: true,
+    }, [], { now: new Date().toISOString() }),
+    extraArgs: [`Read "${briefPath}" and carry it out.`],
+  });
+  say(`[audit-daemon] reviewer rules: ${launch.rules.join(', ')}`);
+  const child = spawn(launch.file, launch.args, {
     cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32',
   });
   child.stdout?.on('data', (d) => { transcript += d; process.stdout.write(d); });
