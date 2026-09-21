@@ -157,6 +157,45 @@ if (failing.length) {
   console.log('');
   console.log('failing:');
   for (const f of [...new Set(failing)].slice(0, 40)) console.log(`  ${f}`);
+
+  /*
+   * ═══ AND THE REASON, BECAUSE A NAME CANNOT TELL YOU WHOSE FAULT IT IS ═══
+   *
+   * This printed names only, and it cost a full audit pass. Measured
+   * 2026-09-20: a clone reported 12 deploy-gate failures at two revisions;
+   * an auditor recorded them as the pre-existing baseline and wrote, in
+   * these words, "NO ENVIRONMENT FINDING ... the 12 reproduce identically
+   * in clone and shared tree". The shared tree is 0 -- green sharded AND
+   * unsharded, with the test file, the script and _shared.js byte-identical
+   * between tree and clone.
+   *
+   * The answer was in the failure MESSAGE the whole time.
+   * test/checkEdgeDeploy.test.mjs carries a `ranAtAll` assertion written
+   * for exactly this, reading "the check script could not be STARTED ...
+   * This is the machine, not the deploy gate -- under a full-suite run
+   * these tests each spawn a node process and resource exhaustion surfaces
+   * here first." Somebody anticipated this failure, wrote the sentence that
+   * identifies it, and THIS SCRIPT THREW THE SENTENCE AWAY.
+   *
+   * So rule 21's environment-finding clause -- the one that exists to stop
+   * an auditor spending a pass on a phantom -- was unanswerable from the
+   * evidence the auditor was handed. Printing the assertion text is what
+   * makes that clause usable, and it is three lines.
+   *
+   * The clone is kept under --keep for the full transcript; this is the
+   * first screen, which is what actually gets read.
+   */
+  const reasons = [...text.matchAll(/^\s*(?:AssertionError[^\n]*|Error[^\n]*):?\s*\n?\s*([^\n]{12,300})/gm)]
+    .map((m) => m[1].trim())
+    .filter((r) => !/^[+\-]/.test(r));
+  if (reasons.length) {
+    console.log('');
+    console.log('why (first line of each distinct failure message):');
+    for (const r of [...new Set(reasons)].slice(0, 12)) console.log(`  ${r}`);
+    console.log('');
+    console.log('  A MESSAGE NAMING THE MACHINE IS AN ENVIRONMENT FINDING, NOT A DEFECT.');
+    console.log('  Say so explicitly in the report -- see CLAUDE.md rule 21.');
+  }
 }
 
 if (keep) {
