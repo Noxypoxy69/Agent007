@@ -218,6 +218,73 @@ test('MALFORMED ROWS DO NOT THROW AND DO NOT RESOLVE', () => {
   assert.equal(resolveAgentId().agentId, null, 'called with no arguments at all');
 });
 
+test('AN UNVOUCHED ROW MAKES THE ANSWER MORE AMBIGUOUS, NEVER LESS', () => {
+  /*
+   * THE REGRESSION THE FAIL-OPEN FIX INTRODUCED, taken verbatim from the blind
+   * audit that found it. Dropping an unvouched row from the list used to COUNT
+   * occupants shrank 2 to 1 and turned a refusal into a confident name, with a
+   * `why` that was flatly false: "the only agent ever registered in this
+   * worktree".
+   *
+   * DIFFERENCED THREE WAYS, because the interesting part is that the middle
+   * case must refuse while BOTH ends resolve or refuse for their own reasons.
+   */
+  const q = { agent_id: 'code-q', session_id: 's1', repo_id: 'R', worktree_id: 'W', machine_id: MACHINE };
+  const ask = (rows) => resolveAgentId({ env: {}, sessionId: 'unseen', registrations: rows, repoId: 'R', worktreeId: 'W', machineId: MACHINE });
+
+  // POSITIVE CONTROL: genuinely one occupant, fully stated -> resolves.
+  assert.equal(ask([q]).agentId, 'code-q', 'the sole fully-stated occupant did not resolve');
+
+  // THE DEFECT: a second occupant that states no machine. It may not lend a
+  // name, but it must still make "who is here" unanswerable.
+  const silent = { agent_id: 'code-r', session_id: 's3', repo_id: 'R', worktree_id: 'W' };
+  const r = ask([q, silent]);
+  assert.equal(r.agentId, null,
+    'an unvouched second occupant was deleted from the count, turning a refusal into a name');
+  assert.deepEqual(r.candidates, ['code-q', 'code-r'], 'the refusal must name who it saw');
+
+  // AND A POSITIVELY FOREIGN ROW IS STILL EXCLUDED FROM THE COUNT, so this has
+  // not simply reverted the fail-open: evidence about another machine is not
+  // evidence about this worktree.
+  const elsewhere = { agent_id: 'code-r', session_id: 's3', repo_id: 'R', worktree_id: 'W', machine_id: 'OTHER-MACHINE' };
+  assert.equal(ask([q, elsewhere]).agentId, 'code-q',
+    'a row from another machine was counted as an occupant here');
+});
+
+test('THE SAME FLIP ONE RUNG UP: an unvouched row naming this session does not resolve it', () => {
+  /*
+   * The audit named this twin and it is the sharper of the two, because rung 2
+   * describes its answer as "its own earlier declaration, not a guess". A row
+   * that does not say where it is from cannot support that sentence.
+   */
+  const ask = (rows) => resolveAgentId({ env: {}, sessionId: 'mine', registrations: rows, repoId: 'R', worktreeId: 'W', machineId: MACHINE });
+
+  const stated = { agent_id: 'code-z', session_id: 'mine', repo_id: 'R', worktree_id: 'W', machine_id: MACHINE };
+  assert.equal(ask([stated]).agentId, 'code-z', 'the stated row did not resolve, so this proves nothing');
+
+  const { machine_id: _drop, ...unstated } = stated;
+  const r = ask([unstated]);
+  assert.equal(r.agentId, null, 'an unattributable row was adopted as this session\'s own declaration');
+  assert.match(r.why, /does not state its/, r.why);
+});
+
+test('ROWS PRESENT BUT UNVOUCHED DO NOT READ AS AN EMPTY STORE', () => {
+  /*
+   * The third state. "could not read" and "read nothing" were deliberately kept
+   * apart; the provenance filter added "read something we may not speak for"
+   * and the first version collapsed it into the empty message -- which points a
+   * reader at a missing registration when the real cause is a registration
+   * written while the config was unreadable.
+   */
+  const unstated = [{ agent_id: 'code-z', session_id: 'other', repo_id: 'R', worktree_id: 'W' }];
+  const r = resolveAgentId({ env: {}, sessionId: 'mine', registrations: unstated, repoId: 'R', worktreeId: 'W', machineId: MACHINE });
+  assert.equal(r.agentId, null);
+  assert.doesNotMatch(r.why, /no prior registration/, 'an unvouched row was reported as an empty store');
+
+  const empty = resolveAgentId({ env: {}, sessionId: 'mine', registrations: [], repoId: 'R', worktreeId: 'W', machineId: MACHINE });
+  assert.match(empty.why, /no prior registration/, 'the genuinely empty store changed its message');
+});
+
 test('A ROW THAT DECLINES TO SAY WHERE IT IS FROM IS NOT ADMITTED', () => {
   /*
    * THE SHAPE THE HOSTILE LIST ABOVE COULD NOT REACH, and the reason it could

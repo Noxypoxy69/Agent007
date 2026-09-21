@@ -205,22 +205,97 @@ export function resolveAgentId({
    * same reason, in the same words: not a worker with an unknown session, a row
    * this registry cannot vouch for.
    */
-  const vouches = (ourValue, rowValue) => ourValue === null || str(rowValue) === ourValue;
+  /**
+   * TWO DIFFERENT QUESTIONS, AND ONE LIST CANNOT ANSWER BOTH.
+   *
+   * THE REGRESSION THIS REPLACES WAS MINE, one commit old, found by a blind
+   * auditor that was told nothing about it. Fixing the fail-open, I filtered
+   * unvouched rows out of a single list called `ours` -- and then used that one
+   * list BOTH to pick the answer AND to count how many agents have ever worked
+   * here. Deleting a row before the count is what did the damage:
+   *
+   *   two occupants, one of them stating no machine_id
+   *     before the fail-open fix : ADMITTED   -> 2 occupants -> REFUSE
+   *     after it                 : DROPPED    -> 1 occupant  -> "code-q is the
+   *                                              only agent ever registered in
+   *                                              this worktree on this machine"
+   *
+   * That `why` is simply false in the case it is emitted for, and the same flip
+   * exists one rung up: two rows sharing a session id and naming different
+   * agents, one unvouched, went from "the store names this session as 2
+   * different agents" to a confident this-session resolution.
+   *
+   * SO THE DIRECTION OF THE BUG INVERTED. The fail-open produced an
+   * over-REFUSAL at rung 3 (an extra occupant). Mine produced an
+   * over-RESOLUTION. For a module whose whole premise is "an agent id is never
+   * invented here", trading a false refusal for a false name is the worse half
+   * -- and it is silent, because it is reached only through a SessionStart hook.
+   *
+   * THE FIX IS THAT A ROW OF UNKNOWN PROVENANCE MAKES THE ANSWER MORE
+   * AMBIGUOUS, NEVER LESS. Three categories, not two:
+   *
+   *   FOREIGN  the row positively states a different machine/worktree/repo.
+   *            Excluded from everything -- it is evidence about somewhere else,
+   *            which is what the original filter was right about.
+   *   SILENT   we know our value and the row declines to state its own. It may
+   *            NOT lend a name, because we cannot vouch for it. It DOES count
+   *            toward ambiguity, because it may well be an agent that really
+   *            worked here -- bin/agentbridge.mjs writes machine_id from
+   *            `cfg?.machineId ?? null`, and loadConfig() returns null whenever
+   *            ~/.agentbridge/config.json is absent or unreadable.
+   *   VOUCHED  states values matching ours. Both lends and counts.
+   *
+   * There is a real tension here and it is worth naming rather than hiding: a
+   * SILENT row could be from another machine sharing a synced HOME, so counting
+   * it toward ambiguity can over-refuse. That is the safe direction for this
+   * module and it is the one the header promises.
+   */
+  const foreign = (ourValue, rowValue) =>
+    ourValue !== null && str(rowValue) !== null && str(rowValue) !== ourValue;
+  const silent = (ourValue, rowValue) =>
+    ourValue !== null && str(rowValue) === null;
 
-  const ours = rows.filter((r) => {
+  const named = rows.filter((r) => {
     if (!r || typeof r !== 'object') return false;
     const agent = str(r.agent_id);
-    if (!agent || !SAFE_ID.test(agent)) return false;
-    if (!vouches(machineId, r.machine_id)) return false;
-    if (!vouches(worktreeId, r.worktree_id)) return false;
-    if (!vouches(repoId, r.repo_id)) return false;
-    return true;
+    return !!agent && SAFE_ID.test(agent);
   });
 
+  /* Rows that are not evidence about somewhere else. */
+  const present = named.filter((r) =>
+    !foreign(machineId, r.machine_id)
+    && !foreign(worktreeId, r.worktree_id)
+    && !foreign(repoId, r.repo_id));
+
+  /* Of those, the ones that actually state where they are from. */
+  const vouched = new Set(present.filter((r) =>
+    !silent(machineId, r.machine_id)
+    && !silent(worktreeId, r.worktree_id)
+    && !silent(repoId, r.repo_id)));
+
+  /** How many rows we can see but may not speak for -- the third state. */
+  const unvouchedCount = present.length - vouched.size;
+
   /* 2. THIS SESSION SAID SO EARLIER. */
-  const mine = ours.filter((r) => sameSession(r.session_id, sessionId));
+  const mine = present.filter((r) => sameSession(r.session_id, sessionId));
   const mineIds = [...new Set(mine.map((r) => str(r.agent_id)))];
   if (mineIds.length === 1) {
+    /*
+     * ONE NAME, BUT IT MUST BE ONE WE MAY SPEAK FOR. A single matching row that
+     * declines to say where it is from is not this session's own earlier
+     * declaration -- it is a row we cannot attribute, and adopting it is the
+     * cross-machine theft this module exists to refuse.
+     */
+    if (!mine.some((r) => vouched.has(r))) {
+      return {
+        agentId: null,
+        source: null,
+        candidates: mineIds,
+        why: `a registration for this session names ${mineIds[0]}, but it does not state its `
+          + 'machine, worktree or repo, so this cannot be established as that session\'s own '
+          + 'earlier declaration rather than another machine\'s. Set AGENTBRIDGE_AGENT_ID.',
+      };
+    }
     return {
       agentId: mineIds[0],
       source: SOURCE.THIS_SESSION,
@@ -244,13 +319,38 @@ export function resolveAgentId({
   }
 
   /* 3. ONE AGENT HAS EVER WORKED HERE. */
-  const occupants = [...new Set(ours.map((r) => str(r.agent_id)))].sort();
-  if (occupants.length === 1) {
+  const occupants = [...new Set(present.map((r) => str(r.agent_id)))].sort();
+  if (occupants.length === 1 && unvouchedCount === 0) {
     return {
       agentId: occupants[0],
       source: SOURCE.SOLE_OCCUPANT,
       candidates: [],
       why: `${occupants[0]} is the only agent ever registered in this worktree on this machine`,
+    };
+  }
+
+  /*
+   * A DROPPED ROW IS NOT AN EMPTY STORE, AND SAYING SO IS THE POINT.
+   *
+   * This module already went to trouble to keep "could not read" and "read
+   * nothing" distinguishable -- the non-array branch above exists for exactly
+   * that, and its test says so in those words. The provenance filter introduced
+   * a THIRD state, rows present but not vouched for, and the first version of
+   * it collapsed that into the empty-store message.
+   *
+   * It matters because of what it points at. A session whose registration was
+   * written while the config was unreadable now never resolves, on a machine
+   * whose own config is fine -- a permanently dead watcher, diagnosed as "no
+   * prior registration", which sends the reader to look for the wrong thing.
+   */
+  if (occupants.length === 1) {
+    return {
+      agentId: null,
+      source: null,
+      candidates: occupants,
+      why: `${occupants[0]} is the only agent named in this worktree, but ${unvouchedCount} `
+        + `registration(s) here do not state their machine, worktree or repo, so it cannot be `
+        + 'established that they are the same agent. Set AGENTBRIDGE_AGENT_ID.',
     };
   }
 
@@ -261,6 +361,10 @@ export function resolveAgentId({
     why: occupants.length
       ? `${occupants.length} agents have registered in this worktree (${occupants.join(', ')}), `
         + 'so which one this session is cannot be established. Set AGENTBRIDGE_AGENT_ID.'
-      : 'no prior registration in this worktree on this machine, and AGENTBRIDGE_AGENT_ID is not set.',
+      : unvouchedCount
+        ? `${unvouchedCount} registration(s) are present but state no machine, worktree or repo, `
+          + 'so none can be attributed to this worktree. This is NOT an empty store. '
+          + 'Set AGENTBRIDGE_AGENT_ID.'
+        : 'no prior registration in this worktree on this machine, and AGENTBRIDGE_AGENT_ID is not set.',
   };
 }
