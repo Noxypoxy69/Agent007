@@ -73,10 +73,18 @@ const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v
  *                                 starvedLimit, deadlineMs
  */
 export function nextAction(state = {}, opts = {}) {
-  const o = { ...LOOP_DEFAULTS, ...opts };
-  const ticksUsed = num(state.ticksUsed, 0);
-  const noProgress = num(state.consecutiveNoProgress, 0);
-  const depth = num(state.queueDepth, 0);
+  /*
+   * `= {}` COVERS AN OMITTED ARGUMENT, NOT AN EXPLICIT null, and a caller
+   * reading a queue file that came back empty passes exactly that. The
+   * first version threw `Cannot read properties of null` on the last line
+   * of its own garbage-input test -- so the scheduler would have died on
+   * the case it was written to survive.
+   */
+  const s = state ?? {};
+  const o = { ...LOOP_DEFAULTS, ...(opts ?? {}) };
+  const ticksUsed = num(s.ticksUsed, 0);
+  const noProgress = num(s.consecutiveNoProgress, 0);
+  const depth = num(s.queueDepth, 0);
 
   /*
    * THE DEADLINE IS CHECKED FIRST, and against the clock rather than a
@@ -84,8 +92,8 @@ export function nextAction(state = {}, opts = {}) {
    * the loop has been spending its cycles.
    */
   if (typeof o.deadlineMs === 'number' && Number.isFinite(o.deadlineMs)) {
-    const started = num(state.startedAt, NaN);
-    const now = num(state.now, NaN);
+    const started = num(s.startedAt, NaN);
+    const now = num(s.now, NaN);
     if (Number.isFinite(started) && Number.isFinite(now) && now - started >= o.deadlineMs) {
       return {
         action: LOOP_ACTION.STOP,
