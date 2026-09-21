@@ -13,6 +13,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { readSuiteSummary, summaryBlocks } from '../src/suiteSummary.mjs';
 
 /** A complete node --test summary block. */
@@ -57,12 +58,49 @@ const RED_WITH_EMBEDDED_CHILD = [
   '      at TestContext.<anonymous> (file:///C:/x/test/probe.test.mjs:198:12)',
 ].join('\n');
 
-test('THE DEFECT: a child summary inside failure detail is not read as the suite result', () => {
+test('THE DEFECT: two summaries in one text are REFUSED, not chosen between', () => {
+  /*
+   * THIS ASSERTION INVERTED, and the reason is the point.
+   *
+   * It used to demand that the reader pick the parent's block out of two. Three
+   * successive rules for picking were each broken -- last line, last block,
+   * split-at-first-marker -- and the third was broken by a blind auditor for the
+   * same reason as the second. A rule for choosing between two summaries can
+   * only be as good as a story about where the second came from, and that story
+   * (a child `node --test` reprinted in failure detail) was never verified:
+   * `grep -acn spawnSync test/probe.test.mjs` is 0, so the named producer
+   * cannot emit a summary at all.
+   *
+   * So the contract is now: more than one complete summary means some of these
+   * numbers are not this run's, and nothing can say which. Refuse. It cannot
+   * report a wrong number, only decline to report -- and the failing names and
+   * exit status still print.
+   */
   const r = readSuiteSummary(RED_WITH_EMBEDDED_CHILD, 1);
-  assert.equal(r.fail, 1, 'the child\'s fail 0 was read as the suite\'s result');
-  assert.equal(r.tests, 2992);
-  assert.equal(r.pass, 2985);
-  assert.equal(r.ok, true, `a well-formed red summary must still be reportable: ${r.why}`);
+  assert.equal(r.ok, false, 'two summaries were reconciled into one confident answer');
+  assert.equal(r.fail, null, 'a number was reported from an ambiguous text');
+  assert.match(r.why, /2 complete summaries/);
+  assert.match(r.why, /Refusing rather than picking one/);
+});
+
+test('ORDER DOES NOT MATTER ANY MORE, which is the property that was missing', () => {
+  /*
+   * Every previous version depended on WHERE the second block sat, and each was
+   * defeated by an ordering its author had not pictured. Both arrangements must
+   * now refuse identically, so no future reader can break this by discovering
+   * that node emits things in a different order than I assumed.
+   */
+  const child = block({ tests: 7, pass: 7, fail: 0 });
+  const parent = block({ tests: 2992, pass: 2985, fail: 1, skipped: 6 });
+  for (const [label, text] of [
+    ['child last', `${parent}\n✖ failing tests:\n${child}`],
+    ['child first', `${child}\nsome output\n${parent}`],
+    ['child first, with its own marker', `✖ failing tests:\n${child}\n${parent}`],
+  ]) {
+    const r = readSuiteSummary(text, 1);
+    assert.equal(r.ok, false, `${label}: an ambiguous text produced a confident answer`);
+    assert.equal(r.fail, null, `${label}: a number was reported`);
+  }
 });
 
 test('THE POSITIVE FIRST: an ordinary green run reports cleanly', () => {
@@ -145,6 +183,54 @@ test('BLOCKS ARE CONTIGUOUS, so a repeated label splits rather than merges', () 
   // back to back, with no intervening line: a repeated label must still split
   const glued = `${block({ tests: 1, pass: 1 })}\n${block({ tests: 2, pass: 2 })}`;
   assert.equal(summaryBlocks(glued).length, 2, 'adjacent summaries merged into one');
+});
+
+test('A NON-ZERO EXIT IS NOT THE ONLY CONTRADICTION: exit 0 with failures is refused too', () => {
+  /*
+   * A16. The first version checked only the half that had bitten me. A
+   * one-directional consistency check agrees with the truth right up until
+   * something unusual happens, which is when it is supposed to speak (rule 4).
+   *
+   * Differenced: the identical block at exit 1 must be ACCEPTED, so this cannot
+   * pass because red summaries are refused generally.
+   */
+  const text = block({ tests: 10, pass: 9, fail: 1 });
+  const bad = readSuiteSummary(text, 0);
+  assert.equal(bad.ok, false, 'exit 0 with a counted failure was reported as usable');
+  assert.match(bad.why, /exited 0 while reporting 1 failing/);
+
+  assert.equal(readSuiteSummary(text, 1).ok, true,
+    'the same block at exit 1 was refused, so the assertion above proves nothing');
+});
+
+test('THE WIRING: audit-workspace actually consults this module', () => {
+  /*
+   * A3, and the omission is the embarrassing part: I built exactly this gate
+   * for src/watcherIdentity.mjs in this same branch, with a three-screen header
+   * arguing that the wiring is a separate claim from the logic (rule 17), and
+   * then did not build one here. Revert the call site to the old inline reader
+   * and all of the tests above stay green.
+   *
+   * Read as SOURCE rather than executed, because running the script clones a
+   * repository and runs a full suite. test/auditWorkspaceUsesNpmCli.test.mjs
+   * already pins a different property of this same file the same way, so the
+   * technique was in hand too.
+   */
+  const src = readFileSync(new URL('../scripts/audit-workspace.mjs', import.meta.url), 'utf8');
+
+  assert.match(src, /readSuiteSummary/,
+    'audit-workspace no longer consults the summary reader, so nothing above constrains what it prints');
+  assert.match(src, /COUNTS UNRELIABLE/,
+    'the refusal path is not surfaced, so an unreadable summary would print silently or not at all');
+
+  /*
+   * AND THE OLD READER MUST BE GONE, not merely unused. A dead copy beside a
+   * live one is how the next editor reintroduces it -- which is not
+   * hypothetical: grep found the byte-identical reader still live in
+   * scripts/audit-auto.mjs, unfixed by any of this.
+   */
+  assert.doesNotMatch(src, /matchAll\(new RegExp\(`\^\\\\u2139/,
+    'the old per-label last-match reader is still present in this file');
 });
 
 test('NOTHING IS INVENTED FROM PROSE THAT LOOKS LIKE A SUMMARY', () => {

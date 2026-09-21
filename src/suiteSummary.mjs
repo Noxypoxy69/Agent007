@@ -81,8 +81,16 @@ export function summaryBlocks(text) {
       current[m[1]] = Number(m[2]);
       continue;
     }
-    // `duration_ms` closes a block; anything else that is not a summary line
-    // also ends it, which is what keeps a child's output from extending ours.
+    /*
+     * Any line that is not `ℹ `-prefixed ends the block.
+     *
+     * The comment here used to claim `duration_ms` closes a block. It does not:
+     * `duration_ms` is absent from FIELDS, so it falls through to this test --
+     * and it DOES start with the prefix, so the block stays open. Harmless (a
+     * repeated label splits, an incomplete block is filtered) but false, in the
+     * one file whose entire subject is a mechanism nobody checked. Caught by a
+     * blind auditor reading the comment against the code.
+     */
     if (current && !line.startsWith(`${INFO} `)) {
       blocks.push(current);
       current = null;
@@ -106,27 +114,58 @@ export function summaryBlocks(text) {
  */
 export function readSuiteSummary(text, status) {
   /*
-   * SPLIT AT NODE'S OWN BOUNDARY, BECAUSE "THE LAST BLOCK" IS THE CHILD'S.
+   * ONE SUMMARY OR NONE. NEVER A CHOICE BETWEEN TWO.
    *
-   * My first fix read whole blocks and took the last one, and my own mutation
-   * test caught that it is wrong for exactly the same reason the original was:
-   * node prints its summary and THEN the `failing tests:` detail, so a child
-   * summary reprinted inside that detail is the LAST complete block in the
-   * text. Reading blocks instead of lines did not help by itself -- it changed
-   * which wrong thing was picked.
+   * ═══ THIRD ATTEMPT, AND THE FIRST TWO WERE GUESSES ═══
    *
-   * The marker is the only structural boundary node gives us, and everything
-   * after it is quoted output rather than this run's result. Ask the thing that
-   * owns the mapping, which is the same move as everywhere else in this repo.
+   * v1 took the last MATCHING LINE per label. v2 took the last complete BLOCK.
+   * v3 split at the first `✖ failing tests:` and took the last block before
+   * it. All three are the same move -- a rule for picking one summary out of
+   * several -- and a blind audit broke v3 the same way my own mutation broke
+   * v2: `String.search` returns the FIRST match, so a marker arriving from
+   * captured child output truncates the text before the parent's own summary,
+   * and the reader then confidently reports the CHILD's numbers.
    *
-   * With no marker, there were no failures to detail, so the whole text is
-   * ours.
+   * ═══ AND THE STORY ALL THREE WERE BUILT ON WAS NEVER VERIFIED ═══
+   *
+   * I wrote, in the module header, in the script, and in three commit messages,
+   * that the stray `ℹ fail 0` came from a child `node --test` summary
+   * reprinted inside the detail of `NO COMMAND PRINTS A RUNTIME ASSERTION`.
+   * That test spawns the CLI and not a test runner:
+   *
+   *     grep -acn spawnSync test/probe.test.mjs   ->  0
+   *
+   * so it cannot produce a summary block at all. The mechanism was an
+   * assumption I repeated until it sounded measured, and each successive
+   * "boundary" was chosen from it. I still do not know what produced that line.
+   *
+   * ═══ SO STOP PICKING, AND REFUSE INSTEAD ═══
+   *
+   * A rule for choosing between two summaries can only be as good as a story
+   * about where the second one came from, and I do not have one. What is
+   * certain is this: if the text contains more than one complete summary, then
+   * SOME of those numbers are not this run's, and nothing here can say which.
+   * That is precisely the state `ok: false` exists for.
+   *
+   * This is strictly safer than all three previous versions -- it cannot report
+   * a wrong number, only refuse to report -- and it needs no theory about node's
+   * output order, which is the part I kept getting wrong. The failing-test names
+   * and the exit status still print either way, so a refusal is not a blackout.
+   *
+   * Note the anchor: `^ℹ` at column zero. Node indents captured output
+   * beneath a failing test, so an indented block never parses as a summary in
+   * the first place. That may well be why no producer has been found.
    */
-  const whole = String(text ?? '');
-  const marker = whole.search(/^✖ failing tests:$/m);
-  const mine = marker >= 0 ? whole.slice(0, marker) : whole;
+  const complete = summaryBlocks(text).filter((b) => b.tests !== undefined && b.fail !== undefined);
 
-  const complete = summaryBlocks(mine).filter((b) => b.tests !== undefined && b.fail !== undefined);
+  if (complete.length > 1) {
+    return {
+      ok: false, tests: null, pass: null, fail: null, skipped: null,
+      why: `${complete.length} complete summaries are present in this output, so some of these `
+        + 'numbers belong to another run and nothing here can tell which. Refusing rather than '
+        + 'picking one. Read the exit status and the failing list below.',
+    };
+  }
 
   if (!complete.length) {
     return {
@@ -136,13 +175,8 @@ export function readSuiteSummary(text, status) {
     };
   }
 
-  /*
-   * THE LAST COMPLETE BLOCK IS OURS. A child's summary is printed inside the
-   * parent's failure detail, which comes BEFORE the parent's own summary in
-   * node's output order -- so last is right, but only once blocks are whole.
-   * Taking the last LINE per label is what read a child's number.
-   */
-  const b = complete[complete.length - 1];
+  /* Exactly one, established above. */
+  const b = complete[0];
   const n = (k) => (typeof b[k] === 'number' ? b[k] : 0);
   const tests = n('tests');
   const parts = n('pass') + n('fail') + n('cancelled') + n('skipped') + n('todo');
@@ -168,6 +202,23 @@ export function readSuiteSummary(text, status) {
       why: `the suite exited ${status === null ? 'killed' : status} while reporting fail 0. `
         + 'A non-zero exit with no counted failure means the count is not the whole story -- '
         + 'read the failing list and the exit code, not this number.',
+    };
+  }
+
+  /*
+   * AND THE OTHER DIRECTION, which the first version left out.
+   *
+   * `exit 0 with fail > 0` is exactly as impossible as its mirror, and I
+   * checked only the half that had bitten me. A one-directional consistency
+   * check is the shape that agrees with the truth until something unusual
+   * happens, which is when a gate is supposed to speak (rule 4). Cheap to close
+   * and there is no argument for leaving it open.
+   */
+  if (status === 0 && n('fail') > 0) {
+    return {
+      ok: false, tests, pass: n('pass'), fail: n('fail'), skipped: n('skipped'),
+      why: `the suite exited 0 while reporting ${n('fail')} failing. Node does not do that, `
+        + 'so either the exit status or the count is not this run\'s. Refusing both.',
     };
   }
 

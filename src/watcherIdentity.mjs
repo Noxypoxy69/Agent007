@@ -273,8 +273,17 @@ export function resolveAgentId({
     && !silent(worktreeId, r.worktree_id)
     && !silent(repoId, r.repo_id)));
 
-  /** How many rows we can see but may not speak for -- the third state. */
-  const unvouchedCount = present.length - vouched.size;
+  /**
+   * How many rows we can see but may not speak for -- the third state.
+   *
+   * COUNTED, NOT SUBTRACTED. This was `present.length - vouched.size`, and
+   * `vouched` is a Set of row OBJECTS: two references to the same fully-vouched
+   * row give length 2, size 1, and a phantom unvouched row -- a false refusal
+   * reading "1 registration(s) here do not state their machine". Latent, since
+   * JSON.parse yields distinct objects, but a set size is not a count of the
+   * thing being counted. Found by blind audit.
+   */
+  const unvouchedCount = present.filter((r) => !vouched.has(r)).length;
 
   /* 2. THIS SESSION SAID SO EARLIER. */
   const mine = present.filter((r) => sameSession(r.session_id, sessionId));
@@ -358,13 +367,26 @@ export function resolveAgentId({
     agentId: null,
     source: null,
     candidates: occupants,
+    /*
+     * NO THIRD ARM HERE, BECAUSE IT COULD NEVER FIRE.
+     *
+     * This carried `unvouchedCount ? "...This is NOT an empty store..." : ...`
+     * as the fix for the third state. It was DEAD CODE, shipped under a
+     * paragraph explaining its importance. `occupants` is derived from
+     * `present`, and every row in `present` cleared the `named` filter, so
+     * `occupants.length === 0` implies `present.length === 0` implies
+     * `unvouchedCount === 0`. There is no input that reaches it.
+     *
+     * The third state is real and IS reported -- one rung up, at the
+     * `occupants.length === 1` branch, which is where an unvouched row actually
+     * lands because it still carries an agent_id and still counts as an
+     * occupant. The test named for this behaviour returns through that branch,
+     * so the assertion was true and was never evidence for the code it sat
+     * under. Found by blind audit reading reachability rather than the test.
+     */
     why: occupants.length
       ? `${occupants.length} agents have registered in this worktree (${occupants.join(', ')}), `
         + 'so which one this session is cannot be established. Set AGENTBRIDGE_AGENT_ID.'
-      : unvouchedCount
-        ? `${unvouchedCount} registration(s) are present but state no machine, worktree or repo, `
-          + 'so none can be attributed to this worktree. This is NOT an empty store. '
-          + 'Set AGENTBRIDGE_AGENT_ID.'
-        : 'no prior registration in this worktree on this machine, and AGENTBRIDGE_AGENT_ID is not set.',
+      : 'no prior registration in this worktree on this machine, and AGENTBRIDGE_AGENT_ID is not set.',
   };
 }
