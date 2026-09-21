@@ -143,6 +143,14 @@ function attach(pkgDir, bundlePath) {
   const companions = [];
   for (const name of readdirSync(pkgDir)) {
     if (!name.endsWith('.md')) continue;
+    /*
+     * A MANIFEST CANNOT HASH ITSELF. The first run recorded MANIFEST.md as a
+     * companion and then rewrote MANIFEST.md to contain that hash, so the row
+     * was stale the instant it was written -- a self-referential claim that is
+     * false by construction and would fail any arrival check that believed it.
+     * The manifest files are the document, not its contents.
+     */
+    if (name.startsWith('MANIFEST.')) continue;
     const buf = readFileSync(path.join(pkgDir, name));
     companions.push({
       name, location: 'inside the package', bytes: buf.length, sha256: sha256(buf),
