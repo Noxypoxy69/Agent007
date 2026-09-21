@@ -337,6 +337,19 @@ test('deadlineMs IS VALIDATED TOO -- it was the one opts field left open (M-2)',
    * and must not become "stop immediately". */
   assert.equal(nextAction(past, { maxTicks: 99 }).action, LOOP_ACTION.TICK);
   assert.equal(nextAction(past, { deadlineMs: undefined, maxTicks: 99 }).action, LOOP_ACTION.TICK);
+
+  /*
+   * AND ZERO IS A REAL DEADLINE, NOT THE ABSENCE OF ONE (L-2).
+   *
+   * The daemon computed `posInt('--deadline', 0) * 1000 || undefined`, so
+   * `--deadline 0` -- the tightest bound an operator can ask for -- fell
+   * through `||` and became NO bound. The sentinel for "not asked for" and
+   * a value the operator can type were the same token.
+   */
+  const atZero = nextAction({ queueDepth: 50, startedAt: 0, now: 0 }, { deadlineMs: 0, maxTicks: 99 });
+  assert.equal(atZero.action, LOOP_ACTION.STOP,
+    'deadlineMs 0 was read as "no deadline", which is the opposite of what it asks for');
+  assert.equal(atZero.code, LOOP_STOP.DEADLINE);
 });
 
 test('THE SPEND BOUND FAILS CLOSED ON A NON-NUMBER, like every state field', () => {

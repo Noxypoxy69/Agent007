@@ -113,9 +113,41 @@ const {
 const { proposeAudit, isClaimable, MAX_REVIEW_ATTEMPTS } = await import('../src/auditDispatch.mjs');
 const { nextAction, LOOP_ACTION, LOOP_STOP, LOOP_DEFAULTS } = await import('../src/auditLoop.mjs');
 
-const INTERVAL_MS = posInt('--interval', LOOP_DEFAULTS.intervalMs / 1000) * 1000;
+/*
+ * `--interval 0` IS REFUSED, NOT HONOURED. Blind audit L-1.
+ *
+ * `posInt` accepts `^\d+$`, so zero was legal, and it makes the backoff
+ * `Math.min(0 * 2**n, cap)` -- zero at every step -- and the
+ * post-placement sleep zero too. The loop then spins as fast as the queue
+ * can be read, bounded only by `maxTicks`. In `--launch` mode that is a
+ * paid review per iteration with no pause between.
+ *
+ * Refused rather than clamped, because an operator who typed 0 meant
+ * something, and quietly substituting 60 is the same class of surprise as
+ * quietly substituting a spend.
+ */
+const INTERVAL_SECONDS = posInt('--interval', LOOP_DEFAULTS.intervalMs / 1000);
+if (INTERVAL_SECONDS === 0) {
+  say('[audit-daemon] --interval 0 would remove the backoff entirely, so each cycle '
+    + 'runs as fast as the queue can be read. Refusing: pass at least 1.');
+  process.exit(2);
+}
+const INTERVAL_MS = INTERVAL_SECONDS * 1000;
 const MAX_TICKS = posInt('--max-ticks', LOOP_DEFAULTS.maxTicks);
-const DEADLINE_MS = posInt('--deadline', 0) * 1000 || undefined;
+/*
+ * `--deadline 0` MEANT "NO DEADLINE", WHICH IS THE OPPOSITE OF HOW IT
+ * READS. Blind audit L-2.
+ *
+ * The old line was `posInt('--deadline', 0) * 1000 || undefined`, and `0`
+ * fell through the `||` to `undefined` -- so an operator asking for the
+ * tightest possible bound got NO bound. The sentinel for "not asked for"
+ * and a real value the operator can type were the same token.
+ *
+ * Absence is now the sentinel, which is what absence already means
+ * everywhere else here, and `0` is honoured: stop on the first cycle.
+ */
+const DEADLINE_SECONDS = posInt('--deadline', null);
+const DEADLINE_MS = DEADLINE_SECONDS === null ? undefined : DEADLINE_SECONDS * 1000;
 const { allocateWorkspace, releaseWorkspace } = await import('../src/auditWorkspace.mjs');
 const { measureReviewed, attributionHolds, ATTRIBUTION } = await import('../src/auditAttribution.mjs');
 
@@ -1149,7 +1181,37 @@ for (;;) {
   backoffServed = false;
   ticksUsed += 1;
   say(`[audit-daemon] tick ${ticksUsed}/${MAX_TICKS}: ${decision.why}`);
-  const placed = await tick();
+
+  /*
+   * ═══ A THROW HERE MUST NOT LOOK LIKE AN ORDERLY STOP ═══
+   *
+   * Blind audit M-5, recorded OPEN against 2cbf947. The queue READ is
+   * wrapped and exits 2, and this was not -- so a rejection escaped the
+   * top-level await and node exited 1, which is exactly the code an
+   * orderly starved or budget stop uses. The commit that introduced this
+   * loop claims "EXIT CODES CARRY THE DIFFERENCE", and for this path they
+   * did not.
+   *
+   * It is worse than a collision. `tick()` marks the row CLAIMED before
+   * it writes the brief, so a throw between those points leaves the job
+   * CLAIMED WITH NO REVIEWER and kills the supervisor -- "starvation
+   * wearing a claim", reachable through a door the 9190865 fix did not
+   * cover.
+   *
+   * Exit 3, distinct from every orderly stop. The claim itself recovers
+   * through the lease, which is the designed path and is the one thing
+   * here that already works: `nextJob` admits a CLAIMED row past its
+   * lease, and a run tonight was observed doing exactly that.
+   */
+  let placed = false;
+  try {
+    placed = await tick();
+  } catch (e) {
+    say(`[audit-daemon] STOPPING: a tick threw (${e?.message ?? e}).`);
+    say('               If it threw after claiming, that job is CLAIMED with no reviewer '
+      + 'and recovers when its lease lapses. Exit 3 so this is not read as an orderly stop.');
+    process.exit(3);
+  }
   consecutiveNoProgress = placed ? 0 : consecutiveNoProgress + 1;
 
   if (placed) {
