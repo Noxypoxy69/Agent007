@@ -105,7 +105,28 @@ export function summaryBlocks(text) {
  * and the caller must print the reason rather than the numbers.
  */
 export function readSuiteSummary(text, status) {
-  const complete = summaryBlocks(text).filter((b) => b.tests !== undefined && b.fail !== undefined);
+  /*
+   * SPLIT AT NODE'S OWN BOUNDARY, BECAUSE "THE LAST BLOCK" IS THE CHILD'S.
+   *
+   * My first fix read whole blocks and took the last one, and my own mutation
+   * test caught that it is wrong for exactly the same reason the original was:
+   * node prints its summary and THEN the `failing tests:` detail, so a child
+   * summary reprinted inside that detail is the LAST complete block in the
+   * text. Reading blocks instead of lines did not help by itself -- it changed
+   * which wrong thing was picked.
+   *
+   * The marker is the only structural boundary node gives us, and everything
+   * after it is quoted output rather than this run's result. Ask the thing that
+   * owns the mapping, which is the same move as everywhere else in this repo.
+   *
+   * With no marker, there were no failures to detail, so the whole text is
+   * ours.
+   */
+  const whole = String(text ?? '');
+  const marker = whole.search(/^✖ failing tests:$/m);
+  const mine = marker >= 0 ? whole.slice(0, marker) : whole;
+
+  const complete = summaryBlocks(mine).filter((b) => b.tests !== undefined && b.fail !== undefined);
 
   if (!complete.length) {
     return {
