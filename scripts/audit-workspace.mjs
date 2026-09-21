@@ -150,10 +150,24 @@ const suite = spawnSync(process.execPath,
      * list breaks in the same call, so there would be nothing to read either.
      *
      * Rule 21: that is an accident of whoever's environment launched this,
-     * arriving as a claim about the code. One line removes the whole class,
-     * and nothing here wants colour.
+     * arriving as a claim about the code.
+     *
+     * THIS COMMENT SAID "one line removes the whole class" AND THAT WAS THE
+     * HALF-FIX AGAIN. The class is "the parent environment changes node's
+     * output shape". Colour is one door;
+     * `NODE_OPTIONS=--test-reporter=tap` is the other, and it emits no
+     * `ℹ` lines AT ALL -- so a fully green suite reports "the suite did not
+     * finish reporting. This is NOT a green run", the exact false-and-loud
+     * symptom the colour pin was added for. Found by blind audit (L-3), in the
+     * same sentence that claimed the class was closed.
      */
-    env: { ...process.env, AGENTBRIDGE_HOME: home, NO_COLOR: '1', FORCE_COLOR: '0' },
+    env: {
+      ...process.env,
+      AGENTBRIDGE_HOME: home,
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      NODE_OPTIONS: '',
+    },
   });
 
 const text = `${suite.stdout ?? ''}${suite.stderr ?? ''}`;

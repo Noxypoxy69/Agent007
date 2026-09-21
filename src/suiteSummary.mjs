@@ -204,9 +204,12 @@ export function readSuiteSummary(text, status) {
      * `tests 7/fail 0` can tell at a glance which is plausibly this run, which
      * is exactly the judgement this module refuses to make on its behalf.
      */
-    const shown = complete
-      .map((x) => `tests ${x.tests ?? '?'}/fail ${x.fail ?? '?'}`)
-      .join(' and ');
+    /*
+     * No `?? '?'` fallback: `complete` is filtered on both fields being
+     * defined, so neither arm was reachable. Dead code inside a message added
+     * to carry evidence, found by blind audit (L-4).
+     */
+    const shown = complete.map((x) => `tests ${x.tests}/fail ${x.fail}`).join(' and ');
     return {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
       why: `${complete.length} complete summaries are present in this output (${shown}), so some `

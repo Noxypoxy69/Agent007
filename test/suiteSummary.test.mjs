@@ -81,6 +81,23 @@ test('THE DEFECT: two summaries in one text are REFUSED, not chosen between', ()
   assert.equal(r.fail, null, 'a number was reported from an ambiguous text');
   assert.match(r.why, /2 complete summaries/);
   assert.match(r.why, /Refusing rather than picking one/);
+
+  /*
+   * THE EVIDENCE THE REFUSAL EXISTS TO CARRY, and it was unpinned.
+   *
+   * Blind audit H-1, measured by the repository's own harness: revert
+   * src/suiteSummary.mjs to its parent, keep these tests, and every one stays
+   * green -- because both phrases asserted above are in the OLD message too.
+   * The only thing the commit actually changed was the addition of the
+   * competing block numbers, and nothing asserted them.
+   *
+   * That matters precisely here: on a GREEN double-summary run there are no
+   * failing-test names, so this string is the entire content the reader gets.
+   * An unpinned message is a message that can silently go back to being
+   * useless.
+   */
+  assert.match(r.why, /tests 2992\/fail 1/, 'the refusal does not name the first competing block');
+  assert.match(r.why, /tests 7\/fail 0/, 'the refusal does not name the second competing block');
 });
 
 test('ORDER DOES NOT MATTER ANY MORE, which is the property that was missing', () => {
@@ -246,6 +263,60 @@ test('THE WIRING: audit-workspace actually consults this module', () => {
    */
   assert.doesNotMatch(src, /matchAll\(new RegExp\(`\^\\\\u2139/,
     'the old per-label last-match reader is still present in this file');
+
+  /*
+   * THE OUTPUT SHAPE IS PINNED AT THE SPAWN (blind audit H-1/D5, and L-3).
+   *
+   * The reader is anchored at column zero with no ANSI tolerance, so an
+   * inherited FORCE_COLOR or NODE_OPTIONS=--test-reporter=tap makes a green
+   * suite report "the suite did not finish reporting". That pin was added and
+   * never asserted; the technique was already in this file one line above.
+   */
+  for (const v of ['NO_COLOR', 'FORCE_COLOR', 'NODE_OPTIONS']) {
+    assert.match(src, new RegExp(v),
+      `${v} is not pinned in the suite spawn, so the launching environment can change what the counts say`);
+  }
+});
+
+test('THE SECOND WIRING: audit-auto consults the module too, and its refusal reaches no verdict', () => {
+  /*
+   * M-3. The first wiring gate was built for scripts/audit-workspace.mjs on the
+   * argument that wiring is a separate claim from logic (rule 17). Then a
+   * SECOND consumer was wired in and neither this gate nor the dead-copy
+   * assertion was extended to it -- so reverting audit-auto to the old
+   * per-label reader left the suite green. The comment naming that file as
+   * "unfixed by any of this" sat ten lines above, and became stale silently.
+   *
+   * audit-auto matters more than audit-workspace: its numbers become GATE /
+   * HOLLOW verdicts written into an audit ledger.
+   */
+  const raw = readFileSync(new URL('../scripts/audit-auto.mjs', import.meta.url), 'utf8');
+  const src = raw
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+  assert.ok(src.includes('spawnSync'), 'comment-blanking removed live code; the gate is not reading source');
+
+  assert.match(src, /readSuiteSummary/,
+    'audit-auto no longer consults the summary reader');
+  assert.doesNotMatch(src, /matchAll\(new RegExp\(`\^\\\\u2139/,
+    'the old per-label last-match reader is still present in audit-auto');
+
+  /*
+   * AND THE REFUSAL MUST NOT RENDER AS A VERDICT. `ran` was consulted at one of
+   * four consumers; the other three compared `.fail` directly and printed
+   * "fail -1" while writing verdict:'not-green' to the ledger -- a confident
+   * claim about the commit when the truth was about the machine (M-2).
+   */
+  assert.match(src, /unreadable\(/,
+    'the unreadable guard is gone, so a refusal can render as a count again');
+  assert.equal((src.match(/unreadable\(/g) ?? []).length >= 4, true,
+    'not every runTests consumer is guarded: a -1 sentinel can still reach the ledger');
+
+  for (const v of ['NO_COLOR', 'FORCE_COLOR', 'NODE_OPTIONS']) {
+    assert.match(src, new RegExp(v),
+      `${v} is not pinned in audit-auto's spawn, so the launching environment decides its verdicts`);
+  }
 });
 
 test('NOTHING IS INVENTED FROM PROSE THAT LOOKS LIKE A SUMMARY', () => {

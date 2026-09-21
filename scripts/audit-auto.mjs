@@ -226,9 +226,37 @@ function filesOf(sha) {
 
 /** node --test with a real exit status; never piped, so the code is node's. */
 function runTests(cwd, files, home) {
+  /*
+   * PIN THE OUTPUT SHAPE, BECAUSE THE READER IS ANCHORED AT COLUMN ZERO.
+   *
+   * readSuiteSummary matches `^ℹ <label> <n>` at column zero with no ANSI
+   * tolerance. Two things in an inherited environment change that shape and
+   * neither is exotic:
+   *
+   *   FORCE_COLOR    wraps the spec reporter's diagnostic lines in ANSI, so the
+   *                  anchor matches nothing and every commit in the range reads
+   *                  as unreadable.
+   *   NODE_OPTIONS=--test-reporter=tap   emits no `ℹ` lines AT ALL. Same
+   *                  outcome through the other half of the same door.
+   *
+   * The sibling tool pinned the colour half 27 minutes before this reader was
+   * wired in here, under a header saying exactly why, and the pin was not
+   * carried across -- found by blind audit (M-1). The reporter half was missed
+   * in both places (L-3): a comment claiming "one line removes the whole class"
+   * removed one half of it. Both halves are pinned here and there now.
+   *
+   * Rule 21: whoever launched this process does not get to change what the
+   * measurement says about a commit.
+   */
   const r = spawnSync(process.execPath, ['--test', '--test-timeout=120000', ...files], {
     cwd, encoding: 'utf8', maxBuffer: 6.4e7,
-    env: { ...process.env, AGENTBRIDGE_HOME: home },
+    env: {
+      ...process.env,
+      AGENTBRIDGE_HOME: home,
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      NODE_OPTIONS: '',
+    },
   });
   const text = `${r.stdout ?? ''}${r.stderr ?? ''}`;
 
@@ -273,6 +301,38 @@ function runTests(cwd, files, home) {
    */
   const ran = tests >= 0 && pass >= 0 && fail >= 0;
   return { status: r.status, pass, fail, tests, ran, text, why: summary.why };
+}
+
+/**
+ * Did this run produce a usable count, and if not, say so ONCE and the same way.
+ *
+ * THE -1 SENTINEL REACHED THE OPERATOR AND THE LEDGER, which the comment above
+ * forbids in those words. `ran` was consulted at exactly ONE of four consumers;
+ * the other three compared `.fail` directly, so a refusal rendered as:
+ *
+ *     SKIP   its own tests are not green at this commit (fail -1)
+ *     LOOSE  tests do not notice the subject's last change (pass -1)
+ *
+ * Both are confident claims ABOUT THE COMMIT when the truth is about the
+ * machine or the output shape, and `verdict: 'not-green'` was written into the
+ * audit ledger on that basis. Found by blind audit (M-2).
+ *
+ * `why` was already computed and attached and then discarded at all three
+ * sites. It is the one fact that distinguishes "look at the commit" from "look
+ * at the machine", so it is printed rather than dropped.
+ *
+ * @returns a finding to push and log, or null when the run is usable
+ */
+function unreadable(r, short, tests) {
+  if (r.ran) return null;
+  return {
+    log: [
+      `${short}  UNKNOWN no usable test summary  [${tests.join(' ')}]`,
+      `         ${r.why}`,
+      '         That is NOT a gate and NOT a pass: nothing was measured.',
+    ],
+    finding: { sha: short, verdict: 'unknown', detail: r.why ?? 'no usable test summary' },
+  };
 }
 
 const findings = [];
@@ -348,6 +408,8 @@ for (const sha of shas) {
       linkModules(work2);
 
       const before2 = runTests(work2, tests, home2);
+      const u2 = unreadable(before2, short, tests);
+      if (u2) { for (const l of u2.log) console.log(l); findings.push(u2.finding); continue; }
       if (before2.fail !== 0) {
         console.log(`${short}  SKIP   its own tests are not green at this commit (fail ${before2.fail})`);
         findings.push({ sha: short, verdict: 'not-green', detail: `fail ${before2.fail} before any revert` });
@@ -390,6 +452,8 @@ for (const sha of shas) {
        * is the thing reverted, says HOLLOW.
        */
       const after2 = runTests(work2, tests, home2);
+      const ua2 = unreadable(after2, short, tests);
+      if (ua2) { for (const l of ua2.log) console.log(l); findings.push(ua2.finding); continue; }
       if (after2.fail > 0) {
         console.log(`${short}  PINNED tests go red when the subject's last change is undone (fail ${after2.fail})  [${tests.join(' ')}]`);
         findings.push({ sha: short, verdict: 'real-gate', detail: `fail ${after2.fail} with ${undone.join(', ')}` });
@@ -421,6 +485,8 @@ for (const sha of shas) {
     linkModules(work);
 
     const before = runTests(work, tests, home);
+    const u = unreadable(before, short, tests);
+    if (u) { for (const l of u.log) console.log(l); findings.push(u.finding); continue; }
     if (before.fail !== 0) {
       console.log(`${short}  SKIP   its own tests are not green at this commit (fail ${before.fail})`);
       findings.push({ sha: short, verdict: 'not-green', detail: `fail ${before.fail} before any revert` });

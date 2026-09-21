@@ -38,7 +38,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { DEFAULT_ENTRY_POINTS } from '../src/moduleGraph.mjs';
+import { DEFAULT_ENTRY_POINTS, parseImports } from '../src/moduleGraph.mjs';
 
 const SCRIPTS = new URL('../scripts/', import.meta.url);
 
@@ -50,26 +50,60 @@ const SCRIPTS = new URL('../scripts/', import.meta.url);
  * way a gate like this dies is somebody adding a line on a Friday and nobody
  * ever being able to tell whether it is still true.
  *
+ * AND THE COMMIT THAT ADDED THIS CLAIMED THE MAP "MAY ONLY SHRINK". IT DOES
+ * NOT, and nothing here makes it. Blind audit M-5. Staleness is checked -- an
+ * exemption must still be an importer -- which is a DIFFERENT property, and
+ * conflating the two is how a snooze button gets described as a ratchet.
+ * Nothing prevents growth, so a thirty-one-character sentence still disarms
+ * this gate for any one script. The honest statement is: growth is permitted
+ * and visible in review, and that is the whole protection.
+ *
  * Empty today, and that is the honest state: every script here is run by a
  * person, by npm, or by a hook.
  */
 const NOT_AN_ENTRY_POINT = Object.freeze({});
 
-/** Scripts whose source contains a relative import from src/. */
+/**
+ * Scripts that import from src/ — ASKED OF THE SHIPPED PARSER, not re-matched.
+ *
+ * THIS HAND-ROLLED A REGEX NEXT TO THE PARSER THAT GETS IT RIGHT, which is the
+ * finding and the irony together: the gate exists because a hand-typed sweep
+ * kept being one spelling short, and it was itself a hand-typed sweep one
+ * spelling wider. Blind audit M-4 enumerated what the regex missed:
+ *
+ *     import '../src/x.mjs';                side-effect: no `from`, no `(`
+ *     import(someVariable)                  not a literal specifier at all
+ *     import(new URL('../src/x.mjs', …))    and template-literal specifiers
+ *
+ * The repository USES the side-effect form — `test/noOrphanModules.test.mjs`
+ * ships a fixture written for it. And `src/moduleGraph.mjs`, which this file
+ * already imports for DEFAULT_ENTRY_POINTS, exports `parseImports`: it covers
+ * every one of those forms and returns variable-argument dynamic imports
+ * SEPARATELY as `dynamic`, so a specifier it cannot resolve is surfaced rather
+ * than silently dropped.
+ *
+ * Rule 8 — fix the matcher, not the spelling somebody happened to notice. Ask
+ * whatever owns the mapping.
+ *
+ * The comment blanking goes with the regex: `parseImports` handles comments
+ * itself, and the old `/\/\*[\s\S]*?\*\//` also blanked a `/*` inside a string
+ * or regex literal, which could eat live code with only an aggregate count to
+ * notice.
+ */
 function importersOfSrc() {
   const found = [];
   for (const name of readdirSync(SCRIPTS)) {
     if (!name.endsWith('.mjs')) continue;
+    const { specifiers, dynamic } = parseImports(readFileSync(new URL(name, SCRIPTS), 'utf8'));
     /*
-     * COMMENT-BLANKED BEFORE MATCHING (rule 13). A script DISCUSSING
-     * `../src/foo.mjs` in prose is not an importer, and this file's whole
-     * subject is comments about src/ modules -- so matching raw source would
-     * make this gate fire on documentation.
+     * A NON-LITERAL DYNAMIC IMPORT COUNTS AS AN IMPORTER. It may resolve into
+     * src/ and nothing here can tell. Counting it is the safe direction: the
+     * worst it can do is demand a declaration a person then makes or exempts
+     * with a reason, and the alternative is a silent blind spot.
      */
-    const src = readFileSync(new URL(name, SCRIPTS), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/(^|[^:])\/\/.*$/gm, '$1');
-    if (/(?:from|import\()\s*['"]\.\.\/src\//.test(src)) found.push(`scripts/${name}`);
+    if (dynamic.length || specifiers.some((s) => s.startsWith('../src/'))) {
+      found.push(`scripts/${name}`);
+    }
   }
   return found.sort();
 }
@@ -98,26 +132,50 @@ test('EVERY SCRIPT THAT IMPORTS FROM src/ IS DECLARED OR EXEMPTED', () => {
     + 'Add them to DEFAULT_ENTRY_POINTS, or to NOT_AN_ENTRY_POINT with a reason.');
 });
 
-test('AN EXEMPTION WITHOUT A REASON IS ITSELF A FINDING', () => {
-  /*
-   * Same rule the orphan allowlist enforces. Checked even while the map is
-   * empty, so the constraint is in place before the first entry is added --
-   * which is when nobody is thinking about it.
-   */
-  for (const [p, reason] of Object.entries(NOT_AN_ENTRY_POINT)) {
-    assert.equal(typeof reason, 'string', `${p} is exempted with no reason`);
-    assert.ok(reason.trim().length > 30,
-      `${p}'s exemption is too short to disagree with: ${JSON.stringify(reason)}`);
+/**
+ * The exemption rules, as a function so a FIXTURE can exercise them.
+ *
+ * THE RULES WERE WRITTEN AS LOOPS OVER AN EMPTY MAP AND ASSERTED NOTHING.
+ * Blind audit M-5, measured: both tests passed having executed zero
+ * assertions, so `> 30` could have been `> 3000` or deleted and the suite
+ * would not have moved. A rule that has never been applied to a single input
+ * is not a rule; it is a comment with a `test(` in front of it.
+ *
+ * Extracted so the real map and a hostile fixture go through the SAME code —
+ * otherwise the fixture proves something about a copy.
+ *
+ * @returns array of complaints; empty means the map is well-formed
+ */
+export function exemptionFindings(map, importers) {
+  const out = [];
+  for (const [p, reason] of Object.entries(map)) {
+    if (typeof reason !== 'string') { out.push(`${p} is exempted with no reason`); continue; }
+    if (reason.trim().length <= 30) {
+      out.push(`${p}'s exemption is too short to disagree with: ${JSON.stringify(reason)}`);
+    }
+    if (!importers.has(p)) {
+      out.push(`${p} is exempted but no longer imports from src/ -- remove the entry`);
+    }
   }
+  return out;
+}
+
+test('THE EXEMPTION RULES FIRE, proven on a fixture rather than on an empty map', () => {
+  /*
+   * Rule 1 applied to a rule that had never been watched doing anything. Each
+   * case is differenced against a well-formed entry, so a complaint cannot be
+   * "everything is rejected".
+   */
+  const importers = new Set(['scripts/real.mjs']);
+  const ok = { 'scripts/real.mjs': 'a reason long enough for a later reader to disagree with it' };
+  assert.deepEqual(exemptionFindings(ok, importers), [],
+    'a well-formed exemption was reported as a finding, so every rejection below proves nothing');
+
+  assert.match(exemptionFindings({ 'scripts/real.mjs': null }, importers)[0] ?? '', /no reason/);
+  assert.match(exemptionFindings({ 'scripts/real.mjs': 'too short' }, importers)[0] ?? '', /too short to disagree/);
+  assert.match(exemptionFindings({ 'scripts/gone.mjs': ok['scripts/real.mjs'] }, importers)[0] ?? '', /no longer imports/);
 });
 
-test('AN EXEMPTION FOR A SCRIPT THAT NO LONGER IMPORTS src/ IS STALE', () => {
-  /*
-   * The list may only SHRINK, the same property noOrphanModules pins for its
-   * allowlist. A stale exemption is a standing permission nobody can evaluate.
-   */
-  const importers = new Set(importersOfSrc());
-  for (const p of Object.keys(NOT_AN_ENTRY_POINT)) {
-    assert.ok(importers.has(p), `${p} is exempted but no longer imports from src/ -- remove the entry`);
-  }
+test('THE REAL EXEMPTION MAP IS WELL-FORMED', () => {
+  assert.deepEqual(exemptionFindings(NOT_AN_ENTRY_POINT, new Set(importersOfSrc())), []);
 });
