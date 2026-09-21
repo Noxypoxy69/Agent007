@@ -100,6 +100,36 @@ export function isClaimable(job, { now, leaseMs = CLAIM_LEASE_MS } = {}) {
     ? job.claimed_at
     : null;
   if (since === null) return true;
+
+  /*
+   * ═══ THE CLOCK MUST BE A NUMBER, AND THIS THROWS RATHER THAN GUESSING ═══
+   *
+   * Blind audit H-1, and it was mine. `scripts/audit-daemon.mjs:1073` passed
+   * `new Date().toISOString()`. A string minus a number is NaN, every
+   * `NaN > leaseMs` is false, so EVERY claim with a well-formed
+   * `claimed_at` read as un-expired however long its lease had lapsed --
+   * and the supervised loop computed `queueDepth` from exactly that. With
+   * only expired claims left it saw depth 0, reported
+   * "no claimable jobs. This is the good ending: the queue is drained",
+   * and exited 0 over a backlog it exists to recover.
+   *
+   * `proposeAudit` has thrown a TypeError on this since it was written,
+   * and test/auditDispatch.test.mjs carries a PASSING test called
+   * "A STRING `now` IS REFUSED, because it would make every lease
+   * immortal". The mechanism was known, written down and covered -- and
+   * `isClaimable` is exported separately with no such guard, so the one
+   * call site that bypassed `proposeAudit` walked straight into it.
+   *
+   * Fixing only the call site would leave the next one free to repeat it
+   * (rule 8: fix the matcher, not the spelling). Refusing here is also
+   * the fail-safe direction: a loud throw beats a silent "nothing is
+   * claimable", which is indistinguishable from real success.
+   */
+  if (typeof now !== 'number' || !Number.isFinite(now)) {
+    throw new TypeError('isClaimable needs `now` as epoch milliseconds, got '
+      + `${typeof now} ${JSON.stringify(now)}. A non-number makes (now - claimed_at) NaN, `
+      + 'so every lease reads as un-expired and a recoverable backlog reports as empty');
+  }
   return (now - since) > leaseMs;
 }
 

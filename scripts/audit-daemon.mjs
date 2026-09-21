@@ -1069,8 +1069,14 @@ for (;;) {
    */
   let queueDepth = 0;
   try {
-    const now = new Date().toISOString();
-    queueDepth = readQueue(REPO).rows.filter((r) => isClaimable(r, { now })).length;
+    /*
+     * EPOCH MILLISECONDS, because `isClaimable` does arithmetic on it.
+     * This passed `new Date().toISOString()` -- blind audit H-1 -- and a
+     * string minus a number is NaN, so every expired claim read as live
+     * and `queueDepth` excluded the whole recoverable backlog. Line 237
+     * of this same file had it right the whole time.
+     */
+    queueDepth = readQueue(REPO).rows.filter((r) => isClaimable(r, { now: Date.now() })).length;
   } catch (e) {
     /*
      * AN UNREADABLE QUEUE IS NOT AN EMPTY ONE, but it is also not a number

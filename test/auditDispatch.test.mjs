@@ -209,6 +209,44 @@ test('A STRING `now` IS REFUSED, because it would make every lease immortal', ()
     /isLive/, 'a missing liveness predicate was defaulted instead of refused');
 });
 
+test('isClaimable REFUSES A NON-NUMERIC CLOCK, or every lease is immortal (H-1)', () => {
+  /*
+   * `proposeAudit` has always thrown on a string `now`, and the test two
+   * below this one -- "A STRING `now` IS REFUSED, because it would make
+   * every lease immortal" -- has always passed. `isClaimable` is exported
+   * separately with no such guard, and the one call site that bypasses
+   * `proposeAudit` passed `new Date().toISOString()`.
+   *
+   * A string minus a number is NaN, every `NaN > leaseMs` is false, so
+   * every claim with a well-formed `claimed_at` read as un-expired for
+   * ever. The supervised loop computed queueDepth from that, saw 0, and
+   * reported "the queue is drained" over a backlog it exists to recover.
+   *
+   * The mechanism was known, documented and covered at one entry point
+   * and not the other. Generated from the shapes a caller could plausibly
+   * hold -- an ISO string is the one that actually happened.
+   */
+  const claimed = job({ state: JOB.CLAIMED, claimed_at: T0 });
+
+  for (const bad of [new Date(T0).toISOString(), '1700000000000', null, undefined, NaN, {}, []]) {
+    assert.throws(
+      () => isClaimable(claimed, { now: bad }),
+      /epoch milliseconds/,
+      `now=${JSON.stringify(bad)} was accepted; every lease is immortal under it`,
+    );
+  }
+
+  /* THE POSITIVE (rule 5): a real clock still decides both ways, so the
+   * throw above is a guard and not an off switch. */
+  assert.equal(isClaimable(claimed, { now: T0 + 1 }), false);
+  assert.equal(isClaimable(claimed, { now: T0 + CLAIM_LEASE_MS + 1 }), true);
+
+  /* AND THE BAD CLOCK IS NOT REACHED for rows that never had a claim --
+   * those short-circuit above, and must keep working. */
+  assert.equal(isClaimable(job(), { now: 'nonsense' }), true,
+    'a PENDING row started throwing; the guard was placed too early');
+});
+
 test('isClaimable: PENDING yes, live claim no, expired yes, terminal never', () => {
   assert.equal(isClaimable(job(), { now: T0 }), true);
   assert.equal(isClaimable(job({ state: JOB.CLAIMED, claimed_at: T0 }), { now: T0 + 1 }), false);
