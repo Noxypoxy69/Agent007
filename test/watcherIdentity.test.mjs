@@ -217,3 +217,44 @@ test('MALFORMED ROWS DO NOT THROW AND DO NOT RESOLVE', () => {
   assert.equal(resolveAgentId({ registrations: 'not an array' }).agentId, null);
   assert.equal(resolveAgentId().agentId, null, 'called with no arguments at all');
 });
+
+test('A ROW THAT DECLINES TO SAY WHERE IT IS FROM IS NOT ADMITTED', () => {
+  /*
+   * THE SHAPE THE HOSTILE LIST ABOVE COULD NOT REACH, and the reason it could
+   * not: every entry in `junk` is rejected by the agent_id check, so the loop
+   * proved nothing about the location filters. Rule 7 and rule 8 -- hostile
+   * inputs drawn from what already failed bound nothing, and the one malformed
+   * row that RESOLVED was the one nobody wrote down.
+   *
+   * This is not a hypothetical row. bin/agentbridge.mjs writes
+   * `machine_id: cfg?.machineId ?? null` and loadConfig() returns null when
+   * ~/.agentbridge/config.json is missing or unreadable, so a real
+   * register-session on an uninitialised machine produces it.
+   */
+  const at = (over) => [{ agent_id: 'code-z', session_id: 'mine', repo_id: 'R', worktree_id: 'W', machine_id: MACHINE, ...over }];
+  const ask = (rows) => resolveAgentId({ env: {}, sessionId: 'mine', registrations: rows, repoId: 'R', worktreeId: 'W', machineId: MACHINE });
+
+  // THE POSITIVE CONTROL FIRST (rule 5): the complete row resolves, so every
+  // refusal below is about the field removed and not about something else.
+  assert.equal(ask(at({})).agentId, 'code-z', 'the complete row did not resolve, so this test proves nothing');
+
+  for (const field of ['machine_id', 'worktree_id', 'repo_id']) {
+    for (const [label, value] of [['absent', undefined], ['null', null], ['empty', ''], ['blank', '   '], ['a number', 42]]) {
+      const row = at({ [field]: value });
+      if (value === undefined) delete row[0][field];
+      assert.equal(ask(row).agentId, null,
+        `a row with ${field} ${label} was admitted, so it is unfiltered on that field`);
+    }
+  }
+
+  /*
+   * AND THE OTHER HALF STAYS TRUE: not knowing OUR value is a reason not to
+   * filter, never a reason to refuse. readMachineId() returns null when this
+   * machine's config cannot be read, and that must not take out sessions that
+   * have done nothing wrong.
+   */
+  const blind = resolveAgentId({
+    env: {}, sessionId: 'mine', registrations: at({}), repoId: 'R', worktreeId: 'W', machineId: null,
+  });
+  assert.equal(blind.agentId, 'code-z', 'a null machineId on OUR side must not refuse a fully-stated row');
+});

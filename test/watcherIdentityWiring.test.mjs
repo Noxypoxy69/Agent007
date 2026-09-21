@@ -186,8 +186,23 @@ const pidIfAny = (home) => {
   try { return JSON.parse(fs.readFileSync(pidPath(home), 'utf8')).pid; } catch { return null; }
 };
 
+/**
+ * Kill whatever is actually running, then remove the fixture home.
+ *
+ * THE FALLBACK IS THE WHOLE POINT, and the first version of this fix only got
+ * half of it. `pidIfAny` was threaded into the three REFUSAL tests, where a
+ * watcher starts only if the test fails. It was not threaded into the four
+ * POSITIVE tests, where a watcher has certainly started and the caller's `pid`
+ * is read AFTER the assertions -- so any assertion failure there left `pid`
+ * null, killed nothing, and then deleted the fixture home out from under a live
+ * detached supervisor. Strictly worse than the case that was fixed.
+ *
+ * Doing it here rather than at seven call sites means a new test cannot
+ * reintroduce it by forgetting.
+ */
 function cleanup(home, pid) {
-  if (pid && alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+  const target = pid ?? pidIfAny(home);
+  if (target && alive(target)) { try { process.kill(target, 'SIGKILL'); } catch { /* already gone */ } }
   fs.rmSync(home, { recursive: true, force: true });
 }
 
@@ -335,6 +350,39 @@ test('A ROW FROM ANOTHER MACHINE DOES NOT LEND AN IDENTITY THROUGH THE WIRE', ()
     pid = JSON.parse(fs.readFileSync(pidPath(h2), 'utf8')).pid;
   } finally {
     cleanup(h2, pid);
+  }
+});
+
+test('THE WORKTREE ARGUMENT IS PLUMBED, not merely present in the resolver', () => {
+  /*
+   * THE HALF THIS FILE WAS MISSING, and it is the half it exists for.
+   *
+   * The tests above prove `env`, `sessionId` and `machineId` reach the resolver.
+   * Nothing proved `repoId` or `worktreeId` did: every row in every other test
+   * uses this worktree's own value, so blinding the argument at the call site --
+   * `repoId: null, worktreeId: null` in bridge-session-poll.mjs -- left all six
+   * green while the worktree isolation the module advertises was gone at the
+   * wire. The unit test catches the filter being deleted from src/; only this
+   * catches the argument being blinded on the way in. Rule 17, one layer in.
+   *
+   * DIFFERENCED, so a refusal here cannot be something else refusing: the only
+   * change between the two halves is which worktree the row names.
+   */
+  const { home, tokenFile } = fixtureHome([row({ worktree_id: 'some-other-worktree', repo_id: 'some-other-repo' })]);
+  try {
+    const msg = message(run(baseEnv(home, tokenFile)));
+    assert.match(msg, /NOT POLLING/, `a row from another worktree started a watcher: ${msg}`);
+    assert.equal(fs.existsSync(pidPath(home)), false);
+  } finally {
+    cleanup(home, null);
+  }
+
+  const { home: h2, tokenFile: t2 } = fixtureHome([row()]);
+  try {
+    assert.match(message(run(baseEnv(h2, t2))), /is polling/,
+      'the same row naming THIS worktree did not resolve, so the refusal above proves nothing');
+  } finally {
+    cleanup(h2, null);
   }
 });
 

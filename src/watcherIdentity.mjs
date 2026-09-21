@@ -177,13 +177,43 @@ export function resolveAgentId({
    * but another machine's id is the cross-machine case, and it is more
    * suspicious than an ordinary mismatch rather than less.
    */
+  /**
+   * A ROW THAT DOES NOT STATE WHERE IT IS FROM IS NOT A ROW WE MAY SPEAK FOR.
+   *
+   * THE BUG THIS REPLACES, which was a presence-guard on the field being
+   * compared -- `str(r.machine_id) !== null && str(r.machine_id) !== machineId`.
+   * A row whose `machine_id` was absent, null, empty or a non-string skipped the
+   * machine check entirely and was admitted FROM ANY MACHINE. Same for worktree
+   * and repo. The module's own safety argument -- "a row from ANOTHER MACHINE
+   * never resolves" -- was false for exactly the rows that decline to say.
+   *
+   * AND A SHIPPED WRITER PRODUCES THAT ROW. `bin/agentbridge.mjs` ends
+   * register-session with `row.machine_id = cfgForMachine?.machineId ?? null`,
+   * and loadConfig() returns null whenever ~/.agentbridge/config.json is absent
+   * OR unreadable. So a machine that never ran `agentbridge init`, or one read
+   * landing mid-rewrite, writes a permanently machine-unfiltered row. The
+   * fixtures never built that shape, which is why twelve green tests missed it:
+   * the hostile list was drawn from inputs that already failed (rule 7/8/9).
+   *
+   * NULL ON OUR SIDE STILL MEANS "DO NOT FILTER", and that half was right. If
+   * this machine cannot read its own id we genuinely cannot compare, and
+   * refusing every row would take out sessions that have done nothing wrong.
+   * The asymmetry is deliberate: not knowing OUR value is a reason not to
+   * filter; a row not stating ITS value is a reason not to trust the row.
+   *
+   * `src/liveRegistry.mjs` already drops a row missing its session_id for the
+   * same reason, in the same words: not a worker with an unknown session, a row
+   * this registry cannot vouch for.
+   */
+  const vouches = (ourValue, rowValue) => ourValue === null || str(rowValue) === ourValue;
+
   const ours = rows.filter((r) => {
     if (!r || typeof r !== 'object') return false;
     const agent = str(r.agent_id);
     if (!agent || !SAFE_ID.test(agent)) return false;
-    if (machineId !== null && str(r.machine_id) !== null && str(r.machine_id) !== machineId) return false;
-    if (worktreeId !== null && str(r.worktree_id) !== null && str(r.worktree_id) !== worktreeId) return false;
-    if (repoId !== null && str(r.repo_id) !== null && str(r.repo_id) !== repoId) return false;
+    if (!vouches(machineId, r.machine_id)) return false;
+    if (!vouches(worktreeId, r.worktree_id)) return false;
+    if (!vouches(repoId, r.repo_id)) return false;
     return true;
   });
 
