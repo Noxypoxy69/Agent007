@@ -118,6 +118,22 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
    * cost something.
    */
   'src/auditloop.mjs',
+  /*
+   * THE FOURTEENTH, AND THE GATE CAUGHT THIS ONE TOO. `src/daemonArgs.mjs`
+   * was extracted from the daemon minutes earlier and the closure went red
+   * on it immediately, because `scripts/audit-daemon.mjs` is a registered
+   * control and now imports it.
+   *
+   * REGISTERED rather than exempted: it parses `--max-ticks`, which is the
+   * spending bound, and `--by`, which is the identity the daemon claims
+   * work AS -- the input `claimJob`'s author-cannot-audit check compares
+   * against. Both are authority surface, and a trailing-flag bug in either
+   * has already been a live finding.
+   *
+   * Second time the list has grown from a test failing rather than from
+   * somebody remembering. That is now the normal way it grows.
+   */
+  'src/daemonargs.mjs',
 ]);
 
 /**
