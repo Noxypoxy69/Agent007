@@ -185,7 +185,16 @@ if (failing.length) {
    * The clone is kept under --keep for the full transcript; this is the
    * first screen, which is what actually gets read.
    */
-  const reasons = [...text.matchAll(/^\s*(?:AssertionError[^\n]*|Error[^\n]*):?\s*\n?\s*([^\n]{12,300})/gm)]
+  /*
+   * THE FIRST VERSION OF THIS PRINTED LINE FRAGMENTS -- "was allowed",
+   * "ictly equal:" -- because `AssertionError[^\n]*` ate the message
+   * greedily and the capture landed on the NEXT line. Watched failing on
+   * a real run before it was believed, which is the only reason it is not
+   * still doing that. The error CLASS is bounded to the token, the
+   * bracketed code is skipped without crossing the colon, and the message
+   * is whatever follows on that same line.
+   */
+  const reasons = [...text.matchAll(/^\s*(?:AssertionError|TypeError|RangeError|SyntaxError|Error)\b[^:\n]*:[ \t]*([^\n]{5,300})/gm)]
     .map((m) => m[1].trim())
     .filter((r) => !/^[+\-]/.test(r));
   if (reasons.length) {
