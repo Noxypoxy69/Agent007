@@ -80,14 +80,30 @@ function check(name, actual, expected, detail) {
   return { name, ok: true, why: `resolved ${actual}, matches manifest` };
 }
 
-export function run(pkgDir) {
+export async function run(pkgDir) {
   const manifestPath = path.join(pkgDir, 'MANIFEST.json');
   if (!existsSync(manifestPath)) {
     console.error(`migration-verify: no MANIFEST.json under ${pkgDir}`);
     process.exit(2);
   }
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  const expect = (rel) => manifest.items.find((i) => i.source_relative_to_agentbridge_home === rel)?.records ?? null;
+
+  /**
+   * THE MANIFEST SAYS WHICH COUNT TO COMPARE AGAINST, AND IT MATTERS.
+   *
+   * An append-only ledger holds one line per state transition; its reader folds
+   * them by id and returns the latest of each. Comparing a reader's output to
+   * the LINE count makes a healthy store look catastrophically short. The
+   * packager records both and names the right one in
+   * `compare_reader_output_against`.
+   */
+  const expect = (rel) => {
+    const item = manifest.items.find((i) => i.source_relative_to_agentbridge_home === rel);
+    if (!item) return null;
+    return item.compare_reader_output_against === 'distinct_ids'
+      ? item.distinct_ids ?? null
+      : item.records ?? null;
+  };
 
   /*
    * THE KEY COMPARISON FIRST, because everything about the two keyed stores
@@ -99,12 +115,25 @@ export function run(pkgDir) {
 
   const results = [];
 
-  // ── the audit queue, through the reader the daemon uses ────────────────
+  /*
+   * ── the audit queue, through the reader the daemon uses ────────────────
+   *
+   * `readQueue` returns `{ rows, malformed, file }`, NOT an array -- I wrote
+   * `Array.isArray(queue)` first and the control run on the source machine
+   * reported the store unreadable when it was fine. `malformed` is surfaced
+   * because the reader counts bad lines rather than dropping them, and a
+   * ledger that arrives with lines it cannot parse is a damaged migration even
+   * when the total happens to match.
+   */
   let queue = null;
-  try { queue = readQueue(REPO); } catch (e) { queue = null; var queueErr = e?.message; }
+  let queueErr;
+  try { queue = readQueue(REPO); } catch (e) { queueErr = e?.message; }
   const expectedAudits = srcKeys.map((k) => expect(`audits/${k}.jsonl`)).find((n) => n != null) ?? null;
-  results.push(check('audit queue', Array.isArray(queue) ? queue.length : null, expectedAudits,
-    queueErr ?? 'readQueue did not return an array'));
+  results.push(check('audit queue', Array.isArray(queue?.rows) ? queue.rows.length : null, expectedAudits,
+    queueErr ?? 'readQueue returned no rows array'));
+  if (queue?.malformed) {
+    results.push({ name: 'audit ledger integrity', ok: false, why: `${queue.malformed} line(s) did not parse` });
+  }
 
   // ── findings, via the same key derivation the writer uses ──────────────
   const findingsPath = repoStorePath(REPO, 'findings', '.jsonl');
@@ -123,9 +152,20 @@ export function run(pkgDir) {
     ['token measurements', readMeasurements, 'tokenMeasurements.json'],
     ['escalations', readEscalations, 'escalations.json'],
   ]) {
+    /*
+     * AWAITED. These readers are ASYNC, and without the await every one of
+     * them hands back a Promise that `Array.isArray` rejects -- so all four
+     * reported "did not resolve" against stores that were perfectly readable.
+     *
+     * That is the same defect I fixed in src/watcherIdentity.mjs hours earlier,
+     * where an un-awaited store read made every session refuse. It cost one
+     * control run to find here because the control was run at all: this script
+     * was pointed at the SOURCE machine first, where every store is known good,
+     * so a FAIL could only be the script.
+     */
     let rows = null;
     let err;
-    try { rows = read(); } catch (e) { err = e?.message; }
+    try { rows = await read(); } catch (e) { err = e?.message; }
     results.push(check(name, Array.isArray(rows) ? rows.length : null, expect(rel),
       err ?? 'the reader did not return an array'));
   }
@@ -163,5 +203,5 @@ if (invokedDirectly(process.argv[1], import.meta.url)) {
     console.error('usage: node scripts/migration-verify.mjs --package <dir>');
     process.exit(2);
   }
-  process.exit(run(path.resolve(pkg)));
+  process.exit(await run(path.resolve(pkg)));
 }

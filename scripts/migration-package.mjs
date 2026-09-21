@@ -196,13 +196,42 @@ for (const f of present) {
   }
 
   const text = bytes.toString('utf8');
+  const lines = f.rel.endsWith('.jsonl')
+    ? text.split('\n').filter((l) => l.trim())
+    : null;
+
+  /*
+   * TWO COUNTS FOR AN APPEND-ONLY LEDGER, AND THEY ARE NOT THE SAME NUMBER.
+   *
+   * `audits/<key>.jsonl` holds one line per STATE TRANSITION, so a single job
+   * contributes many. `readQueue` folds them by `audit_id` and returns the
+   * latest of each, which is what every consumer means by "the queue". Compare
+   * a reader's output against the line count and a healthy store looks
+   * catastrophically short.
+   *
+   * I made exactly that mistake reading this file earlier -- counted 850 rows
+   * in an append-only log and reported it as 850 jobs -- so both numbers are
+   * recorded and the verifier is told which one to use.
+   */
+  const distinct = lines
+    ? (() => {
+        const ids = new Set();
+        for (const l of lines) {
+          try { const r = JSON.parse(l); if (typeof r?.audit_id === 'string') ids.add(r.audit_id); } catch { /* malformed */ }
+        }
+        return ids.size ? ids.size : null;
+      })()
+    : null;
+
   rows.push({
     source_relative_to_agentbridge_home: f.rel,
     destination_relative_to_package: `state/${f.rel}`,
     bytes: statSync(f.src).size,
-    records: f.rel.endsWith('.jsonl')
-      ? text.split('\n').filter((l) => l.trim()).length
+    records: lines
+      ? lines.length
       : (() => { try { const p = JSON.parse(text); return Array.isArray(p) ? p.length : null; } catch { return null; } })(),
+    distinct_ids: distinct,
+    compare_reader_output_against: distinct != null ? 'distinct_ids' : 'records',
     sha256: srcHash,
     authority: Boolean(f.authority),
     why: f.why,
