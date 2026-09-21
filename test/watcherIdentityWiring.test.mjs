@@ -133,9 +133,39 @@ const run = (env, payload = { session_id: UUID }) => spawnSync(
   { cwd: REPO, env, input: JSON.stringify(payload), encoding: 'utf8', timeout: 90_000, windowsHide: true },
 );
 
+/**
+ * The LAST thing the hook said -- its verdict.
+ *
+ * Same helper test/bridgeSessionPoll.test.mjs uses, and it is correct for a
+ * verdict because the polling-or-refusing line is always last.
+ */
 const message = (r) => {
   try { return JSON.parse(String(r.stdout).trim().split('\n').pop()).systemMessage; } catch { return String(r.stdout); }
 };
+
+/**
+ * EVERYTHING the hook said, and the distinction cost this file a red run.
+ *
+ * `say()` writes ONE JSON OBJECT PER LINE, and sessionStart calls it more than
+ * once: the resolution announcement, then the dark-watcher alarm, then the
+ * verdict. Asserting the announcement against the last line failed while the
+ * announcement was sitting two lines above it -- an assertion on a proxy for
+ * "what was said" (rule 4), in my own gate, on the first run.
+ *
+ * So anything about what the operator was TOLD reads every line. Only the
+ * verdict reads the last one.
+ *
+ * WHAT THIS DOES NOT ESTABLISH, and it is a separate open question rather than
+ * something this file quietly settles: whether the hook CONSUMER renders a
+ * second `{"systemMessage":...}` line at all. These assertions prove the bytes
+ * leave the process, which is the half a test here can measure. The pattern
+ * predates this work -- the darkWatchers alarm on line 901 does the same thing
+ * -- so it is not a regression, but "emitted" is not "seen" and nothing should
+ * be read as claiming it is.
+ */
+const allMessages = (r) => String(r.stdout).trim().split('\n')
+  .map((line) => { try { return JSON.parse(line).systemMessage ?? ''; } catch { return line; } })
+  .join('\n');
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const pidPath = (home) => path.join(home, 'polls', `${SESSION}.json`);
@@ -197,9 +227,14 @@ test('THE WIRING SAYS WHICH RUNG ANSWERED, so a resolved id is not read as a dec
   const { home, tokenFile } = fixtureHome([row()]);
   let pid = null;
   try {
-    const msg = message(run(baseEnv(home, tokenFile)));
-    assert.match(msg, /AGENTBRIDGE_AGENT_ID is not set; resolved this session as wire-agent/, msg);
-    assert.match(msg, /this-session/, `the source rung was not named: ${msg}`);
+    const r = run(baseEnv(home, tokenFile));
+    const said = allMessages(r);
+    // THE POSITIVE FIRST (rule 5): an announcement asserted against a hook that
+    // refused would pass for the wrong reason on any refusal that mentions the
+    // variable, and this file has three such refusals.
+    assert.match(message(r), /is polling/, `the hook refused, so the announcement proves nothing: ${said}`);
+    assert.match(said, /AGENTBRIDGE_AGENT_ID is not set; resolved this session as wire-agent/, said);
+    assert.match(said, /this-session/, `the source rung was not named: ${said}`);
     try { pid = JSON.parse(fs.readFileSync(pidPath(home), 'utf8')).pid; } catch { /* refused */ }
   } finally {
     cleanup(home, pid);
@@ -215,12 +250,14 @@ test('THE DECLARED VARIABLE STILL WINS THROUGH THE WIRING, and says nothing abou
   const { home, tokenFile } = fixtureHome([row()]);
   let pid = null;
   try {
-    const msg = message(run(baseEnv(home, tokenFile, { AGENTBRIDGE_AGENT_ID: 'declared-agent' })));
-    assert.match(msg, /is polling/, msg);
+    const r = run(baseEnv(home, tokenFile, { AGENTBRIDGE_AGENT_ID: 'declared-agent' }));
+    assert.match(message(r), /is polling/, allMessages(r));
     const rec = JSON.parse(fs.readFileSync(pidPath(home), 'utf8'));
     pid = rec.pid;
     assert.equal(rec.agentId, 'declared-agent', 'the store overrode an explicitly declared id');
-    assert.doesNotMatch(msg, /resolved this session as/,
+    // EVERY line, not the last: the announcement is emitted before the verdict,
+    // so checking the verdict alone would pass with the announcement present.
+    assert.doesNotMatch(allMessages(r), /resolved this session as/,
       'a declared id must not be announced as a resolution');
   } finally {
     cleanup(home, pid);
