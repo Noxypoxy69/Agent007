@@ -1064,7 +1064,17 @@ for (;;) {
 
   if (decision.action === LOOP_ACTION.WAIT) {
     say(`[audit-daemon] ${decision.why}`);
-    await new Promise((r) => { setTimeout(r, decision.waitMs).unref?.(); });
+    /*
+     * NOT `.unref()`. An unref'd timer does not hold the event loop open,
+     * so node exited DURING THE BACKOFF -- "Detected unsettled top-level
+     * await" -- and the supervisor vanished mid-wait having reported that
+     * it was waiting. That is precisely the silence this loop's stop
+     * reasons exist to prevent, arriving in the loop itself.
+     *
+     * `unref` is right for a timer that must not keep a process alive.
+     * Here the timer IS the process's reason to be alive.
+     */
+    await new Promise((r) => { setTimeout(r, decision.waitMs); });
     continue;
   }
 
@@ -1074,6 +1084,7 @@ for (;;) {
   consecutiveNoProgress = placed ? 0 : consecutiveNoProgress + 1;
 
   if (placed) {
-    await new Promise((r) => { setTimeout(r, INTERVAL_MS).unref?.(); });
+    /* Same reason as the backoff above: this timer must hold the loop open. */
+    await new Promise((r) => { setTimeout(r, INTERVAL_MS); });
   }
 }
