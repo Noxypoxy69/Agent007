@@ -207,13 +207,39 @@ export function nextAction(state = {}, opts = {}) {
    * as the limits did.
    */
   if (noProgress >= o.starvedLimit && depth > 0) {
+    /*
+     * THE REMEDY MUST NOT BE GUESSED. Blind audit M-E.
+     *
+     * This named two causes -- a live claim on every seat, or the
+     * candidate being the daemon's own work -- and told the operator to
+     * register a seat or wait for leases. `queueDepth` is computed with
+     * `isClaimable`, which admits any PENDING row, while `proposeAudit`
+     * additionally refuses rows for REVIEW_EXHAUSTED and AUTHOR_UNKNOWN.
+     * A queue of only those is depth > 0 for ever and neither remedy
+     * touches it: no new seat and no lapsing lease clears an exhausted
+     * counter or an unresolvable author. The loop would then exit 1 on
+     * every invocation, permanently, while advising a fix that cannot
+     * work.
+     *
+     * The caller already has the real reasons -- `proposeAudit` returns
+     * them per job -- so they are passed in and printed instead of
+     * guessed. When they are absent the message says the causes are
+     * CANDIDATES rather than asserting them.
+     */
+    const reasons = Array.isArray(s.unplacedReasons)
+      ? [...new Set(s.unplacedReasons.filter((r) => typeof r === 'string' && r.trim()))]
+      : [];
     return {
       action: LOOP_ACTION.STOP,
       code: LOOP_STOP.STARVED,
       why: `${noProgress} consecutive cycles placed nothing while ${depth} job(s) were `
-        + 'claimable. THE QUEUE IS NOT EMPTY: every seat is holding a live claim, or '
-        + 'every candidate is this daemon\'s own work. Register another seat, or wait '
-        + 'for the leases to lapse',
+        + `claimable. THE QUEUE IS NOT EMPTY. ${reasons.length > 0
+          ? `The dispatcher refused them for: ${reasons.join(', ')}. `
+            + 'Note that a seat or a lapsing lease only helps the seat-related ones'
+          : 'No reason was reported, so the cause is UNKNOWN rather than assumed. '
+            + 'Common ones are a live claim on every seat, a candidate that is this '
+            + "daemon's own work, an exhausted review counter, or an author that "
+            + 'could not be established -- and the last two are not fixed by waiting'}`,
     };
   }
 

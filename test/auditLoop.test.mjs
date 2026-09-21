@@ -80,6 +80,33 @@ test('STARVED IS NOT EMPTY -- different code, and it names the backlog', () => {
   assert.notEqual(r.code, LOOP_STOP.EMPTY, 'a starved queue was reported as drained');
   assert.match(r.why, /115/, 'the stop reason does not say how much work was left behind');
   assert.match(r.why, /NOT EMPTY/);
+
+  /*
+   * AND IT DOES NOT GUESS A REMEDY (M-E). The old message asserted two
+   * causes and recommended registering a seat or waiting for leases --
+   * neither of which touches REVIEW_EXHAUSTED or AUTHOR_UNKNOWN, so a
+   * queue of only those would stop for ever while advising a fix that
+   * cannot work.
+   */
+  assert.doesNotMatch(r.why, /^.*Register another seat, or wait/,
+    'the stop message still prescribes a remedy without knowing the cause');
+  assert.match(r.why, /UNKNOWN rather than assumed/,
+    'with no reasons reported, the message must say the cause is unknown');
+
+  /* Given the real reasons, it PRINTS them instead. */
+  const told = nextAction(
+    {
+      ticksUsed: 1,
+      consecutiveNoProgress: 5,
+      queueDepth: 115,
+      unplacedReasons: ['review_exhausted', 'author_unknown'],
+    },
+    { starvedLimit: 5 },
+  );
+  assert.match(told.why, /review_exhausted/);
+  assert.match(told.why, /author_unknown/);
+  assert.match(told.why, /only helps the seat-related ones/,
+    'it lists the reasons but still implies waiting will fix them');
 });
 
 test('BACKOFF IS EXPONENTIAL AND CAPPED, and it is watched at both ends', () => {

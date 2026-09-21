@@ -54,7 +54,39 @@ export function flagValue(argv, name, dflt = null) {
       why: `${name} was given with no value. Refusing to guess it.`,
     };
   }
-  return { ok: true, value: list[i + 1] };
+
+  /*
+   * ═══ AND THE NEXT FLAG IS NOT A VALUE EITHER ═══
+   *
+   * Blind audit M-A, and it is the trailing-flag defect surviving one
+   * spelling over. This guarded only `i + 1 >= length`, so a flag
+   * FOLLOWED BY ANOTHER FLAG returned that flag as the value.
+   *
+   * `posIntArg` happened to catch it, because `/^\d+$/` rejects
+   * `--launch` -- so the numeric flags looked covered and `--by` was not.
+   * And `--by` is the identity the daemon claims work AS:
+   *
+   *     node scripts/audit-daemon.mjs --supervise --launch --by --once
+   *
+   * gives `BY = '--once'`, which matches no commit trailer, so
+   * `proposeAudit`'s author-cannot-audit exclusion cannot fire -- while
+   * `has('--once')` and `has('--launch')` still read argv independently,
+   * so the run proceeds in launch mode. Fail-open on rule 20's core
+   * property, from a plausible typing order.
+   *
+   * Guarding in the shared helper rather than in the numeric parser is
+   * the same correction M-3 already made once, one spelling short.
+   */
+  const value = list[i + 1];
+  if (typeof value === 'string' && /^--?[A-Za-z]/.test(value)) {
+    return {
+      ok: false,
+      code: ARG_ERROR,
+      why: `${name} was followed by ${JSON.stringify(value)}, which is another flag rather `
+        + 'than a value. Refusing to guess it.',
+    };
+  }
+  return { ok: true, value };
 }
 
 /**

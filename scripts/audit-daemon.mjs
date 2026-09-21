@@ -148,6 +148,33 @@ const MAX_TICKS = posInt('--max-ticks', LOOP_DEFAULTS.maxTicks);
  */
 const DEADLINE_SECONDS = posInt('--deadline', null);
 const DEADLINE_MS = DEADLINE_SECONDS === null ? undefined : DEADLINE_SECONDS * 1000;
+
+/*
+ * ═══ A LOOP FLAG WITHOUT --supervise IS REFUSED, NOT IGNORED ═══
+ *
+ * Blind audit M-D. `MAX_TICKS`, `INTERVAL_MS` and `DEADLINE_MS` are read
+ * at startup and consulted ONLY inside the supervised branch. So
+ *
+ *     node scripts/audit-daemon.mjs --launch --max-ticks 0
+ *
+ * parses the flag, silently discards it, runs a full tick and SPAWNS A
+ * PAID REVIEWER -- while `--max-ticks 0` is pinned elsewhere as "a real
+ * dry run: it reports what it would do and launches nothing".
+ *
+ * That is the one place in this range where a spend bound an operator
+ * typed is thrown away without a word, which is the same class as
+ * `--max-ticks` silently defaulting. Refused, matching how `--interval 0`
+ * is handled: an operator who names a bound gets it or gets told why not.
+ */
+if (!SUPERVISE) {
+  for (const n of ['--max-ticks', '--interval', '--deadline']) {
+    if (has(n)) {
+      say(`[audit-daemon] ${n} only applies to --supervise, and without it the value is `
+        + 'ignored -- including a spend bound. Refusing rather than discarding it.');
+      process.exit(2);
+    }
+  }
+}
 const { allocateWorkspace, releaseWorkspace } = await import('../src/auditWorkspace.mjs');
 const { measureReviewed, attributionHolds, ATTRIBUTION } = await import('../src/auditAttribution.mjs');
 
@@ -280,7 +307,20 @@ function nextJob() {
      * looks like an idle daemon while a control sits unreviewed.
      */
     for (const u of plan.unassigned.slice(0, 3)) say(`[audit-daemon] ${u.audit_id}: ${u.why}`);
-    return { rows, job: null, pendingCount: claimable.length };
+    /*
+     * THE CODES GO BACK TO THE CALLER, not just to stderr. The supervised
+     * loop's STARVED message used to GUESS the cause and recommend a
+     * remedy -- register a seat, wait for leases -- that does not touch
+     * REVIEW_EXHAUSTED or AUTHOR_UNKNOWN. Blind audit M-E. The dispatcher
+     * knows the real reason per job, so it is carried rather than
+     * reconstructed.
+     */
+    return {
+      rows,
+      job: null,
+      pendingCount: claimable.length,
+      unplacedReasons: [...new Set(plan.unassigned.map((u) => u.code).filter(Boolean))],
+    };
   }
 
   const job = jobs.find((j) => j.audit_id === picked.audit_id) ?? null;
@@ -413,8 +453,16 @@ function brief(job, dir, nonce) {
   ].join('\n');
 }
 
+/*
+ * The dispatcher's reasons from the most recent tick, so the supervised
+ * loop's STARVED message can PRINT them rather than guess a remedy that
+ * may not apply. Blind audit M-E.
+ */
+let lastUnplacedReasons = [];
+
 async function tick() {
-  const { rows, job, pendingCount } = nextJob();
+  const { rows, job, pendingCount, unplacedReasons } = nextJob();
+  lastUnplacedReasons = unplacedReasons ?? [];
   if (!job) {
     /*
      * "EMPTY" AND "STARVED" ARE DIFFERENT, AND THIS SAID EMPTY FOR BOTH.
@@ -1094,7 +1142,26 @@ async function tick() {
  * real dry run: it reports what it would do and launches nothing.
  */
 if (!SUPERVISE) {
-  const did = await tick();
+  /*
+   * WRAPPED FOR THE SAME REASON THE SUPERVISED CALL IS. Blind audit M-C:
+   * the exit-3 guard went on the supervised `tick()` and not on this one
+   * -- which is the DEFAULT invocation, the one the usage line at the top
+   * of this file documents. A throw between the CLAIMED write and the
+   * brief write leaves a job claimed with no reviewer either way; only
+   * one path said so.
+   *
+   * Fixed at one call site and not its sibling, again, in the fix for a
+   * finding about exactly that.
+   */
+  let did = false;
+  try {
+    did = await tick();
+  } catch (e) {
+    say(`[audit-daemon] a tick threw (${e?.message ?? e}).`);
+    say('               If it threw after claiming, that job is CLAIMED with no reviewer '
+      + 'and recovers when its lease lapses.');
+    process.exit(3);
+  }
   if (!ONCE && did) say('[audit-daemon] --once not given, but this build consumes one job per invocation by design.');
   process.exit(0);
 }
@@ -1139,7 +1206,14 @@ for (;;) {
 
   const decision = nextAction(
     {
-      ticksUsed, consecutiveNoProgress, queueDepth, backoffServed, startedAt, now: Date.now(),
+      ticksUsed,
+      consecutiveNoProgress,
+      queueDepth,
+      backoffServed,
+      startedAt,
+      now: Date.now(),
+      /* Carried, not reconstructed -- see lastUnplacedReasons (M-E). */
+      unplacedReasons: lastUnplacedReasons,
     },
     {
       intervalMs: INTERVAL_MS,

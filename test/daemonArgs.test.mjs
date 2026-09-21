@@ -69,12 +69,46 @@ test('A MALFORMED NUMBER IS FATAL, not the default', () => {
   assert.deepEqual(posIntArg([], '--max-ticks', 5), { ok: true, value: 5 });
 });
 
-test('THE NEXT FLAG IS NOT A VALUE -- it fails the digit test, loudly', () => {
-  /* `--max-ticks --launch` was already caught before M-6, because the next
-   * token is not digits. Pinned so the M-3 rework cannot lose it. */
-  const r = posIntArg(['--max-ticks', '--launch'], '--max-ticks', 5);
-  assert.equal(r.ok, false);
-  assert.match(r.why, /--launch/);
+test('THE NEXT FLAG IS NOT A VALUE -- FOR EVERY FLAG, not just the numeric ones (M-A)', () => {
+  /*
+   * `--max-ticks --launch` was caught all along, but only because
+   * `/^\d+$/` rejects `--launch`. That made the numeric flags LOOK
+   * covered while `--by` -- which takes a free-form string -- had no
+   * equivalent check at all:
+   *
+   *     node scripts/audit-daemon.mjs --supervise --launch --by --once
+   *
+   * gave BY = '--once', which matches no commit trailer, so the
+   * author-cannot-audit exclusion could not fire, while `has('--once')`
+   * and `has('--launch')` still read argv independently so the run
+   * proceeded in launch mode. Fail-open on rule 20's core property from a
+   * typing order.
+   *
+   * Generated over every flag the daemon takes a value for (rule 7).
+   */
+  for (const name of ['--by', '--max-ticks', '--interval', '--deadline']) {
+    for (const next of ['--launch', '--once', '--supervise', '-v']) {
+      const r = flagValue([name, next], name, 'THE-DEFAULT');
+      assert.equal(r.ok, false, `${name} ${next} was accepted as a value`);
+      assert.match(r.why, /another flag/);
+    }
+  }
+
+  /* Still caught through the numeric path, which is where it was already
+   * covered -- the rework must not lose that. */
+  const n = posIntArg(['--max-ticks', '--launch'], '--max-ticks', 5);
+  assert.equal(n.ok, false);
+  assert.match(n.why, /--launch/);
+
+  /*
+   * THE POSITIVE (rule 5), and it is the one that stops this becoming an
+   * over-block: a value that merely STARTS with a dash is not a flag. A
+   * negative number and a lone dash must still pass through, or an
+   * operator with a legitimate value is refused.
+   */
+  assert.deepEqual(flagValue(['--by', '-'], '--by'), { ok: true, value: '-' });
+  assert.deepEqual(flagValue(['--by', '-5'], '--by'), { ok: true, value: '-5' });
+  assert.deepEqual(flagValue(['--by', 'sess-1'], '--by'), { ok: true, value: 'sess-1' });
 });
 
 test('AN UNREADABLE ATTEMPT COUNTER IS AT THE BOUND, NOT ZERO (L3)', () => {
