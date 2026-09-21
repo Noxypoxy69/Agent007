@@ -216,7 +216,22 @@ test('THE WIRING: audit-workspace actually consults this module', () => {
    * already pins a different property of this same file the same way, so the
    * technique was in hand too.
    */
-  const src = readFileSync(new URL('../scripts/audit-workspace.mjs', import.meta.url), 'utf8');
+  /*
+   * COMMENT-BLANKED BEFORE MATCHING (rule 13, three independent rediscoveries
+   * in this repo already). The raw source would let a mention of
+   * `readSuiteSummary` in a COMMENT satisfy this gate with the call deleted --
+   * and the comment thirty lines above the call site now discusses this module
+   * by name, so that is one word away rather than hypothetical. A blind auditor
+   * flagged the latency before it bit.
+   */
+  const raw = readFileSync(new URL('../scripts/audit-workspace.mjs', import.meta.url), 'utf8');
+  const src = raw
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+  // The blanking must not have eaten the file: a gate that greps an empty
+  // string passes nothing and fails everything, which is its own hollow shape.
+  assert.ok(src.includes('spawnSync'), 'comment-blanking removed live code; the gate is not reading source');
 
   assert.match(src, /readSuiteSummary/,
     'audit-workspace no longer consults the summary reader, so nothing above constrains what it prints');

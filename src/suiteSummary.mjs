@@ -14,22 +14,32 @@
  * `fail 0` on a red suite. And 2985 + 6 = 2991, one short of 2992 -- the
  * numbers did not even agree with each other, and nothing said so.
  *
- * ═══ WHY, AND IT IS A PROPERTY OF THIS REPOSITORY ═══
+ * ═══ WHAT IS ACTUALLY KNOWN, WHICH IS LESS THAN THIS USED TO SAY ═══
  *
  * The old reader took the LAST match of `^ℹ <label> (\d+)` across the
  * whole captured text, per label, independently. That is right for a run that
- * prints one summary. It is wrong here, because:
+ * prints one summary. The observed output proves there was more than one: the
+ * labels disagreed with each other (2985 pass + 6 skipped against 2992 tests),
+ * which can only happen if they came from different blocks.
  *
- *   1. Node prints its summary block and THEN a `failing tests:` section that
- *      reprints each failing test's captured output.
- *   2. Tests in this repository SPAWN CHILD PROCESSES -- the poll supervisor,
- *      the CLI, the guard. A child that runs its own tests prints its own
- *      `ℹ fail 0` block, which is captured as that test's output.
+ * WHERE THE SECOND BLOCK CAME FROM IS STILL UNKNOWN, and this header used to
+ * assert it confidently: a child `node --test` summary reprinted inside the
+ * `failing tests:` detail of `NO COMMAND PRINTS A RUNTIME ASSERTION`. That test
+ * spawns nothing at all --
  *
- * So a child's green summary, reprinted inside the parent's failure detail,
- * becomes the last `fail` line in the text and is read as the parent's result.
- * Each label is taken from a potentially DIFFERENT block, which is also how the
- * arithmetic stopped adding up.
+ *     grep -acn spawn test/probe.test.mjs   ->  0
+ *
+ * -- and its assertion payload is one stderr line truncated to 120 characters,
+ * structurally incapable of carrying a summary block.
+ *
+ * THE RETRACTION TOOK TWO GOES, WHICH IS THE PART WORTH KEEPING. The commit
+ * that retracted the story removed it from an inner comment and left it here,
+ * stated in the present tense as the module's reason for existing -- and the
+ * NEXT commit, whose entire subject was deleting the last copy of that story,
+ * claimed in its message that this file had already been cleaned. It had not.
+ * A blind auditor measured that. A retracted explanation left standing anywhere
+ * is the one the next reader will act on, and three successive wrong fixes came
+ * from acting on this one.
  *
  * ═══ WHY THIS IS WORSE THAN AN ORDINARY BUG ═══
  *
@@ -152,18 +162,56 @@ export function readSuiteSummary(text, status) {
    * output order, which is the part I kept getting wrong. The failing-test names
    * and the exit status still print either way, so a refusal is not a blackout.
    *
-   * Note the anchor: `^ℹ` at column zero. Node indents captured output
-   * beneath a failing test, so an indented block never parses as a summary in
-   * the first place. That may well be why no producer has been found.
+   * ONE MORE UNVERIFIED MECHANISM WENT IN HERE AND CAME STRAIGHT BACK OUT.
+   * This said: "Node indents captured output beneath a failing test, so an
+   * indented block never parses as a summary in the first place. That may well
+   * be why no producer has been found." I retracted one guess and wrote another
+   * in the same comment, without measuring either.
+   *
+   * A blind auditor measured it and the reachable half is the opposite. A
+   * PASSING test's stdout is printed at COLUMN ZERO:
+   *
+   *     node --test test/guardToolRoster.test.mjs
+   *     === GUARD TOOL ROSTER @ 61bbeb2 (83 rows) ===      <- flush left
+   *     ...
+   *     ✖ tests 10
+   *
+   * So column-zero injection is open through any passing test that prints a
+   * summary-shaped block, which is the reachable route rather than the failing
+   * one I was reasoning about. Whether node indents a FAILING test's captured
+   * stdout is still unmeasured -- no test fails at HEAD and the auditor could
+   * not author one.
+   *
+   * The refusal above does not depend on any of this, which is the whole reason
+   * it was chosen. Recorded so nobody rebuilds a boundary on the guess.
    */
   const complete = summaryBlocks(text).filter((b) => b.tests !== undefined && b.fail !== undefined);
 
   if (complete.length > 1) {
+    /*
+     * A REFUSAL MUST CARRY ITS EVIDENCE, because for a GREEN run it is the only
+     * thing the reader gets.
+     *
+     * The first version said "Read the exit status and the failing list below"
+     * and the caller's comment claimed "a refusal is not a blackout". Both
+     * wrong, and a blind auditor traced it: the failing list is built from `✖`
+     * names, so on a green run with two summaries there are none. The auditor
+     * would have seen exit 0, COUNTS UNRELIABLE, and nothing else -- while rule
+     * 3 forbids falling back to the exit code. That is a blackout, invented by
+     * the commit that added the refusal.
+     *
+     * So name the blocks. A reader who can see `tests 2992/fail 1` beside
+     * `tests 7/fail 0` can tell at a glance which is plausibly this run, which
+     * is exactly the judgement this module refuses to make on its behalf.
+     */
+    const shown = complete
+      .map((x) => `tests ${x.tests ?? '?'}/fail ${x.fail ?? '?'}`)
+      .join(' and ');
     return {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
-      why: `${complete.length} complete summaries are present in this output, so some of these `
-        + 'numbers belong to another run and nothing here can tell which. Refusing rather than '
-        + 'picking one. Read the exit status and the failing list below.',
+      why: `${complete.length} complete summaries are present in this output (${shown}), so some `
+        + 'of these numbers belong to another run and nothing here can tell which. Refusing '
+        + 'rather than picking one.',
     };
   }
 

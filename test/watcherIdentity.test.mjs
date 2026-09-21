@@ -251,6 +251,38 @@ test('AN UNVOUCHED ROW MAKES THE ANSWER MORE AMBIGUOUS, NEVER LESS', () => {
     'a row from another machine was counted as an occupant here');
 });
 
+test('A DUPLICATED ROW REFERENCE DOES NOT INVENT AN UNVOUCHED ROW', () => {
+  /*
+   * RULE 11: THE POINT WHERE THE MUTATION STOPS BEING A NO-OP.
+   *
+   * `unvouchedCount` was `present.length - vouched.size`, and `vouched` is a Set
+   * of row OBJECTS. Reverting to that subtraction leaves every existing fixture
+   * green -- a blind auditor checked all 20 `registrations:` sites and none
+   * aliases a row, and the production caller feeds `JSON.parse` output, which
+   * yields distinct objects. So the fix was committed as a no-op and nothing
+   * pinned it.
+   *
+   * A set size is not a count of the thing being counted. Here is the input
+   * where that matters: the SAME object twice. Subtraction gives 2 - 1 = 1 and
+   * invents an unvouched row, which blocks the sole-occupant rung and refuses a
+   * session that should resolve.
+   */
+  const q = { agent_id: 'code-q', session_id: 's1', repo_id: 'R', worktree_id: 'W', machine_id: MACHINE };
+  const r = resolveAgentId({
+    env: {}, sessionId: 'unseen', registrations: [q, q], repoId: 'R', worktreeId: 'W', machineId: MACHINE,
+  });
+  assert.equal(r.agentId, 'code-q',
+    'a duplicated reference to one vouched row was counted as an unvouched row, refusing a resolvable session');
+  assert.equal(r.source, SOURCE.SOLE_OCCUPANT);
+
+  // DIFFERENCED: two DISTINCT rows of identical content behave the same, so
+  // this is about object identity and not about the content being repeated.
+  const twin = { ...q };
+  assert.equal(resolveAgentId({
+    env: {}, sessionId: 'unseen', registrations: [q, twin], repoId: 'R', worktreeId: 'W', machineId: MACHINE,
+  }).agentId, 'code-q', 'two distinct rows of identical content did not resolve');
+});
+
 test('THE SAME FLIP ONE RUNG UP: an unvouched row naming this session does not resolve it', () => {
   /*
    * The audit named this twin and it is the sharper of the two, because rung 2

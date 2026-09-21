@@ -139,7 +139,21 @@ const suite = spawnSync(process.execPath,
     cwd: work,
     encoding: 'utf8',
     maxBuffer: 6.4e7,
-    env: { ...process.env, AGENTBRIDGE_HOME: home },
+    /*
+     * NO_COLOR, BECAUSE EVERY READER DOWNSTREAM IS ANCHORED AT COLUMN ZERO.
+     *
+     * This forwarded the parent environment wholesale. With FORCE_COLOR set
+     * anywhere up the chain, node's spec reporter wraps its summary lines in
+     * ANSI, `^ℹ` matches nothing, `summaryBlocks` returns [], and a fully
+     * green run is reported as "the suite did not finish reporting. This is NOT
+     * a green run" -- loud, confident and backwards. The `^✖ (.+?) \(` failing
+     * list breaks in the same call, so there would be nothing to read either.
+     *
+     * Rule 21: that is an accident of whoever's environment launched this,
+     * arriving as a claim about the code. One line removes the whole class,
+     * and nothing here wants colour.
+     */
+    env: { ...process.env, AGENTBRIDGE_HOME: home, NO_COLOR: '1', FORCE_COLOR: '0' },
   });
 
 const text = `${suite.stdout ?? ''}${suite.stderr ?? ''}`;
@@ -175,7 +189,14 @@ const text = `${suite.stdout ?? ''}${suite.stderr ?? ''}`;
  * summary, rather than choosing between them -- a choice needs a story about
  * where the other came from, and there isn't one. It also reconciles the parts
  * against the total and cross-checks both directions against the exit status.
- * The failing names below print either way, so a refusal is not a blackout.
+ *
+ * A REFUSAL NAMES THE COMPETING BLOCKS. This comment used to say "the failing
+ * names below print either way, so a refusal is not a blackout", which a blind
+ * auditor showed was false in the one case the refusal invented: on a GREEN run
+ * with two summaries there are no `✖` names, so the failing list is empty and
+ * the reader gets exit 0, COUNTS UNRELIABLE and nothing else -- while rule 3
+ * forbids falling back to the exit code. The refusal now carries
+ * `tests A/fail B and tests C/fail D` so there is something to judge from.
  */
 const { readSuiteSummary } = await import('../src/suiteSummary.mjs');
 const summary = readSuiteSummary(text, suite.status);
