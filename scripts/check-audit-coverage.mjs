@@ -17,6 +17,24 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { auditCoverage, formatCoverage, defaultAuditRange } from '../src/auditLedger.mjs';
+/*
+ * STATICALLY, SO THE WIRING IS VISIBLE TO WHATEVER READS THE MODULE GRAPH.
+ *
+ * I first imported this with `await import(...)` down in the reporting
+ * branch, and `test/noOrphanModules.test.mjs` went red: "test-only
+ * src/auditWindow.mjs -- a NEW module is reachable from nothing shipped".
+ * The gate was RIGHT and it is rule 17 in miniature. The module was wired,
+ * but by an import no static reader can see, so every tool that answers
+ * "is this reachable?" -- the orphan gate, the dead-export ratchet, a human
+ * grepping for callers -- would have said no. An unscannable import is a
+ * weaker claim of wiring than a scannable one, and this module exists
+ * BECAUSE the same logic was previously unreachable to the suite.
+ *
+ * There is no cost: auditWindow is pure, imports nothing, and runs no
+ * top-level code. `safeGit` below stays dynamic because it is genuinely
+ * optional -- the banner degrades to UNKNOWN without it.
+ */
+import { windowSpan, describeWindow } from '../src/auditWindow.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -131,7 +149,6 @@ if (asJson) {
    * M3 (rule 10) and M2 (the bare-rev branch was wrong and unwatched).
    * This file keeps only the printing.
    */
-  const { windowSpan, describeWindow } = await import('../src/auditWindow.mjs');
   let span = { behind: null, ahead: null, kind: 'unknown' };
   try {
     const { runGit } = await import('../src/safeGit.mjs');
