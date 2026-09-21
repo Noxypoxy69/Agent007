@@ -15,9 +15,27 @@
  * So the first test here is that exact package. It is not a hypothetical: it is
  * the auditor's counterexample, kept as a fixture, and it must never pass again.
  *
- * NOTHING HERE TOUCHES THE OPERATOR'S STORE. Every fixture is a mkdtemp
+ * NOTHING HERE WRITES TO THE OPERATOR'S STORE. Every fixture is a mkdtemp
  * directory; the packager's source is redirected with AGENTBRIDGE_HOME and the
  * verifier is only ever run against fixtures through its exported `run`.
+ *
+ * ═══ WHY THESE ASSERT ON ROWS AND NOT ON THE EXIT CODE ═══
+ *
+ * The first version of this file asserted `notEqual(code, 0)` four times, under
+ * a title promising that "the identical untampered one passes" and a comment
+ * explaining that the case was differenced. IT WAS NOT. The untampered half was
+ * never built and never run, so every one of those assertions was satisfiable by
+ * a verifier that rejects everything — the precise hollow gate the comment
+ * claimed to be avoiding, written into the test that exists to prevent it.
+ *
+ * It cannot be differenced on the exit code, and that is the reason it was not:
+ * phase 2 asks whether each file is installed in the LIVE store, and a fixture
+ * key is in nobody's live store, so a perfect fixture package still exits 1. The
+ * exit code cannot distinguish "tampered" from "not installed here".
+ *
+ * So the difference is taken where it actually exists — the phase-1 verdict and
+ * the row text — by capturing what `run` prints. Each negative below is paired
+ * with a near-identical positive that must NOT produce the same row.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,6 +70,42 @@ const item = (rel, body, extra = {}) => ({
   ...extra,
 });
 
+/**
+ * Run the verifier and keep every line it printed.
+ *
+ * `run` returns only an exit code, and the exit code conflates every phase —
+ * see the header. The rows are where the verdict actually lives, so a test that
+ * wants to say WHICH check fired has to read them.
+ *
+ * Restoring the console in `finally` matters: node's test reporter is the same
+ * console, so leaking the patch turns an unrelated later failure into silence.
+ */
+async function verify(dir) {
+  const { run } = await import('../scripts/migration-verify.mjs');
+  const lines = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (...a) => lines.push(a.map(String).join(' '));
+  console.error = (...a) => lines.push(a.map(String).join(' '));
+  try {
+    const code = await run(dir);
+    return { code, out: lines.join('\n') };
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+  }
+}
+
+/** Build a one-file package on disk and return its directory. */
+function packageWith(dir, items, keys, write) {
+  for (const [rel, body] of write) {
+    mkdirSync(path.dirname(path.join(dir, 'state', rel)), { recursive: true });
+    writeFileSync(path.join(dir, 'state', rel), body);
+  }
+  writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(manifestFor(items, keys)));
+  return dir;
+}
+
 test('THE COUNTEREXAMPLE: a manifest with no package behind it must FAIL', async () => {
   /*
    * The auditor's exact demonstration. Manifest only, no state/ directory,
@@ -63,32 +117,52 @@ test('THE COUNTEREXAMPLE: a manifest with no package behind it must FAIL', async
     const m = manifestFor([{ ...item('audits/aaaaaaaaaaaaaaaa.jsonl', body), sha256: '0'.repeat(64) }]);
     writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(m));
 
-    const { run } = await import('../scripts/migration-verify.mjs');
-    const code = await run(dir);
+    const { code, out } = await verify(dir);
     assert.notEqual(code, 0,
       'a package containing nothing but a manifest was accepted — this is the wipe-the-source-machine gate');
+    assert.match(out, /integrity FAILED/,
+      'the manifest-only package was rejected, but not by the integrity phase — so this proves nothing about whether the package was opened');
+    assert.match(out, /ABSENT from the package/,
+      'nothing said the claimed file was missing; the rejection came from somewhere else');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('A TAMPERED PAYLOAD FAILS, and the identical untampered one passes', async () => {
+test('A TAMPERED PAYLOAD FAILS INTEGRITY, and the identical untampered one does not', async () => {
   /*
-   * Differenced: the same package with the correct hash must reach a DIFFERENT
-   * outcome for phase 1, or "tampering is detected" would be satisfied by a
-   * verifier that rejects everything.
+   * DIFFERENCED FOR REAL THIS TIME. The two packages are byte-identical except
+   * for the payload, so a verifier that rejects everything fails the second
+   * assertion.
+   *
+   * The difference is the PHASE-1 verdict, not the exit code: both packages exit
+   * 1, because a fixture store key is installed nowhere and phase 2 says so.
+   * That is the verifier being right, and asserting the exit code here is what
+   * made the original version of this test hollow.
    */
-  const { run } = await import('../scripts/migration-verify.mjs');
   const body = '{"audit_id":"a"}\n';
+  const items = [item('audits/aaaaaaaaaaaaaaaa.jsonl', body)];
 
   const bad = mk();
+  const good = mk();
   try {
-    mkdirSync(path.join(bad, 'state', 'audits'), { recursive: true });
-    writeFileSync(path.join(bad, 'state/audits/aaaaaaaaaaaaaaaa.jsonl'), 'TAMPERED\n');
-    writeFileSync(path.join(bad, 'MANIFEST.json'),
-      JSON.stringify(manifestFor([item('audits/aaaaaaaaaaaaaaaa.jsonl', body)])));
-    assert.notEqual(await run(bad), 0, 'a payload whose bytes do not match its recorded hash was accepted');
-  } finally { rmSync(bad, { recursive: true, force: true }); }
+    packageWith(bad, items, undefined, [['audits/aaaaaaaaaaaaaaaa.jsonl', 'TAMPERED\n']]);
+    packageWith(good, items, undefined, [['audits/aaaaaaaaaaaaaaaa.jsonl', body]]);
+
+    const t = await verify(bad);
+    assert.notEqual(t.code, 0, 'a payload whose bytes do not match its recorded hash was accepted');
+    assert.match(t.out, /integrity FAILED/, 'the tampered payload did not fail the integrity phase');
+    assert.match(t.out, /does not match the manifest/, 'the tampered payload was not reported as a hash mismatch');
+
+    const g = await verify(good);
+    assert.match(g.out, /integrity OK/,
+      'the UNTAMPERED package also failed integrity — so "detects tampering" is satisfied here by rejecting everything, which is exactly the hollow gate this file is about');
+    assert.doesNotMatch(g.out, /does not match the manifest/,
+      'a correct payload was reported as a hash mismatch');
+  } finally {
+    rmSync(bad, { recursive: true, force: true });
+    rmSync(good, { recursive: true, force: true });
+  }
 });
 
 test('TWO FILES FOR ONE KEY IS REFUSED, never resolved by a rename', async () => {
@@ -98,24 +172,41 @@ test('TWO FILES FOR ONE KEY IS REFUSED, never resolved by a rename', async () =>
    * authority file with another, on a machine where the source may be gone.
    * This machine really does carry two findings files, so the case is live.
    *
-   * A tool cannot choose between them. The contract is refusal, and the
-   * assertion is that the word "rename" never appears as advice for this shape.
+   * A tool cannot choose between them. The contract is refusal.
+   *
+   * Differenced against the SAME package carrying one findings file, because
+   * every fixture here fails phase 2 anyway — so the claim has to be about the
+   * refusal row, not about the exit code. This is the shape that ships: the real
+   * package on this machine carries two findings files and is refused by it.
    */
-  const dir = mk();
+  const a = '{"finding_id":"x"}\n';
+  const b = '{"finding_id":"y"}\n';
+  const two = mk();
+  const one = mk();
   try {
-    const a = '{"finding_id":"x"}\n';
-    const b = '{"finding_id":"y"}\n';
-    mkdirSync(path.join(dir, 'state', 'findings'), { recursive: true });
-    writeFileSync(path.join(dir, 'state/findings/aaaaaaaaaaaaaaaa.jsonl'), a);
-    writeFileSync(path.join(dir, 'state/findings/bbbbbbbbbbbbbbbb.jsonl'), b);
-    writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(manifestFor(
+    packageWith(two,
       [item('findings/aaaaaaaaaaaaaaaa.jsonl', a), item('findings/bbbbbbbbbbbbbbbb.jsonl', b)],
       ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb'],
-    )));
+      [['findings/aaaaaaaaaaaaaaaa.jsonl', a], ['findings/bbbbbbbbbbbbbbbb.jsonl', b]]);
+    packageWith(one,
+      [item('findings/aaaaaaaaaaaaaaaa.jsonl', a)],
+      ['aaaaaaaaaaaaaaaa'],
+      [['findings/aaaaaaaaaaaaaaaa.jsonl', a]]);
 
-    const { run } = await import('../scripts/migration-verify.mjs');
-    assert.notEqual(await run(dir), 0, 'two files competing for one destination key were not refused');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+    const t = await verify(two);
+    assert.notEqual(t.code, 0, 'two files competing for one destination key were not refused');
+    assert.match(t.out, /only one can occupy the destination key/,
+      'the two-file package was rejected, but not by the ambiguity refusal');
+    assert.doesNotMatch(t.out, /renamed from/,
+      'a rename was advised for a key two files are competing for — following it destroys one of them');
+
+    const g = await verify(one);
+    assert.doesNotMatch(g.out, /only one can occupy the destination key/,
+      'a package with ONE findings file was also refused as ambiguous, so the refusal is unconditional and proves nothing');
+  } finally {
+    rmSync(two, { recursive: true, force: true });
+    rmSync(one, { recursive: true, force: true });
+  }
 });
 
 test('EVERY PACKAGED FILE IS ACCOUNTED FOR, not only the one at the destination key', async () => {
@@ -125,16 +216,26 @@ test('EVERY PACKAGED FILE IS ACCOUNTED FOR, not only the one at the destination 
    * Phase 1 now iterates the manifest, so the count of rows follows the
    * manifest rather than a fixed list of store names.
    */
+  const a = '{"finding_id":"x"}\n';
+  const b = '{"finding_id":"y"}\n';
   const dir = mk();
   try {
-    const a = '{"finding_id":"x"}\n';
-    mkdirSync(path.join(dir, 'state', 'findings'), { recursive: true });
-    // Present in the manifest, ABSENT from the package.
-    writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(manifestFor(
-      [item('findings/aaaaaaaaaaaaaaaa.jsonl', a)],
-    )));
-    const { run } = await import('../scripts/migration-verify.mjs');
-    assert.notEqual(await run(dir), 0, 'a manifest item missing from the package was not reported');
+    /*
+     * Two manifest items, only the FIRST written to disk. If coverage followed a
+     * fixed list of store names rather than the manifest, the second would go
+     * unmentioned — so the assertion names the missing file, not the count.
+     */
+    packageWith(dir,
+      [item('findings/aaaaaaaaaaaaaaaa.jsonl', a), item('findings/bbbbbbbbbbbbbbbb.jsonl', b)],
+      ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb'],
+      [['findings/aaaaaaaaaaaaaaaa.jsonl', a]]);
+
+    const { code, out } = await verify(dir);
+    assert.notEqual(code, 0, 'a manifest item missing from the package was not reported');
+    assert.match(out, /findings\/bbbbbbbbbbbbbbbb\.jsonl.*ABSENT from the package/,
+      'the second packaged file was claimed by the manifest, absent from the package, and checked by nothing');
+    assert.match(out, /OK +pkg findings\/aaaaaaaaaaaaaaaa\.jsonl/,
+      'the file that IS present was not reported as present, so the absence row above proves nothing');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
