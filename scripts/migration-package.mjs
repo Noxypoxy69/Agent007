@@ -144,7 +144,22 @@ function attach(pkgDir, bundlePath) {
     process.exit(7);
   }
 
-  const companions = [];
+  /*
+   * A RE-ATTACH USED TO DELETE THE BUNDLE ROW, SILENTLY. Blind audit MEDIUM-1.
+   *
+   * `companions` was rebuilt from `readdirSync(pkgDir)` and then ASSIGNED over
+   * the old array. The bundle is recorded as "BESIDE the package, not inside
+   * it", so a directory listing cannot see it -- and re-attaching is the
+   * documented workflow for revising the decision document. Measured: attach
+   * with a bundle, edit the decision doc, attach again without `--bundle`, and
+   * the bundle row is gone with no warning. The git history is the largest and
+   * least replaceable artifact of the whole migration.
+   *
+   * So companions recorded OUTSIDE the package are carried forward. A new
+   * `--bundle` replaces the bundle row; no `--bundle` keeps it.
+   */
+  const kept = (manifest.companions ?? []).filter((c) => c.location && !c.location.startsWith('inside'));
+  const companions = bundlePath ? kept.filter((c) => c.kind !== 'git bundle') : kept;
   for (const name of readdirSync(pkgDir)) {
     if (!name.endsWith('.md')) continue;
     /*
@@ -204,11 +219,32 @@ function attach(pkgDir, bundlePath) {
     });
   }
 
+  /*
+   * BOTH MANIFESTS ARE READ BEFORE EITHER IS WRITTEN. Blind audit MEDIUM-6:
+   * MANIFEST.json was written first and the MANIFEST.md read then threw ENOENT,
+   * leaving the JSON claiming `companions_attached_at` for an attach that never
+   * finished and two manifests disagreeing. The packager refuses that state
+   * elsewhere -- "a half-overwritten package is worse than no package" -- so it
+   * refuses it here too, before touching anything.
+   */
+  const mdPath = path.join(pkgDir, 'MANIFEST.md');
+  if (!existsSync(mdPath)) {
+    console.error(`migration-package: ${pkgDir} has a MANIFEST.json but no MANIFEST.md.`);
+    console.error('  Refusing to attach: writing one and not the other leaves the two disagreeing.');
+    process.exit(10);
+  }
+  const md = readFileSync(mdPath, 'utf8').replace(/\n## Companions[\s\S]*$/, '\n');
+
   manifest.companions = companions;
   manifest.companions_attached_at = new Date().toISOString();
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
-  const mdPath = path.join(pkgDir, 'MANIFEST.md');
+  /*
+   * THE BUNDLE PARAGRAPH WAS UNCONDITIONAL, so a package with no bundle recorded
+   * still told the operator to go and verify one (MEDIUM-2) -- a typed sentence
+   * in a document whose whole claim is that every line in it was measured.
+   */
+  const hasBundle = companions.some((c) => c.kind === 'git bundle');
   const extra = [
     '',
     '## Companions',
@@ -219,11 +255,15 @@ function attach(pkgDir, bundlePath) {
     '|---|---|---|---|',
     ...companions.map((c) => `| \`${c.name}\` | ${c.location} | ${c.bytes} | \`${c.sha256}\` |`),
     '',
-    'The bundle is git objects and must be checked with `git bundle verify`, not',
-    'by hash alone: a hash proves the bytes arrived, not that the objects resolve.',
-    '',
+    ...(hasBundle ? [
+      'The bundle is git objects and must be checked with `git bundle verify`, not',
+      'by hash alone: a hash proves the bytes arrived, not that the objects resolve.',
+      '',
+    ] : [
+      'No git bundle is recorded against this package.',
+      '',
+    ]),
   ].join('\n');
-  const md = readFileSync(mdPath, 'utf8').replace(/\n## Companions[\s\S]*$/, '\n');
   writeFileSync(mdPath, `${md.trimEnd()}\n${extra}`);
 
   console.log(`attached to : ${pkgDir}`);
@@ -328,39 +368,112 @@ function collect() {
  * `secretStore` and the machineId into the package, labelled authority history,
  * and a name-based check would wave it through because the NAME is `audits/...`.
  *
- * So every source is resolved with `realpathSync` and three things are demanded
- * of the target: it is a REGULAR FILE, it is inside AGENTBRIDGE_HOME, and its
- * basename is not on the never-carry list. Refuse on any of them.
+ * So every source is resolved and four things are demanded of the target: it is
+ * a REGULAR FILE, it is inside AGENTBRIDGE_HOME, no component of its path is on
+ * the never-carry list, and it is not the SAME FILE as anything on that list.
+ *
+ * ═══ THE NAME WAS THREE ATTACKS SHORT, AND THE REPO ALREADY KNEW ALL THREE ═══
+ *
+ * Blind audit HIGH-4. The previous version compared `parts[0]` and the basename
+ * to `NEVER` with an exact, case-sensitive `Array.includes`, against a path from
+ * NON-native `realpathSync`. Every other resolver in this repository uses
+ * `realpathSync.native` and carries a header saying why. So:
+ *
+ *   Config.json      case — Windows opens it, `includes` does not match it
+ *   CONFIG~1.JSO     8.3 — the non-native call does not expand short names,
+ *                    which is the entire subject of CLAUDE.md rule 21
+ *   a hard link      realpath CANNOT see through one, native or not: it
+ *                    resolves to the link's own path, which is a regular file
+ *                    inside HOME with an allowed name. `New-Item -ItemType
+ *                    HardLink` needs no elevation.
+ *   x/overrides/y    a middle component, checked by neither end
+ *
+ * The first two are fixed by asking the OS (`realpathSync.native`) and folding
+ * case, the third is why the check is not a name check at all any more, and the
+ * fourth by looking at every component instead of two.
+ *
+ * IDENTITY, NOT SPELLING. A hard link has no name that betrays it — what it has
+ * is the same `dev` + `ino` as its target. So the never-carry list is resolved
+ * to a set of file identities once, and every source is compared against that
+ * set. A name is something an attacker chooses; an inode is not.
+ *
+ * PURE, AND EXPORTED, BECAUSE THE ONLY TEST OF THIS NEVER CALLED IT. The audit
+ * proved that structurally: `assertNothingForbidden` had one call site and it
+ * was production, so replacing its body with `return` left all 3048 tests green.
+ * The test asserted `typeof … === 'function'` and that `path.relative` works.
+ * The reason given — that symlink creation needs a privilege — did not hold: the
+ * file list is an argument, so a fixture list can be passed straight in. That is
+ * what this split buys, and the exit stays in the caller where it belongs.
+ *
+ * @returns array of refusal sentences; empty means nothing forbidden
  */
-function assertNothingForbidden(files) {
-  const homeReal = realpathSync(HOME);
+export function forbiddenFindings(files, home, fs = { realpath: realpathSync.native, stat: statSync }) {
+  const out = [];
+  let homeReal;
+  try { homeReal = fs.realpath(home); } catch { return [`the AgentBridge home ${home} cannot be resolved`]; }
+
+  const fold = (s) => s.toLowerCase();
+  const neverFolded = new Set(NEVER.map(fold));
+
+  /*
+   * The identities of the never-carry entries that actually exist. A missing one
+   * contributes nothing -- it cannot be hard-linked to -- and must not become a
+   * refusal, or a store without a config file could never be packaged at all.
+   */
+  const forbiddenIds = new Map();
+  for (const name of NEVER) {
+    try {
+      const st = fs.stat(fs.realpath(path.join(homeReal, name)));
+      forbiddenIds.set(`${st.dev}:${st.ino}`, name);
+    } catch { /* not present: nothing to link to */ }
+  }
+
   for (const f of files) {
     if (f.missing) continue;
 
     let real;
-    try { real = realpathSync(f.src); } catch {
-      console.error(`migration-package: REFUSING -- ${f.rel} cannot be resolved (broken link?).`);
-      process.exit(3);
+    try { real = fs.realpath(f.src); } catch {
+      out.push(`${f.rel} cannot be resolved (broken link?)`);
+      continue;
     }
 
-    if (!statSync(real).isFile()) {
-      console.error(`migration-package: REFUSING -- ${f.rel} does not resolve to a regular file.`);
-      process.exit(3);
+    let st;
+    try { st = fs.stat(real); } catch {
+      out.push(`${f.rel} cannot be stat'd after resolving`);
+      continue;
     }
+    if (!st.isFile()) { out.push(`${f.rel} does not resolve to a regular file`); continue; }
 
     const rel = path.relative(homeReal, real);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      console.error(`migration-package: REFUSING -- ${f.rel} resolves OUTSIDE the AgentBridge home.`);
-      console.error('  A link out of the store is how a secret arrives labelled as history.');
-      process.exit(3);
+      out.push(`${f.rel} resolves OUTSIDE the AgentBridge home -- a link out of the store is how a secret arrives labelled as history`);
+      continue;
     }
 
     const parts = rel.split(path.sep);
-    if (NEVER.includes(parts[0]) || NEVER.includes(parts[parts.length - 1])) {
-      console.error(`migration-package: REFUSING -- ${f.rel} resolves to ${parts.join('/')}, which is never carried.`);
-      process.exit(3);
+    const hit = parts.find((p) => neverFolded.has(fold(p)));
+    if (hit) {
+      out.push(`${f.rel} resolves to ${parts.join('/')}, and "${hit}" is never carried`);
+      continue;
+    }
+
+    /*
+     * The one a name cannot catch. Identity is checked LAST so the message names
+     * the spelling when there is one, and falls back to this when there is not.
+     */
+    const id = forbiddenIds.get(`${st.dev}:${st.ino}`);
+    if (id) {
+      out.push(`${f.rel} is the SAME FILE as ${id} (a hard link -- same device and inode), which is never carried`);
     }
   }
+  return out;
+}
+
+function assertNothingForbidden(files) {
+  const findings = forbiddenFindings(files, HOME);
+  if (!findings.length) return;
+  for (const why of findings) console.error(`migration-package: REFUSING -- ${why}.`);
+  process.exit(3);
 }
 
 /**
@@ -402,10 +515,12 @@ export function storeKeyNote(rows) {
     return `${head}scripts/migration-verify.mjs computes the destination key and names the rename.`;
   }
   return `${head}This package carries more than one file under ${ambiguous.join(' and ')}, so `
-    + 'scripts/migration-verify.mjs will REFUSE to name a rename for it and will report installation as FAILED '
-    + 'until a person decides which file is this repository\'s store. That refusal is the tool working: only one '
-    + 'file can occupy the destination name, and renaming both destroys one. Integrity and resolution are reported '
-    + 'separately and still verify normally.';
+    + 'scripts/migration-verify.mjs will REFUSE to name a rename for it. Both the INSTALLATION and the RESOLUTION '
+    + 'row for that kind report FAILED, and they report it for the same reason: with two files competing for one '
+    + 'destination name, neither the location nor the record count can be attributed to a particular file. That '
+    + 'refusal is the tool working -- renaming both destroys one. INTEGRITY still verifies normally, and every '
+    + 'other store installs and resolves normally; the three phases are reported separately. Decide which file is '
+    + 'this repository\'s store, and the refusal clears.';
 }
 
 function build() {
@@ -528,6 +643,20 @@ const manifest = {
     authority_files: rows.filter((r) => r.authority).length,
   },
   excluded_by_policy: NEVER,
+  /*
+   * WHAT EXISTED AT SOURCE, recorded as a SECOND fact so that removing an item
+   * from `items` contradicts something.
+   *
+   * Blind audit HIGH-2(b): deleting the audit-queue and finding-registry items
+   * from a real manifest produced a full PASS and exit 0. Nothing asked whether
+   * the manifest was COMPLETE, because the manifest was the only description of
+   * what should be there -- a list cannot notice its own missing entry.
+   *
+   * This is derived from the same `present` list `items` is built from, so it
+   * adds no new claim at build time. What it adds is a disagreement AFTER build
+   * time: an items list edited or truncated later no longer matches it.
+   */
+  source_inventory: present.map((f) => f.rel).sort(),
   items: rows,
   notes: [
     'Contains NO credentials, NO DPAPI material, NO machineId, NO registrations, NO override grants.',

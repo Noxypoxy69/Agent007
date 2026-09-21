@@ -42,9 +42,12 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync,
+  statSync, linkSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const mk = () => mkdtempSync(path.join(tmpdir(), 'ab-migtest-'));
@@ -56,6 +59,7 @@ function manifestFor(items, keys = ['aaaaaaaaaaaaaaaa']) {
     manifest_version: 1,
     hash_algorithm: 'sha256',
     source_store_keys: keys,
+    source_inventory: items.map((i) => i.source_relative_to_agentbridge_home).sort(),
     items,
   };
 }
@@ -126,6 +130,118 @@ test('THE COUNTEREXAMPLE: a manifest with no package behind it must FAIL', async
       'nothing said the claimed file was missing; the rejection came from somewhere else');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('A MANIFEST CANNOT SEND THE VERIFIER OUT OF THE PACKAGE', async () => {
+  /*
+   * ═══ THE WIPE-AUTHORISING GATE READ ITS ADDRESS FROM ITS INPUT ═══
+   *
+   * Blind audit HIGH-1, reproduced by hand before this was written. Phase 1 did
+   * `path.join(pkgDir, item.destination_relative_to_package)` with nothing
+   * constraining that field. Point it at the live store with `..` and phase 1
+   * hashes the live file, phase 2 hashes the same live file, phase 3 reads the
+   * same live store, and all three agree — because they are one file that was
+   * never copied anywhere. Measured, on a directory containing only a manifest:
+   *
+   *     integrity OK · installation OK · 0 failure(s), 1 advisory
+   *     PACKAGE INTACT, INSTALLED, AND REACHABLE THROUGH ITS REAL READERS.
+   *
+   * THE COUNTEREXAMPLE TEST ABOVE DID NOT CATCH IT, and that is the lesson: its
+   * fixture used `state/` paths and hashes of 64 zeros, so it pinned the five
+   * strings the first probe happened to try rather than the matcher (rule 8).
+   *
+   * Differenced: the same package with the honest destination must NOT produce
+   * this refusal, or "traversal is refused" would be satisfied by refusing
+   * everything.
+   */
+  const body = '{"audit_id":"a"}\n';
+  const evil = mk();
+  const good = mk();
+  try {
+    // The payload really is absent from the package — that is the whole point.
+    const escape = { ...item('audits/aaaaaaaaaaaaaaaa.jsonl', body), destination_relative_to_package: '../../../../../../../../.agentbridge/audits/aaaaaaaaaaaaaaaa.jsonl' };
+    writeFileSync(path.join(evil, 'MANIFEST.json'), JSON.stringify(manifestFor([escape])));
+    const e = await verify(evil);
+    assert.notEqual(e.code, 0, 'a manifest pointing outside the package was followed');
+    assert.match(e.out, /Refusing to follow the manifest to another location/,
+      'the traversal was rejected by something other than the path check, so the path check is unproven');
+    assert.match(e.out, /integrity FAILED/);
+
+    packageWith(good, [item('audits/aaaaaaaaaaaaaaaa.jsonl', body)], undefined,
+      [['audits/aaaaaaaaaaaaaaaa.jsonl', body]]);
+    const g = await verify(good);
+    assert.doesNotMatch(g.out, /Refusing to follow the manifest/,
+      'an honest destination was refused as a traversal');
+    assert.match(g.out, /integrity OK/);
+  } finally {
+    rmSync(evil, { recursive: true, force: true });
+    rmSync(good, { recursive: true, force: true });
+  }
+});
+
+test('A TRUNCATED MANIFEST IS CAUGHT BY THE SOURCE INVENTORY', async () => {
+  /*
+   * Blind audit HIGH-2(b): deleting the audit-queue and finding-registry items
+   * from a real manifest produced a full PASS and exit 0. A list cannot notice
+   * its own missing entry, so the packager now records what it FOUND at source
+   * as a second fact and a truncated items list contradicts it.
+   *
+   * Differenced against the same manifest whose inventory agrees.
+   */
+  const a = '{"finding_id":"x"}\n';
+  const dir = mk();
+  try {
+    const m = manifestFor([item('findings/aaaaaaaaaaaaaaaa.jsonl', a)]);
+    m.source_inventory = ['findings/aaaaaaaaaaaaaaaa.jsonl', 'delegations.json'];  // one was dropped
+    mkdirSync(path.join(dir, 'state', 'findings'), { recursive: true });
+    writeFileSync(path.join(dir, 'state/findings/aaaaaaaaaaaaaaaa.jsonl'), a);
+    writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(m));
+
+    const t = await verify(dir);
+    assert.notEqual(t.code, 0, 'a manifest missing a file its own inventory records was accepted');
+    assert.match(t.out, /manifest completeness.*delegations\.json/s,
+      'the dropped file was not named');
+
+    // And the honest inventory must not trip it.
+    m.source_inventory = ['findings/aaaaaaaaaaaaaaaa.jsonl'];
+    writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(m));
+    const g = await verify(dir);
+    assert.match(g.out, /OK +manifest completeness/,
+      'a complete manifest was reported as truncated, so the refusal above proves nothing');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('A MANIFEST WITH NO USABLE COUNT FAILS RESOLUTION rather than advising', async () => {
+  /*
+   * Blind audit HIGH-2(a): `compare` returned an ADVISORY whenever the expected
+   * count was null, and advisories set no exit code. Renaming `records` to
+   * `record_count` in every item — what a manifest_version bump would do — made
+   * every resolution row a NOTE and still printed EVERY STORE RESOLVED, exit 0.
+   * Phase 3 ran and asserted nothing.
+   *
+   * Differenced against the identical manifest that keeps `records`.
+   */
+  const rows = JSON.stringify([{ id: 1 }, { id: 2 }]);
+  const withCount = mk();
+  const without = mk();
+  try {
+    for (const [dir, mangle] of [[withCount, false], [without, true]]) {
+      const it = item('delegations.json', rows);
+      if (mangle) { it.record_count = it.records; delete it.records; }
+      packageWith(dir, [it], [], [['delegations.json', rows]]);
+    }
+    const bad = await verify(without);
+    assert.match(bad.out, /FAIL +resolve delegations/,
+      'a carried store with no usable count was waved through as an advisory');
+    assert.match(bad.out, /NO usable count/);
+
+    const good = await verify(withCount);
+    assert.doesNotMatch(good.out, /FAIL +resolve delegations/,
+      'the store WITH a count also failed, so the refusal above is unconditional');
+  } finally {
+    rmSync(withCount, { recursive: true, force: true });
+    rmSync(without, { recursive: true, force: true });
   }
 });
 
@@ -239,34 +355,124 @@ test('EVERY PACKAGED FILE IS ACCOUNTED FOR, not only the one at the destination 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('THE PACKAGER REFUSES A LINK THAT ESCAPES THE STORE', async () => {
+test('THE CREDENTIAL GUARD IS ACTUALLY CALLED, with hostile inputs derived from its own list', async () => {
   /*
-   * The exclusion list compared NAMES, and `collect()` can only produce names
-   * from the include list — so the check was unreachable, and could not have
-   * caught the shape that matters anyway.
+   * ═══ THE ONLY TEST OF THE CREDENTIAL GUARD NEVER CALLED IT ═══
    *
-   * `readFileSync` follows links. A file named `audits/x.jsonl` whose target is
-   * `config.json` puts the DPAPI-sealed secret and the machineId into a package
-   * labelled authority history. The guard now resolves with realpath and
-   * demands a regular file inside the store.
+   * Blind audit HIGH-3, and it was a proof rather than an inference: the suite
+   * had exactly one reference to `assertNothingForbidden` and it was
+   * `typeof … === 'function'`, so replacing the function body with `return`
+   * left all 3048 tests green. The rest of the old test asserted that
+   * `path.relative(home, home + '/config.json')` ends in `config.json` — a
+   * tautology about `node:path` — and wrote a fixture nothing read.
    *
-   * Symlink creation needs a privilege this process may not hold, so the test
-   * asserts the PREDICATE rather than requiring the link: an entry resolving to
-   * a never-carry name must be refused.
+   * This is the one surface here that keeps the DPAPI-sealed secretStore, the
+   * machineId, the registrations and the override grants out of a portable
+   * archive, and it had zero executable coverage.
+   *
+   * The stated reason — symlink creation needs a privilege — did not hold: the
+   * file list is an ARGUMENT, so a fixture list goes straight in. The predicate
+   * is now `forbiddenFindings`, pure and exported, and this calls it.
+   *
+   * Rule 7: the hostile inputs are GENERATED from the real `NEVER` list, so
+   * adding an entry extends the coverage without anyone remembering to.
    */
-  const { assertNothingForbidden, NEVER } = await import('../scripts/migration-package.mjs');
-  assert.ok(NEVER.includes('config.json'), 'config.json is no longer on the never-carry list');
+  const { forbiddenFindings, NEVER } = await import('../scripts/migration-package.mjs');
 
   const home = mk();
   try {
+    // A benign carried file, so every refusal below is differenced against it.
+    mkdirSync(path.join(home, 'audits'), { recursive: true });
+    const benign = path.join(home, 'audits', 'aaaaaaaaaaaaaaaa.jsonl');
+    writeFileSync(benign, '{"audit_id":"a"}\n');
+    const okFile = { rel: 'audits/aaaaaaaaaaaaaaaa.jsonl', src: benign };
+
+    assert.deepEqual(forbiddenFindings([okFile], home), [],
+      'an ordinary carried file was refused, so every refusal below proves nothing');
+
+    /*
+     * EVERY never-carry entry, as a file, reached through an allowed-looking
+     * name. This is the symlink/hardlink shape with the link step removed: the
+     * guard resolves and compares, and what it must notice is the TARGET.
+     */
+    for (const name of NEVER) {
+      const target = path.join(home, name);
+      if (!existsSync(target)) writeFileSync(target, 'SECRET');
+      if (!statSync(target).isFile()) continue;
+      const findings = forbiddenFindings(
+        [{ rel: `audits/looks-innocent.jsonl`, src: target }], home,
+      );
+      assert.equal(findings.length, 1,
+        `a source resolving to ${name} was NOT refused — that is a credential leaving the machine in an archive labelled authority history`);
+      assert.match(findings[0], new RegExp(name.replace('.', '\\.')),
+        `the refusal for ${name} does not name it, so an operator cannot tell what was caught`);
+    }
+
+    // Case: Windows opens Config.json, an exact `includes` does not match it.
+    assert.equal(
+      forbiddenFindings([{ rel: 'audits/x.jsonl', src: path.join(home, 'CONFIG.JSON') }], home).length,
+      1,
+      'a case variant of config.json walked past the guard');
+
+    // A never-carry name as a MIDDLE component, checked by neither end before.
+    mkdirSync(path.join(home, 'nested', 'overrides'), { recursive: true });
+    const buried = path.join(home, 'nested', 'overrides', 'grant.json');
+    writeFileSync(buried, '{}');
+    assert.equal(forbiddenFindings([{ rel: 'audits/x.jsonl', src: buried }], home).length, 1,
+      'a never-carry directory in the middle of the path was not noticed');
+
+    // Outside the store entirely.
+    const outside = mk();
+    try {
+      const leak = path.join(outside, 'anything.json');
+      writeFileSync(leak, 'SECRET');
+      const out = forbiddenFindings([{ rel: 'audits/x.jsonl', src: leak }], home);
+      assert.equal(out.length, 1, 'a source outside the AgentBridge home was carried');
+      assert.match(out[0], /OUTSIDE/);
+    } finally { rmSync(outside, { recursive: true, force: true }); }
+
+    // A directory is not a regular file.
+    assert.match(
+      forbiddenFindings([{ rel: 'audits/x.jsonl', src: path.join(home, 'audits') }], home)[0] ?? '',
+      /regular file/);
+
+    // A `missing` entry is skipped rather than refused — the packager records it.
+    assert.deepEqual(forbiddenFindings([{ rel: 'gone.json', src: path.join(home, 'gone.json'), missing: true }], home), []);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('A HARD LINK TO A CREDENTIAL IS REFUSED BY IDENTITY, not by its name', async (t) => {
+  /*
+   * The shape no name check can see. `realpathSync` — native or not — cannot
+   * look through a hard link: it resolves to the LINK's own path, which is a
+   * regular file, inside the home, with a perfectly allowed name. Creating one
+   * needs no elevation on Windows.
+   *
+   * So the guard compares device+inode against the never-carry files. This test
+   * makes a real hard link; if the platform refuses to create one, it skips
+   * rather than passing quietly — a skip is visible, a silent pass is not.
+   */
+  const { forbiddenFindings } = await import('../scripts/migration-package.mjs');
+  const home = mk();
+  try {
     writeFileSync(path.join(home, 'config.json'), '{"secretStore":{"scheme":"dpapi-user"}}');
-    // A source that resolves to a forbidden basename must be refused. We cannot
-    // exit-test in-process, so assert the resolved-name predicate the guard uses.
-    const resolved = path.relative(home, path.join(home, 'config.json')).split(path.sep);
-    assert.ok(NEVER.includes(resolved[resolved.length - 1]),
-      'the guard would not recognise a link resolving to config.json');
-    assert.equal(typeof assertNothingForbidden, 'function',
-      'the exclusion guard is no longer exported and cannot be tested');
+    mkdirSync(path.join(home, 'audits'), { recursive: true });
+    const link = path.join(home, 'audits', 'bbbbbbbbbbbbbbbb.jsonl');
+    try {
+      linkSync(path.join(home, 'config.json'), link);
+    } catch (e) {
+      t.skip(`this platform would not create a hard link: ${e?.code ?? e?.message}`);
+      return;
+    }
+    // The premise, asserted rather than assumed: the link really is a separate
+    // name that resolves to itself, so a name check would wave it through.
+    assert.equal(realpathSync.native(link), realpathSync.native(link));
+    assert.ok(!realpathSync.native(link).toLowerCase().endsWith('config.json'),
+      'realpath saw through the hard link, so this fixture is not the case being tested');
+
+    const out = forbiddenFindings([{ rel: 'audits/bbbbbbbbbbbbbbbb.jsonl', src: link }], home);
+    assert.equal(out.length, 1, 'a hard link to config.json was packaged as authority history');
+    assert.match(out[0], /SAME FILE as config\.json/);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -295,6 +501,106 @@ test('THE MANIFEST DESCRIBES THE VERIFIER IT ACTUALLY SHIPS WITH', async () => {
     'a package carrying two files under one kind was told the verifier would name a rename — it will not, and following that advice destroys an authority file');
   assert.match(storeKeyNote(two), /findings\/ \(2 files\)/,
     'the note does not name the kind that is ambiguous, so the operator cannot tell which decision is theirs');
+});
+
+test('THE NOTE IS CHECKED AGAINST THE VERIFIER, not against a copy of the claim', async () => {
+  /*
+   * ═══ THE GATE ABOVE RECONSTRUCTS THE CLAIM INSTEAD OF READING IT ═══
+   *
+   * Hollow gate #2, found by blind audit (MEDIUM-3) in the commit whose whole
+   * subject was that the manifest had stopped describing a verifier it does not
+   * ship with. The replacement sentence was ALSO false: it said "integrity and
+   * resolution are reported separately and still verify normally", and for the
+   * ambiguous kind resolution does not verify at all — it was advisory, for
+   * exactly the same reason the installation row fails.
+   *
+   * The test above could never have seen that, because it is a regex over the
+   * note and never runs the verifier. So this one builds the shape the note
+   * describes, RUNS the verifier on it, and checks the rows agree with the
+   * sentence. Derive the claim from the artefact.
+   */
+  const { storeKeyNote } = await import('../scripts/migration-package.mjs');
+  const a = '{"finding_id":"x"}\n';
+  const b = '{"finding_id":"y"}\n';
+  const dir = mk();
+  try {
+    const items = [item('findings/aaaaaaaaaaaaaaaa.jsonl', a), item('findings/bbbbbbbbbbbbbbbb.jsonl', b)];
+    packageWith(dir, items, ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb'],
+      [['findings/aaaaaaaaaaaaaaaa.jsonl', a], ['findings/bbbbbbbbbbbbbbbb.jsonl', b]]);
+
+    const note = storeKeyNote(items);
+    const { out } = await verify(dir);
+
+    assert.match(note, /INSTALLATION and the RESOLUTION row for that kind report FAILED/,
+      'the note no longer states what the verifier does with this shape');
+    assert.match(out, /FAIL +install findings\//, 'the note claims installation FAILS here and it did not');
+    assert.match(out, /FAIL +resolve finding registry/,
+      'the note claims the resolution row FAILS here and it did not — that is the sentence being wrong again');
+
+    assert.match(note, /INTEGRITY still verifies normally/);
+    assert.match(out, /integrity OK/, 'the note claims integrity still verifies and it did not');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('THE PASS PATH EXISTS: a well-formed, installed package reaches exit 0', () => {
+  /*
+   * ═══ THE EXIT-0 PATH HAD NEVER BEEN WATCHED SUCCEEDING ═══
+   *
+   * Blind audit LOW-1, and it is the reason HIGH-1 and HIGH-2 were both
+   * reachable: this file held four `notEqual(code, 0)` and not one `equal`, and
+   * no assertion on any phase-3 row at all. Every test proved the gate could say
+   * no. Nothing proved it could say yes for the right reasons — so two ways of
+   * getting a WRONG yes sat there unnoticed.
+   *
+   * Rule 5: the negative needs the positive first. This is the positive, and it
+   * is what makes every refusal in this file mean something.
+   *
+   * It runs the verifier as a CHILD with AGENTBRIDGE_HOME pointed at a fixture,
+   * because the store root is a module constant read at import. Nothing here
+   * touches the operator's store — which is also why the keyed stores are left
+   * out: their destination key is a fact about the real repository path, and
+   * phase 3 reads them through consumers this fixture cannot redirect per-call.
+   */
+  const REPO = fileURLToPath(new URL('..', import.meta.url));
+  const rows = (n) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ id: i })));
+  const payloads = [
+    ['delegations.json', rows(3)],
+    ['leadWork.json', rows(2)],
+    ['tokenMeasurements.json', rows(5)],
+    ['escalations.json', rows(1)],
+  ];
+
+  const pkg = mk();
+  const home = mk();
+  try {
+    packageWith(pkg, payloads.map(([rel, body]) => item(rel, body)), [], payloads);
+    for (const [rel, body] of payloads) writeFileSync(path.join(home, rel), body);
+
+    const run = () => spawnSync(process.execPath,
+      ['scripts/migration-verify.mjs', '--package', pkg],
+      { cwd: REPO, encoding: 'utf8', env: { ...process.env, AGENTBRIDGE_HOME: home } });
+
+    const good = run();
+    assert.equal(good.status, 0,
+      `a correct, installed package did not pass. The gate can refuse but cannot accept:\n${good.stdout}${good.stderr}`);
+    assert.match(good.stdout, /PACKAGE INTACT, INSTALLED, AND REACHABLE/);
+    assert.match(good.stdout, /OK +resolve delegations +resolved 3, matches manifest/,
+      'phase 3 did not actually compare a count — an exit 0 with every resolution row advisory is the HIGH-2 shape');
+    assert.match(good.stdout, /OK +manifest completeness/);
+
+    /*
+     * Differenced at the far end (rule 4): change the INSTALLED bytes, not the
+     * package, so phase 1 still passes and only phase 2 moves. An exit code that
+     * never changes would mean the 0 above was not earned.
+     */
+    writeFileSync(path.join(home, 'leadWork.json'), rows(2).replace('0', '9'));
+    const drifted = run();
+    assert.notEqual(drifted.status, 0, 'the installed copy differed from the package and it still passed');
+    assert.match(drifted.stdout, /FAIL +install leadWork\.json/);
+  } finally {
+    rmSync(pkg, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('THE INCLUDE LIST CARRIES NOTHING FROM THE NEVER LIST', async () => {
