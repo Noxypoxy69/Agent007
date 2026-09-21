@@ -522,6 +522,25 @@ test('AN ALREADY-PREPARED JOB WAITS BEHIND ONE THAT IS NOT (H-1)', () => {
   assert.equal(without.proposals[0].audit_id, 'audit-prepared',
     'PREMISE FAILED: the prepared job does not outrank the other on age');
 
+  /*
+   * AND A REVIEWING CALLER IGNORES THE KEY ENTIRELY (M-5, second half).
+   *
+   * `byUrgency` serves both modes. Demoting `prepared_at` in a --launch
+   * run meant the daemon avoided exactly the jobs whose worktree and
+   * brief it had already set up, leaving those to accumulate while it
+   * prepared more. The key answers "do not prepare this twice" and says
+   * nothing about reviewing.
+   */
+  const launching = proposeAudit({
+    jobs: [prepared, untouched],
+    sessions: [seat('only-seat')],
+    now: T0,
+    isLive: allLive,
+    demotePrepared: false,
+  });
+  assert.equal(launching.proposals[0].audit_id, 'audit-prepared',
+    'a launching caller skipped the job whose workspace already exists');
+
   /* AND IT RANKS BELOW last_review: a failed review is stronger evidence of
    * trouble than a pending preparation, so it must not be reordered. */
   const reviewed = job({

@@ -143,7 +143,11 @@ export function isClaimable(job, { now, leaseMs = CLAIM_LEASE_MS } = {}) {
  * must propose the same pairing, or a "the dispatcher assigned it" claim is
  * unreproducible and nobody can debug it.
  */
-function byUrgency(a, b) {
+/**
+ * @param demotePrepared  true when the CALLER is preparing workspaces, so a
+ *   job it already prepared should wait behind one it has not.
+ */
+function byUrgency(a, b, demotePrepared = true) {
   /*
    * ESCAPED STILL COMES FIRST. Blind audit L5, and I had this inverted.
    *
@@ -189,8 +193,23 @@ function byUrgency(a, b) {
    * prepared once, then sorts behind the ones that are not. It is
    * deliberately below `last_review`, because a failed review is stronger
    * evidence of trouble than a pending preparation.
+   *
+   * ═══ AND ONLY WHEN THE CALLER IS PREPARING ═══
+   *
+   * Blind audit M-5, second half, and it was backwards. `byUrgency` serves
+   * BOTH modes, so a `--launch` run was demoting exactly the jobs whose
+   * worktree and brief already exist on disk -- the daemon avoiding the
+   * work it had already paid to set up, and leaving those worktrees to
+   * accumulate while it prepared more.
+   *
+   * The demotion answers "do not prepare this twice". It says nothing
+   * about reviewing, so a reviewing caller passes false and the key is
+   * skipped. The flag is the caller's knowledge, not this function's
+   * guess.
    */
-  const prepped = Number(Boolean(a?.prepared_at)) - Number(Boolean(b?.prepared_at));
+  const prepped = demotePrepared
+    ? Number(Boolean(a?.prepared_at)) - Number(Boolean(b?.prepared_at))
+    : 0;
   if (prepped !== 0) return prepped;
   const at = String(a?.first_seen_at ?? '');
   const bt = String(b?.first_seen_at ?? '');
@@ -213,6 +232,14 @@ function byUrgency(a, b) {
  */
 export function proposeAudit({
   jobs = [], sessions = [], now, isLive, leaseMs = CLAIM_LEASE_MS,
+  /*
+   * Does this caller PREPARE workspaces rather than review them? Only it
+   * knows, and the answer changes the ordering -- see byUrgency's
+   * `prepared_at` block. Defaults true because the daemon's default mode
+   * is prepare-only, so the safe default is the one that stops it
+   * preparing the same job twice.
+   */
+  demotePrepared = true,
 } = {}) {
   /*
    * A STRING `now` WOULD SILENTLY POISON EVERY LEASE COMPARISON. `'2026-..' -
@@ -255,7 +282,7 @@ export function proposeAudit({
 
   const claimable = arr(jobs)
     .filter((j) => j && str(j.audit_id) && isClaimable(j, { now, leaseMs }))
-    .sort(byUrgency);
+    .sort((a, b) => byUrgency(a, b, demotePrepared));
 
   const proposals = [];
   const unassigned = [];

@@ -240,7 +240,16 @@ function nextJob() {
    */
   const seat = { session_id: BY, agent_id: BY, capacity: 'idle' };
   const plan = proposeAudit({
-    jobs, sessions: [seat], now: Date.now(), isLive: () => true,
+    jobs,
+    sessions: [seat],
+    now: Date.now(),
+    isLive: () => true,
+    /*
+     * Only a PREPARING run should avoid a job it already prepared. A
+     * launching run wants those first if anything -- their worktree and
+     * brief are already on disk. Blind audit M-5, second half.
+     */
+    demotePrepared: !LAUNCH,
   });
 
   const claimable = jobs.filter((j) => isClaimable(j, { now: Date.now() }));
