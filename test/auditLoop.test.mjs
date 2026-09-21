@@ -83,7 +83,17 @@ test('STARVED IS NOT EMPTY -- different code, and it names the backlog', () => {
 });
 
 test('BACKOFF IS EXPONENTIAL AND CAPPED, and it is watched at both ends', () => {
-  const opts = { intervalMs: 1000, maxIntervalMs: 8000, starvedLimit: 99 };
+  /*
+   * `maxTicks` is raised alongside `starvedLimit` because the two are now
+   * RECONCILED -- starvedLimit is clamped to maxTicks - 1 so STARVED stays
+   * reachable at any budget (M-1). Without the raise, `starvedLimit: 99`
+   * silently becomes 4 and the curve stops being observable past that.
+   * Stating it here because a reader who changes one and not the other
+   * gets a confusing red.
+   */
+  const opts = {
+    intervalMs: 1000, maxIntervalMs: 8000, starvedLimit: 99, maxTicks: 1000,
+  };
 
   const one = nextAction({ queueDepth: 5, consecutiveNoProgress: 1 }, opts);
   assert.equal(one.action, LOOP_ACTION.WAIT);
@@ -139,10 +149,18 @@ test('A SERVED BACKOFF LEADS TO A TICK, not another backoff', () => {
     1000 * (2 ** below),
   );
 
-  /* And a served backoff still yields to the STOP conditions, or the loop
-   * would tick past its budget on the cycle after every wait. */
+  /*
+   * And a served backoff still yields to the STOP conditions, or the loop
+   * would tick past its budget on the cycle after every wait.
+   *
+   * `consecutiveNoProgress: 0` ISOLATES BUDGET. This passed `s` whole,
+   * carrying noProgress 2, and with `maxTicks: 3` the M-1 reconciliation
+   * clamps starvedLimit to 2 -- so STARVED fired first and the assertion
+   * named the wrong code. Both are correct stops; the test was pinning an
+   * interaction it did not mean to test.
+   */
   const capped = nextAction(
-    { ...s, backoffServed: true, ticksUsed: 9 },
+    { ...s, backoffServed: true, ticksUsed: 9, consecutiveNoProgress: 0 },
     { intervalMs: 1000, maxTicks: 3 },
   );
   assert.equal(capped.action, LOOP_ACTION.STOP);

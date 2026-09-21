@@ -142,13 +142,38 @@ export function nextAction(state = {}, opts = {}) {
      * could produce, disabled the deadline with no word. Same failure as
      * maxTicks, in the fix that claimed to close it.
      */
-    deadlineMs: raw.deadlineMs === undefined || raw.deadlineMs === null
-      ? undefined
-      : num(raw.deadlineMs, NaN),
+    deadlineMs: raw.deadlineMs,
   };
   const ticksUsed = num(s.ticksUsed, 0);
   const noProgress = num(s.consecutiveNoProgress, 0);
   const depth = num(s.queueDepth, 0);
+
+  /*
+   * A DEADLINE THAT WAS ASKED FOR AND CANNOT BE READ STOPS THE LOOP.
+   *
+   * Blind audit M-2, and my first attempt at it was not a fix. Routing the
+   * value through `num` normalised a bad one to NaN, which this check then
+   * ignored exactly as before -- silently running with no deadline, which
+   * is the failure. There is no safe default to fall back to the way
+   * `maxTicks` falls back to 5: the absence of a deadline IS a valid
+   * configuration, so "unreadable" and "not asked for" would look
+   * identical.
+   *
+   * So an unreadable deadline is treated as ALREADY EXPIRED. The operator
+   * asked for a bound, the bound cannot be evaluated, and running
+   * unbounded is the one outcome they did not ask for. `undefined` and
+   * `null` still mean "no deadline", which is the documented default.
+   */
+  if (o.deadlineMs !== undefined && o.deadlineMs !== null
+    && !(typeof o.deadlineMs === 'number' && Number.isFinite(o.deadlineMs) && o.deadlineMs >= 0)) {
+    return {
+      action: LOOP_ACTION.STOP,
+      code: LOOP_STOP.DEADLINE,
+      why: `deadlineMs is ${JSON.stringify(o.deadlineMs)}, which is not a duration in `
+        + 'milliseconds. A deadline that was asked for and cannot be read stops the loop: '
+        + 'running unbounded is the one outcome the caller did not ask for',
+    };
+  }
 
   /*
    * THE DEADLINE IS CHECKED FIRST, and against the clock rather than a
