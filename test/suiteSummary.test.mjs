@@ -30,19 +30,31 @@ const block = ({ tests, pass, fail = 0, skipped = 0, cancelled = 0, todo = 0 }) 
 /**
  * THE EXACT SHAPE THAT PRODUCED `fail 0` ON A RED RUN.
  *
- * A child process printed its own green summary; node captured that as the
- * failing test's output and reprinted it in the detail section. Note the
- * ORDER -- the embedded block comes after some text and before the parent's
- * own summary, so a per-label "last match" reads the child for `fail` and the
- * parent for `tests`, which is also why the arithmetic stopped reconciling.
+ * THE ORDER IS THE WHOLE FIXTURE, and I got it wrong on the first attempt --
+ * with the child block placed BEFORE the parent summary, all seven tests here
+ * passed against the ORIGINAL broken reader. A fixture that cannot construct
+ * the real case cannot fail for it (hollow gate 9), and I had node's own output
+ * in front of me at the time.
+ *
+ * Node prints its summary FIRST and the `failing tests:` detail AFTER it. A
+ * child process's own green summary is captured as that failing test's output
+ * and reprinted in the detail -- so the child's block is the LAST one in the
+ * text, and a per-label "last match" reads the child's `fail 0` as the suite's
+ * result while `tests` still comes from the parent. That mismatch is also
+ * exactly why the arithmetic stopped reconciling.
  */
 const RED_WITH_EMBEDDED_CHILD = [
   '\u2714 a test that passed (1.2ms)',
   '\u2716 NO COMMAND PRINTS A RUNTIME ASSERTION (100163.8315ms)',
-  '  AssertionError [ERR_ASSERTION]: the child said:',
+  block({ tests: 2992, pass: 2985, fail: 1, skipped: 6 }),
+  '',
+  '\u2716 failing tests:',
+  '',
+  'test at test\\probe.test.mjs:198:1',
+  '\u2716 NO COMMAND PRINTS A RUNTIME ASSERTION (100163.8315ms)',
+  '  AssertionError [ERR_ASSERTION]: the child process reported:',
   block({ tests: 7, pass: 7, fail: 0 }),
   '      at TestContext.<anonymous> (file:///C:/x/test/probe.test.mjs:198:12)',
-  block({ tests: 2992, pass: 2985, fail: 1, skipped: 6 }),
 ].join('\n');
 
 test('THE DEFECT: a child summary inside failure detail is not read as the suite result', () => {
