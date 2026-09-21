@@ -66,9 +66,35 @@ const norm = (p) => p.split(path.sep).join('/').replace(/^\.\//, '');
  * from the REAL lists (rule 7) so registering a new control extends this
  * check without anybody editing it.
  */
-function controlModules() {
-  const all = [...PROTECTED_PATHS, ...AUDIT_BEARING_EXTRAS].map(norm);
-  return all.filter((p) => /\.(mjs|js)$/i.test(p) && existsSync(path.join(ROOT, p)));
+/**
+ * The registered control modules, in the GRAPH's spelling.
+ *
+ * ═══ WHY NOT existsSync ═══
+ *
+ * This used to be `existsSync(path.join(ROOT, p))`, which is
+ * case-INSENSITIVE on NTFS and case-SENSITIVE on ext4. `AUDIT_BEARING_EXTRAS`
+ * stores entries lower-cased -- correctly, since `isAuditBearing` folds
+ * case -- so on Linux `existsSync('src/auditloop.mjs')` is FALSE and four
+ * controls were filtered out before the closure walk ever saw them:
+ * auditLoop, daemonArgs, auditWindow, invokedDirectly. The four newest, and
+ * the ones this gate exists to cover.
+ *
+ * CI runs ubuntu-latest, so that is the platform that matters, and it is
+ * the reader whose job is to check the gate who got the broken behaviour --
+ * rule 21 exactly, in the file I wrote to close a rule-21 bug.
+ *
+ * `graphKeyFor` already folds case and the graph's keys come from a real
+ * `readdirSync`, so resolving through it answers "does this file exist"
+ * and "what is it really called" in one step, identically on both
+ * platforms. A registered path the graph cannot find is reported by the
+ * fixture test below rather than silently skipped.
+ */
+function controlModules(graph) {
+  return [...PROTECTED_PATHS, ...AUDIT_BEARING_EXTRAS]
+    .map(norm)
+    .filter((p) => /\.(mjs|js)$/i.test(p))
+    .map((p) => graphKeyFor(graph, p))
+    .filter(Boolean);
 }
 
 /**
@@ -182,29 +208,33 @@ test('THE FIXTURE IS REAL: there are control modules and the graph sees them', (
    * iterating nothing -- which is precisely the hollow shape this file is
    * about.
    */
-  const controls = controlModules();
-  assert.ok(controls.length > 5,
-    `expected several control modules, found ${controls.length}`);
-
   /* `buildGraph` returns { graph, dynamicOnly, files }, and `graph` maps a
    * repo-relative path to an ARRAY of resolved edges. Asked of the module
    * rather than assumed -- my first version treated the return value itself
    * as the Map and this precondition caught it on the first run. */
   const { graph } = buildGraph(ROOT);
+  const controls = controlModules(graph);
+  assert.ok(controls.length > 5,
+    `expected several control modules, found ${controls.length}`);
 
   /*
-   * EVERY control module must be found, not "more than five of them".
+   * EVERY REGISTERED MODULE MUST RESOLVE, and this is where a dropped one
+   * is now REPORTED rather than silently skipped.
    *
-   * Blind audit M-3: this asserted `seen.length > 5`, which passed on the
-   * correctly-cased PROTECTED_PATHS entries while three registered
-   * controls were invisible to the walk. A precondition written to catch
-   * exactly this failure was too weak to catch it, which is worse than
-   * having none -- it reads as coverage.
+   * Blind audit M-3 asserted `seen.length > 5`, which passed on the
+   * correctly-cased entries while three controls were invisible. M-B then
+   * found the deeper half: the `existsSync` filter dropped the lower-cased
+   * entries BEFORE any of this ran, on any case-sensitive filesystem --
+   * which is what CI uses. So the count was right and the population was
+   * wrong, on the platform that matters.
    *
-   * Naming the missing ones rather than comparing counts, because a count
-   * mismatch sends the next reader to work out WHICH.
+   * Resolution now goes through the graph, so this compares the registered
+   * list against what was actually resolved and NAMES anything missing.
    */
-  const missingFromGraph = controls.filter((c) => graphKeyFor(graph, c) === null);
+  const registered = [...PROTECTED_PATHS, ...AUDIT_BEARING_EXTRAS]
+    .map(norm)
+    .filter((p) => /\.(mjs|js)$/i.test(p));
+  const missingFromGraph = registered.filter((p) => graphKeyFor(graph, p) === null);
   assert.deepEqual(missingFromGraph, [],
     'these registered controls are not in the module graph, so the closure below walks '
     + 'NONE of their imports and silently covers less than it claims');
@@ -221,7 +251,7 @@ test('EVERY MODULE A CONTROL IMPORTS IS ITSELF AUDIT-BEARING', () => {
    * just as much as one hop away.
    */
   const { graph } = buildGraph(ROOT);
-  const controls = controlModules();
+  const controls = controlModules(graph);
 
   const seenSet = new Set();
   const queue = [...controls];
@@ -287,7 +317,7 @@ test('the reached-but-not-a-control list may only SHRINK', () => {
    * they say.
    */
   const { graph } = buildGraph(ROOT);
-  const controls = controlModules();
+  const controls = controlModules(graph);
   const seenSet = new Set();
   const queue = [...controls];
   while (queue.length > 0) {
@@ -322,17 +352,34 @@ test('A LOWER-CASED REGISTRATION STILL REACHES THE GRAPH (M-3)', () => {
    * Derived from the REAL list (rule 7), so a future lower-cased entry is
    * covered without anybody remembering, and asserted against the actual
    * on-disk spelling rather than a literal (rule 21).
+   *
+   * ═══ AND NOT THROUGH existsSync, WHICH IS THE BUG ITSELF ═══
+   *
+   * Blind audit M-B. This filtered candidates with
+   * `existsSync(path.join(ROOT, p))`, which is case-INSENSITIVE on NTFS
+   * and case-SENSITIVE on ext4. On Linux every lower-cased entry was
+   * filtered out here, `differing` came back EMPTY, and the precondition
+   * below -- `differing.length > 0` -- FAILED.
+   *
+   * CI runs ubuntu-latest. So the test written to pin a rule-21 defect
+   * was itself encoding NTFS case-insensitivity, and it failed on the
+   * only platform that gates anything, in the direction that looks like
+   * the registration list is wrong.
+   *
+   * The graph is the existence check now: its keys come from a real
+   * `readdirSync`, so it answers the same question identically on both
+   * platforms.
    */
   const { graph } = buildGraph(ROOT);
 
-  const lowercased = AUDIT_BEARING_EXTRAS
+  const candidates = AUDIT_BEARING_EXTRAS
     .map(norm)
     .filter((p) => /\.(mjs|js)$/i.test(p))
-    .filter((p) => existsSync(path.join(ROOT, p)));
+    .filter((p) => graphKeyFor(graph, p) !== null);
 
   /* PRECONDITION (rule 6): there IS at least one entry whose registered
    * spelling differs from the graph's, or this test proves nothing. */
-  const differing = lowercased.filter((p) => !graph.has(p) && graphKeyFor(graph, p) !== null);
+  const differing = candidates.filter((p) => !graph.has(p));
   assert.ok(differing.length > 0,
     'no registered control is spelled differently from its graph key, so this test '
     + 'cannot exercise the case-fold. If EXTRAS stopped being lower-cased, delete it.');
