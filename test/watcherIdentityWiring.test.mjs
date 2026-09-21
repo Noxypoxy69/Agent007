@@ -170,6 +170,22 @@ const allMessages = (r) => String(r.stdout).trim().split('\n')
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const pidPath = (home) => path.join(home, 'polls', `${SESSION}.json`);
 
+/**
+ * The pid of whatever is running, INCLUDING when nothing should be.
+ *
+ * A refusal test asserts no watcher started, so the obvious cleanup is to pass
+ * no pid -- and that is exactly wrong. When such a test FAILS, a watcher did
+ * start, and passing null leaks a detached supervisor that outlives the run.
+ *
+ * MEASURED HERE. Blinding readMachineId() as a mutation turned the foreign-row
+ * test red, correctly, and left pid 14828 polling against a fixture home the
+ * finally block had just deleted. The cleanup was written for the case the test
+ * asserts rather than the case it exists to catch.
+ */
+const pidIfAny = (home) => {
+  try { return JSON.parse(fs.readFileSync(pidPath(home), 'utf8')).pid; } catch { return null; }
+};
+
 function cleanup(home, pid) {
   if (pid && alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
   fs.rmSync(home, { recursive: true, force: true });
@@ -289,7 +305,7 @@ test('AN AMBIGUOUS WORKTREE REFUSES THROUGH THE WIRE, AND NAMES THE CANDIDATES',
     assert.match(msg, /wire-agent/, `the refusal did not name the candidates: ${msg}`);
     assert.equal(fs.existsSync(pidPath(home)), false, 'an unresolved session started a watcher');
   } finally {
-    cleanup(home, null);
+    cleanup(home, pidIfAny(home));
   }
 });
 
@@ -307,7 +323,7 @@ test('A ROW FROM ANOTHER MACHINE DOES NOT LEND AN IDENTITY THROUGH THE WIRE', ()
     assert.match(msg, /NOT POLLING/, msg);
     assert.equal(fs.existsSync(pidPath(home)), false, 'a foreign row started a watcher');
   } finally {
-    cleanup(home, null);
+    cleanup(home, pidIfAny(home));
   }
 
   // THE DIFFERENCED CONTROL: the same row, this machine, resolves.
@@ -342,6 +358,6 @@ test('AN EMPTY STORE STILL REFUSES, AND STILL NAMES THE VARIABLE THAT FIXES IT',
       'an empty store was reported as an unreadable one');
     assert.equal(fs.existsSync(pidPath(home)), false);
   } finally {
-    cleanup(home, null);
+    cleanup(home, pidIfAny(home));
   }
 });
