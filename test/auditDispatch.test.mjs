@@ -450,7 +450,16 @@ test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
    * think of (rule 7), and each is a value JSON.parse can actually yield
    * from a queue file (rule 9).
    */
-  for (const bad of ['', 'three', {}, [], true, null, NaN, -1, Infinity]) {
+  /*
+   * `null` AND `undefined` ARE NOT IN THIS LIST, and that is deliberate.
+   * My first version put null here and the test went red, correctly: an
+   * absent field is what every row written before this counter existed
+   * looks like, and refusing those would stall the whole historical
+   * queue. Absent is a legitimate zero; a BLANK or malformed value is
+   * not, and `Number('')` being 0 is exactly the footgun that made the
+   * loose version dangerous.
+   */
+  for (const bad of ['', '  ', 'three', '1.5', '-1', {}, [], true, NaN, -1, 1.5, Infinity]) {
     const r = proposeAudit({
       jobs: [job({ review_attempts: bad })],
       sessions: [seat('reviewer-one')],
@@ -464,7 +473,7 @@ test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
 
   /* THE POSITIVE (rule 5): a readable count under the bound still runs,
    * including the two spellings a JSON round-trip really produces. */
-  for (const ok of [0, 1, '2', undefined]) {
+  for (const ok of [0, 1, '2', undefined, null]) {
     const r = proposeAudit({
       jobs: [job({ review_attempts: ok })],
       sessions: [seat('reviewer-one')],

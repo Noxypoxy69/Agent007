@@ -18,7 +18,6 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import * as childProcess from 'node:child_process';
 
 import { measureReviewed, attributionHolds, ATTRIBUTION } from '../src/auditAttribution.mjs';
 
@@ -132,47 +131,34 @@ test('AN ABSENT OR MALFORMED CLAIM IS NOT A MATCH', () => {
   }
 });
 
-test('attributionHolds DECIDES FROM ITS ARGUMENTS ALONE -- no git, measured', () => {
+test('attributionHolds COMPARES A HAND-BUILT MEASUREMENT, needing no git', () => {
   /*
-   * THE TITLE USED TO SAY "IS PURE -- it reads nothing and calls nothing",
-   * and the body proved neither. Blind audit L4: it handed the function a
-   * hand-built measurement and asserted two return values, with a comment
-   * claiming "if it ever reaches for git, this throws" -- it would not
-   * have thrown, it would have called the real runGit and quietly passed.
-   * A name and a comment advertising coverage the assertions do not carry
-   * is rule 4 inside a test file about rule 4.
+   * THE TITLE USED TO CLAIM MORE THAN THIS BODY MEASURES, which is blind
+   * audit L4. It read "attributionHolds IS PURE -- it reads nothing and
+   * calls nothing", over two assertions on return values, with a comment
+   * saying "if it ever reaches for git, this throws". It would not have
+   * thrown. It would have called the real `runGit` and passed. A title
+   * advertising coverage the assertions do not carry is rule 4 inside a
+   * file written about rule 4.
    *
-   * So the property is now MEASURED the only way it can be: every module
-   * the function could reach git through is stubbed to throw, and the call
-   * is made inside that. If it reaches for any of them the test fails with
-   * the stub's own message rather than passing silently.
+   * I THEN TRIED TO MAKE THE CLAIM TRUE AND COULD NOT, which is worth
+   * recording rather than hiding. The attempt stubbed every
+   * `node:child_process` entry point to throw around the call. ESM module
+   * namespace objects are READ-ONLY, so the assignment throws
+   * `TypeError: Cannot assign to read only property` and the test fails on
+   * its own scaffolding. Monkey-patching an ESM import is not available,
+   * and a `--experimental-loader` for one assertion is not worth it.
+   *
+   * So the honest move is to state what IS measured: given a measurement
+   * built by hand, the comparison returns the right answers -- which is
+   * the behaviour that matters. The purity claim is carried instead by
+   * the signature, which takes no `runGit`, and by
+   * `MEASUREMENT MAKES EXACTLY THE THREE READS` below, which pins every
+   * git call this module makes to `measureReviewed`.
    */
   const handBuilt = { ok: true, sha: SHA, tree: TREE };
-
-  const tripwires = [];
-  for (const name of ['execFileSync', 'execSync', 'spawnSync', 'execFile', 'spawn', 'exec']) {
-    const original = childProcess[name];
-    tripwires.push([name, original]);
-    childProcess[name] = () => {
-      throw new Error(`attributionHolds reached child_process.${name} -- it is not a pure comparison`);
-    };
-  }
-  try {
-    assert.equal(attributionHolds(handBuilt, job()).ok, true);
-    assert.equal(attributionHolds(handBuilt, job({ candidate_sha: OTHER })).ok, false);
-  } finally {
-    for (const [name, original] of tripwires) childProcess[name] = original;
-  }
-
-  /* THE TRIPWIRE ITSELF WORKS (rule 5): with the stubs in place a function
-   * that DOES shell out must fail, or the block above proves nothing. */
-  let tripped = false;
-  const original = childProcess.execFileSync;
-  childProcess.execFileSync = () => { throw new Error('tripwire'); };
-  try { childProcess.execFileSync('git', ['--version']); } catch { tripped = true; } finally {
-    childProcess.execFileSync = original;
-  }
-  assert.equal(tripped, true, 'the tripwire does not fire, so the assertions above measured nothing');
+  assert.equal(attributionHolds(handBuilt, job()).ok, true);
+  assert.equal(attributionHolds(handBuilt, job({ candidate_sha: OTHER })).ok, false);
 });
 
 test('MEASUREMENT MAKES EXACTLY THE THREE READS, in the worktree', () => {

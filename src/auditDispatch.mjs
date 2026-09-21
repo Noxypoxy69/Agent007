@@ -287,8 +287,21 @@ export function proposeAudit({
      * of a candidate quietly being reviewed for ever. Refusing one job is
      * recoverable; an unbounded spin is the defect the bound exists for.
      */
-    const raw = job.review_attempts ?? 0;
-    const tries = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
+    /*
+     * STRICT, because the loose spellings are the dangerous ones.
+     * `Number('')` is 0 and `Number(' ')` is 0, so an empty or blank value
+     * -- exactly what a truncated write leaves behind -- would read as a
+     * fresh counter and dispatch for ever. A negative is not a count
+     * either. Absent (null/undefined) IS legitimately zero: that is what
+     * a row written before this field existed looks like, and refusing
+     * those would stall every historical job.
+     */
+    const raw = job.review_attempts;
+    let tries;
+    if (raw === null || raw === undefined) tries = 0;
+    else if (typeof raw === 'number') tries = Number.isInteger(raw) && raw >= 0 ? raw : NaN;
+    else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) tries = Number(raw.trim());
+    else tries = NaN;
     const unreadable = !Number.isFinite(tries);
     if (unreadable || tries >= MAX_REVIEW_ATTEMPTS) {
       unassigned.push({
