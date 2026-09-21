@@ -15,9 +15,13 @@
  *
  * ═══ THE FAILURE, MEASURED ═══
  *
- * `npm run audit:workspace` clones into `os.tmpdir()`, which on this
- * machine is `C:\Users\DANNYG~1\AppData\Local\Temp\...` -- an NTFS 8.3
- * SHORT NAME for `DANNY GARCIA`. A child process is spawned with that
+ * `npm run audit:workspace` clones into `os.tmpdir()`. On a Windows
+ * profile whose directory name contains a space or exceeds eight
+ * characters, that path arrives as an NTFS 8.3 SHORT NAME: the profile
+ * segment becomes a six-character stem plus a `~1` suffix. (The literal
+ * is deliberately not written here -- it is an identity segment, and a
+ * leak-regression gate refuses it. That gate caught this very file.)
+ * A child process is spawned with that
  * path in `argv[1]`, but node resolves the entry point through realpath
  * before setting `import.meta.url`, so the two sides are the SAME FILE
  * spelled two ways. Every comparison above except the last then says
