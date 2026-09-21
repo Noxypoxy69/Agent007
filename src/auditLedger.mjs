@@ -97,6 +97,27 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
   'src/invokeddirectly.mjs',
   'src/auditwindow.mjs',
   'scripts/check-edge-deploy.mjs',
+  /*
+   * THE THIRTEENTH, AND THE GATE CAUGHT IT RATHER THAN A PERSON.
+   *
+   * `src/auditLoop.mjs` landed about an hour after
+   * test/auditBearingClosure.test.mjs, and that gate went red on it
+   * immediately -- `scripts/audit-daemon.mjs` is a registered control and
+   * now imports it, so the closure demanded an answer.
+   *
+   * REGISTERED rather than exempted, because it is a control on the one
+   * axis this repository cannot audit after the fact: it decides whether a
+   * paid LLM review is launched, and holds `maxTicks`, the only spending
+   * bound in the system. CLAUDE.md puts spending in the owner's column, so
+   * a change here is a change to what an agent may spend unattended.
+   *
+   * This is the first time the list has been extended by a test failing
+   * instead of by somebody remembering, which is the entire point of the
+   * closure. Every earlier entry -- principalResolution, invokedDirectly,
+   * auditWindow -- was added after the fact, once its absence had already
+   * cost something.
+   */
+  'src/auditloop.mjs',
 ]);
 
 /**
