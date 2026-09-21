@@ -143,7 +143,25 @@ export function nextAction(state = {}, opts = {}) {
     };
   }
 
-  if (noProgress > 0) {
+  /*
+   * ═══ A BACKOFF THAT HAS BEEN SERVED MUST NOT BE SERVED AGAIN ═══
+   *
+   * MEASURED: the first version returned WAIT whenever `noProgress > 0`,
+   * and `noProgress` only changes after a TICK. So the loop waited, came
+   * back, saw the same count, and waited again -- for ever, at a fixed
+   * interval, never retrying. It ran 300s without a second tick and
+   * without stopping, printing "backing off" each time.
+   *
+   * That is worse than a spin: a spin is visible and expensive, while this
+   * looked exactly like a healthy supervisor and did nothing. The starved
+   * stop condition below was unreachable for the same reason, so the loop
+   * could never report the backlog it was sitting on either.
+   *
+   * `backoffServed` is the caller saying "I have slept". It resets with
+   * every tick, so the backoff still grows across genuine no-progress
+   * cycles rather than being skipped.
+   */
+  if (noProgress > 0 && !s.backoffServed) {
     /*
      * EXPONENTIAL, CAPPED. Both causes of no-progress resolve in minutes,
      * so doubling reaches a useful wait quickly and the cap stops it

@@ -98,6 +98,44 @@ test('BACKOFF IS EXPONENTIAL AND CAPPED, and it is watched at both ends', () => 
     'backoff grew past its cap');
 });
 
+test('A SERVED BACKOFF LEADS TO A TICK, not another backoff', () => {
+  /*
+   * MEASURED as a live defect, not imagined. The first version returned
+   * WAIT whenever noProgress > 0, and noProgress only changes after a
+   * TICK -- so the loop waited, came back, saw the same count, and waited
+   * again for ever. It ran 300 seconds without a second tick and without
+   * stopping, printing "backing off" each time.
+   *
+   * Worse than a spin, because a spin is visible and expensive while this
+   * looked exactly like a healthy supervisor and did nothing. It also made
+   * the STARVED stop unreachable, so the loop could never report the
+   * backlog it was sitting on.
+   */
+  const s = { queueDepth: 50, consecutiveNoProgress: 2 };
+
+  const first = nextAction(s, { intervalMs: 1000 });
+  assert.equal(first.action, LOOP_ACTION.WAIT, 'the backoff never happens at all');
+
+  const after = nextAction({ ...s, backoffServed: true }, { intervalMs: 1000 });
+  assert.equal(after.action, LOOP_ACTION.TICK,
+    'after sleeping, the loop backed off AGAIN instead of retrying -- it can never '
+    + 'tick a second time and can never reach the starved stop');
+
+  /* The backoff still GROWS across genuine no-progress cycles; serving one
+   * must not flatten the curve. */
+  assert.equal(nextAction({ ...s, consecutiveNoProgress: 1 }, { intervalMs: 1000 }).waitMs, 2000);
+  assert.equal(nextAction({ ...s, consecutiveNoProgress: 3 }, { intervalMs: 1000 }).waitMs, 8000);
+
+  /* And a served backoff still yields to the STOP conditions, or the loop
+   * would tick past its budget on the cycle after every wait. */
+  const capped = nextAction(
+    { ...s, backoffServed: true, ticksUsed: 9 },
+    { intervalMs: 1000, maxTicks: 3 },
+  );
+  assert.equal(capped.action, LOOP_ACTION.STOP);
+  assert.equal(capped.code, LOOP_STOP.BUDGET);
+});
+
 test('A DEADLINE STOPS THE LOOP whatever it is doing', () => {
   const r = nextAction(
     { queueDepth: 50, startedAt: 1000, now: 1000 + 60_000 },

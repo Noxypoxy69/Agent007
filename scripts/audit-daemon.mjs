@@ -1021,6 +1021,9 @@ if (!SUPERVISE) {
 const startedAt = Date.now();
 let ticksUsed = 0;
 let consecutiveNoProgress = 0;
+/* Set after sleeping, cleared by the next tick. Without it the loop backs
+ * off and never retries -- see the note in src/auditLoop.mjs. */
+let backoffServed = false;
 
 say(`[audit-daemon] SUPERVISING. interval ${Math.round(INTERVAL_MS / 1000)}s, `
   + `budget ${MAX_TICKS} tick(s)${LAUNCH ? '' : ', PREPARE ONLY (no reviewer is launched)'}`);
@@ -1048,7 +1051,9 @@ for (;;) {
   }
 
   const decision = nextAction(
-    { ticksUsed, consecutiveNoProgress, queueDepth, startedAt, now: Date.now() },
+    {
+      ticksUsed, consecutiveNoProgress, queueDepth, backoffServed, startedAt, now: Date.now(),
+    },
     { intervalMs: INTERVAL_MS, maxTicks: MAX_TICKS, deadlineMs: DEADLINE_MS },
   );
 
@@ -1075,9 +1080,11 @@ for (;;) {
      * Here the timer IS the process's reason to be alive.
      */
     await new Promise((r) => { setTimeout(r, decision.waitMs); });
+    backoffServed = true;
     continue;
   }
 
+  backoffServed = false;
   ticksUsed += 1;
   say(`[audit-daemon] tick ${ticksUsed}/${MAX_TICKS}: ${decision.why}`);
   const placed = await tick();
