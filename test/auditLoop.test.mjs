@@ -193,6 +193,75 @@ test('EVERY STOP CARRIES A REASON -- generated from the real code list', () => {
   }
 });
 
+test('STARVED IS REACHABLE THROUGH THE REAL CALLER, not only from a hand-built state', () => {
+  /*
+   * Blind audit M-1, and it is hollow gate 9 in my own test file. The two
+   * existing STARVED cases pass `{ ticksUsed: 1, consecutiveNoProgress: 5 }`
+   * and `{ consecutiveNoProgress: 99 }` -- shapes the daemon CANNOT
+   * produce, because it increments both counters together and neither
+   * moves on a WAIT, so it maintains `noProgress <= ticksUsed` always.
+   *
+   * With both limits at 5, BUDGET was reached on the same cycle that would
+   * have tripped STARVED and won every time. STARVED -- the reason this
+   * module exists -- was unreachable, and a blocked backlog was reported
+   * as budget exhaustion with advice to RAISE THE SPEND CAP.
+   *
+   * So this simulates the caller's own invariant instead of asserting a
+   * state: counters in lockstep, exactly as audit-daemon.mjs does it.
+   */
+  let ticksUsed = 0;
+  let noProgress = 0;
+  let backoffServed = false;
+  let last = null;
+
+  for (let i = 0; i < 50; i += 1) {
+    last = nextAction({
+      ticksUsed, consecutiveNoProgress: noProgress, queueDepth: 118, backoffServed,
+    });
+    if (last.action === LOOP_ACTION.STOP) break;
+    if (last.action === LOOP_ACTION.WAIT) { backoffServed = true; continue; }
+    backoffServed = false;
+    ticksUsed += 1;
+    noProgress += 1; /* a permanently starved queue: nothing is ever placed */
+  }
+
+  assert.equal(last.action, LOOP_ACTION.STOP);
+  assert.equal(last.code, LOOP_STOP.STARVED,
+    'a permanently starved queue stopped for some other reason. If that reason is '
+    + 'budget_exhausted, the operator is told to raise a SPEND cap while nothing was '
+    + 'spent and every seat is blocked');
+  assert.match(last.why, /118/);
+
+  /* AND THE PREMISE (rule 6): the invariant this depends on really holds --
+   * starvedLimit must be strictly below maxTicks or the above is luck. */
+  assert.ok(LOOP_DEFAULTS.starvedLimit < LOOP_DEFAULTS.maxTicks,
+    'starvedLimit >= maxTicks makes STARVED unreachable through the real caller');
+});
+
+test('THE SPEND BOUND FAILS CLOSED ON A NON-NUMBER, like every state field', () => {
+  /*
+   * Blind audit M-2. `state` was validated and `opts` was not, and spread
+   * means an explicitly present `maxTicks: undefined` OVERRIDES the default
+   * rather than falling back. So the only spending bound in the system was
+   * the one value nothing checked, and it failed OPEN: TICK for ever.
+   *
+   * Generated from the hostile shapes rather than the one I thought of.
+   */
+  for (const bad of [undefined, NaN, 'abc', '5', {}, [], -1, Infinity, true]) {
+    const r = nextAction({ ticksUsed: 99, queueDepth: 50 }, { maxTicks: bad });
+    assert.equal(r.action, LOOP_ACTION.STOP,
+      `maxTicks ${JSON.stringify(bad)} left the loop ticking with 99 ticks used`);
+    assert.equal(r.code, LOOP_STOP.BUDGET);
+  }
+
+  /* THE POSITIVE (rule 5): a real number is still honoured in both
+   * directions, so the guard above is not just forcing a constant. */
+  assert.equal(nextAction({ ticksUsed: 2, queueDepth: 50 }, { maxTicks: 9 }).action,
+    LOOP_ACTION.TICK);
+  assert.equal(nextAction({ ticksUsed: 9, queueDepth: 50 }, { maxTicks: 9 }).code,
+    LOOP_STOP.BUDGET);
+});
+
 test('GARBAGE STATE DOES NOT THROW and does not invent work', () => {
   /*
    * The scheduler reads a queue file other processes write. A malformed

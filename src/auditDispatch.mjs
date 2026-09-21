@@ -145,6 +145,23 @@ function byUrgency(a, b) {
    */
   const tried = Number(Boolean(a?.last_review)) - Number(Boolean(b?.last_review));
   if (tried !== 0) return tried;
+
+  /*
+   * AND A JOB ALREADY PREPARED WAITS BEHIND ONE THAT IS NOT.
+   *
+   * Blind audit H-1. The daemon's prepare-only path gives the claim back
+   * without recording a review -- correctly, since none happened -- so
+   * none of the keys above changed and the row returned to head-of-queue.
+   * A supervised prepare run therefore re-prepared ONE job every tick,
+   * leaking a worktree and a brief each time, while reporting progress.
+   *
+   * Demoting on `prepared_at` makes that loop WALK the queue: each job is
+   * prepared once, then sorts behind the ones that are not. It is
+   * deliberately below `last_review`, because a failed review is stronger
+   * evidence of trouble than a pending preparation.
+   */
+  const prepped = Number(Boolean(a?.prepared_at)) - Number(Boolean(b?.prepared_at));
+  if (prepped !== 0) return prepped;
   const at = String(a?.first_seen_at ?? '');
   const bt = String(b?.first_seen_at ?? '');
   if (at !== bt) return at < bt ? -1 : 1;

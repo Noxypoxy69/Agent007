@@ -56,7 +56,19 @@ export const LOOP_DEFAULTS = Object.freeze({
   intervalMs: 60_000,
   maxIntervalMs: 15 * 60_000,
   maxTicks: 5,
-  starvedLimit: 5,
+  /*
+   * STRICTLY BELOW maxTicks, OR STARVED CAN NEVER FIRE. Blind audit M-1.
+   *
+   * The caller increments `ticksUsed` and `consecutiveNoProgress` in
+   * lockstep and neither moves on a WAIT, so it maintains
+   * `noProgress <= ticksUsed` always. With both limits at 5, BUDGET was
+   * reached on the same cycle that would have tripped STARVED and won,
+   * every time. STARVED -- the entire reason this module exists, per its
+   * own header -- was unreachable through the only caller, and a blocked
+   * backlog was reported as budget exhaustion with advice to raise the
+   * SPEND cap. Exactly the wrong instruction.
+   */
+  starvedLimit: 3,
 });
 
 const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
@@ -81,7 +93,30 @@ export function nextAction(state = {}, opts = {}) {
    * the case it was written to survive.
    */
   const s = state ?? {};
-  const o = { ...LOOP_DEFAULTS, ...(opts ?? {}) };
+  /*
+   * ═══ opts GOES THROUGH `num` TOO, OR THE SPEND BOUND FAILS OPEN ═══
+   *
+   * Blind audit M-2. Every `state` field was validated and no `opts` field
+   * was, and object spread means an EXPLICITLY PRESENT `maxTicks: undefined`
+   * overrides the default rather than falling back to it. So
+   * `{ maxTicks: undefined }`, `NaN` or `'abc'` all made `ticksUsed >=
+   * o.maxTicks` false for ever, and the loop returned TICK unboundedly.
+   *
+   * This module is registered as a control on exactly one ground -- it
+   * holds the only spending bound in the system -- and that bound was the
+   * one value nothing checked. `posInt` in the daemon means there is no
+   * live exploit today; this is a latent fail-open, fixed rather than
+   * argued away, because the next caller will not be `posInt`.
+   */
+  const raw = opts ?? {};
+  const o = {
+    ...LOOP_DEFAULTS,
+    ...raw,
+    maxTicks: num(raw.maxTicks, LOOP_DEFAULTS.maxTicks),
+    starvedLimit: num(raw.starvedLimit, LOOP_DEFAULTS.starvedLimit),
+    intervalMs: num(raw.intervalMs, LOOP_DEFAULTS.intervalMs),
+    maxIntervalMs: num(raw.maxIntervalMs, LOOP_DEFAULTS.maxIntervalMs),
+  };
   const ticksUsed = num(s.ticksUsed, 0);
   const noProgress = num(s.consecutiveNoProgress, 0);
   const depth = num(s.queueDepth, 0);
@@ -109,6 +144,25 @@ export function nextAction(state = {}, opts = {}) {
    * happens to be empty -- the two answers differ in what they say, and
    * the honest one is the one the operator asked for.
    */
+  /*
+   * STARVED IS TESTED BEFORE BUDGET, because when both are true the
+   * starved message is the one the operator needs. "You have spent your
+   * budget, raise it" is actively misleading advice when nothing was
+   * spent and every seat is blocked -- raising it just buys more empty
+   * cycles. Blind audit M-1, second half: the ordering mattered as much
+   * as the limits did.
+   */
+  if (noProgress >= o.starvedLimit && depth > 0) {
+    return {
+      action: LOOP_ACTION.STOP,
+      code: LOOP_STOP.STARVED,
+      why: `${noProgress} consecutive cycles placed nothing while ${depth} job(s) were `
+        + 'claimable. THE QUEUE IS NOT EMPTY: every seat is holding a live claim, or '
+        + 'every candidate is this daemon\'s own work. Register another seat, or wait '
+        + 'for the leases to lapse',
+    };
+  }
+
   if (ticksUsed >= o.maxTicks) {
     return {
       action: LOOP_ACTION.STOP,
@@ -123,23 +177,6 @@ export function nextAction(state = {}, opts = {}) {
       action: LOOP_ACTION.STOP,
       code: LOOP_STOP.EMPTY,
       why: 'no claimable jobs. This is the good ending: the queue is drained',
-    };
-  }
-
-  /*
-   * STARVED IS NOT EMPTY, and conflating them is the bug this whole
-   * subsystem exists to stop. A starved queue has work and nowhere to put
-   * it -- every seat holds a live claim -- so stopping silently would
-   * report "done" over an untouched backlog.
-   */
-  if (noProgress >= o.starvedLimit) {
-    return {
-      action: LOOP_ACTION.STOP,
-      code: LOOP_STOP.STARVED,
-      why: `${noProgress} consecutive cycles placed nothing while ${depth} job(s) were `
-        + 'claimable. THE QUEUE IS NOT EMPTY: every seat is holding a live claim, or '
-        + 'every candidate is this daemon\'s own work. Register another seat, or wait '
-        + 'for the leases to lapse',
     };
   }
 

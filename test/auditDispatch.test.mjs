@@ -439,6 +439,63 @@ test('A FAILED REVIEW DOES NOT DEMOTE AN ESCAPED JOB BELOW A LOCAL ONE (L5)', ()
     'a single failed review pushed an ALREADY-PUSHED candidate behind a local one');
 });
 
+test('AN ALREADY-PREPARED JOB WAITS BEHIND ONE THAT IS NOT (H-1)', () => {
+  /*
+   * Blind audit H-1, and it was the fix for starvation creating a second
+   * spin one commit later.
+   *
+   * The daemon's prepare-only path gives the claim back WITHOUT recording
+   * a review -- correctly, none happened. But `byUrgency` sorted only on
+   * escaped, last_review, first_seen_at and audit_id, so nothing the
+   * release touched was in the key: the same row came back head-of-queue,
+   * `tick()` returned true so the no-progress counter reset, and a
+   * supervised prepare run re-prepared ONE job every cycle, leaking a
+   * worktree and a nonce-bearing brief each time while reporting progress.
+   *
+   * Both jobs are escaped and unreviewed here, so `prepared_at` is the
+   * only key that can decide -- and the prepared one holds the WINNING
+   * age, so this can only pass if it is genuinely consulted (rule 9).
+   */
+  const prepared = job({
+    audit_id: 'audit-prepared',
+    escaped: true,
+    first_seen_at: '2026-09-01T00:00:00Z',
+    prepared_at: '2026-09-21T00:00:00Z',
+  });
+  const untouched = job({
+    audit_id: 'audit-untouched',
+    escaped: true,
+    first_seen_at: '2026-09-20T00:00:00Z',
+  });
+
+  const r = proposeAudit({
+    jobs: [prepared, untouched], sessions: [seat('only-seat')], now: T0, isLive: allLive,
+  });
+  assert.equal(r.proposals[0].audit_id, 'audit-untouched',
+    'a job already prepared took the seat again -- a supervised prepare run grinds one '
+    + 'row and leaks a worktree per tick instead of walking the queue');
+
+  /* THE PREMISE (rule 6): without prepared_at the prepared job really does
+   * win on age, so this measures the new key and not the fixture. */
+  const { prepared_at: _drop, ...noMark } = prepared;
+  const without = proposeAudit({
+    jobs: [noMark, untouched], sessions: [seat('only-seat')], now: T0, isLive: allLive,
+  });
+  assert.equal(without.proposals[0].audit_id, 'audit-prepared',
+    'PREMISE FAILED: the prepared job does not outrank the other on age');
+
+  /* AND IT RANKS BELOW last_review: a failed review is stronger evidence of
+   * trouble than a pending preparation, so it must not be reordered. */
+  const reviewed = job({
+    audit_id: 'audit-reviewed', escaped: true, first_seen_at: '2026-09-01T00:00:00Z', last_review: { x: 1 },
+  });
+  const order = proposeAudit({
+    jobs: [reviewed, prepared], sessions: [seat('only-seat')], now: T0, isLive: allLive,
+  });
+  assert.equal(order.proposals[0].audit_id, 'audit-prepared',
+    'a reviewed job outranked a merely-prepared one');
+});
+
 test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
   /*
    * The bound was `Number.isFinite(tries) && tries >= MAX`, so every value

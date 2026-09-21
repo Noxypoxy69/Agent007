@@ -69,6 +69,21 @@ const SUPERVISE = has('--supervise');
  * money rather than correctness.
  */
 const posInt = (name, dflt) => {
+  /*
+   * A FLAG PRESENT WITH NO VALUE IS AN ERROR, NOT THE DEFAULT.
+   *
+   * Blind audit M-6. `flag()` returns its default when the name is the
+   * LAST argv entry, so `--max-ticks` typed at the end of the line
+   * silently became 5. That is verbatim the mistake this function's own
+   * comment says it exists to stop -- "an operator asking for one spend
+   * and silently getting another" -- reachable by a plausible typing
+   * order. `--max-ticks --launch` was already caught, because the next
+   * token fails the digit test; only the end-of-argv case leaked.
+   */
+  if (argv.includes(name) && argv.indexOf(name) + 1 >= argv.length) {
+    say(`[audit-daemon] ${name} was given with no value. Refusing to guess a spend.`);
+    process.exit(2);
+  }
   const raw = flag(name, null);
   if (raw === null) return dflt;
   if (!/^\d+$/.test(String(raw).trim())) {
@@ -512,6 +527,24 @@ async function tick() {
         state: JOB.PENDING,
         claimed_by: null,
         claimed_at: null,
+        /*
+         * PREPARED, AND THAT HAS TO BE RECORDED OR THE LOOP RE-PREPARES IT.
+         *
+         * Blind audit H-1. The prepare path releases with `reviewed:false`,
+         * which writes NOTHING -- and `byUrgency` sorts on `escaped`,
+         * `last_review`, `first_seen_at`, `audit_id`, none of which the
+         * release changes. So the same row was head-of-queue on the next
+         * tick, `tick()` returned true so `consecutiveNoProgress` reset,
+         * and `--supervise` without `--launch` -- the DEFAULT -- re-prepared
+         * one job every cycle, leaking a worktree and a nonce-bearing brief
+         * each time, then exited telling the operator to raise a spending
+         * budget that nothing had spent.
+         *
+         * My fix for starvation created a second spin one commit later.
+         * `prepared_at` is what `byUrgency` now demotes on, so a supervised
+         * prepare run WALKS the queue instead of grinding one row.
+         */
+        ...(reviewed ? {} : { prepared_at: new Date().toISOString() }),
         ...(reviewed
           ? {
             review_attempts: nextAttempt(r.review_attempts),
