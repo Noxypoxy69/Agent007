@@ -812,8 +812,32 @@ async function tick() {
     extraArgs: [`Read "${briefPath}" and carry it out.`],
   });
   say(`[audit-daemon] reviewer rules: ${launch.rules.join(', ')}`);
-  const child = spawn(launch.file, launch.args, {
-    cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32',
+
+  /*
+   * ARGS ARE QUOTED FOR THE SHELL, BECAUSE `shell: true` CONCATENATES THEM.
+   *
+   * `shell: true` is required on win32 -- `claude` is a .cmd shim and node 24
+   * refuses to spawn one without a shell -- but it means the argv array is
+   * joined into a command line, so any argument containing a space is
+   * re-split by cmd.exe.
+   *
+   * MEASURED: the rules went in as `Bash(git status:*),Bash(git diff:*),...`
+   * and the CLI reported ten times over that it was "Ignoring --allowedTools
+   * rule \"status:*)\"" -- every rule had been cut at its internal space, so
+   * the reviewer was launched with NO usable rules and then refused the
+   * prompt as a stray argument. Both halves silent unless you read the run.
+   *
+   * Quoting only what needs it, and only when a shell is actually used.
+   * Arguments that already carry double quotes are left alone: the prompt
+   * embeds a quoted path and re-wrapping it would nest quotes cmd cannot
+   * parse.
+   */
+  const shellUsed = process.platform === 'win32';
+  const args = shellUsed
+    ? launch.args.map((a) => (/\s/.test(a) && !a.includes('"') ? `"${a}"` : a))
+    : launch.args;
+  const child = spawn(launch.file, args, {
+    cwd: ws.dir, stdio: ['ignore', 'pipe', 'pipe'], shell: shellUsed,
   });
   child.stdout?.on('data', (d) => { transcript += d; process.stdout.write(d); });
   child.stderr?.on('data', (d) => { transcript += d; process.stderr.write(d); });
