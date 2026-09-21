@@ -82,7 +82,11 @@ test('THE FIXTURE IS REAL: there are control modules and the graph sees them', (
   assert.ok(controls.length > 5,
     `expected several control modules, found ${controls.length}`);
 
-  const graph = buildGraph(ROOT);
+  /* `buildGraph` returns { graph, dynamicOnly, files }, and `graph` maps a
+   * repo-relative path to an ARRAY of resolved edges. Asked of the module
+   * rather than assumed -- my first version treated the return value itself
+   * as the Map and this precondition caught it on the first run. */
+  const { graph } = buildGraph(ROOT);
   const seen = controls.filter((c) => graph.has(c));
   assert.ok(seen.length > 5,
     `the module graph does not contain the registered controls: ${JSON.stringify(controls.slice(0, 5))}`);
@@ -98,20 +102,20 @@ test('EVERY MODULE A CONTROL IMPORTS IS ITSELF AUDIT-BEARING', () => {
    * Walks the transitive closure, because a control two hops away decides
    * just as much as one hop away.
    */
-  const graph = buildGraph(ROOT);
+  const { graph } = buildGraph(ROOT);
   const controls = controlModules();
 
   const seenSet = new Set();
   const queue = [...controls];
   while (queue.length > 0) {
     const cur = queue.pop();
-    const node = graph.get(cur);
-    if (!node) continue;
-    for (const dep of node.imports ?? []) {
-      const rel = norm(dep);
-      if (seenSet.has(rel)) continue;
-      seenSet.add(rel);
-      queue.push(rel);
+    const edges = graph.get(cur);
+    if (!edges) continue;
+    for (const dep of edges) {
+      const r = norm(dep);
+      if (seenSet.has(r)) continue;
+      seenSet.add(r);
+      queue.push(r);
     }
   }
 
