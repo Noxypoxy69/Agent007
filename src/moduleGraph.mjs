@@ -182,6 +182,16 @@ export const DEFAULT_ENTRY_POINTS = [
   'scripts/diff-suite.mjs',
   'scripts/enqueue-audit-job.mjs',
   'scripts/pre-push-audit.mjs',
+  /* THE MIGRATION ARRIVAL CHECK. A person runs it once, on a new machine,
+   * to prove the migrated authority stores RESOLVE through their real readers
+   * rather than merely existing on disk. Declared in the same commit that adds
+   * it, which is the rule test/entryPointsComplete.test.mjs exists to enforce
+   * and which four previous extractions learned the hard way.
+   *
+   * scripts/migration-package.mjs is deliberately NOT here: it uses node
+   * builtins only and imports nothing from src/, so it creates no edge and
+   * needs no declaration. */
+  'scripts/migration-verify.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
