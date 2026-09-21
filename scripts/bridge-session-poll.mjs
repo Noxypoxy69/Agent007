@@ -86,6 +86,29 @@ async function readPayload() {
 
 const homeDir = (env) => env.AGENTBRIDGE_HOME || path.join(os.homedir(), '.agentbridge');
 
+/**
+ * This machine's durable id, or null when it cannot be read.
+ *
+ * NULL IS THE SAFE ANSWER AND IT IS NOT THE SAME AS A WRONG ONE.
+ * resolveAgentId treats a null machine id as "do not filter on machine", which
+ * is the behaviour that shipped before any of this existed -- rows are still
+ * filtered by worktree, and the ambiguity rule still refuses. Inventing an id
+ * here, or defaulting to the first one in the store, would be the cross-machine
+ * identity theft the resolver exists to refuse.
+ *
+ * Read directly rather than through loadConfig(), which is async and pulls in
+ * the whole config layer for one string inside a 30s SessionStart budget.
+ */
+function readMachineId(env) {
+  try {
+    const raw = fs.readFileSync(path.join(homeDir(env), 'config.json'), 'utf8');
+    const id = JSON.parse(raw)?.machineId;
+    return typeof id === 'string' && id.trim() ? id.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** session_id becomes a file name, so its shape is checked before it is joined to a path. */
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -698,12 +721,76 @@ async function sessionStart() {
   if (!raw || !SAFE.test(raw)) { say('agentbridge poll: NOT POLLING -- no usable session_id in the hook payload'); return; }
   const sessionId = `claude-${raw}`;
 
-  const agentId = String(env.AGENTBRIDGE_AGENT_ID ?? '').trim();
-  if (!agentId || !SAFE.test(agentId)) {
-    say('agentbridge poll: NOT POLLING -- AGENTBRIDGE_AGENT_ID is not set. An agent id is '
-      + 'never invented here, because a fabricated identity on the roster is what work gets '
-      + 'routed by. This session will be invisible to every other machine.');
+  /*
+   * RESOLVE THE IDENTITY, DO NOT INVENT ONE -- AND DO NOT GIVE UP THE MOMENT
+   * THE VARIABLE IS UNSET.
+   *
+   * WHAT THIS REPLACES, and the refusal was half right. It read
+   * AGENTBRIDGE_AGENT_ID, found it empty, said NOT POLLING and returned. The
+   * reasoning was correct -- a fabricated identity on the roster is what work
+   * gets routed by -- but the conclusion was too strong: it treated "the
+   * variable is unset" as "the identity is unknown", and those are different
+   * claims.
+   *
+   * MEASURED 2026-09-21, on this machine, in this worktree. --status reported
+   * NOTHING IS WATCHING while an agent was committing here, and the bridge
+   * showed that agent's last heartbeat two days stale. AGENTBRIDGE_AGENT_ID
+   * was empty because the session arrived by teleport rather than through
+   * agent.cmd. Meanwhile registrations.json already held a row naming this
+   * exact session_id as code-b. The evidence to resolve it was on disk the
+   * whole time and nothing looked.
+   *
+   * src/watcherIdentity.mjs carries the order and the refusals. The short
+   * version: the environment wins; failing that, a prior registration for THIS
+   * session id is that session's own earlier declaration read back, not a
+   * guess; failing that, a worktree with exactly one occupant ever. Anything
+   * ambiguous REFUSES and names the candidates, and rows from another machine
+   * or another worktree are never admitted.
+   *
+   * So the strong rule survives -- nothing here invents a name -- and the
+   * common case stops being a dead watcher.
+   */
+  const { resolveAgentId, SOURCE } = await import('../src/watcherIdentity.mjs');
+  let registrations = [];
+  try {
+    const store = await import('../src/registrationStore.mjs');
+    // AWAITED. readRegistrations is async; without this it hands over a Promise
+    // and the resolver refuses every session. Cost one dry run to find.
+    registrations = await store.readRegistrations();
+  } catch (e) {
+    /*
+     * A STORE WE CANNOT READ IS NO EVIDENCE, NOT BAD EVIDENCE. Carry on with an
+     * empty list: the environment may still answer, and if it does not, the
+     * refusal below is the same one that shipped before this change.
+     */
+    process.stderr.write(`[poll] could not read the registration store: ${e?.message ?? e}\n`);
+  }
+
+  const identity = resolveAgentId({
+    env,
+    sessionId,
+    registrations,
+    repoId: path.basename(REPO),
+    worktreeId: path.basename(REPO),
+    machineId: readMachineId(env),
+  });
+
+  if (!identity.agentId) {
+    say(`agentbridge poll: NOT POLLING -- ${identity.why} An agent id is never invented here, `
+      + 'because a fabricated identity on the roster is what work gets routed by. This session '
+      + 'will be invisible to every other machine until AGENTBRIDGE_AGENT_ID is set '
+      + '(or the session is started through agent.cmd).');
     return;
+  }
+  const agentId = identity.agentId;
+  if (identity.source !== SOURCE.DECLARED) {
+    /*
+     * SAY WHICH RUNG ANSWERED. A watcher that starts under a name nobody typed
+     * must announce where that name came from, or the next person debugging the
+     * roster cannot tell a resolved identity from a declared one.
+     */
+    say(`agentbridge poll: AGENTBRIDGE_AGENT_ID is not set; resolved this session as `
+      + `${agentId} (${identity.source}) -- ${identity.why}.`);
   }
 
   const tokenFile = String(env.AGENTBRIDGE_TOKEN_FILE ?? '').trim() || DEFAULT_TOKEN_FILE;
