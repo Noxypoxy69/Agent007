@@ -104,6 +104,20 @@ export const DEFAULT_ENTRY_POINTS = [
    * a launcher is the one caller the graph structurally cannot see, because
    * .cmd is not JavaScript. */
   'scripts/agent-worktree.mjs',
+  /* THE COVERAGE REPORT ITSELF, and the second module to be called an orphan
+   * for its absence. CLAUDE.md documents running it by hand, the Stop gate
+   * and scripts/pre-push-audit.mjs consume the same `auditCoverage` it
+   * prints, and nothing in the graph imports it -- so from here it is
+   * indistinguishable from an orphan, exactly as the entry above says.
+   *
+   * The note at audit-daemon.mjs predicted this: src/auditWorkspace.mjs read
+   * as unreferenced the moment it was extracted, and the answer was to
+   * declare the entry rather than allowlist the module. src/auditWindow.mjs
+   * hit the identical wall four days later when 79 lines of banner logic
+   * came out of this script, and I reached for the import style first and
+   * the entry list second. Declared now, so the next extraction out of this
+   * file does not rediscover it a third time. */
+  'scripts/check-audit-coverage.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
