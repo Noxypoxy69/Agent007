@@ -7,8 +7,11 @@ one.
 
 ## The important thing first: these are LOCAL sessions
 
-All four register from machine `ed745954-0c44-4f85-bca7-113f2a01bd2f` — Danny's
-Windows box. They are Claude Code CLI sessions, not cloud containers. Anything
+All four register from the SAME machine — the owner's Windows box. `list_agents`
+carries the machine id and is authoritative; it is not repeated here, because a
+real machine id committed to a public repository identifies the box, and a copy
+in a doc goes stale the moment the machine is rebuilt while `list_agents` cannot.
+They are Claude Code CLI sessions, not cloud containers. Anything
 that looks like a claude.ai link for them is a **remote-control view of a local
 process**: the link lets you see and message the session, it does not start one.
 **The process has to come back on that machine.**
