@@ -134,6 +134,22 @@ export const DEFAULT_ENTRY_POINTS = [
    * recorded a WIRED module as a permitted orphan, which is the snooze button
    * the list below exists to refuse. */
   'scripts/bridge-session-poll.mjs',
+  /* THE AUDIT CLONE TOOL, and the FOURTH module called an orphan for the
+   * absence of its only caller from this list -- after src/auditWorkspace.mjs,
+   * src/auditWindow.mjs and src/watcherIdentity.mjs. A person and npm run it;
+   * nothing in the graph imports it, so from here it is indistinguishable from
+   * an orphan.
+   *
+   * The note beside check-audit-coverage.mjs predicted a third time and the
+   * note beside bridge-session-poll.mjs predicted a fourth, and both were
+   * right, which says the prediction is not the useful part. What is useful:
+   * this list is the ONLY place that can distinguish an entry point from an
+   * orphan, so every script under scripts/ that a human or npm invokes belongs
+   * here the moment it imports anything from src/. Extracting logic out of one
+   * of these scripts -- which is what rule 10 asks for -- is precisely what
+   * trips it, so the two rules pull against each other and this list is where
+   * that is resolved. */
+  'scripts/audit-workspace.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
