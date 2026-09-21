@@ -92,7 +92,22 @@ export function posIntArg(argv, name, dflt) {
 export function nextAttempt(stored, bound) {
   const max = Number.isInteger(bound) && bound >= 0 ? bound : 0;
   if (stored === null || stored === undefined) return 1;
-  const n = typeof stored === 'number' || typeof stored === 'string' ? Number(stored) : NaN;
+
+  /*
+   * A BLANK STRING IS NOT ZERO, and this is the half I had already fixed
+   * at the other end and not here. `Number('')` and `Number('  ')` are
+   * both 0, so a truncated or empty value -- exactly what a partial write
+   * leaves behind -- counted as a fresh counter and returned 1, for ever.
+   *
+   * `proposeAudit` was made strict about this when L3 was closed; the
+   * WRITER was not, so the two ends disagreed about what a corrupt
+   * counter means. Found the moment this function became testable, which
+   * is the argument for extracting it.
+   */
+  let n = NaN;
+  if (typeof stored === 'number') n = stored;
+  else if (typeof stored === 'string' && /^\d+$/.test(stored.trim())) n = Number(stored.trim());
+
   if (!Number.isFinite(n) || n < 0) return max;
   return Math.floor(n) + 1;
 }
