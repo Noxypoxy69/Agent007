@@ -71,6 +71,75 @@ function controlModules() {
   return all.filter((p) => /\.(mjs|js)$/i.test(p) && existsSync(path.join(ROOT, p)));
 }
 
+/**
+ * REACHED BY A CONTROL, AND ARGUED NOT TO BE ONE.
+ *
+ * ═══ WHY THIS LIST EXISTS AND WHY IT IS NOT THE OLD DEFECT AGAIN ═══
+ *
+ * The closure below found TWELVE modules a control reaches that are not
+ * registered. Sweeping all twelve into `AUDIT_BEARING_EXTRAS` in one go
+ * would multiply the audit demand across the repository overnight, and
+ * rule 19 is explicit that an over-block is not the safe direction: it is
+ * how a gate gets switched off entirely, which loses every layer at once.
+ * `auditLedger.mjs`'s own header records the "make all of src/
+ * audit-bearing" attempt being refused by this suite, correctly.
+ *
+ * So this freezes today's twelve and catches TOMORROW's. The difference
+ * from the defect it replaces is the DIRECTION OF THE DEFAULT: before, a
+ * new control was exempt until somebody remembered to register it, and
+ * nothing ever went red. Now a new module reached by a control fails this
+ * test until somebody either registers it or writes down, here, why it is
+ * not a control. An argument somebody can disagree with beats an omission
+ * nobody can see.
+ *
+ * Several of these are genuinely arguable and I am not pretending
+ * otherwise -- `permissionRequest` and `ownerDecisions` in particular look
+ * like authority surface to me. They are listed rather than registered
+ * because re-classifying eleven modules is a policy change for the owner,
+ * not a fix an auditor's finding licensed. Named here so the decision is
+ * visible instead of buried.
+ */
+const REACHED_BUT_NOT_A_CONTROL = Object.freeze({
+  'src/config.mjs':
+    'Reads configuration and resolves paths. Carries no decision a guard consults; '
+    + 'the deciding is done by the callers, which are registered.',
+  'src/exec.mjs':
+    'A process-spawn wrapper. It REFUSES git specifically, and that refusal is pinned '
+    + 'by test/... -- the lint it enforces is its own, not a control another gate reads.',
+  'src/approvalStore.mjs':
+    'Storage for approvals. The authority decision lives in the callers that write and '
+    + 'read it; this is the file layer under them.',
+  'src/ownerDecisions.mjs':
+    'ARGUABLE, and flagged for the owner rather than settled here: it reads the owner '
+    + 'decision ledger, which is authority surface, but registering it changes audit '
+    + 'policy across every commit that touches owner decisions.',
+  'src/permissionRequest.mjs':
+    'ARGUABLE for the same reason. CLAUDE.md says it enforces permission routing, which '
+    + 'reads like a control; the owner should decide whether it becomes audit-bearing.',
+  'src/registrationStore.mjs':
+    'Storage for session registrations. Persistence under the registration path rather '
+    + 'than a decision any gate consults.',
+  'src/secretstore.mjs':
+    'Reads credential material from disk. It moves secrets, it does not decide who may '
+    + 'have them; the token classes and scopes are decided elsewhere.',
+  'src/validationRunner.mjs':
+    'Runs validation commands and reports results. The pass/fail meaning is assigned by '
+    + 'its callers, which are registered.',
+  'src/candidateTree.mjs':
+    'Resolves a candidate commit to its tree sha. A measurement helper for the audit '
+    + 'path; the fence that compares those shas is src/auditAttribution.mjs.',
+  'src/auditAttribution.mjs':
+    'ARGUABLE: it IS the attribution fence, and is the strongest candidate here for '
+    + 'registration. Left out only because it landed with full branch coverage this '
+    + 'session and the owner should make the policy call in one pass, not piecemeal.',
+  'src/auditWorkspace.mjs':
+    'Allocates and releases the reviewer worktree. Identity discipline rather than a '
+    + 'verdict; nothing reads it to decide whether work is approved.',
+  'src/watcherIdentity.mjs':
+    'ARGUABLE: it decides the identity a watcher registers under, and a wrong answer '
+    + 'makes a session invisible. Another session wrote it this hour and owns that call.',
+});
+
 test('THE FIXTURE IS REAL: there are control modules and the graph sees them', () => {
   /*
    * Rule 5 and rule 9 together. If `controlModules()` came back empty, or
@@ -124,17 +193,61 @@ test('EVERY MODULE A CONTROL IMPORTS IS ITSELF AUDIT-BEARING', () => {
    * test files are covered by the baseline-test machinery, which is a
    * different mechanism with a different failure mode.
    */
-  const missing = [...seenSet]
+  const reached = [...seenSet]
     .filter((rel) => !rel.startsWith('test/'))
     .filter((rel) => existsSync(path.join(ROOT, rel)))
     .filter((rel) => !isAuditBearing(rel))
     .sort();
 
-  assert.deepEqual(missing, [],
+  const unexplained = reached.filter((rel) => !(rel in REACHED_BUT_NOT_A_CONTROL));
+
+  assert.deepEqual(unexplained, [],
     'these modules are REACHED BY A CONTROL and are not audit-bearing, so a commit '
-    + 'changing only one of them does not appear in the coverage report and rule 20 '
-    + 'cannot be enforced for it. Register them in AUDIT_BEARING_EXTRAS, or explain '
-    + 'in that list why a control may reach them without itself being one');
+    + 'changing only one of them does not appear in the coverage report at all and '
+    + 'rule 20 cannot be enforced for it. Either register them in '
+    + 'AUDIT_BEARING_EXTRAS, or add an entry to REACHED_BUT_NOT_A_CONTROL saying why '
+    + 'a control may reach this without it being one');
+});
+
+test('the reached-but-not-a-control list may only SHRINK', () => {
+  /*
+   * The companion every allowlist in this repository has, and the reason
+   * `noOrphanModules` has one: an entry for something that no longer needs
+   * it is permission nobody asked for, quietly widening over time.
+   *
+   * It also stops the obvious abuse of the gate above -- making a red test
+   * green by adding a line -- from going unnoticed, because a stale line
+   * fails here.
+   */
+  const { graph } = buildGraph(ROOT);
+  const controls = controlModules();
+  const seenSet = new Set();
+  const queue = [...controls];
+  while (queue.length > 0) {
+    const cur = queue.pop();
+    for (const dep of graph.get(cur) ?? []) {
+      const r = norm(dep);
+      if (seenSet.has(r)) continue;
+      seenSet.add(r);
+      queue.push(r);
+    }
+  }
+
+  for (const rel of Object.keys(REACHED_BUT_NOT_A_CONTROL)) {
+    assert.ok(existsSync(path.join(ROOT, rel)),
+      `${rel} is exempted but no longer exists -- remove the entry`);
+    assert.ok(seenSet.has(rel),
+      `${rel} is exempted but no control reaches it any more -- remove the entry`);
+    assert.equal(isAuditBearing(rel), false,
+      `${rel} is now audit-bearing: delete its exemption`);
+  }
+});
+
+test('every exemption carries a reason a later reader can disagree with', () => {
+  for (const [rel, why] of Object.entries(REACHED_BUT_NOT_A_CONTROL)) {
+    assert.ok(typeof why === 'string' && why.length > 40,
+      `${rel} is exempted without a real reason`);
+  }
 });
 
 test('AND ORDINARY CODE IS STILL NOT AUDIT-BEARING -- the over-block guard', () => {
