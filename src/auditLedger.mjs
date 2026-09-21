@@ -65,6 +65,38 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
   'src/principalresolution.mjs',
   'src/governor.mjs',
   'src/auditqueuestore.mjs',
+  /*
+   * THREE MORE, AND THE PARAGRAPH ABOVE PREDICTED ALL THREE. Blind audit
+   * H-1, 2026-09-20, MEASURED: the note two lines up says "any new control
+   * file is still exempt until somebody remembers this list", and within
+   * the same session three new control modules landed and were exempt.
+   *
+   * The sharpest is `src/invokedDirectly.mjs`. It decides whether the
+   * deploy gate and the hook attestation RUN THEIR BODIES AT ALL -- its own
+   * header calls a wrong answer "a gate that prints nothing and exits 0 ...
+   * the worst failure a gate has". Measured:
+   *
+   *     node scripts/check-audit-coverage.mjs c5549eb^..c5549eb --json
+   *       { "commits": [] }
+   *
+   * A commit editing that file ALONE does not appear in the coverage report
+   * at all -- not as unaudited, not as anything. `auditEscalation` can never
+   * block on it, so rule 20 was unenforceable for it permanently.
+   *
+   * `scripts/check-edge-deploy.mjs` is the deploy gate itself and was
+   * likewise unregistered. `src/auditWindow.mjs` reports how much history a
+   * coverage run did not examine, which is a control over this very file.
+   *
+   * REGISTERING THEM FIXES TODAY AND NOT THE CLASS, exactly as the note
+   * about principalResolution said. What is new is that the class now has a
+   * GATE: test/auditBearingClosure.test.mjs derives the import closure of
+   * every audit-bearing file and fails if any member is unregistered. So
+   * the next control module reached by a control is caught by a red test
+   * rather than by somebody remembering.
+   */
+  'src/invokeddirectly.mjs',
+  'src/auditwindow.mjs',
+  'scripts/check-edge-deploy.mjs',
 ]);
 
 /**

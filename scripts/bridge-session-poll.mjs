@@ -45,6 +45,8 @@ import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { invokedDirectly } from '../src/invokedDirectly.mjs';
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
 const CLI = path.join(REPO, 'bin', 'agentbridge.mjs');
@@ -1113,7 +1115,28 @@ const flag = (name) => {
  * `--supervise` would have detached a poller that nothing recorded and nothing
  * would ever stop. An import must not be able to do that.
  */
-const RUN_DIRECTLY = !!process.argv[1] && path.resolve(process.argv[1]) === SELF;
+/*
+ * `path.resolve` DOES NOT COLLAPSE A SPELLING, AND THIS IS A HOOK ENTRY.
+ *
+ * Blind audit H-2. `src/invokedDirectly.mjs` enumerates five main-module
+ * checks broken the same way; the fix was applied to two and this was one
+ * of the three left, which is the half-closed contract this repository
+ * keeps producing. It matters more here than at either migrated site:
+ * `.claude/settings.json` runs this file at SessionStart and SessionEnd as
+ * `node "$CLAUDE_PROJECT_DIR/scripts/bridge-session-poll.mjs"`.
+ *
+ * `path.resolve` normalises separators and `..`; it does NOT resolve an
+ * 8.3 short name, a junction or a symlink. So if CLAUDE_PROJECT_DIR ever
+ * arrives spelled differently from node's resolved entry path -- an agent
+ * worktree reached through a junction, a temp checkout under a short
+ * profile name -- this comparison says "imported", the hook exits 0 having
+ * done nothing, and A DEAD WATCHER AND A LIVE ONE PRODUCE IDENTICAL
+ * EVIDENCE. That is the exact failure this file has a section about, and
+ * it would arrive through the mechanism meant to prevent it.
+ *
+ * `invokedDirectly` asks realpath instead of comparing spellings.
+ */
+const RUN_DIRECTLY = invokedDirectly(process.argv[1], import.meta.url);
 
 if (RUN_DIRECTLY) try {
   if (argv.includes('--supervise')) {

@@ -1,6 +1,6 @@
 import http from 'node:http';
-import { pathToFileURL } from 'node:url';
 import { verify } from '../src/sign.mjs';
+import { invokedDirectly } from '../src/invokedDirectly.mjs';
 import { detectCollisions } from './collisions.mjs';
 import { buildMcpServer } from '../mcp/tools.mjs';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -169,7 +169,16 @@ async function handleMcp(req, res) {
  * not open a socket or reach for DATABASE_URL -- that coupling is what left
  * /mcp untested.
  */
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+/*
+ * `pathToFileURL` encodes correctly and STILL compares two spellings: it
+ * does not collapse an 8.3 short name, a junction or a symlinked checkout,
+ * so the resolved `import.meta.url` and the argv-derived URL can name one
+ * file and differ. Blind audit H-2 -- the last of the five sites
+ * src/invokedDirectly.mjs enumerates. Here the failure is the server
+ * silently not listening, which at least announces itself; that is why it
+ * was the lowest-risk of the three and is still worth closing.
+ */
+const isMain = invokedDirectly(process.argv[1], import.meta.url);
 if (isMain) {
   const store = await import('./store.mjs');
   const port = Number(process.env.PORT || 8787);
