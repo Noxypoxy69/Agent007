@@ -150,6 +150,30 @@ export const DEFAULT_ENTRY_POINTS = [
    * trips it, so the two rules pull against each other and this list is where
    * that is resolved. */
   'scripts/audit-workspace.mjs',
+  /* THE REMAINING NINE, DECLARED TOGETHER RATHER THAN ONE PER INCIDENT.
+   *
+   * Four modules have now been called orphans because their only caller was
+   * missing from this list, and each was fixed by adding that one caller. A
+   * blind auditor pointed out the obvious: NINE more scripts import from src/
+   * and are undeclared, two of them named in package.json `scripts`. They are
+   * latent only because nothing is EXCLUSIVELY reachable through them today --
+   * which is exactly the condition the next rule-10 extraction breaks.
+   *
+   * Every one is invoked by a person, by npm, or by a hook. That is the only
+   * test for an entry point, and it is a statement a person has to make, which
+   * is what this list is for. test/entryPointsComplete.test.mjs now fails when
+   * a script imports from src/ and appears in neither this list nor an
+   * exemption with a reason -- so the fifth incident reports itself instead of
+   * arriving as a mystery orphan. */
+  'scripts/audit-auto.mjs',
+  'scripts/start-agent.mjs',
+  'scripts/check-deployed-instructions.mjs',
+  'scripts/check-edge-deploy.mjs',
+  'scripts/verify-hook-integrity.mjs',
+  'scripts/measure-session-efficiency.mjs',
+  'scripts/probe-audit-due.mjs',
+  'scripts/probe-dead-exports.mjs',
+  'scripts/worker-wire-gate-scripts.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',

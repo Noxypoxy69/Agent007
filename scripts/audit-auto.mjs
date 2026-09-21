@@ -43,6 +43,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { runGit } from '../src/safeGit.mjs';
+import { readSuiteSummary } from '../src/suiteSummary.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -230,13 +231,34 @@ function runTests(cwd, files, home) {
     env: { ...process.env, AGENTBRIDGE_HOME: home },
   });
   const text = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  const num = (label) => {
-    const m = [...text.matchAll(new RegExp(`^\\u2139 ${label} (\\d+)`, 'gm'))];
-    return m.length ? Number(m[m.length - 1][1]) : -1;
-  };
-  const pass = num('pass');
-  const fail = num('fail');
-  const tests = num('tests');
+
+  /*
+   * THE SECOND OF THREE COPIES OF A READER THAT WAS FIXED IN ONE PLACE.
+   *
+   * This held the byte-identical per-label last-match reader that
+   * scripts/audit-workspace.mjs was corrected away from -- found by a blind
+   * auditor after that fix landed, with the note that "the fix landed at ONE of
+   * THREE summary readers, and the two left behind decide more than
+   * audit-workspace does". True here: these counts become GATE / HOLLOW
+   * verdicts written into the audit ledger.
+   *
+   * Taking the last match of each label INDEPENDENTLY means the labels can come
+   * from different summary blocks, which is how the original produced
+   * `fail 0` on a red run with arithmetic that did not add up. That matters more
+   * in this file than in audit-workspace, because this one is the nested-child
+   * case BY CONSTRUCTION: test/auditAutoVerdicts.test.mjs spawns audit-auto,
+   * which spawns `node --test`.
+   *
+   * src/suiteSummary.mjs refuses when the text holds more than one complete
+   * summary rather than choosing between them, and reconciles the parts against
+   * the total and both directions of the exit status. Its refusal lands on
+   * `ran: false`, which this file already routes to UNKNOWN -- "NOT a gate and
+   * NOT a pass: nothing was measured" -- which is the correct home for it.
+   */
+  const summary = readSuiteSummary(text, r.status);
+  const pass = summary.ok ? summary.pass : -1;
+  const fail = summary.ok ? summary.fail : -1;
+  const tests = summary.ok ? summary.tests : -1;
 
   /*
    * "COULD NOT RUN" AND "FAILED" MUST NOT RENDER ALIKE, and the -1 sentinel
@@ -250,7 +272,7 @@ function runTests(cwd, files, home) {
    * is, so that is what decides.
    */
   const ran = tests >= 0 && pass >= 0 && fail >= 0;
-  return { status: r.status, pass, fail, tests, ran, text };
+  return { status: r.status, pass, fail, tests, ran, text, why: summary.why };
 }
 
 const findings = [];
@@ -433,9 +455,18 @@ for (const sha of shas) {
      * between a suite and a wreck.
      */
     if (!after.ran) {
-      console.log(`${short}  UNKNOWN the suite did not run after the revert -- no summary was produced  [${tests.join(' ')}]`);
+      /*
+       * SAY WHICH KIND OF UNREADABLE. This printed "no summary was produced"
+       * for every non-count, which was true of the only case it then had. Now
+       * the reader distinguishes several -- no block, parts that do not
+       * reconcile, two competing summaries, an exit status contradicting the
+       * count -- and collapsing them loses the one fact that tells an operator
+       * whether to look at the commit or at the machine.
+       */
+      console.log(`${short}  UNKNOWN no usable summary after the revert  [${tests.join(' ')}]`);
+      console.log(`         ${after.why}`);
       console.log('         That is NOT a gate and NOT a pass: nothing was measured.');
-      findings.push({ sha: short, verdict: 'unknown', detail: 'no test summary after revert' });
+      findings.push({ sha: short, verdict: 'unknown', detail: after.why ?? 'no test summary after revert' });
       continue;
     }
     if (before.ran && after.tests < before.tests) {
