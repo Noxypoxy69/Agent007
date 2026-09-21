@@ -121,10 +121,23 @@ test('A SERVED BACKOFF LEADS TO A TICK, not another backoff', () => {
     'after sleeping, the loop backed off AGAIN instead of retrying -- it can never '
     + 'tick a second time and can never reach the starved stop');
 
-  /* The backoff still GROWS across genuine no-progress cycles; serving one
-   * must not flatten the curve. */
+  /*
+   * The backoff still GROWS across genuine no-progress cycles; serving one
+   * must not flatten the curve.
+   *
+   * OBSERVED BELOW starvedLimit, and derived from it rather than typed.
+   * This used to assert n=3 and broke when starvedLimit dropped to 3 --
+   * correctly, because at the limit the loop STOPS rather than waits. A
+   * literal here is a claim about one configuration, which is the same
+   * mistake as encoding a machine's accident (rule 21).
+   */
+  const below = LOOP_DEFAULTS.starvedLimit - 1;
+  assert.ok(below >= 2, `starvedLimit ${LOOP_DEFAULTS.starvedLimit} leaves no curve to observe`);
   assert.equal(nextAction({ ...s, consecutiveNoProgress: 1 }, { intervalMs: 1000 }).waitMs, 2000);
-  assert.equal(nextAction({ ...s, consecutiveNoProgress: 3 }, { intervalMs: 1000 }).waitMs, 8000);
+  assert.equal(
+    nextAction({ ...s, consecutiveNoProgress: below }, { intervalMs: 1000 }).waitMs,
+    1000 * (2 ** below),
+  );
 
   /* And a served backoff still yields to the STOP conditions, or the loop
    * would tick past its budget on the cycle after every wait. */
