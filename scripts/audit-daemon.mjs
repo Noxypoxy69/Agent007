@@ -61,6 +61,22 @@ const flag = (n, d = null) => {
 
 const ONCE = has('--once');
 const LAUNCH = has('--launch');
+const SUPERVISE = has('--supervise');
+/*
+ * Parsed strictly, and a malformed value is FATAL rather than defaulted.
+ * `--max-ticks abc` silently becoming 5 is an operator asking for one
+ * spend and getting another, which is the one mistake here that costs
+ * money rather than correctness.
+ */
+const posInt = (name, dflt) => {
+  const raw = flag(name, null);
+  if (raw === null) return dflt;
+  if (!/^\d+$/.test(String(raw).trim())) {
+    say(`[audit-daemon] ${name} must be a whole number, got ${JSON.stringify(raw)}`);
+    process.exit(2);
+  }
+  return Number(String(raw).trim());
+};
 const say = (s) => process.stderr.write(`${s}\n`);
 
 /**
@@ -89,6 +105,11 @@ const {
   claimJob, JOB, REQUIRED_PROOFS, makeAuthorResolver, AUTHOR_UNAVAILABLE,
 } = await import('../src/auditJob.mjs');
 const { proposeAudit, isClaimable, MAX_REVIEW_ATTEMPTS } = await import('../src/auditDispatch.mjs');
+const { nextAction, LOOP_ACTION, LOOP_STOP, LOOP_DEFAULTS } = await import('../src/auditLoop.mjs');
+
+const INTERVAL_MS = posInt('--interval', LOOP_DEFAULTS.intervalMs / 1000) * 1000;
+const MAX_TICKS = posInt('--max-ticks', LOOP_DEFAULTS.maxTicks);
+const DEADLINE_MS = posInt('--deadline', 0) * 1000 || undefined;
 const { allocateWorkspace, releaseWorkspace } = await import('../src/auditWorkspace.mjs');
 const { measureReviewed, attributionHolds, ATTRIBUTION } = await import('../src/auditAttribution.mjs');
 
@@ -974,6 +995,85 @@ async function tick() {
   return true;
 }
 
-const did = await tick();
-if (!ONCE && did) say('[audit-daemon] --once not given, but this build consumes one job per invocation by design.');
-process.exit(0);
+/*
+ * ═══ --supervise: THE LOOP, BOUNDED ═══
+ *
+ * Without it this consumes one job and exits, which is what it has always
+ * done and why the queue reached 115 while a working consumer sat unused.
+ * The enqueue side was automatic and nothing joined it to the consume side.
+ *
+ * The DECISION of when to tick lives in src/auditLoop.mjs so its backoff
+ * and its stop conditions can be watched without spawning anything (rule
+ * 10). This function only carries out what that decides, and reports every
+ * transition -- a supervisor whose exits are indistinguishable is the
+ * defect this repository has a whole section about.
+ *
+ * SPEND IS BOUNDED BY DEFAULT and the default is small. Each launched tick
+ * is a paid review, and spending is the owner's call. `--max-ticks 0` is a
+ * real dry run: it reports what it would do and launches nothing.
+ */
+if (!SUPERVISE) {
+  const did = await tick();
+  if (!ONCE && did) say('[audit-daemon] --once not given, but this build consumes one job per invocation by design.');
+  process.exit(0);
+}
+
+const startedAt = Date.now();
+let ticksUsed = 0;
+let consecutiveNoProgress = 0;
+
+say(`[audit-daemon] SUPERVISING. interval ${Math.round(INTERVAL_MS / 1000)}s, `
+  + `budget ${MAX_TICKS} tick(s)${LAUNCH ? '' : ', PREPARE ONLY (no reviewer is launched)'}`);
+
+for (;;) {
+  /*
+   * DEPTH IS RE-READ EVERY CYCLE, never carried. Another session commits
+   * into this repository while the loop runs, so a cached depth is a
+   * statement about a queue that no longer exists.
+   */
+  let queueDepth = 0;
+  try {
+    const now = new Date().toISOString();
+    queueDepth = readQueue(REPO).rows.filter((r) => isClaimable(r, { now })).length;
+  } catch (e) {
+    /*
+     * AN UNREADABLE QUEUE IS NOT AN EMPTY ONE, but it is also not a number
+     * to act on. Stop and say so, rather than treat a read failure as a
+     * drained backlog -- that conflation is the bug this subsystem exists
+     * to prevent.
+     */
+    say(`[audit-daemon] STOPPING: the queue could not be read (${e?.message ?? e}). `
+      + 'This is UNKNOWN, not empty.');
+    process.exit(2);
+  }
+
+  const decision = nextAction(
+    { ticksUsed, consecutiveNoProgress, queueDepth, startedAt, now: Date.now() },
+    { intervalMs: INTERVAL_MS, maxTicks: MAX_TICKS, deadlineMs: DEADLINE_MS },
+  );
+
+  if (decision.action === LOOP_ACTION.STOP) {
+    say(`[audit-daemon] STOPPED (${decision.code}): ${decision.why}`);
+    /*
+     * A DRAINED QUEUE EXITS 0. EVERYTHING ELSE DOES NOT -- a caller must be
+     * able to tell "there is no work left" from "there is work and I could
+     * not place it", and an exit code is the only channel a scheduler has.
+     */
+    process.exit(decision.code === LOOP_STOP.EMPTY ? 0 : 1);
+  }
+
+  if (decision.action === LOOP_ACTION.WAIT) {
+    say(`[audit-daemon] ${decision.why}`);
+    await new Promise((r) => { setTimeout(r, decision.waitMs).unref?.(); });
+    continue;
+  }
+
+  ticksUsed += 1;
+  say(`[audit-daemon] tick ${ticksUsed}/${MAX_TICKS}: ${decision.why}`);
+  const placed = await tick();
+  consecutiveNoProgress = placed ? 0 : consecutiveNoProgress + 1;
+
+  if (placed) {
+    await new Promise((r) => { setTimeout(r, INTERVAL_MS).unref?.(); });
+  }
+}
