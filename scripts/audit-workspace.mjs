@@ -143,14 +143,44 @@ const suite = spawnSync(process.execPath,
   });
 
 const text = `${suite.stdout ?? ''}${suite.stderr ?? ''}`;
-const num = (label) => {
-  const m = [...text.matchAll(new RegExp(`^\\u2139 ${label} (\\d+)`, 'gm'))];
-  return m.length ? m[m.length - 1][1] : '?';
-};
+
+/*
+ * THE NUMBERS COME FROM ONE BLOCK OR THEY DO NOT COME AT ALL.
+ *
+ * This read `^ℹ <label> (\d+)` per label and took the LAST match of each,
+ * independently. Blind audit D5 measured what that produces here:
+ *
+ *     suite exit : 1
+ *     tests 2992  pass 2985  fail 0  skipped 6
+ *     failing:
+ *       NO COMMAND PRINTS A RUNTIME ASSERTION
+ *
+ * `fail 0` on a red suite, and 2985 + 6 = 2991 rather than 2992 -- the numbers
+ * disagreed with each other and nothing said so. The cause is that tests in
+ * this repository SPAWN CHILDREN, node reprints a failing test's captured
+ * output in its `failing tests:` detail, and a child's own green summary lands
+ * in that detail. So `fail` was read from a grandchild and `tests` from the
+ * parent.
+ *
+ * It matters more than an ordinary bug because of who reads it. Rule 20 sends
+ * every auditor to a clone made by THIS SCRIPT, and rule 3 tells them to assert
+ * the reported count rather than the exit code. The instrument was lying in the
+ * direction of "everything is fine", to exactly the people told to trust it.
+ *
+ * src/suiteSummary.mjs reads whole contiguous blocks, reconciles the parts
+ * against the total, and cross-checks against the exit status -- and REFUSES,
+ * with a reason, rather than printing a number it cannot stand behind.
+ */
+const { readSuiteSummary } = await import('../src/suiteSummary.mjs');
+const summary = readSuiteSummary(text, suite.status);
 
 console.log('');
 console.log(`suite exit : ${suite.status === null ? 'killed' : suite.status}   (0 is green; there is no piping here, so this is node's own status)`);
-console.log(`tests ${num('tests')}  pass ${num('pass')}  fail ${num('fail')}  skipped ${num('skipped')}`);
+if (summary.ok) {
+  console.log(`tests ${summary.tests}  pass ${summary.pass}  fail ${summary.fail}  skipped ${summary.skipped}`);
+} else {
+  console.log(`tests ?  pass ?  fail ?  skipped ?   COUNTS UNRELIABLE -- ${summary.why}`);
+}
 
 const failing = [...text.matchAll(/^✖ (.+?) \(/gm)].map((m) => m[1]);
 if (failing.length) {
