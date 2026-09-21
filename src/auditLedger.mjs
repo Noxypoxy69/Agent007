@@ -134,6 +134,22 @@ export const AUDIT_BEARING_EXTRAS = Object.freeze([
    * somebody remembering. That is now the normal way it grows.
    */
   'src/daemonargs.mjs',
+  /*
+   * THE FIFTEENTH AND SIXTEENTH, caught by the same gate on the same day.
+   * `scripts/audit-daemon.mjs` now derives the reviewer's tool rules, so it
+   * imports `agentPermissions`, which imports `preExecutionGuard`.
+   *
+   * Neither is arguable. `preExecutionGuard` IS the allow/deny/owner-gate
+   * decision, and `agentPermissions` decides which commands a spawned agent
+   * may run -- it is the file that turns that guard's verdicts into another
+   * process's permissions. A change to either alters what an unattended
+   * reviewer is allowed to do.
+   *
+   * Third time the closure has extended this list by failing rather than by
+   * somebody remembering, and the first time it reached two hops out.
+   */
+  'src/agentpermissions.mjs',
+  'src/preexecutionguard.mjs',
 ]);
 
 /**
