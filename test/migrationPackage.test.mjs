@@ -659,7 +659,7 @@ test('A HARD LINK TO A CREDENTIAL IS REFUSED BY IDENTITY, not by its name', asyn
      * itself — an assertion that cannot fail, in the file whose subject is
      * hollow gates. The second compared it to the raw `link` string and failed
      * on this machine, because `mkdtemp` hands back an 8.3 short path
-     * (`DANNYG~1`) that `realpathSync.native` expands. That is rule 21 exactly:
+     * that `realpathSync.native` expands. That is rule 21 exactly:
      * the value is a property of the machine, not of the thing. So the premise
      * is stated as a RELATION between two resolved paths, which no path spelling
      * can disturb.
