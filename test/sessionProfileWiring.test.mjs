@@ -80,8 +80,17 @@ test('an ATTESTED session may edit a guard control, and it is announced', () => 
   assert.equal(r.allowed, true);
   assert.equal(r.overridden, true);
   assert.match(r.notice, /protected-control-by-profile/);
-  // No grant was spent, and the notice must not imply one was.
-  assert.doesNotMatch(r.notice, /override/i);
+  /*
+   * THE NOTICE MUST SAY WHICH CHANNEL PERMITTED THIS. A reader auditing the
+   * transcript has to be able to tell a profile permit from a spent grant --
+   * they have different provenance and different questions to ask about them.
+   * The first version of this asserted the word "override" was ABSENT, which
+   * failed against the sentence "No override was spent": the assertion was
+   * matching the vocabulary instead of the claim.
+   */
+  assert.match(r.notice, /No override was spent/);
+  assert.equal(r.notice.includes('protected-control-overridden'), false,
+    'a profile permit must not be reported as a grant permit');
 }));
 
 test('the gate configuration is refused to an attested session too', () => withStore(() => {
