@@ -806,16 +806,35 @@ test('THE NOTE IS CHECKED AGAINST THE VERIFIER, not against a copy of the claim'
    * sentence. Derive the claim from the artefact.
    */
   const { storeKeyNote } = await import('../scripts/migration-package.mjs');
+  const { repoStorePath } = await import('../src/guardSession.mjs');
   const a = '{"finding_id":"x"}\n';
   const b = '{"finding_id":"y"}\n';
   const dir = mk();
+  const home = mk();
   try {
     const items = [item('findings/aaaaaaaaaaaaaaaa.jsonl', a), item('findings/bbbbbbbbbbbbbbbb.jsonl', b)];
     packageWith(dir, items, ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb'],
       [['findings/aaaaaaaaaaaaaaaa.jsonl', a], ['findings/bbbbbbbbbbbbbbbb.jsonl', b]]);
 
+    /*
+     * THROUGH A CHILD WITH A FIXTURE HOME, not the in-process helper — this test
+     * asserts on a `resolve` row, and the header of this file says those go
+     * through `verifyChild` because the in-process reader opens the OPERATOR'S
+     * live store. Flagged by blind audit LOW-10: it was robust here only by
+     * accident of the fixture, which is exactly how the 26-row measurement got
+     * into a fixture two commits ago.
+     *
+     * The destination key is DERIVED from the shipped resolver, so the fixture
+     * store is where the verifier will actually look rather than where this
+     * machine happens to put it.
+     */
+    const repo = fileURLToPath(new URL('..', import.meta.url));
+    const key = path.basename(repoStorePath(repo, 'findings', '.jsonl'));
+    mkdirSync(path.join(home, 'findings'), { recursive: true });
+    writeFileSync(path.join(home, 'findings', key), a);
+
     const note = storeKeyNote(items);
-    const { out } = await verify(dir);
+    const { out } = verifyChild(dir, home);
 
     assert.match(note, /INSTALLATION and the RESOLUTION row for that kind report FAILED/,
       'the note no longer states what the verifier does with this shape');
@@ -825,7 +844,10 @@ test('THE NOTE IS CHECKED AGAINST THE VERIFIER, not against a copy of the claim'
 
     assert.match(note, /INTEGRITY still verifies normally/);
     assert.match(out, /integrity OK/, 'the note claims integrity still verifies and it did not');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('THE PASS PATH EXISTS: a well-formed, installed package reaches exit 0', () => {
