@@ -92,8 +92,26 @@ const defaultHome = () => process.env.AGENTBRIDGE_HOME || path.join(homedir(), '
  */
 export const PENDING_MAX_AGE_MS = 120_000;
 
+/*
+ * A REPO ROOT THAT IS NOT A STRING IS NOT A REPO ROOT, AND THIS THREW.
+ *
+ * Measured by the suite on the first full run after wiring: `repoRootOf(cwd)`
+ * answers null when git cannot describe the tree, `repoStorePath` handed that
+ * null to `path.resolve`, and the TypeError travelled out through
+ * gatherSessionEvidence into evaluateClaudeTool. The hook binary catches a
+ * throw and turns it into a DENY -- so the failure direction was safe, and the
+ * consequence was still an OUTAGE: every tool call in such a session refused,
+ * which is CLAUDE.md rule 19's "an outage gets the hook switched off".
+ *
+ * So the store path is total. No root, no store, no attestation, and the
+ * resolver's contained default stands -- which is the same answer an unattested
+ * session gets, reached without an exception.
+ */
+const usableRoot = (repoRoot) => (typeof repoRoot === 'string' && repoRoot.trim() !== '' ? repoRoot : null);
+
 /** The one-shot file a launcher writes BEFORE the session exists. */
 export function pendingPath(repoRoot, home = defaultHome()) {
+  if (!usableRoot(repoRoot)) return null;
   return repoStorePath(repoRoot, STORE_KIND, '.pending.json', home);
 }
 
@@ -111,6 +129,7 @@ const safeId = (sessionId) => String(sessionId ?? '').replace(/[^A-Za-z0-9_-]/g,
 
 /** The immutable per-session binding. */
 export function bindingPath(repoRoot, sessionId, home = defaultHome()) {
+  if (!usableRoot(repoRoot)) return null;
   const id = safeId(sessionId);
   if (id === '') return null;
   return repoStorePath(repoRoot, STORE_KIND, `-${id}.json`, home);
@@ -130,6 +149,7 @@ export function writePendingAttestation(repoRoot, profile = MANUAL_TRUSTED, now 
     return { ok: false, reason: `${profile} is not an execution profile` };
   }
   const file = pendingPath(repoRoot, home);
+  if (!file) return { ok: false, reason: 'no usable repository root, so there is nowhere to record it' };
   try {
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, `${JSON.stringify({ profile, created_at: new Date(now).toISOString() })}\n`, 'utf8');
@@ -158,6 +178,7 @@ export function bindSessionProfile(repoRoot, sessionId, now = Date.now(), home =
    * the header rejects. So it is deleted first and judged afterwards.
    */
   const pending = pendingPath(repoRoot, home);
+  if (!pending) return { ok: false, reason: 'no usable repository root, so nothing can be bound' };
   const claim = existsSync(pending) ? readJson(pending) : null;
   try { if (existsSync(pending)) unlinkSync(pending); } catch { /* best effort; judged below anyway */ }
 
@@ -243,10 +264,29 @@ export function isAuditWorkspace(cwd, env = process.env) {
  * this is the only part that touches the disk or the environment.
  */
 export function gatherSessionEvidence({ repoRoot, sessionId = null, cwd = repoRoot, env = process.env, home = defaultHome() } = {}) {
-  return {
-    sessionId,
-    attestation: sessionId ? readSessionBinding(repoRoot, sessionId, home) : null,
-    holdsTaskLease: holdsTaskLease(env),
-    auditWorkspace: isAuditWorkspace(cwd, env),
-  };
+  /*
+   * TOTAL, BECAUSE THE CALLER IS A PreToolUse HOOK AND A THROW THERE IS A DENY
+   * ON EVERY TOOL CALL.
+   *
+   * The guards above make each helper total on its own, and this catch is the
+   * class-level repair rather than a second copy of them: the property that
+   * matters is that NOTHING thrown while gathering evidence can take a session
+   * out, and fixing only the instance found by the suite would leave the
+   * property. bin/agentbridge-claude-guard.mjs makes exactly this argument
+   * about evaluateClaudeTool one layer up.
+   *
+   * The fallback is the CONTAINED answer, not a permissive one: no attestation
+   * means resolveSessionProfile returns AUTONOMOUS_TASK. Failing to measure is
+   * never a reason to trust.
+   */
+  try {
+    return {
+      sessionId,
+      attestation: sessionId ? readSessionBinding(repoRoot, sessionId, home) : null,
+      holdsTaskLease: holdsTaskLease(env),
+      auditWorkspace: isAuditWorkspace(cwd, env),
+    };
+  } catch {
+    return { sessionId, attestation: null, holdsTaskLease: false, auditWorkspace: false };
+  }
 }

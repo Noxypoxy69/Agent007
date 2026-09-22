@@ -197,6 +197,13 @@ export const DEFAULT_ENTRY_POINTS = [
    * test/entryPointsComplete.test.mjs exists to catch. */
   'scripts/migration-verify.mjs',
   'scripts/migration-package.mjs',
+  /* THE LAUNCHER'S HALF OF THE EXECUTION-PROFILE SPLIT. agent.cmd invokes it
+   * immediately before exec'ing claude, so it is a process entry in exactly the
+   * sense the four above are: something outside the graph runs it, which is why
+   * src/sessionEvidence.mjs and src/sessionPolicy.mjs are shipped rather than
+   * test-only. Declared in the commit that adds it, which is the rule
+   * test/entryPointsComplete.test.mjs exists to enforce. */
+  'scripts/attest-session.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
   'mcp/stdio.mjs',
