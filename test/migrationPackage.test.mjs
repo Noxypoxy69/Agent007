@@ -777,7 +777,15 @@ test('THE PASS PATH EXISTS: a well-formed, installed package reaches exit 0', ()
     const good = verifyChild(pkg, home);
     assert.equal(good.code, 0,
       `a correct, installed package did not pass. The gate can refuse but cannot accept:\n${good.out}`);
-    assert.match(good.out, /PACKAGE INTACT, INSTALLED, AND REACHABLE/);
+    /*
+     * THE BANNER NAMES WHAT IT ACTUALLY RESOLVED. It used to say, unqualified,
+     * "REACHABLE THROUGH ITS REAL READERS" with five of six resolution rows
+     * advisory (blind audit MEDIUM-6). This fixture carries four stores and
+     * declares two absent, so the banner must say four and two — a package that
+     * resolved one store cannot read like a package that resolved six.
+     */
+    assert.match(good.out, /PACKAGE INTACT AND INSTALLED\. 4 store\(s\) read back through their real consumers; 2 carried nothing to verify\./,
+      'the banner does not report how much it actually resolved');
     assert.match(good.out, /OK +resolve delegations +resolved 3, matches manifest/,
       'phase 3 did not actually compare a count — an exit 0 with every resolution row advisory is the HIGH-2 shape');
     assert.match(good.out, /OK +manifest completeness/);
