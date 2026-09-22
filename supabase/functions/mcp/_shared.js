@@ -419,11 +419,59 @@ export function heartbeatAgeMs(row, now) {
   return n - t;
 }
 
-export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
-  if (row?.capacity === 'offline') return false;
+/**
+ * FOUR FACTS, NOT ONE -- spliced from src/liveRegistry.mjs, which carries the
+ * full account of why.
+ *
+ *   presence      SELF-DECLARED departure -- NOT owner intent; see below
+ *   liveness      heartbeat age           -- have we heard from it?
+ *   availability  may receive work        -- presence AND liveness
+ *
+ * A worker that stopped reporting and a worker that DECLARED offline used to
+ * render as the same word, and they call for opposite responses: the second did
+ * what it meant to, the first is a fault nobody is being told about.
+ *
+ * A MISSED HEARTBEAT IS EVIDENCE ABOUT LIVENESS. IT IS NOT THE OWNER CHANGING
+ * THEIR MIND. Presence therefore never reads the clock.
+ *
+ * `presence` IS NOT OWNER INTENT. It is the worker's own declaration: a session
+ * can take itself out, it cannot put itself in. There is no owner-intent anchor
+ * to key it on -- one registration token is shared by every worker and
+ * `registered_by` is documented PROVENANCE ONLY -- so the owner half of the
+ * contract is deliberately NOT implemented rather than faked. src/liveRegistry.mjs
+ * carries the full account.
+ */
+export const PRESENCE = { PRESENT: 'present', DEPARTED: 'departed' };
+export const LIVENESS = { LIVE: 'live', STALE: 'stale', UNKNOWN: 'unknown' };
+
+/** Owner intent, and nothing else. No clock, on purpose. */
+export function presenceOf(row) {
+  return row?.capacity === 'offline' ? PRESENCE.DEPARTED : PRESENCE.PRESENT;
+}
+
+/**
+ * Heartbeat age, and nothing else. A declared-offline worker that is still
+ * beating is LIVE; its declaration is about availability, not about whether the
+ * process is running. UNKNOWN is its own answer, never folded into STALE.
+ */
+export function livenessOf(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
   const age = heartbeatAgeMs(row, now);
-  if (age === null) return false;
-  return age >= 0 && age <= staleAfterMs;
+  if (age === null) return LIVENESS.UNKNOWN;
+  return age >= 0 && age <= staleAfterMs ? LIVENESS.LIVE : LIVENESS.STALE;
+}
+
+/** May this session receive work? Present by intent AND live by heartbeat. */
+export function isAvailable(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  return presenceOf(row) === PRESENCE.PRESENT
+    && livenessOf(row, { now, staleAfterMs }) === LIVENESS.LIVE;
+}
+
+/*
+ * The spelling every call site already uses. isLive is availability and always
+ * was; it delegates so there is ONE definition rather than two that agree today.
+ */
+export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  return isAvailable(row, { now, staleAfterMs });
 }
 
 /**
@@ -464,11 +512,21 @@ export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
  * it. Writing the derivation inline at the read site would have been three
  * lines and a second source of truth for "what does a reader see", and the two
  * would disagree the first time somebody changed one.
+ *
+ * ═══ WHAT THIS FUNCTION IS, NOW THAT THE FACTS ARE NAMED APART ═══
+ *
+ * It answers AVAILABILITY in the four-token vocabulary the dispatch path
+ * branches on, and no longer derives presence from the clock. The 'offline' it
+ * returns for a silent worker is an availability verdict, NOT a claim that the
+ * owner withdrew the agent -- `presence` and `liveness` on each registry row
+ * carry that, and are where a reader tells a fault from an orderly shutdown.
+ *
+ * The token is deliberately unchanged: laneRegistry admits any session whose
+ * capacity !== 'offline', so a new token here would make a stale row resolvable.
  */
 export function observedCapacity(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
-  return isLive(row, { now, staleAfterMs })
-    ? (CAPACITIES.includes(row?.capacity) ? row.capacity : 'idle')
-    : 'offline';
+  if (!isAvailable(row, { now, staleAfterMs })) return 'offline';
+  return CAPACITIES.includes(row?.capacity) ? row.capacity : 'idle';
 }
 
 
@@ -494,6 +552,14 @@ export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS 
       head_sha: str(r?.head_sha),
       heartbeat_at: r?.heartbeat_at ?? r?.lastSeenAt ?? r?.last_seen_at ?? null,
       capacity: observedCapacity(r, { now, staleAfterMs }),
+      /*
+       * The separated facts travel with the row. Leaving each reader to derive
+       * presence and liveness from heartbeat_at would rebuild the very shape
+       * this fixed: a second implementation at the read site.
+       */
+      presence: presenceOf(r),
+      liveness: livenessOf(r, { now, staleAfterMs }),
+      available: isAvailable(r, { now, staleAfterMs }),
     });
   }
 
