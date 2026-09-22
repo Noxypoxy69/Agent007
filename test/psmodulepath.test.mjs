@@ -5,7 +5,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { run } from '../src/exec.mjs';
+import { childEnv, run } from '../src/exec.mjs';
 import { protectSecret, unprotectSecret, verifyPermissions } from '../src/secretstore.mjs';
 import { probeProcesses } from '../src/processes.mjs';
 
@@ -497,14 +497,76 @@ test('psmodulepath: only powershell.exe gets a rewritten environment', { skip: !
   );
 });
 
-test('psmodulepath: pwsh keeps its own module path', () => {
-  // PowerShell 7 must NOT be stripped -- it needs the PS7 tree that breaks 5.1.
-  // Asserted on the matcher rather than by spawning, so it holds on any machine.
-  // (Kept in step with isWindowsPowerShell() in src/exec.mjs.)
-  const base = (f) => f.replace(/\\/g, '/').split('/').pop().toLowerCase();
-  assert.equal(base('pwsh.exe'), 'pwsh.exe');
-  assert.notEqual(base('pwsh.exe'), 'powershell.exe');
-  assert.equal(base('C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe'), 'powershell.exe');
+/*
+ * THESE THREE ASSERT THE SHIPPED FUNCTION. THE ONE THEY REPLACED DID NOT.
+ *
+ * It defined its own basename lambda and asserted against string literals, so
+ * it agreed with itself: every mutation of the real matcher in src/exec.mjs
+ * left it green, including widening it to strip pwsh -- which is the single
+ * regression its own name promised to catch. Its comment said "kept in step
+ * with isWindowsPowerShell() in src/exec.mjs", and nothing kept it in step.
+ *
+ * childEnv is imported and called directly. It is pure, so these run on any
+ * platform and carry no { skip: !isWin } -- which also means that on a
+ * non-Windows runner, where the other tests in this file skip, what is left is
+ * real coverage instead of a tautology.
+ *
+ * The matcher is asserted THROUGH childEnv rather than on its own, because
+ * childEnv is its only production caller: a matcher that is correct while
+ * nothing asks it is the defect one layer up.
+ */
+test('psmodulepath: pwsh keeps its own module path -- asserted on the shipped childEnv', () => {
+  // PowerShell 7 must NOT be stripped: it needs the PS7 tree that breaks 5.1.
+  const env = { PSModulePath: 'PS7-TREE', PATH: 'p' };
+  for (const file of ['pwsh.exe', 'pwsh', 'C:\\Program Files\\PowerShell\\7\\pwsh.exe']) {
+    assert.equal(childEnv(file, env).PSModulePath, 'PS7-TREE', `${file} must keep its own module path`);
+  }
+});
+
+test('psmodulepath: every spelling of Windows PowerShell is cleared, and nothing else is', () => {
+  // GENERATED FROM TWO LISTS rather than one example each, so a matcher that is
+  // right about the spelling somebody thought of and wrong about a sibling goes
+  // red here (rule 7). The negatives are the half that stops a widened matcher.
+  const env = { PSModulePath: 'POISON' };
+  const CLEARED = [
+    'powershell.exe',
+    'POWERSHELL.EXE',
+    'PowerShell.exe',
+    'powershell',
+    'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    'C:/WINDOWS/system32/WindowsPowerShell/v1.0/powershell.exe',
+  ];
+  const UNTOUCHED = ['pwsh.exe', 'pwsh', 'cmd.exe', 'node.exe', 'git.exe', 'powershell-ise.exe', 'notpowershell.exe'];
+  for (const file of CLEARED) {
+    assert.equal(childEnv(file, env).PSModulePath, '', `${file} should have been cleared`);
+  }
+  for (const file of UNTOUCHED) {
+    assert.equal(childEnv(file, env).PSModulePath, 'POISON', `${file} must not be rewritten`);
+  }
+});
+
+test('psmodulepath: the cleared value is the EMPTY STRING, and nothing else in the environment moves', () => {
+  /*
+   * THE VALUE, NOT JUST THE ABSENCE OF THE POISON. Every other test in this
+   * file asks whether the poison is gone, which is satisfied by ANY replacement
+   * -- a hardcoded system32 path, a nonexistent root, undefined, or a single
+   * space. All five of those shipped green before this assertion existed, and
+   * src/exec.mjs argues at length that the empty string specifically is what
+   * makes a machine with a different system root work.
+   *
+   * The deep comparison is what catches the other direction: returning ONLY
+   * { PSModulePath: '' } and discarding the inherited environment also passed
+   * every test in this file, which would hand every powershell child no PATH,
+   * no SystemRoot and no USERNAME -- and hardenPermissions() builds an ACL
+   * grant out of USERDOMAIN and USERNAME.
+   */
+  const base = {
+    PSModulePath: 'POISON', PATH: 'p', SystemRoot: 'C:\\WINDOWS', USERNAME: 'u', USERDOMAIN: 'd',
+  };
+  const out = childEnv('powershell.exe', base);
+  assert.deepEqual(out, { ...base, PSModulePath: '' });
+  assert.equal(out.PSModulePath, '', 'the cleared value must be the empty string, not a path and not undefined');
+  assert.equal(Object.prototype.hasOwnProperty.call(out, 'PSModulePath'), true, 'the key must be present, not deleted');
 });
 
 test('psmodulepath: a path containing spaces and shell metacharacters stays inert', { skip: !isWin }, async () => {
