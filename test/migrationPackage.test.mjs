@@ -588,17 +588,21 @@ test('A HARD LINK TO A CREDENTIAL IS REFUSED BY IDENTITY, not by its name', asyn
       return;
     }
     /*
-     * The premise, asserted rather than assumed: the link is a SEPARATE name
-     * that resolves to itself and not to its target, so a name check waves it
-     * through — that is the whole reason identity is checked instead.
+     * The premise, asserted rather than assumed: realpath does NOT see through
+     * the hard link — it resolves to a different path from the target's, so a
+     * name check waves it through. That is the whole reason identity is checked.
      *
-     * The first version of this compared `realpathSync.native(link)` to itself,
-     * an assertion that cannot fail, in a file whose subject is hollow gates.
-     * Caught by blind audit.
+     * Two wrong versions of this assertion preceded the right one, both caught,
+     * and both are the lesson. The first compared `realpathSync.native(link)` to
+     * itself — an assertion that cannot fail, in the file whose subject is
+     * hollow gates. The second compared it to the raw `link` string and failed
+     * on this machine, because `mkdtemp` hands back an 8.3 short path
+     * (`DANNYG~1`) that `realpathSync.native` expands. That is rule 21 exactly:
+     * the value is a property of the machine, not of the thing. So the premise
+     * is stated as a RELATION between two resolved paths, which no path spelling
+     * can disturb.
      */
-    assert.equal(realpathSync.native(link), realpathSync.native(link) && link,
-      'realpath did not return the link\'s own path, so this fixture is not the case being tested');
-    assert.ok(!realpathSync.native(link).toLowerCase().endsWith('config.json'),
+    assert.notEqual(realpathSync.native(link), realpathSync.native(path.join(home, 'config.json')),
       'realpath saw through the hard link, so this fixture is not the case being tested');
 
     const out = forbiddenFindings([{ rel: 'audits/bbbbbbbbbbbbbbbb.jsonl', src: link }], home);
