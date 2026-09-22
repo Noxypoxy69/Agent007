@@ -54,7 +54,9 @@
  * Exit 0 only when all three phases pass. READ-ONLY: it changes nothing.
  */
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import {
+  readFileSync, existsSync, statSync, lstatSync, realpathSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,6 +173,71 @@ export function payloadPathProblem(item) {
   return null;
 }
 
+/**
+ * Open a file the package claims to contain, or say why not.
+ *
+ * ═══ THE TRAVERSAL FIX COVERED `items` AND LEFT ITS SIBLING OPEN ═══
+ *
+ * Blind audit D2, reproduced before this was written. `payloadPathProblem`
+ * constrained the manifest's ITEMS and the companions loop three lines below it
+ * still did `path.join(pkgDir, c.name)` with nothing constraining `c.name` --
+ * and decided whether to open it at all from `c.location`, another manifest
+ * field. Measured, against a package directory containing no such file:
+ *
+ *     OK  companion ../../../../../../../../.agentbridge/audits/<key>.jsonl
+ *         sha256 matches
+ *
+ * 1.37 MB hashed out of the LIVE store and reported as an intact companion.
+ * That is the same mechanism the header above writes up as HIGH-1, in the very
+ * commit that fixed it -- rule 8 again, one field over: the five strings the
+ * probe tried got fixed, and the matcher did not.
+ *
+ * AND A STRING CHECK IS NOT ENOUGH, because the filesystem gets a vote. Blind
+ * audit D3: nothing here resolved links, so a symlink or NTFS junction sitting
+ * at `state/audits/<x>.jsonl` redirects the read to one live file with no `..`
+ * anywhere in the manifest. The packager was hardened against exactly this and
+ * the verifier was not -- the asymmetry was inside a single commit whose own
+ * message says "readFileSync FOLLOWS LINKS".
+ *
+ * So both halves: the manifest string is confined, and then the RESOLVED path
+ * must still be a regular file inside the package. Asking the OS with
+ * `realpathSync.native` rather than `realpathSync`, for the reason every other
+ * resolver in this repository states -- case folding and 8.3 short names.
+ *
+ * @returns {{file: string}} or {{why: string}}
+ */
+function insidePackage(pkgDir, rel, label) {
+  if (typeof rel !== 'string' || rel === '') return { why: `${label} carries no path` };
+  if (rel.includes('\\')) return { why: `"${rel}" contains a backslash; package paths are forward-slashed` };
+  if (path.posix.isAbsolute(rel) || path.win32.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) {
+    return { why: `"${rel}" is an absolute path; a manifest may only name a location INSIDE the package` };
+  }
+  if (rel.split('/').some((p) => p === '..' || p === '.' || p === '')) {
+    return { why: `"${rel}" walks outside the package; a manifest may only name a location INSIDE the package` };
+  }
+
+  const file = path.join(pkgDir, rel);
+  if (!existsSync(file)) return { why: 'claimed by the manifest and ABSENT from the package' };
+
+  let real;
+  let rootReal;
+  try {
+    real = realpathSync.native(file);
+    rootReal = realpathSync.native(pkgDir);
+  } catch {
+    return { why: `"${rel}" could not be resolved (broken link?)` };
+  }
+  const within = path.relative(rootReal, real);
+  if (within.startsWith('..') || path.isAbsolute(within)) {
+    return {
+      why: `"${rel}" is a link that resolves OUTSIDE the package, to ${within.split(path.sep).slice(-2).join('/')}. `
+        + 'Refusing to read it -- that is how a verifier ends up hashing the live store instead of the package.',
+    };
+  }
+  if (!statSync(real).isFile()) return { why: `"${rel}" does not resolve to a regular file` };
+  return { file: real };
+}
+
 function destinationFor(rel, packagedByKind) {
   const [kind, base] = rel.includes('/') ? rel.split('/') : [null, rel];
   if (!kind) return { dest: rel };
@@ -211,9 +278,9 @@ export async function run(pkgDir) {
       integrityOk = false;
       continue;
     }
-    const f = path.join(pkgDir, 'state', rel);
-    if (!existsSync(f)) {
-      results.push(fail(`pkg ${rel}`, 'claimed by the manifest and ABSENT from the package'));
+    const { file: f, why } = insidePackage(pkgDir, `state/${rel}`, `pkg ${rel}`);
+    if (!f) {
+      results.push(fail(`pkg ${rel}`, why));
       integrityOk = false;
       continue;
     }
@@ -229,8 +296,8 @@ export async function run(pkgDir) {
   for (const c of manifest.companions ?? []) {
     const inside = c.location && c.location.startsWith('inside');
     if (!inside) { results.push(advise(`companion ${c.name}`, `${c.bytes} B, beside the package — verify separately (${c.verify_with ?? 'no method recorded'})`)); continue; }
-    const f = path.join(pkgDir, c.name);
-    if (!existsSync(f)) { results.push(fail(`companion ${c.name}`, 'recorded and ABSENT')); integrityOk = false; continue; }
+    const { file: f, why } = insidePackage(pkgDir, c.name, `companion ${c.name}`);
+    if (!f) { results.push(fail(`companion ${c.name}`, why)); integrityOk = false; continue; }
     const got = sha256(readFileSync(f));
     results.push(got === c.sha256
       ? ok(`companion ${c.name}`, 'sha256 matches')
@@ -258,6 +325,20 @@ export async function run(pkgDir) {
     if (!existsSync(live)) {
       results.push(fail(`install ${rel}`,
         `not present in the live store at ${dest}${renamedFrom ? ` (must be RENAMED from ${renamedFrom})` : ''}`));
+      installedOk = false;
+      continue;
+    }
+    /*
+     * THE INSTALLED COPY MUST BE A REAL FILE, NOT A POINTER AT ONE. A symlink in
+     * the live store aimed back at the package makes "installed, byte-identical"
+     * true of a machine where nothing was installed -- the phase-2 equivalent of
+     * D2/D3 above. `lstatSync` sees the link itself; `statSync` would follow it
+     * and agree with the lie.
+     */
+    if (!lstatSync(live).isFile()) {
+      results.push(fail(`install ${rel}`,
+        `${dest} exists but is a link, not a regular file. A pointer is not an installed copy: `
+        + 'it can aim back at the package, or anywhere, and still hash the same.'));
       installedOk = false;
       continue;
     }

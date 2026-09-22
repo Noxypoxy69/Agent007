@@ -42,7 +42,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync,
-  statSync, linkSync, realpathSync,
+  statSync, linkSync, symlinkSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -195,6 +195,107 @@ test('A MANIFEST CANNOT SEND THE VERIFIER OUT OF THE PACKAGE', async () => {
   } finally {
     rmSync(evil, { recursive: true, force: true });
     rmSync(good, { recursive: true, force: true });
+  }
+});
+
+test('A COMPANION CANNOT SEND THE VERIFIER OUT OF THE PACKAGE EITHER', async () => {
+  /*
+   * ═══ THE FIX FOR THE TRAVERSAL COVERED items AND NOT ITS SIBLING ═══
+   *
+   * Blind audit D2, reproduced by hand. `payloadPathProblem` constrained the
+   * manifest's items; three lines below it the companions loop still did
+   * `path.join(pkgDir, c.name)` with nothing constraining `c.name`, and decided
+   * whether to open it from `c.location` — another manifest field. Measured,
+   * against a package directory containing no such file:
+   *
+   *     OK  companion ../../../../../../../../.agentbridge/audits/<key>.jsonl
+   *         sha256 matches
+   *
+   * The reason it survived is one line: `Grep "companion" test/migrationPackage
+   * .test.mjs` returned nothing. The branch had no test, so the fix had no
+   * reason to look at it — which is the whole argument for testing a gate's
+   * accepting path as well as its refusing one.
+   *
+   * Differenced against a real companion sitting honestly inside the package.
+   */
+  const dir = mk();
+  try {
+    const body = '{"finding_id":"x"}\n';
+    const doc = '# decisions\n';
+    packageWith(dir, [item('findings/aaaaaaaaaaaaaaaa.jsonl', body)], ['aaaaaaaaaaaaaaaa'],
+      [['findings/aaaaaaaaaaaaaaaa.jsonl', body]]);
+    writeFileSync(path.join(dir, 'DECISIONS.md'), doc);
+
+    const manifestPath = path.join(dir, 'MANIFEST.json');
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8'));
+
+    // The honest companion FIRST, so the refusal below is not unconditional.
+    m.companions = [{
+      name: 'DECISIONS.md', location: 'inside the package', bytes: Buffer.byteLength(doc), sha256: sha256(doc),
+    }];
+    writeFileSync(manifestPath, JSON.stringify(m));
+    const good = await verify(dir);
+    assert.match(good.out, /OK +companion DECISIONS\.md/,
+      'a companion genuinely inside the package was refused, so the refusal below proves nothing');
+
+    // Now the same shape, aimed out of the package at a file that really exists.
+    const outside = mk();
+    try {
+      writeFileSync(path.join(outside, 'secret.jsonl'), body);
+      const escape = path.relative(dir, path.join(outside, 'secret.jsonl')).split(path.sep).join('/');
+      m.companions = [{
+        name: escape, location: 'inside the package', bytes: Buffer.byteLength(body), sha256: sha256(body),
+      }];
+      writeFileSync(manifestPath, JSON.stringify(m));
+
+      const bad = await verify(dir);
+      assert.notEqual(bad.code, 0, 'a companion naming a path outside the package was followed');
+      assert.doesNotMatch(bad.out, /OK +companion/,
+        'the verifier hashed a file outside the package and called the companion intact');
+      assert.match(bad.out, /may only name a location INSIDE the package/);
+    } finally { rmSync(outside, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('A LINK INSIDE THE PACKAGE IS NOT A PAYLOAD', async (t) => {
+  /*
+   * Blind audit D3. A string check is not enough, because the filesystem gets a
+   * vote: a symlink or junction sitting at `state/<rel>` redirects the read to
+   * one live file with no `..` anywhere in the manifest. The packager was
+   * hardened against exactly this — "readFileSync FOLLOWS LINKS" is in its own
+   * commit message — and the verifier beside it was not.
+   *
+   * Differenced: the same package with a real file at that path must pass.
+   */
+  const body = '{"finding_id":"x"}\n';
+  const real = mk();
+  const linked = mk();
+  const target = mk();
+  try {
+    packageWith(real, [item('findings/aaaaaaaaaaaaaaaa.jsonl', body)], ['aaaaaaaaaaaaaaaa'],
+      [['findings/aaaaaaaaaaaaaaaa.jsonl', body]]);
+    assert.match((await verify(real)).out, /OK +pkg findings\//,
+      'the honest package failed, so the link refusal below proves nothing');
+
+    // Same manifest, but the payload is a link out to an identical file.
+    writeFileSync(path.join(target, 'elsewhere.jsonl'), body);
+    packageWith(linked, [item('findings/aaaaaaaaaaaaaaaa.jsonl', body)], ['aaaaaaaaaaaaaaaa'], []);
+    mkdirSync(path.join(linked, 'state', 'findings'), { recursive: true });
+    try {
+      symlinkSync(path.join(target, 'elsewhere.jsonl'), path.join(linked, 'state/findings/aaaaaaaaaaaaaaaa.jsonl'));
+    } catch (e) {
+      t.skip(`this platform would not create a symlink: ${e?.code ?? e?.message}`);
+      return;
+    }
+
+    const out = (await verify(linked)).out;
+    assert.doesNotMatch(out, /OK +pkg findings\//,
+      'a link pointing out of the package was read as a packaged payload, and its bytes matched');
+    assert.match(out, /resolves OUTSIDE the package/);
+  } finally {
+    rmSync(real, { recursive: true, force: true });
+    rmSync(linked, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
   }
 });
 
@@ -486,9 +587,17 @@ test('A HARD LINK TO A CREDENTIAL IS REFUSED BY IDENTITY, not by its name', asyn
       t.skip(`this platform would not create a hard link: ${e?.code ?? e?.message}`);
       return;
     }
-    // The premise, asserted rather than assumed: the link really is a separate
-    // name that resolves to itself, so a name check would wave it through.
-    assert.equal(realpathSync.native(link), realpathSync.native(link));
+    /*
+     * The premise, asserted rather than assumed: the link is a SEPARATE name
+     * that resolves to itself and not to its target, so a name check waves it
+     * through — that is the whole reason identity is checked instead.
+     *
+     * The first version of this compared `realpathSync.native(link)` to itself,
+     * an assertion that cannot fail, in a file whose subject is hollow gates.
+     * Caught by blind audit.
+     */
+    assert.equal(realpathSync.native(link), realpathSync.native(link) && link,
+      'realpath did not return the link\'s own path, so this fixture is not the case being tested');
     assert.ok(!realpathSync.native(link).toLowerCase().endsWith('config.json'),
       'realpath saw through the hard link, so this fixture is not the case being tested');
 
