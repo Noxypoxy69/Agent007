@@ -23,8 +23,18 @@ import path from 'node:path';
 
 import {
   MANUAL_TRUSTED, AUTONOMOUS_TASK, REVIEW_ONLY, PROFILES, DEFAULT_PROFILE,
-  CAPABILITIES, permits, capabilitiesOf, resolveSessionProfile,
+  CAPABILITIES, permits, resolveSessionProfile,
 } from '../src/sessionPolicy.mjs';
+
+/**
+ * The whole capability row, built through the accessor production uses.
+ *
+ * This was `capabilitiesOf`, an exported convenience with no production caller
+ * -- which the dead-export ratchet correctly flagged. Reading the row through
+ * `permits` is strictly better as a test: it exercises the function the guard
+ * actually calls, rather than a sibling that could drift away from it.
+ */
+const rowOf = (profile) => Object.fromEntries(CAPABILITIES.map((k) => [k, permits(profile, k)]));
 import {
   pendingPath, bindingPath, writePendingAttestation, bindSessionProfile,
   readSessionBinding, holdsTaskLease, isAuditWorkspace, gatherSessionEvidence,
@@ -147,7 +157,7 @@ test('MANUAL_TRUSTED relaxes exactly the three checks it is meant to', () => {
 test('AUTONOMOUS_TASK is byte-for-byte the model that shipped before the split', () => {
   // Nothing was weakened; something was scoped. If this row ever changes, the
   // split has started eating the thing it was supposed to leave alone.
-  assert.deepEqual({ ...capabilitiesOf(AUTONOMOUS_TASK) }, {
+  assert.deepEqual(rowOf(AUTONOMOUS_TASK), {
     protectedPathsApply: true,
     baselineTestsImmutable: true,
     shellAllowlistApplies: true,

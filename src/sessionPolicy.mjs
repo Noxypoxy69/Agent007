@@ -213,10 +213,16 @@ export function permits(profile, capability) {
   return row[capability];
 }
 
-/** The whole capability row, for a caller that needs several answers at once. */
-export function capabilitiesOf(profile) {
-  return TABLE[profile] ?? TABLE[DEFAULT_PROFILE];
-}
+/*
+ * `capabilitiesOf(profile)` USED TO BE HERE AND IS DELETED RATHER THAN KEPT
+ * "for a caller that needs several answers at once". There was no such caller:
+ * the dead-export ratchet counted it as the one export this change added with
+ * tests and nothing shipping behind it, and its advice is the right advice --
+ * name the production caller or do not export it. A convenience accessor that
+ * exists only so a test can read a whole row is the test reaching past the
+ * interface, and `permits` over CAPABILITIES says the same thing through the
+ * surface production actually uses.
+ */
 
 const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
 
