@@ -164,6 +164,10 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/verifyCache.mjs',
   'src/verifyIdentity.mjs',
   'src/verifyRunner.mjs',
+  /* The profile split's two modules. Full reasoning in guardSession.mjs; both
+   * lists in one edit, which is the fifth time these files ask for that. */
+  'src/sessionPolicy.mjs',
+  'src/sessionEvidence.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

@@ -241,6 +241,17 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/verifyCache.mjs',
   'src/verifyIdentity.mjs',
   'src/verifyRunner.mjs',
+  /*
+   * THE PROFILE SPLIT'S OWN TWO MODULES, REGISTERED IN THE COMMIT THAT WIRES
+   * THEM. src/claudeGuard.mjs now asks sessionPolicy which of its checks apply
+   * at all, so a session that could rewrite either one would not need to defeat
+   * any of the rest of this list -- it would simply answer MANUAL_TRUSTED to
+   * every question and walk through. That makes them strictly more
+   * authority-bearing than most entries above, and this file's own comments ask
+   * four separate times for both lists to move in ONE edit.
+   */
+  'src/sessionPolicy.mjs',
+  'src/sessionEvidence.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

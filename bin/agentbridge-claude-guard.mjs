@@ -31,9 +31,18 @@ const UNLOADABLE = (detail) => `${JSON.stringify({
 let evaluateClaudeTool;
 let hookDecision;
 let writeSnapshot;
+let bindSessionProfile;
 try {
   ({ evaluateClaudeTool, hookDecision } = await import('../src/claudeGuard.mjs'));
   ({ writeSnapshot } = await import('../src/guardSession.mjs'));
+  /*
+   * IN THE SAME try AS THE OTHERS, SO A BROKEN PROFILE MODULE FAILS CLOSED TOO.
+   * If this import throws, the catch below refuses every tool call rather than
+   * letting the session run with no profile resolved -- and "no profile
+   * resolved" would mean the contained default, which is safe, but a guard that
+   * half-loaded is not a state to carry on from.
+   */
+  ({ bindSessionProfile } = await import('../src/sessionEvidence.mjs'));
 } catch (e) {
   const detail = String(e?.code ?? e?.message ?? e).slice(0, 120);
   if (process.argv.includes('--session-start')) {
@@ -64,6 +73,27 @@ if (process.argv.includes('--session-start')) {
   try { sessionId = JSON.parse(startRaw || '{}')?.session_id ?? null; } catch { sessionId = null; }
 
   const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+
+  /*
+   * ── BIND THE EXECUTION PROFILE, ONCE, BEFORE THE SESSION CAN ACT ─────────
+   *
+   * This is the ONLY place a profile is ever bound, and this hook runs before
+   * the session's first tool call. That ordering is the whole anchor: a session
+   * cannot promote itself by writing a pending attestation later, because
+   * pending attestations are read here and its SessionStart has been and gone.
+   *
+   * A REFUSED BIND IS NOT AN ERROR. The overwhelmingly common case is a session
+   * nobody attested -- an autonomous worker, or a terminal opened by hand -- and
+   * for those the correct outcome is the contained default, silently. So the
+   * result is REPORTED and never fatal.
+   *
+   * IT RUNS BEFORE writeSnapshot DELIBERATELY. The snapshot mint can refuse for
+   * its own reasons and returns early in spirit; the profile must be bound
+   * regardless, or a session whose snapshot was refused would run with no
+   * binding at all and the two controls would disagree about what it is.
+   */
+  const bound = bindSessionProfile(root, sessionId);
+
   const r = writeSnapshot(root, sessionId);
   /*
    * A REFUSED MINT IS REPORTED, NOT SWALLOWED.
@@ -81,10 +111,21 @@ if (process.argv.includes('--session-start')) {
    * it. writeSnapshot now asks git before minting at all, so that refusal
    * surfaces here too.
    */
+  /*
+   * THE PROFILE IS ANNOUNCED EVERY TIME, INCLUDING WHEN IT IS THE BORING ONE.
+   *
+   * A session that is contained and a session that is trusted must not look the
+   * same on stdout. Saying "autonomous-task" out loud is also the only way an
+   * operator learns that `agent code-a` did not attest -- which, since the
+   * attestation expires in two minutes, is a thing that will happen.
+   */
+  const profileLine = bound.ok
+    ? `execution profile: ${bound.record.profile} (bound to this session)`
+    : `execution profile: autonomous-task -- ${bound.reason}`;
   process.stdout.write(`${JSON.stringify({
-    systemMessage: r.ok
+    systemMessage: `${r.ok
       ? `agentbridge guard: session snapshot initialised at ${r.file}`
-      : `agentbridge guard: snapshot NOT replaced -- ${r.reason}`,
+      : `agentbridge guard: snapshot NOT replaced -- ${r.reason}`}\n${profileLine}`,
   })}\n`);
   process.exit(0);
 }

@@ -4,6 +4,8 @@ import { readSnapshot, isBaselineTest, isProtectedRelPath, overrideCovers, canon
 import { classifyAction, OWNER } from './actionAuthority.mjs';
 import { judgeShellCommand } from './shellAllowlist.mjs';
 import { runGit } from './safeGit.mjs';
+import { permits, resolveSessionProfile, shellHardBoundary, AUTONOMOUS_TASK } from './sessionPolicy.mjs';
+import { gatherSessionEvidence } from './sessionEvidence.mjs';
 
 const SKIP_MARKER = /(?:\b(?:it|test|describe|context)\.skip\s*\(|\bx(?:it|test|describe|context)\s*\(|@pytest\.mark\.(?:skip|xfail)|@unittest\.skip|\bpytest\.skip\s*\(|@Disabled\b|@Ignore\b|\bt\.Skip(?:Now)?\s*\(|#\[ignore\]|\[Ignore\])/;
 
@@ -442,7 +444,22 @@ function grantFor(filePath, cwd) {
   return grant ? { grant, rel: canonicalGrantPath(cwd, filePath) } : null;
 }
 
-function judgeWrite(filePath, input, cwd, sessionId) {
+function judgeWrite(filePath, input, cwd, sessionId, profile = AUTONOMOUS_TASK) {
+  /*
+   * A REVIEWER MAY NOT WRITE WHAT IT IS REVIEWING, AND THIS IS CHECKED FIRST.
+   *
+   * CLAUDE.md rule 20 requires the shared worktree to be READ-ONLY to an
+   * auditor, and until now that was a sentence in a document with nothing
+   * enforcing it. It is first because every branch below can RETURN, and a
+   * check placed after a return is a check that never runs -- which this file
+   * already records happening to the gate-self check and to the action rail.
+   */
+  if (!permits(profile, 'mayWriteRepoFiles')) {
+    return deny('review-only-session',
+      `${filePath} may not be written from a review session. A reviewer that can edit the candidate `
+      + 'has stopped being independent evidence about it. Report the finding instead');
+  }
+
   if (isProtectedPath(filePath, cwd)) {
     /*
      * THE ONE WAY THROUGH, AND IT IS NARROW, EXPIRING AND LOUD.
@@ -501,6 +518,40 @@ function judgeWrite(filePath, input, cwd, sessionId) {
       return deny('protected-control', `${filePath} configures the Stop gate itself. An override cannot cover it: the Stop gate refuses one for this path, so permitting the write here would spend a grant and still lose the turn. Change it from outside the session`);
     }
 
+    /*
+     * ── THE PROFILE RELAXATION, AND IT SITS BELOW THE GATE-SELF CHECK ───────
+     *
+     * For an owner-directed session, editing the guard IS the engineering task.
+     * That is not an edge case here: this very module arrived that way, and the
+     * grant it needed read `paths:["*"]` because enumerating twenty protected
+     * files by hand is not something anybody does twice. CLAUDE.md rule 19 --
+     * an over-blocking control gets switched off, which loses every layer at
+     * once -- and a wildcard grant renewed every few hours IS that switch-off,
+     * arriving slowly enough that nobody called it one.
+     *
+     * WHAT IS NOT RELAXED, AND WHY THE ORDER PROVES IT. GATE_SELF_CONFIG is
+     * refused ABOVE, before this branch can be reached, for every profile. That
+     * file decides whether the guard runs at all -- for this session and for
+     * every later one, including autonomous workers -- so disarming it is not
+     * ordinary engineering, and the Stop gate refuses a grant for it anyway.
+     * Relaxing it here would spend a permission and still lose the turn.
+     *
+     * ANNOUNCED, LIKE EVERY OTHER PERMIT IN THIS FILE. A protected write that
+     * happened because of a profile must not be indistinguishable from one that
+     * was never protected. The transcript names the file and the profile, so a
+     * reader can ask why this session was trusted -- which is the same argument
+     * the grant announcements above are built on.
+     */
+    if (!permits(profile, 'protectedPathsApply')) {
+      return {
+        allowed: true,
+        overridden: true,
+        notice: `[agentbridge:protected-control-by-profile] ${canonicalSelf} is a guard control; this `
+          + `session is ${profile}, for which the protected-path rail does not apply. No override was `
+          + 'spent. The gate configuration is still refused, for every profile.',
+      };
+    }
+
     const covered = grantFor(filePath, cwd);
     if (covered) {
       const { grant, rel } = covered;
@@ -526,7 +577,21 @@ function judgeWrite(filePath, input, cwd, sessionId) {
      */
     return deny('protected-control', `${filePath} is part of the guard or completion contract. An override must name it as ${canonicalSelf}`);
   }
-  if (isSessionBaselineTest(filePath, cwd, sessionId)) {
+  if (isSessionBaselineTest(filePath, cwd, sessionId) && permits(profile, 'baselineTestsImmutable')) {
+    /*
+     * THE IMMUTABILITY IS ABOUT A CANDIDATE UNDER JUDGEMENT, NOT ABOUT TESTS.
+     *
+     * A baseline test is frozen for an autonomous worker so that the thing
+     * being judged cannot rewrite its own judge. An owner-directed session has
+     * no candidate under judgement -- it IS the work -- and "fix this test" is
+     * an ordinary instruction that had no route from inside at all. The comment
+     * below records a guarded agent diagnosing exactly that and hitting the
+     * wall, with a grant making no difference at either layer.
+     *
+     * The condition is on the SAME `if` as the detection rather than inside it,
+     * so a manual session falls through to the ordinary write path and gets the
+     * disabled-test check below like any other edit.
+     */
     /*
      * A BASELINE TEST WAS THE ONE CONTROL WITH NO DOOR AT ALL, AND THAT IS AN
      * OVERSIGHT RATHER THAN A DECISION.
@@ -593,7 +658,38 @@ function judgeWrite(filePath, input, cwd, sessionId) {
   return { allowed: true };
 }
 
-function judgeShell(command, cwd) {
+function judgeShell(command, cwd, profile = AUTONOMOUS_TASK) {
+  /*
+   * ── WHETHER THE RAIL APPLIES AT ALL, ASKED BEFORE IT IS CONSULTED ────────
+   *
+   * THE RAIL IS NOT EDITED. Danny froze src/shellAllowlist.mjs at 90b2924 --
+   * "no new shell regexes, the last change this file gets as a security
+   * boundary" -- and that freeze stands. What changes is who it is pointed at.
+   *
+   * For an owner-directed session the allowlist was friction rather than
+   * safety, and its own header says as much: "a fast-feedback rail, NOT a
+   * security boundary". Measured in this session alone, it refused `cd` into
+   * the project directory, a `grep` whose PATTERN contained `|`, `$HOME` in a
+   * path, and `git clone` -- the last of which CLAUDE.md requires an auditor to
+   * run, which is the defect class of guidance aimed at people who cannot
+   * follow it.
+   *
+   * WHAT SURVIVES IS PROMOTION, and shellHardBoundary is documented in
+   * sessionPolicy.mjs as a speed bump against an accidental push rather than a
+   * boundary -- a denylist of spellings bounds nothing (rule 8). The controls
+   * that actually decide promotion run for every profile and are untouched:
+   * the deploy gate, integration authority, and the owner action rail above.
+   */
+  if (!permits(profile, 'shellAllowlistApplies')) {
+    const promotes = shellHardBoundary(command);
+    if (promotes) {
+      return deny('promotion-needs-owner',
+        `${promotes}. This session is ${profile}, so the shell allowlist does not apply to it -- but `
+        + 'promotion authority is not a profile question. Ask Danny, or hand him the command');
+    }
+    return { allowed: true };
+  }
+
   /*
    * ALLOWLIST, NOT DETECTION. Mutation used to be detected by extracting path
    * tokens, which closed the spellings it knew and nothing else: node -e,
@@ -1036,14 +1132,37 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
   const commands = allStringFields(input, COMMAND_FIELDS);
   const targets = allStringFields(input, PATH_FIELDS);
 
+  /*
+   * ── WHICH KIND OF SESSION IS THIS ────────────────────────────────────────
+   *
+   * RESOLVED ONCE, HERE, AND PASSED DOWN. Not re-derived inside judgeShell and
+   * judgeWrite, and emphatically not scattered as `if (manual)` through the
+   * branches above: two copies of one decision drift, which is the defect this
+   * repository has paid for with PROTECTED_PATHS, with the INSTRUCTIONS splice
+   * and with the _shared.js copy. src/sessionPolicy.mjs is the only thing that
+   * decides a profile and the only thing that says what one permits.
+   *
+   * BELOW THE OWNER ACTION RAIL ON PURPOSE. That branch returns for an
+   * unapproved owner action and must keep doing so for every profile -- a
+   * manual session does not get to deploy. Resolving above it would invite a
+   * later edit to consult the profile there.
+   *
+   * A THROW HERE WOULD BE A DENY, NOT AN ALLOW, because the hook binary catches
+   * and refuses. That is the right direction, and the resolver is written not
+   * to throw: an unknown profile answers with the contained row.
+   */
+  const { profile } = resolveSessionProfile(gatherSessionEvidence({
+    repoRoot: repoRootOf(cwd), sessionId, cwd,
+  }));
+
   const notices = [];
   for (const c of commands) {
-    const verdict = judgeShell(c.value, cwd);
+    const verdict = judgeShell(c.value, cwd, profile);
     if (!verdict.allowed) return verdict;
     if (verdict.notice) notices.push(verdict.notice);
   }
   for (const t of targets) {
-    const verdict = judgeWrite(t.value, input, cwd, sessionId);
+    const verdict = judgeWrite(t.value, input, cwd, sessionId, profile);
     if (!verdict.allowed) return verdict;
     if (verdict.notice) notices.push(verdict.notice);
   }

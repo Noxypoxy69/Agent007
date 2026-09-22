@@ -76,6 +76,27 @@ rem  line on an ampersand and runs the tail. Writing the literal attack
 rem  string into this comment REINTRODUCED the bug it describes.
 echo agent   : "%AGENTBRIDGE_AGENT_ID%"
 echo cwd     : "%CD%"
+
+rem  ATTEST THIS SESSION AS OWNER-DIRECTED, BEFORE claude EXISTS.
+rem
+rem  This is the launcher half of the execution-profile split. It writes a
+rem  one-shot pending attestation; the SessionStart hook consumes it and binds
+rem  it to that session's id, once, and every later tool call only reads.
+rem
+rem  THE ORDERING IS THE WHOLE CONTROL, not the file's contents. At this point
+rem  there is no session, so there is nothing for a session to have done. A
+rem  session cannot promote itself later because pending attestations are read
+rem  only at SessionStart, and its SessionStart has already run.
+rem
+rem  WHY THIS LINE IS HERE AND NOT INSIDE THE GUARD: a session that starts any
+rem  other way -- a bare `claude`, or anything the executor spawns headless --
+rem  gets no attestation and is contained. That is the default and it is the
+rem  safe direction. Deleting this line does not open anything; it only makes
+rem  these sessions contained again.
+rem
+rem  IT MUST NOT FAIL THE LAUNCH. The script exits 0 whatever happens and says
+rem  so on stdout, because losing the terminal would cost more than the profile.
+node "%~dp0scripts\attest-session.mjs" --profile manual-trusted
 echo.
 
 claude
