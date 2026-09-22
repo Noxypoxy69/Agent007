@@ -504,6 +504,17 @@ export function forbiddenFindings(files, home, fs = { realpath: realpathSync.nat
      * the spelling when there is one, and falls back to this when there is not.
      */
     /*
+     * The one a name cannot catch, and it goes BEFORE the nlink rule below so
+     * the refusal names the file when we can name it. Both are refusals; only
+     * one of them tells the operator what leaked.
+     */
+    const id = forbiddenIds.get(`${st.dev}:${st.ino}`);
+    if (id) {
+      out.push(`${f.rel} is the SAME FILE as ${id} (a hard link -- same device and inode), which is never carried`);
+      continue;
+    }
+
+    /*
      * AND AN IDENTITY MAP ONLY KNOWS WHAT IT ENUMERATED. The map above covers
      * the never-carry list; it cannot cover the documented registration
      * credential at `~/Documents/agentbridge-secrets/`, or anything else on the
@@ -520,12 +531,6 @@ export function forbiddenFindings(files, home, fs = { realpath: realpathSync.nat
     if (typeof st.nlink === 'number' && st.nlink > 1) {
       out.push(`${f.rel} has ${st.nlink} names on disk (nlink ${st.nlink}), so its bytes are shared with at least one file this tool cannot see. `
         + 'A store file has exactly one name; refusing rather than guessing what the other one is');
-      continue;
-    }
-
-    const id = forbiddenIds.get(`${st.dev}:${st.ino}`);
-    if (id) {
-      out.push(`${f.rel} is the SAME FILE as ${id} (a hard link -- same device and inode), which is never carried`);
     }
   }
   return out;
