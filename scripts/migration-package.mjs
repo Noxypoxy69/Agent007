@@ -74,6 +74,7 @@ import {
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { invokedDirectly } from '../src/invokedDirectly.mjs';
+import { payloadPathProblem, insidePackage } from '../src/migrationPaths.mjs';
 
 const HOME = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge');
 
@@ -130,12 +131,29 @@ function attach(pkgDir, bundlePath) {
   }
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 
-  /* Re-verify what is already claimed, before adding a claim. */
+  /*
+   * Re-verify what is already claimed, before adding a claim.
+   *
+   * AND THIS WAS THE THIRD READER OF THE MANIFEST'S OWN ADDRESS FIELD. Blind
+   * audit HIGH-3: it did `path.join(pkgDir, item.destination_relative_to_package)`
+   * with nothing constraining the field, so a manifest naming
+   * `../../../.agentbridge/escalations.json` and a package with NO `state/`
+   * directory at all produced
+   *
+   *     state       : 1 file(s) re-verified against the manifest, all match
+   *
+   * having hashed the operator's live store. Two earlier commits fixed this
+   * exact mechanism in the verifier, one site each, and neither looked here --
+   * the header of `src/migrationPaths.mjs` is about that. It now goes through
+   * the same matcher both verifier sites use.
+   */
   const drift = [];
   for (const item of manifest.items) {
-    const f = path.join(pkgDir, item.destination_relative_to_package);
-    if (!existsSync(f)) { drift.push(`${item.destination_relative_to_package} MISSING`); continue; }
-    if (sha256(readFileSync(f)) !== item.sha256) drift.push(`${item.destination_relative_to_package} HASH CHANGED`);
+    const why = payloadPathProblem(item);
+    if (why) { drift.push(`${item.source_relative_to_agentbridge_home ?? '(unnamed)'} ${why}`); continue; }
+    const { file, why: openWhy } = insidePackage(pkgDir, `state/${item.source_relative_to_agentbridge_home}`);
+    if (!file) { drift.push(`${item.source_relative_to_agentbridge_home} ${openWhy}`); continue; }
+    if (sha256(readFileSync(file)) !== item.sha256) drift.push(`${item.source_relative_to_agentbridge_home} HASH CHANGED`);
   }
   if (drift.length) {
     console.error('migration-package: the package no longer matches its manifest:');
@@ -657,6 +675,15 @@ const manifest = {
    * time: an items list edited or truncated later no longer matches it.
    */
   source_inventory: present.map((f) => f.rel).sort(),
+  /*
+   * WHAT WAS LOOKED FOR AND NOT FOUND, so an absence can be SAID rather than
+   * merely being a silence. The verifier holds its own roster of the authority
+   * stores a migration is for (blind audit HIGH-1: a roster inside the manifest
+   * is a second field of the same untrusted document, and trimming both lists
+   * together is one edit). A store that genuinely did not exist on this machine
+   * still has to appear here for that roster to be satisfied.
+   */
+  source_absent: files.filter((f) => f.missing).map((f) => f.file ?? `${f.from}/`).sort(),
   items: rows,
   notes: [
     'Contains NO credentials, NO DPAPI material, NO machineId, NO registrations, NO override grants.',

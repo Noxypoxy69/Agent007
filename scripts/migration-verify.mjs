@@ -61,6 +61,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { invokedDirectly } from '../src/invokedDirectly.mjs';
+import { payloadPathProblem, insidePackage } from '../src/migrationPaths.mjs';
 import { readQueue } from '../src/auditQueueStore.mjs';
 import { repoStorePath } from '../src/guardSession.mjs';
 import {
@@ -71,6 +72,20 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOME = process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge');
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+
+/**
+ * The authority history a migration is FOR, named here rather than in the input.
+ *
+ * A trailing slash means a keyed store: at least one file under that directory,
+ * whatever its key. Everything else is an exact store name.
+ *
+ * `escalations.json` is deliberately absent — the packager marks it
+ * `authority: false` with a larger authoritative copy on the Bridge, and a
+ * roster that demands it would refuse a legitimate package.
+ */
+const AUTHORITY_ROSTER = Object.freeze([
+  'audits/', 'findings/', 'delegations.json', 'leadWork.json', 'tokenMeasurements.json',
+]);
 
 const argv = process.argv.slice(2);
 const flag = (n) => {
@@ -151,27 +166,11 @@ const advise = (name, why) => ({ name, state: 'NOTE', why, advisory: true });
  *
  * @returns a refusal sentence, or null when the item is well-formed
  */
-export function payloadPathProblem(item) {
-  const rel = item?.source_relative_to_agentbridge_home;
-  if (typeof rel !== 'string' || rel === '') {
-    return 'the manifest item carries no source_relative_to_agentbridge_home';
-  }
-  if (rel.includes('\\')) return `"${rel}" contains a backslash; store paths are forward-slashed`;
-  if (path.posix.isAbsolute(rel) || path.win32.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) {
-    return `"${rel}" is an absolute path; a manifest may only name a location INSIDE the package`;
-  }
-  if (rel.split('/').some((p) => p === '..' || p === '.' || p === '')) {
-    return `"${rel}" walks outside the package; a manifest may only name a location INSIDE the package`;
-  }
-
-  const declared = item.destination_relative_to_package;
-  const expected = `state/${rel}`;
-  if (typeof declared === 'string' && declared !== expected) {
-    return `the manifest says this file is at "${declared}", but a package built by scripts/migration-package.mjs always puts it at "${expected}". `
-      + 'Refusing to follow the manifest to another location -- that is how a verifier ends up hashing the live store instead of the package.';
-  }
-  return null;
-}
+ * THE IMPLEMENTATION MOVED TO `src/migrationPaths.mjs` after a blind audit found
+ * a THIRD reader of the same field, in the packager's `attach()`. Two commits
+ * had fixed this mechanism one site at a time; a function both scripts import is
+ * the matcher, and a private helper in one file is three strings (rule 8).
+ */
 
 /**
  * Open a file the package claims to contain, or say why not.
@@ -204,43 +203,15 @@ export function payloadPathProblem(item) {
  * `realpathSync.native` rather than `realpathSync`, for the reason every other
  * resolver in this repository states -- case folding and 8.3 short names.
  *
- * @returns {{file: string}} or {{why: string}}
+ * BOTH HALVES NOW LIVE IN `src/migrationPaths.mjs`, because a blind audit found
+ * a THIRD site reading the same field -- the packager's `attach()` -- after two
+ * separate commits had each fixed the one in front of them.
  */
-function insidePackage(pkgDir, rel, label) {
-  if (typeof rel !== 'string' || rel === '') return { why: `${label} carries no path` };
-  if (rel.includes('\\')) return { why: `"${rel}" contains a backslash; package paths are forward-slashed` };
-  if (path.posix.isAbsolute(rel) || path.win32.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) {
-    return { why: `"${rel}" is an absolute path; a manifest may only name a location INSIDE the package` };
-  }
-  if (rel.split('/').some((p) => p === '..' || p === '.' || p === '')) {
-    return { why: `"${rel}" walks outside the package; a manifest may only name a location INSIDE the package` };
-  }
-
-  const file = path.join(pkgDir, rel);
-  if (!existsSync(file)) return { why: 'claimed by the manifest and ABSENT from the package' };
-
-  let real;
-  let rootReal;
-  try {
-    real = realpathSync.native(file);
-    rootReal = realpathSync.native(pkgDir);
-  } catch {
-    return { why: `"${rel}" could not be resolved (broken link?)` };
-  }
-  const within = path.relative(rootReal, real);
-  if (within.startsWith('..') || path.isAbsolute(within)) {
-    return {
-      why: `"${rel}" is a link that resolves OUTSIDE the package, to ${within.split(path.sep).slice(-2).join('/')}. `
-        + 'Refusing to read it -- that is how a verifier ends up hashing the live store instead of the package.',
-    };
-  }
-  if (!statSync(real).isFile()) return { why: `"${rel}" does not resolve to a regular file` };
-  return { file: real };
-}
 
 function destinationFor(rel, packagedByKind) {
-  const [kind, base] = rel.includes('/') ? rel.split('/') : [null, rel];
-  if (!kind) return { dest: rel };
+  const [rawKind, base] = rel.includes('/') ? rel.split('/') : [null, rel];
+  if (!rawKind) return { dest: rel };
+  const kind = rawKind.toLowerCase();
   const destKey = path.basename(repoStorePath(REPO, kind, '.jsonl'), '.jsonl');
   const siblings = packagedByKind.get(kind) ?? [];
   if (siblings.length > 1) {
@@ -278,7 +249,7 @@ export async function run(pkgDir) {
       integrityOk = false;
       continue;
     }
-    const { file: f, why } = insidePackage(pkgDir, `state/${rel}`, `pkg ${rel}`);
+    const { file: f, why } = insidePackage(pkgDir, `state/${rel}`);
     if (!f) {
       results.push(fail(`pkg ${rel}`, why));
       integrityOk = false;
@@ -294,9 +265,21 @@ export async function run(pkgDir) {
     results.push(ok(`pkg ${item.source_relative_to_agentbridge_home}`, `${item.bytes} B, sha256 matches`));
   }
   for (const c of manifest.companions ?? []) {
-    const inside = c.location && c.location.startsWith('inside');
-    if (!inside) { results.push(advise(`companion ${c.name}`, `${c.bytes} B, beside the package — verify separately (${c.verify_with ?? 'no method recorded'})`)); continue; }
-    const { file: f, why } = insidePackage(pkgDir, c.name, `companion ${c.name}`);
+    /*
+     * THE COMPANION USED TO DECIDE WHETHER IT WOULD BE CHECKED. Blind audit
+     * MEDIUM-5: `inside` was read from `c.location`, so flipping that string to
+     * "BESIDE the package" made a fabricated 900 MB bundle row print from the
+     * manifest's own numbers, never be looked for, and set no exit code — while
+     * the verifier knew exactly where the package was.
+     *
+     * Only a git bundle is legitimately outside, because it is git objects and
+     * `git bundle verify` is the only thing that proves it. Everything else must
+     * be in the package, and `kind` is the field the packager READS from the
+     * file's banner rather than one it copies from its input.
+     */
+    const outside = c.kind === 'git bundle';
+    if (outside) { results.push(advise(`companion ${c.name}`, `${c.bytes} B, beside the package — verify separately (${c.verify_with ?? 'no method recorded'})`)); continue; }
+    const { file: f, why } = insidePackage(pkgDir, c.name);
     if (!f) { results.push(fail(`companion ${c.name}`, why)); integrityOk = false; continue; }
     const got = sha256(readFileSync(f));
     results.push(got === c.sha256
@@ -310,7 +293,9 @@ export async function run(pkgDir) {
   for (const item of manifest.items) {
     const rel = item.source_relative_to_agentbridge_home;
     if (typeof rel !== 'string' || !rel.includes('/')) continue;
-    const [kind] = rel.split('/');
+    /* Folded, for the same reason phase 3 folds: a case variant is not a new
+     * store. An unfolded key made `Audits/` invisible to every later lookup. */
+    const kind = rel.split('/')[0].toLowerCase();
     byKind.set(kind, [...(byKind.get(kind) ?? []), rel.split('/')[1]]);
   }
 
@@ -373,10 +358,34 @@ export async function run(pkgDir) {
    * it is the one the header always meant: a store absent at source has no
    * manifest row, so there is nothing to verify and never was.
    */
-  const carried = (rel) => manifest.items.some((i) => i.source_relative_to_agentbridge_home === rel);
+  /*
+   * ═══ AND CHANGING THE CASE OF A NAME MADE PHASE 3 VANISH ═══
+   *
+   * Blind audit HIGH-2. Phases 1 and 2 find files through the FILESYSTEM, which
+   * is case-insensitive on NTFS and APFS. Phase 3 found them by exact string
+   * equality against literals like 'delegations.json'. So a real package, every
+   * payload byte genuine, with `audits/` spelled `Audits/` in the manifest:
+   *
+   *     OK    pkg Audits/<key>.jsonl        1375550 B, sha256 matches
+   *     OK    install Audits/<key>.jsonl    installed at Audits/<key>.jsonl
+   *     NOTE  resolve audit queue           not carried by this package
+   *     ...
+   *     integrity OK · installation OK · 0 failure(s), 5 advisory
+   *     PACKAGE INTACT, INSTALLED, AND REACHABLE THROUGH ITS REAL READERS.
+   *
+   * Every store carried, hashed and installed, and its reachability through the
+   * real reader never tested while the banner said it was. That is the HIGH-2
+   * outcome verbatim, one matcher over: the `records`→`record_count` spelling
+   * got closed and the matcher did not (rule 8, again).
+   *
+   * This repository already holds the answer, in `src/guardSession.mjs`: "NTFS
+   * and APFS are case-insensitive; a case variant must not be a new key."
+   */
+  const fold = (s) => String(s).toLowerCase();
+  const carried = (rel) => manifest.items.some((i) => fold(i.source_relative_to_agentbridge_home) === fold(rel));
 
   const expectFor = (rel) => {
-    const item = manifest.items.find((i) => i.source_relative_to_agentbridge_home === rel);
+    const item = manifest.items.find((i) => fold(i.source_relative_to_agentbridge_home) === fold(rel));
     if (!item) return undefined;
     const n = item.compare_reader_output_against === 'distinct_ids' ? item.distinct_ids : item.records;
     return typeof n === 'number' && Number.isFinite(n) ? n : null;
@@ -478,6 +487,42 @@ export async function run(pkgDir) {
    * this verifier ship together, so a package built by that packager always has
    * one.
    */
+  /*
+   * ═══ A SECOND FIELD OF THE SAME UNTRUSTED DOCUMENT IS NOT A WITNESS ═══
+   *
+   * Blind audit HIGH-1. `source_inventory` was added so a truncated `items` list
+   * would contradict something — but it contradicts a list in the SAME FILE, so
+   * trimming both together is one extra edit. Measured: a directory holding
+   * `MANIFEST.json` and one byte-exact copy of `escalations.json` — the one
+   * store the packager itself marks `authority: false` and REDUNDANT —
+   * produced `0 failure(s)`, the full green banner, and exit 0. The audit queue,
+   * both finding registries, delegations, lead work and token measurements were
+   * absent and nothing said so.
+   *
+   * THE ROSTER HAS TO COME FROM SOMEWHERE THE MANIFEST CANNOT REACH. It is in
+   * this file, beside the readers that consume each store, so a package that
+   * omits an authority store is missing something the VERIFIER knows about
+   * rather than something its own document declined to mention.
+   *
+   * The packager records what it looked for and did not find, so a store that
+   * genuinely was not on the source machine is still expressible — but it has to
+   * be SAID, which is the difference between an absence and a silence.
+   */
+  const absentAtSource = new Set((manifest.source_absent ?? []).map(fold));
+  const rosterCarried = (entry) => (entry.endsWith('/')
+    ? (byKind.get(entry.slice(0, -1)) ?? []).length > 0
+    : carried(entry));
+  const missingAuthority = AUTHORITY_ROSTER
+    .filter((rel) => !rosterCarried(rel) && !absentAtSource.has(fold(rel)));
+  if (missingAuthority.length) {
+    results.push(fail('authority roster',
+      `${missingAuthority.length} authority store(s) are neither carried nor recorded as absent at source: ${missingAuthority.join(', ')}. `
+      + 'This roster is held by the verifier, not by the manifest, so trimming the manifest cannot hide an omission. '
+      + 'If a store genuinely did not exist on the source machine, the packager records it in source_absent.'));
+  } else {
+    results.push(ok('authority roster', `all ${AUTHORITY_ROSTER.length} authority store(s) accounted for`));
+  }
+
   const inventory = manifest.source_inventory;
   if (!Array.isArray(inventory)) {
     results.push(fail('manifest completeness',
@@ -491,6 +536,25 @@ export async function run(pkgDir) {
         `the source held ${inventory.length} file(s) and ${dropped.length} of them have no item in this manifest: `
         + `${dropped.join(', ')}. The packager writes both lists from the same scan, so they disagree only if the manifest was edited after it was built.`)
       : ok('manifest completeness', `all ${inventory.length} file(s) found at source are carried`));
+  }
+
+  /*
+   * DUPLICATES WERE ACCEPTED AND THE CONTRADICTION NEVER CONSULTED. Blind audit
+   * LOW-8: the same item twice, the second carrying `"records": 99999`, passed —
+   * `expectFor` uses `.find`, so the second count is never read, in a tool whose
+   * whole premise is that every number in the manifest was measured.
+   */
+  const seen = new Map();
+  const dupes = [];
+  for (const i of manifest.items) {
+    const k = fold(i.source_relative_to_agentbridge_home);
+    if (seen.has(k)) dupes.push(i.source_relative_to_agentbridge_home);
+    else seen.set(k, i);
+  }
+  if (dupes.length) {
+    results.push(fail('manifest self-consistency',
+      `${dupes.length} item(s) appear more than once: ${[...new Set(dupes)].join(', ')}. `
+      + 'Only the first is ever read, so a second entry\'s counts and hash are claims nothing checks.'));
   }
 
   const packagedKeys = new Set([...byKind.values()].flat().map((n) => path.basename(n, '.jsonl')));
@@ -514,8 +578,18 @@ export async function run(pkgDir) {
     console.log('verifiably present and reachable from this checkout.');
     return 1;
   }
+  /*
+   * THE BANNER ASSERTED MORE THAN THE ROWS SUPPORTED. Blind audit MEDIUM-6:
+   * with five of six resolution rows advisory it still printed, unqualified,
+   * "REACHABLE THROUGH ITS REAL READERS". Rule 15 — let a gate move rather than
+   * close: it now says how many stores it actually resolved, so a package that
+   * resolved one store cannot read like a package that resolved six.
+   */
+  const resolved = results.filter((r) => r.state === 'OK' && r.name.startsWith('resolve ')).length;
+  const notResolved = results.filter((r) => r.advisory && r.name.startsWith('resolve ')).length;
   console.log('');
-  console.log('PACKAGE INTACT, INSTALLED, AND REACHABLE THROUGH ITS REAL READERS.');
+  console.log(`PACKAGE INTACT AND INSTALLED. ${resolved} store(s) read back through their real consumers`
+    + `${notResolved ? `; ${notResolved} carried nothing to verify` : ''}.`);
   console.log('This does NOT prove you are on the destination machine — nothing here can.');
   return 0;
 }
