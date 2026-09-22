@@ -4162,6 +4162,26 @@ try {
     const file = overridePath(repo);
     const grant = readOverride(repo);
 
+    /*
+     * WHY IT IS NOT LIVE, NOT MERELY THAT IT IS NOT.
+     *
+     * `live: false, grant: null` is what this printed while the operator's own
+     * well-formed wildcard grant sat at this exact key, four and a half hours
+     * expired. A session read that, concluded the channel was broken, and spent
+     * six exchanges and a Notepad session on a timestamp. See
+     * explainRefusedGrant for the full measurement.
+     */
+    let refusedBecause = null;
+    if (!grant) {
+      const { existsSync: exists, readFileSync: read } = await import('node:fs');
+      if (exists(file)) {
+        const { explainRefusedGrant } = await import('../src/grantWrite.mjs');
+        let raw = '';
+        try { raw = read(file, 'utf8'); } catch (e) { raw = ''; }
+        refusedBecause = explainRefusedGrant(raw);
+      }
+    }
+
     if (args.json) {
       console.log(JSON.stringify({
         repo,
@@ -4169,6 +4189,7 @@ try {
         file,
         live: Boolean(grant),
         grant: grant ?? null,
+        refusedBecause,
       }, null, 2));
     } else {
       console.log(`repo        : ${repo}`);
@@ -4190,7 +4211,7 @@ try {
         const { existsSync } = await import('node:fs');
         if (existsSync(file)) {
           console.log('live        : NO — the file exists but the guard refuses it');
-          console.log('              (expired, malformed, or an expiry beyond the maximum)');
+          for (const line of refusedBecause ?? []) console.log(`              ${line}`);
         } else {
           console.log('live        : no grant file at this key');
         }

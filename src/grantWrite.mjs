@@ -167,6 +167,100 @@ export function validateGrantShape({
 }
 
 /**
+ * A grant file exists and the guard will not honour it. Say WHY, in facts.
+ *
+ * ═══ THE HOUR THIS COST, MEASURED ═══
+ *
+ * On 2026-09-21 a session concluded the override channel was broken, tried six
+ * times to place a grant, and routed the operator through a text editor. The
+ * actual state, found 2026-09-22T03:29Z: the operator's own grant was sitting
+ * at exactly the right key, well-formed, `granted_by: "danny"`, `paths: ["*"]`
+ * -- and `expires_at: "2026-09-21T23:00:00Z"`, four and a half hours past. It
+ * had lapsed on a clock, not on a decision.
+ *
+ * `grant-path` reported `live: false, grant: null`, which is true and useless.
+ * Its prose branch could only offer "expired, malformed, or an expiry beyond
+ * the maximum" -- a list of three, when the file on disk answers the question
+ * outright. CLAUDE.md already records that a grant at the wrong key "fails
+ * EXACTLY like the guard being strict, which is why it went unnoticed for hours
+ * and got re-diagnosed three times". This is the same sentence one cause along.
+ *
+ * ═══ IT REPORTS, IT NEVER DECIDES ═══
+ *
+ * `readOverride` remains the only authority on whether a grant is live, and
+ * this runs ONLY after it has already said no. So this cannot widen anything:
+ * the worst a wrong answer here can do is misdescribe a refusal that has
+ * already happened.
+ *
+ * It therefore states FACTS READ OUT OF THE FILE -- this field is absent, this
+ * timestamp is this far in the past -- rather than re-deciding the verdict. The
+ * unexported bound is named as an inference and labelled as one, because the
+ * writer may not keep a second copy of a rule it does not own.
+ */
+export function explainRefusedGrant(rawText, now = Date.now()) {
+  if (typeof rawText !== 'string' || rawText.trim() === '') {
+    return ['the grant file is empty'];
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (e) {
+    return [`the grant file is not valid JSON: ${e.message}`];
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return ['the grant file does not contain a JSON object'];
+  }
+
+  const why = [];
+
+  const hasPaths = Array.isArray(parsed.paths) && parsed.paths.length > 0;
+  const hasActions = Array.isArray(parsed.actions) && parsed.actions.length > 0;
+  if (!hasPaths && !hasActions) why.push('it names no paths and no actions, so it grants nothing');
+
+  if (typeof parsed.reason !== 'string' || parsed.reason.trim() === '') {
+    why.push('"reason" is missing or empty, and the guard requires one');
+  }
+
+  /*
+   * THE TYPE CHECK IS REPORTED SEPARATELY FROM THE VALUE, because they are
+   * different mistakes with the same symptom. An audit found `["2099-01-01"]`
+   * and `{"toString":1}` reading as valid before readOverride demanded a
+   * string, and a reader told only "expired" would go looking at the calendar.
+   */
+  if (!('expires_at' in parsed)) {
+    why.push('"expires_at" is missing, and a grant with no expiry is refused rather than treated as permanent');
+  } else if (typeof parsed.expires_at !== 'string') {
+    why.push(`"expires_at" is ${Array.isArray(parsed.expires_at) ? 'an array' : typeof parsed.expires_at}, and the guard requires an ISO 8601 STRING`);
+  } else {
+    const ms = Date.parse(parsed.expires_at);
+    if (!Number.isFinite(ms)) {
+      why.push(`"expires_at" is ${JSON.stringify(parsed.expires_at)}, which is not a date any parser accepts`);
+    } else if (ms <= now) {
+      const agoMs = now - ms;
+      const hours = Math.floor(agoMs / 3600000);
+      const mins = Math.round((agoMs % 3600000) / 60000);
+      const ago = hours > 0 ? `${hours}h ${mins}m ago` : `${mins}m ago`;
+      why.push(`IT EXPIRED. "expires_at" is ${parsed.expires_at}, which was ${ago}. The grant is otherwise intact -- this is a clock, not a mistake.`);
+    } else {
+      /*
+       * IN THE FUTURE AND STILL REFUSED. The remaining bound is the maximum
+       * horizon, which lives in guardSession.mjs and is not exported. Named as
+       * an inference rather than asserted, and the observed distance is given
+       * so a reader can judge it without this file knowing the constant.
+       */
+      const days = Math.round((ms - now) / 86400000);
+      why.push(`"expires_at" is ${parsed.expires_at}, about ${days} day(s) away and still in the future, so the likely cause is the guard's maximum grant horizon. A far-future expiry is refused precisely because it is not an expiry.`);
+    }
+  }
+
+  if (why.length === 0) {
+    why.push('the file parses and its fields look present, but the guard still declined it -- read readOverride in src/guardSession.mjs');
+  }
+  return why;
+}
+
+/**
  * Turn a duration in hours into the ISO string `readOverride` demands.
  *
  * A SEPARATE FUNCTION BECAUSE THE STRING TYPE IS LOAD-BEARING. readOverride
