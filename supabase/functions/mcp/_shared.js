@@ -444,7 +444,7 @@ export function heartbeatAgeMs(row, now) {
 export const PRESENCE = { PRESENT: 'present', DEPARTED: 'departed' };
 export const LIVENESS = { LIVE: 'live', STALE: 'stale', UNKNOWN: 'unknown' };
 
-/** Owner intent, and nothing else. No clock, on purpose. */
+/** The worker's own declaration, and nothing else -- not the owner's. No clock, on purpose. */
 export function presenceOf(row) {
   return row?.capacity === 'offline' ? PRESENCE.DEPARTED : PRESENCE.PRESENT;
 }
