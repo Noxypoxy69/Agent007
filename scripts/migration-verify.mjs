@@ -83,7 +83,7 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
  * `authority: false` with a larger authoritative copy on the Bridge, and a
  * roster that demands it would refuse a legitimate package.
  */
-const AUTHORITY_ROSTER = Object.freeze([
+export const AUTHORITY_ROSTER = Object.freeze([
   'audits/', 'findings/', 'delegations.json', 'leadWork.json', 'tokenMeasurements.json',
 ]);
 

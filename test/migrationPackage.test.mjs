@@ -49,17 +49,36 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { AUTHORITY_ROSTER } from '../scripts/migration-verify.mjs';
+
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const mk = () => mkdtempSync(path.join(tmpdir(), 'ab-migtest-'));
 
 /** A manifest whose items are real, so a failure is about the code not the shape. */
-function manifestFor(items, keys = ['aaaaaaaaaaaaaaaa']) {
+/**
+ * A manifest whose items are real, so a failure is about the code not the shape.
+ *
+ * `source_absent` IS DERIVED FROM THE SHIPPED ROSTER, not typed. The verifier
+ * holds its own list of the authority stores a migration is for, so a fixture
+ * carrying only `delegations.json` must SAY it has no audit queue — that is the
+ * whole point of the roster (blind audit HIGH-1: a package carrying one
+ * non-authority store got the full green banner). Deriving it here means adding
+ * a store to the roster does not quietly turn every fixture red for a reason
+ * that has nothing to do with what the fixture tests, and `THE ROSTER FIRES`
+ * below is what keeps the gate honest.
+ */
+function manifestFor(items, keys = ['aaaaaaaaaaaaaaaa'], absent = undefined) {
+  const carried = items.map((i) => i.source_relative_to_agentbridge_home);
+  const covers = (entry) => (entry.endsWith('/')
+    ? carried.some((r) => r.toLowerCase().startsWith(entry.toLowerCase()))
+    : carried.some((r) => r.toLowerCase() === entry.toLowerCase()));
   return {
     kind: 'agent007-migration-package',
     manifest_version: 1,
     hash_algorithm: 'sha256',
     source_store_keys: keys,
-    source_inventory: items.map((i) => i.source_relative_to_agentbridge_home).sort(),
+    source_inventory: carried.slice().sort(),
+    source_absent: absent ?? AUTHORITY_ROSTER.filter((e) => !covers(e)),
     items,
   };
 }
@@ -297,6 +316,49 @@ test('A LINK INSIDE THE PACKAGE IS NOT A PAYLOAD', async (t) => {
     rmSync(linked, { recursive: true, force: true });
     rmSync(target, { recursive: true, force: true });
   }
+});
+
+test('THE ROSTER FIRES: an authority store may be absent, but it must be SAID', async () => {
+  /*
+   * ═══ A SECOND FIELD OF THE SAME UNTRUSTED DOCUMENT IS NOT A WITNESS ═══
+   *
+   * Blind audit HIGH-1. `source_inventory` was added so a truncated `items` list
+   * would contradict something — but it contradicts a list in the SAME FILE, so
+   * trimming both together is one extra edit. Measured: a directory holding a
+   * manifest and one byte-exact copy of `escalations.json` — the one store the
+   * packager marks `authority: false` and REDUNDANT — produced `0 failure(s)`,
+   * the full green banner and exit 0, with the audit queue, both finding
+   * registries, delegations, lead work and token measurements absent.
+   *
+   * So the roster lives in the verifier, where the manifest cannot reach it.
+   *
+   * THIS TEST EXISTS BECAUSE `manifestFor` DERIVES `source_absent`. That keeps
+   * every other fixture honest without hand-listing stores, and it would also
+   * disarm this gate everywhere if nothing checked the undeclared case. Rule 6:
+   * the precondition is an assertion, not a convenience.
+   */
+  const body = '{"x":1}\n';
+  const dir = mk();
+  try {
+    const items = [item('delegations.json', body)];
+    // Absent AND declared: the shape every other fixture in this file uses.
+    packageWith(dir, items, [], [['delegations.json', body]]);
+    const declared = await verify(dir);
+    assert.doesNotMatch(declared.out, /FAIL +authority roster/,
+      'a package that declared its absent stores was still refused, so the refusal below proves nothing');
+    assert.match(declared.out, /OK +authority roster/);
+
+    // The same package with the declaration removed.
+    const m = manifestFor(items, [], []);
+    writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(m));
+    const silent = await verify(dir);
+    assert.notEqual(silent.code, 0, 'a package carrying none of the authority stores passed');
+    assert.match(silent.out, /FAIL +authority roster/);
+    for (const entry of AUTHORITY_ROSTER.filter((e) => e !== 'delegations.json')) {
+      assert.match(silent.out, new RegExp(entry.replace('.', '\\.')),
+        `the roster did not name ${entry}, so an operator cannot tell what is missing`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('A TRUNCATED MANIFEST IS CAUGHT BY THE SOURCE INVENTORY', async () => {
