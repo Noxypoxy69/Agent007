@@ -170,6 +170,23 @@ const HELP = `agentbridge ${VERSION} — read-only multi-agent coordination daem
                                         one is live. Prints a path; never writes
                                         one -- an agent that writes its own
                                         permission file has forged the grant.
+  agentbridge grant --paths a,b --reason "…" --granted-by "…" --hours <n>
+             [--actions x,y] [--expires-at <iso>] [--repo <dir>] [--json]
+                                        write that grant to the path grant-path
+                                        prints, then CONFIRM IT BY ASKING THE
+                                        GUARD. If readOverride will not honour
+                                        the file it is rolled back, so this
+                                        cannot leave a malformed grant behind --
+                                        which is the failure it was written for:
+                                        every one of readOverride's dozen
+                                        refusals looks exactly like the guard
+                                        being strict, and hand-editing the JSON
+                                        made all of them reachable by a typo.
+                                        --granted-by is REQUIRED and records WHO
+                                        authorised it and WHERE they said so.
+                                        Writing one for yourself and naming the
+                                        owner in that field is still forgery;
+                                        the field exists so a reader can check.
   agentbridge audit-pin [--rev <rev>] [--task <id>] [--attempt <n>] [--id <s>]
   agentbridge audit-pin --verify <pin.json> [--rev <rev>]
                                         capture what an audit is about at its
@@ -4177,6 +4194,131 @@ try {
         } else {
           console.log('live        : no grant file at this key');
         }
+      }
+    }
+    done(0);
+  }
+
+  /*
+   * WRITE A GRANT, AND PROVE IT LANDED BY ASKING THE GUARD.
+   *
+   * THE COMMAND THAT DID NOT EXIST. `grant-path` printed where the file goes
+   * and nothing put one there, so the only route was a text editor -- and
+   * CLAUDE.md records what that cost: three of the four obvious spellings of
+   * the token path do not work, a grant at the wrong key "fails EXACTLY like
+   * the guard being strict", and on 2026-09-21 a session burned six exchanges
+   * and still produced malformed JSON. Every one of readOverride's dozen
+   * refusals was reachable by a typo and silent.
+   *
+   * IT CANNOT WRITE A GRANT THE GUARD WILL NOT HONOUR. After writing, it calls
+   * the shipped `readOverride` and requires the result to be live. If it is
+   * not, the previous file is restored byte for byte -- or removed if there was
+   * none -- and the caller is told. That is the round trip described in
+   * src/grantWrite.mjs: the writer defers to the only code that owns the rules
+   * rather than keeping a second copy of them.
+   *
+   * WHAT IT IS NOT. It is not an authorisation and it grants this process
+   * nothing it could not already do -- guardSession.mjs states plainly that
+   * anything able to write outside the repository could forge one of these.
+   * What it changes is that `--granted-by` is REQUIRED, so a grant now always
+   * carries a claim about who authorised it and where they said so, and
+   * CLAUDE.md's rule about forging that field becomes something a reader can
+   * actually check.
+   */
+  if (cmd === 'grant') {
+    const { overridePath, readOverride, overrideKeySource } = await import('../src/guardSession.mjs');
+    const { validateGrantShape, expiryFromHours } = await import('../src/grantWrite.mjs');
+    const { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } = await import('node:fs');
+    const nodePath = await import('node:path');
+
+    const repo = args.repo ? String(args.repo) : process.cwd();
+    const file = overridePath(repo);
+
+    const splitList = (v) => (typeof v === 'string'
+      ? v.split(',').map((s) => s.trim()).filter((s) => s !== '')
+      : []);
+    const paths = splitList(args.paths);
+    const actions = splitList(args.actions);
+
+    /*
+     * AN EXPIRY IS REQUIRED AND HAS NO DEFAULT. A default would be a horizon
+     * nobody chose, on the one field whose whole job is making the grant
+     * self-closing.
+     */
+    const expiresAt = typeof args['expires-at'] === 'string'
+      ? args['expires-at']
+      : expiryFromHours(args.hours);
+
+    const check = validateGrantShape({
+      paths,
+      actions,
+      reason: typeof args.reason === 'string' ? args.reason : undefined,
+      grantedBy: typeof args['granted-by'] === 'string' ? args['granted-by'] : undefined,
+      expiresAt: expiresAt ?? undefined,
+    });
+
+    if (!check.ok) {
+      console.error('REFUSED — the grant was not written. Nothing on disk changed.\n');
+      for (const e of check.errors) console.error(`  - ${e}`);
+      console.error('\nusage: agentbridge grant --paths a,b --reason "…" --granted-by "…" --hours 8');
+      console.error('       agentbridge grant --actions <tool> --reason "…" --granted-by "…" --expires-at <iso>');
+      done(2);
+    }
+
+    /*
+     * A PATH THE REPOSITORY DOES NOT CONTAIN IS ALMOST ALWAYS A TYPO, AND A
+     * TYPO HERE IS THE SILENT FAILURE THIS COMMAND EXISTS TO END. It is a
+     * WARNING rather than a refusal: a grant may legitimately name a file the
+     * work is about to create, and refusing that would send the operator back
+     * to the text editor, which is the outcome with no upside.
+     */
+    const unknown = check.grant.paths.filter(
+      (p) => p !== '*' && !existsSync(nodePath.join(repo, p)),
+    );
+
+    const hadFile = existsSync(file);
+    const previous = hadFile ? readFileSync(file, 'utf8') : null;
+
+    mkdirSync(nodePath.dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(check.grant, null, 2)}\n`, 'utf8');
+
+    /* THE ROUND TRIP. The shipped reader is the only authority on whether this worked. */
+    const live = readOverride(repo);
+    if (!live) {
+      if (hadFile) writeFileSync(file, previous, 'utf8');
+      else rmSync(file, { force: true });
+      console.error('REFUSED — the guard would not honour that grant, so it was rolled back.');
+      console.error(`  file    : ${file}`);
+      console.error(`  ${hadFile ? 'the previous grant file was restored' : 'no grant file remains'}`);
+      console.error('\nreadOverride declined it. The usual cause is an expiry beyond the maximum');
+      console.error('horizon the guard allows (30 days). Try a shorter --hours.');
+      done(2);
+    }
+
+    if (args.json) {
+      console.log(JSON.stringify({
+        repo, keySource: overrideKeySource(repo), file, live: true, grant: live, unknownPaths: unknown,
+      }, null, 2));
+    } else {
+      console.log('GRANT LIVE — confirmed by the guard, not by this command.\n');
+      console.log(`repo        : ${repo}`);
+      console.log(`key source  : ${overrideKeySource(repo)}`);
+      console.log(`grant file  : ${file}`);
+      console.log(`granted by  : ${live.granted_by}`);
+      console.log(`expires     : ${live.expires_at}`);
+      console.log(`reason      : ${live.reason}`);
+      if (live.paths.length) {
+        console.log(`paths (${live.paths.length}) :`);
+        for (const p of live.paths) console.log(`  ${p}`);
+      }
+      if (live.actions.length) {
+        console.log(`actions (${live.actions.length}) :`);
+        for (const a of live.actions) console.log(`  ${a}`);
+      }
+      if (unknown.length) {
+        console.log(`\nWARNING — ${unknown.length} granted path(s) do not exist in this repository.`);
+        console.log('If the work is not about to CREATE them, this grant covers nothing:');
+        for (const p of unknown) console.log(`  ${p}`);
       }
     }
     done(0);
