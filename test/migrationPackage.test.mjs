@@ -673,6 +673,95 @@ test('A HARD LINK TO A CREDENTIAL IS REFUSED BY IDENTITY, not by its name', asyn
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test('A HARD LINK TO A GRANT INSIDE A NEVER-CARRY DIRECTORY IS REFUSED', async (t) => {
+  /*
+   * ═══ FOUR OF THE SEVEN NEVER-CARRY ENTRIES ARE DIRECTORIES ═══
+   *
+   * Blind audit HIGH-4. `overrides`, `guard-sessions`, `verify` and `polls` are
+   * directories in the live store, so the identity map held four DIRECTORY
+   * inodes — and the `isFile()` check rejects directories before the identity
+   * comparison runs, making those four entries structurally unreachable.
+   *
+   * A hard link at `audits/<key>.jsonl` pointing at `overrides/<key>.json`
+   * therefore passed every check: resolves to its own path, regular file, inside
+   * the home, no never-carry component, inode in nobody's map. An override grant
+   * in an archive whose manifest says "Contains NO ... override grants."
+   *
+   * The previous hard-link test used `config.json` — one of the three entries
+   * where the map WAS populated — so it could not have caught this. Rule 9: a
+   * fixture that cannot construct the real case cannot fail for it.
+   */
+  const { forbiddenFindings } = await import('../scripts/migration-package.mjs');
+  const home = mk();
+  try {
+    mkdirSync(path.join(home, 'overrides'), { recursive: true });
+    mkdirSync(path.join(home, 'audits'), { recursive: true });
+    const grant = path.join(home, 'overrides', 'e09139d77b22755b.json');
+    writeFileSync(grant, '{"paths":["*"],"granted_by":"danny"}');
+
+    const link = path.join(home, 'audits', 'cccccccccccccccc.jsonl');
+    try { linkSync(grant, link); } catch (e) {
+      t.skip(`this platform would not create a hard link: ${e?.code ?? e?.message}`);
+      return;
+    }
+
+    // Premise: the link is inside the home, named like a payload, and resolves
+    // to itself — every string check passes, which is why identity is needed.
+    const resolved = realpathSync.native(link);
+    assert.ok(!resolved.toLowerCase().includes('overrides'),
+      'realpath saw through the hard link, so this fixture is not the case being tested');
+
+    const out = forbiddenFindings([{ rel: 'audits/cccccccccccccccc.jsonl', src: link }], home);
+    assert.equal(out.length, 1, 'a hard link to a live override grant was packaged as authority history');
+    assert.match(out[0], /names on disk|overrides/,
+      'the refusal does not say why, so an operator cannot tell a grant leaked from an ordinary error');
+
+    // Differenced: an ordinary single-named payload beside it must still pass.
+    const honest = path.join(home, 'audits', 'dddddddddddddddd.jsonl');
+    writeFileSync(honest, '{"audit_id":"a"}\n');
+    assert.deepEqual(forbiddenFindings([{ rel: 'audits/dddddddddddddddd.jsonl', src: honest }], home), [],
+      'an ordinary store file was refused, so the refusal above proves nothing');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('ATTACH RE-VERIFIES THE PACKAGE, and cannot be sent out of it', () => {
+  /*
+   * `attach()` had ZERO test coverage — blind audit MEDIUM-7 — which is why its
+   * manifest-address bug (HIGH-3) survived two commits that fixed the identical
+   * mechanism in the verifier. A fix with no test has nothing to stop it
+   * regressing, which is the argument its own commit message makes.
+   *
+   * Run as a child because `attach` exits the process on refusal.
+   */
+  const repo = fileURLToPath(new URL('..', import.meta.url));
+  const run = (dir, extra = []) => spawnSync(process.execPath,
+    ['scripts/migration-package.mjs', '--attach', dir, ...extra],
+    { cwd: repo, encoding: 'utf8' });
+
+  const dir = mk();
+  try {
+    const body = '{"x":1}\n';
+    packageWith(dir, [item('delegations.json', body)], [], [['delegations.json', body]]);
+    writeFileSync(path.join(dir, 'MANIFEST.md'), '# manifest\n');
+
+    const good = run(dir);
+    assert.equal(good.status, 0, `an intact package was refused:\n${good.stdout}${good.stderr}`);
+    assert.match(good.stdout, /1 file\(s\) re-verified against the manifest, all match/);
+
+    /*
+     * The HIGH-3 shape: the manifest names a file outside the package, and the
+     * package itself holds nothing. This printed "all match" while hashing the
+     * operator's live store.
+     */
+    const m = JSON.parse(readFileSync(path.join(dir, 'MANIFEST.json'), 'utf8'));
+    m.items[0].destination_relative_to_package = '../../../../../../../../.agentbridge/delegations.json';
+    writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify(m));
+    const escaped = run(dir);
+    assert.notEqual(escaped.status, 0, 'attach followed the manifest out of the package');
+    assert.match(`${escaped.stdout}${escaped.stderr}`, /no longer matches its manifest|Refusing to follow the manifest/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('THE MANIFEST DESCRIBES THE VERIFIER IT ACTUALLY SHIPS WITH', async () => {
   /*
    * The manifest promised that migration-verify "computes the destination key

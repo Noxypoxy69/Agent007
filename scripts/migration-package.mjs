@@ -437,14 +437,38 @@ export function forbiddenFindings(files, home, fs = { realpath: realpathSync.nat
    * The identities of the never-carry entries that actually exist. A missing one
    * contributes nothing -- it cannot be hard-linked to -- and must not become a
    * refusal, or a store without a config file could never be packaged at all.
+   *
+   * ═══ FOUR OF THE SEVEN ENTRIES ARE DIRECTORIES, AND THE MAP HELD A
+   *     DIRECTORY'S IDENTITY, WHICH NO CARRIED FILE CAN EVER MATCH ═══
+   *
+   * Blind audit HIGH-4. `overrides`, `guard-sessions`, `verify` and `polls` are
+   * directories in the live store, so `forbiddenIds` held four directory inodes
+   * -- and the `isFile()` check below rejects directories BEFORE the identity
+   * comparison runs, so those four entries were structurally unreachable. Only
+   * the three plain files could ever match.
+   *
+   * The consequence is the one this guard exists to prevent: a hard link at
+   * `audits/<16hex>.jsonl` pointing at `overrides/<key>.json` resolves to its own
+   * path, is a regular file, is inside the home, has no never-carry component,
+   * and its inode was in nobody's map -- so an OVERRIDE GRANT gets packaged under
+   * a manifest that says "Contains NO credentials ... NO override grants." There
+   * are two live grants in that directory.
+   *
+   * So a directory contributes the identity of every file UNDER it.
    */
   const forbiddenIds = new Map();
-  for (const name of NEVER) {
-    try {
-      const st = fs.stat(fs.realpath(path.join(homeReal, name)));
-      forbiddenIds.set(`${st.dev}:${st.ino}`, name);
-    } catch { /* not present: nothing to link to */ }
-  }
+  const addIdentity = (abs, label) => {
+    let st;
+    try { st = fs.stat(fs.realpath(abs)); } catch { return; }
+    if (st.isDirectory()) {
+      let kids = [];
+      try { kids = readdirSync(abs); } catch { return; }
+      for (const kid of kids) addIdentity(path.join(abs, kid), `${label}/${kid}`);
+      return;
+    }
+    forbiddenIds.set(`${st.dev}:${st.ino}`, label);
+  };
+  for (const name of NEVER) addIdentity(path.join(homeReal, name), name);
 
   for (const f of files) {
     if (f.missing) continue;
@@ -479,6 +503,26 @@ export function forbiddenFindings(files, home, fs = { realpath: realpathSync.nat
      * The one a name cannot catch. Identity is checked LAST so the message names
      * the spelling when there is one, and falls back to this when there is not.
      */
+    /*
+     * AND AN IDENTITY MAP ONLY KNOWS WHAT IT ENUMERATED. The map above covers
+     * the never-carry list; it cannot cover the documented registration
+     * credential at `~/Documents/agentbridge-secrets/`, or anything else on the
+     * volume, because there is no bounded list of those.
+     *
+     * A second name for the same bytes is the whole mechanism, and `nlink` is
+     * the OS telling you there is one, without needing to know where it points.
+     * A store file written by this project always has exactly one name, so
+     * refusing a carried file with more is cheap and closes the class rather
+     * than the instances -- including the ones nobody has thought of. It fails
+     * in the safe direction: the cost of a false refusal is a message, and the
+     * cost of a false accept is a credential in an archive labelled history.
+     */
+    if (typeof st.nlink === 'number' && st.nlink > 1) {
+      out.push(`${f.rel} has ${st.nlink} names on disk (nlink ${st.nlink}), so its bytes are shared with at least one file this tool cannot see. `
+        + 'A store file has exactly one name; refusing rather than guessing what the other one is');
+      continue;
+    }
+
     const id = forbiddenIds.get(`${st.dev}:${st.ino}`);
     if (id) {
       out.push(`${f.rel} is the SAME FILE as ${id} (a hard link -- same device and inode), which is never carried`);
