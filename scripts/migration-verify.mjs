@@ -164,8 +164,6 @@ const advise = (name, why) => ({ name, state: 'NOTE', why, advisory: true });
  * to try instead of the matcher (rule 8). A fixture for this shape is now first
  * in `test/migrationPackage.test.mjs` beside it.
  *
- * @returns a refusal sentence, or null when the item is well-formed
- */
  * THE IMPLEMENTATION MOVED TO `src/migrationPaths.mjs` after a blind audit found
  * a THIRD reader of the same field, in the packager's `attach()`. Two commits
  * had fixed this mechanism one site at a time; a function both scripts import is
