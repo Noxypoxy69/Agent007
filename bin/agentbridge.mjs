@@ -332,8 +332,49 @@ try {
       console.log(`  base     ${g.baseSha?.slice(0, 12) ?? '?'}   ${g.mainRef} ${g.mainSha?.slice(0, 12) ?? '?'}`);
       console.log(`  unpushed ${g.unpushed ?? '?'} (${g.unpushedReason ?? '-'})  ahead ${g.aheadOfMain ?? '?'} / behind ${g.behindMain ?? '?'}`);
       console.log(`  files    ${g.staged.length} staged, ${g.dirty.length} dirty, ${g.untracked.length} untracked`);
-      if (s.locks.length) console.log(`  locks    ${s.locks.map((l) => `${l.resource}(${l.ageSeconds}s)`).join(', ')}`);
-      if (s.processes.length) console.log(`  running  ${s.processes.map((p) => `${p.kind}:${p.pid}${p.ambiguous ? '?' : ''}`).join(', ')}${s.processes.some((p) => p.ambiguous) ? '   (? = ambiguous match, may belong to another worktree)' : ''}`);
+      /*
+       * OPTIONAL CHAINING HERE IS A DEFENSIVE GUARD, NOT THE REPAIR, AND IT IS
+       * LABELLED SO NOBODY LATER READS IT AS THE FIX.
+       *
+       * The current producer cannot hand either field a null: discoverLocks
+       * always returns an initialised array, and collect defaults the process
+       * list. So a crash on these reads is UNREACHABLE today and a test that
+       * claimed to prove otherwise would be testing a shape the system does not
+       * build. It is kept under CLAUDE.md rule 11 -- carrying a real null out of
+       * the producer is the durable fix for the defect below, and the day that
+       * lands, these become load-bearing.
+       */
+      if (s.locks?.length) console.log(`  locks    ${s.locks.map((l) => `${l.resource}(${l.ageSeconds}s)`).join(', ')}`);
+      /*
+       * AN UNMEASURED PROCESS LIST IS NOT AN EMPTY ONE, AND THIS LINE USED TO
+       * CLAIM IT WAS -- BY SAYING NOTHING AT ALL.
+       *
+       * When the probe fails, probeProcesses returns `byWorktree: {}` and the
+       * collector fills the missing key with an empty array, so A FAILED PROBE
+       * AND A GENUINELY IDLE WORKTREE ARRIVE HERE AS THE SAME EMPTY ARRAY. The
+       * old length test then printed no running line in either case, and the two
+       * session blocks came out BYTE-IDENTICAL. That was measured against base
+       * caa8797 through this CLI, not supposed.
+       *
+       * The machine-level banner above is not a substitute. It reports that some
+       * probe failed; it does not tell the reader which of these per-session
+       * blocks is unmeasured, and on a multi-session roster that is the only
+       * question being asked.
+       *
+       * THE DISTINCTION ALREADY EXISTS IN THE PAYLOAD AND EVERY OTHER CONSUMER
+       * ALREADY HONOURS IT. bridge/collisions.mjs raises "process list
+       * unavailable ...; \"nothing running\" cannot be confirmed", and the
+       * list_active_processes description tells agents in terms that an empty
+       * list does not mean nothing is running. The flag was carried all the way
+       * to the renderer and only the HUMAN's view dropped it -- so this is the
+       * file's own established semantics being applied, not a new convention.
+       *
+       * `=== false` rather than falsy, matching those same consumers: a payload
+       * that carries no flag at all (an older bridge row) must read as fine
+       * rather than as unknown, or every historical session becomes a warning.
+       */
+      if (s.processProbeOk === false) console.log('  running  unknown -- process list unavailable; "nothing running" cannot be confirmed');
+      else if (s.processes?.length) console.log(`  running  ${s.processes.map((p) => `${p.kind}:${p.pid}${p.ambiguous ? '?' : ''}`).join(', ')}${s.processes.some((p) => p.ambiguous) ? '   (? = ambiguous match, may belong to another worktree)' : ''}`);
     }
     process.exit(0);
   }
