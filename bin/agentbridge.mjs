@@ -312,9 +312,37 @@ try {
       const r = await publish(cfg, payload);
       const landed = r.ok && r.accepted;
       const notConfigured = r.reason === 'no-bridge-url';
+      /*
+       * THREE OUTCOMES, NOT TWO, AND THE THIRD IS A STATEMENT RATHER THAN ADVICE.
+       *
+       * "publish failed" is a claim. For a bridge that received the body and then
+       * went quiet it is false, and acting on it republishes a write that already
+       * committed -- CLAUDE.md: "Reporting failure for completed work is worse
+       * than failing outright, BECAUSE THE RETRY IS WHAT CORRUPTS THE PICTURE."
+       *
+       * But the opposite over-correction is just as wrong: telling an operator
+       * whose bridge is DOWN that the beat "may have landed" inverts the advice
+       * for the commonest failure there is. So the client classifies delivery from
+       * measured error codes, and this only reports what it was told:
+       *
+       *   delivery 'none'     nothing was transmitted. A definite failure, named.
+       *   delivery 'unknown'  cannot be determined from here. Said as a FACT,
+       *                       without advising for or against a retry -- because
+       *                       'unknown' is also the default for codes nobody has
+       *                       measured, where presuming delivery would be a guess.
+       *
+       * THE EXIT CODE DOES NOT MOVE FOR EITHER. test/heartbeatExitCode.test.mjs
+       * pins a transport failure at 1 and its reasoning holds: a watcher must not
+       * read "nobody answered" as fine, or it loops healthily while the roster
+       * goes stale. It stays an alarm; only the claim is corrected.
+       */
       console.error(landed ? 'published.'
         : notConfigured ? 'local-only: no bridgeUrl configured, nothing published'
-          : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
+          : r.delivery === 'none'
+            ? `publish failed: nothing was sent (${r.reason ?? '-'})`
+            : r.delivery === 'unknown'
+              ? `publish UNKNOWN: the bridge never answered (${r.reason ?? '-'}). Whether this beat landed cannot be determined from here: it may have been received and committed, or may never have arrived.`
+              : `publish failed: ${r.status ?? '-'} ${r.reason ?? ''}`);
       beatFailed = !landed && !notConfigured;
     }
     if (args.json || cmd === 'heartbeat') {
