@@ -185,15 +185,20 @@ const SHELL_TOOL_NAMES = new Set(['Bash', 'PowerShell', 'Shell', 'Cmd', 'Termina
  * records the same defect about sed. A comment naming the wrong control is how
  * the next reader "fixes" something that was already right.
  */
-const COMMAND_FIELDS = ['command', 'script', 'cmd'];
-const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
+// Exported so the routing tests generate their cases from the real lists.
+export const COMMAND_FIELDS = ['command', 'script', 'cmd'];
+export const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
 
-function firstStringField(input, fields) {
-  for (const field of fields) {
-    const value = input[field];
-    if (typeof value === 'string' && value.length > 0) return { field, value };
-  }
-  return null;
+/*
+ * EVERY non-empty string among these fields, not the first one. Taking the first
+ * meant a payload was judged by whichever field the list named earlier and the
+ * rest were never looked at: {command:'git status', file_path:'CLAUDE.md'} was
+ * judged as a shell alone and ALLOWED, and {command:'git status', script:...}
+ * never had its script judged. A field outranking another is the same defect
+ * whichever two fields it is.
+ */
+function stringFields(input, fields) {
+  return [...new Set(fields.map((f) => input[f]).filter((v) => typeof v === 'string' && v.length > 0))];
 }
 
 function judgeWrite(filePath, input, cwd, sessionId) {
@@ -295,15 +300,33 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
    */
   if (toolName.startsWith('mcp__')) return { allowed: true };
 
-  const command = firstStringField(input, COMMAND_FIELDS);
-  if (command) return judgeShell(command.value);
+  /*
+   * A COMMAND DOES NOT EXCUSE A PATH. This returned the shell verdict as soon as
+   * it found a command, so a payload carrying both was never judged as a write:
+   * {command:'git status', file_path:'CLAUDE.md'} was ALLOWED (T-096, observed
+   * at 301c200). Every command is judged, then every path, and the first refusal
+   * wins. A tool that carries a path has its path judged whatever else it carries.
+   *
+   * ONLY THE FIELDS IN PATH_FIELDS. A path under any other name -- target,
+   * destination, notebookPath, an array under `paths` -- beside a command is
+   * still not examined here (T-102's residual, the next item).
+   */
+  const commands = stringFields(input, COMMAND_FIELDS);
+  for (const command of commands) {
+    const verdict = judgeShell(command);
+    if (!verdict.allowed) return verdict;
+  }
 
-  if (SHELL_TOOL_NAMES.has(toolName)) {
+  if (commands.length === 0 && SHELL_TOOL_NAMES.has(toolName)) {
     return deny('missing-command', `${toolName} did not provide a command string`);
   }
 
-  const target = firstStringField(input, PATH_FIELDS);
-  if (target) return judgeWrite(target.value, input, cwd, sessionId);
+  const targets = stringFields(input, PATH_FIELDS);
+  for (const target of targets) {
+    const verdict = judgeWrite(target, input, cwd, sessionId);
+    if (!verdict.allowed) return verdict;
+  }
+  if (commands.length > 0 || targets.length > 0) return { allowed: true };
 
   if (STRUCTURED_EDIT_TOOLS.has(toolName)) {
     return deny('missing-write-path', `${toolName} did not provide a path`);
