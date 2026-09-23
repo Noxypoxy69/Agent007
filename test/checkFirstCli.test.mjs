@@ -81,18 +81,51 @@ test('an untracked file counts as a path you are touching', async () => {
    * src/completion.mjs, the module that owns the overlap check, was itself
    * invisible to it on the run that shipped it.
    */
-  const { writeFile, unlink } = await import('node:fs/promises');
-  const probe = fileURLToPath(new URL('../zz-overlap-probe.tmp', import.meta.url));
-  await writeFile(probe, 'probe\n', 'utf8');
+  /*
+   * THE PROBE LIVES IN A THROWAWAY REPOSITORY, NOT IN THIS ONE.
+   *
+   * It used to be written to `<repoRoot>/zz-overlap-probe.tmp` -- a FIXED NAME in
+   * the REPO ROOT -- and removed in a finally. For that window this repository's
+   * working tree was DIRTY FOR EVERY PROCESS THAT LOOKED, and node --test runs
+   * files in parallel. MEASURED on a clean tree at caa8797: run this file
+   * alongside test/deployCheckTree.test.mjs and its "19:37" assertion fails 5/5,
+   * because its two internal runs disagree about whether the tree was dirty.
+   * Either file alone fails 0/5. A test that makes an unrelated test fail is not
+   * a flake, it is a shared resource.
+   *
+   * A PLAIN TEMP DIRECTORY WOULD NOT DO. The subject here is an UNTRACKED FILE IN
+   * A REPOSITORY; outside a repository git lists nothing and this test would pass
+   * while testing something else. So the probe goes into a repository the test
+   * creates and owns, and cf()'s existing `cwd` parameter points check-first at
+   * it. Same subject, no shared resource.
+   *
+   * The remote is the throwaway repo ITSELF, so check-first's `git ls-remote`
+   * resolves without reaching for anything outside this test.
+   */
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { execFileSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const nodePath = await import('node:path');
+
+  const sandbox = await mkdtemp(nodePath.join(tmpdir(), 'ab-overlap-probe-'));
   try {
-    const r = await cf(['roster', '--json']);
+    const git = (a) => execFileSync('git', a, { cwd: sandbox, encoding: 'utf8', stdio: 'pipe' });
+    git(['init', '-q', '-b', 'main']);
+    await writeFile(nodePath.join(sandbox, 'seed.txt'), 'seed\n', 'utf8');
+    git(['add', 'seed.txt']);
+    git(['-c', 'user.email=probe@local', '-c', 'user.name=probe', 'commit', '-q', '-m', 'seed']);
+    git(['remote', 'add', 'origin', sandbox]);
+
+    await writeFile(nodePath.join(sandbox, 'zz-overlap-probe.tmp'), 'probe\n', 'utf8');
+
+    const r = await cf(['roster', '--json'], sandbox);
     const d = JSON.parse(r.stdout);
     assert.ok(
       d.myPaths.some((f) => f.endsWith('zz-overlap-probe.tmp')),
       `an untracked file must be part of your path contract; got ${JSON.stringify(d.myPaths)}`,
     );
   } finally {
-    await unlink(probe).catch(() => {});
+    await rm(sandbox, { recursive: true, force: true });
   }
 });
 
