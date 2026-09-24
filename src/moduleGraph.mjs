@@ -101,8 +101,16 @@ export const DEFAULT_ENTRY_POINTS = [
    * point in the only sense that matters here: something outside the graph
    * invokes it, so what it imports is shipped rather than orphaned. */
   'bin/agentbridge-deploy-check.mjs',
+  /* The Run 2 envelope script. It is run directly, never imported, so it is
+   * an entry point in the same sense as the deploy check: undeclared, it makes
+   * src/run2Envelope.mjs read as test-only while shipped code is calling it. */
+  'scripts/run2-envelope.mjs',
   'bridge/server.mjs',
   'bridge/worker.mjs',
+  /* The deployed Cloudflare OAuth worker: wrangler.toml `main`. Cloudflare
+   * invokes it and nothing imports it, so it is an entry point in the same
+   * sense as the Stop hook -- undeclared, the graph cannot see it ship. */
+  'bridge/oauthWorker.mjs',
   'mcp/stdio.mjs',
 ];
 
