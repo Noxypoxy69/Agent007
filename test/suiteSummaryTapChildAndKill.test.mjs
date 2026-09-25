@@ -20,13 +20,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readSuiteSummary, summaryBlocks } from '../src/suiteSummary.mjs';
+import { readSuiteSummary, locatedBlocks } from '../src/suiteSummary.mjs';
 
 const TAP_CHILD_GREEN = {"status":0,"text":"TAP version 13\n# Subtest: tg1\nok 1 - tg1\n  ---\n  duration_ms: 0.5324\n  type: 'test'\n  ...\n# Subtest: tg2\nok 2 - tg2\n  ---\n  duration_ms: 0.089\n  type: 'test'\n  ...\n# Subtest: tg3\nok 3 - tg3\n  ---\n  duration_ms: 0.0676\n  type: 'test'\n  ...\n# Subtest: tg4\nok 4 - tg4\n  ---\n  duration_ms: 0.0615\n  type: 'test'\n  ...\n# Subtest: tg5\nok 5 - tg5\n  ---\n  duration_ms: 0.0711\n  type: 'test'\n  ...\n1..5\n# tests 5\n# suites 0\n# pass 5\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 66.8168\n✔ p_before (0.4956ms)\n✔ p_spawn (110.7212ms)\n✔ p_after (0.6031ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 170.146\n"};
 const TAP_CHILD_RED = {"status":0,"text":"TAP version 13\n# Subtest: tr1\nok 1 - tr1\n  ---\n  duration_ms: 0.5223\n  type: 'test'\n  ...\n# Subtest: tr2\nnot ok 2 - tr2\n  ---\n  duration_ms: 0.5878\n  type: 'test'\n  location: 'C:/x\\\\red.child.mjs:3:1'\n  failureType: 'testCodeFailure'\n  error: '1 == 2'\n  code: 'ERR_ASSERTION'\n  name: 'AssertionError'\n  expected: 2\n  actual: 1\n  operator: '=='\n  stack: |-\n    TestContext.<anonymous> (file:///C:/x/red.child.mjs:3:28)\n    Test.runInAsyncScope (node:async_hooks:227:14)\n    Test.run (node:internal/test_runner/test:1382:25)\n    Test.processPendingSubtests (node:internal/test_runner/test:960:18)\n    Test.postRun (node:internal/test_runner/test:1522:19)\n    Test.run (node:internal/test_runner/test:1447:12)\n    async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3)\n  ...\n# Subtest: tr3\nok 3 - tr3\n  ---\n  duration_ms: 0.0754\n  type: 'test'\n  ...\n# Subtest: tr4\nok 4 - tr4\n  ---\n  duration_ms: 0.0602\n  type: 'test'\n  ...\n# Subtest: tr5\nok 5 - tr5\n  ---\n  duration_ms: 0.5206\n  type: 'test'\n  ...\n1..5\n# tests 5\n# suites 0\n# pass 4\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 59.854\n✔ p_before (0.5271ms)\n✔ p_spawn (110.5811ms)\n✔ p_after (0.8339ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 177.1786\n"};
 
 const withEol = (text, eol) => (eol === 'CRLF' ? text.replace(/\n/g, '\r\n') : text);
-const complete = (text) => summaryBlocks(text).filter((b) => b.tests !== undefined && b.fail !== undefined);
+const complete = (text) => locatedBlocks(text).map((b) => b.fields).filter((b) => b.tests !== undefined && b.fail !== undefined);
 /** The text cut `extra` bytes past `anchor` (a column-zero line start), decoded as a capture would be. */
 function cutAfter(text, anchor, extra) {
   const at = text.indexOf(anchor);
