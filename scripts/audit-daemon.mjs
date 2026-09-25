@@ -51,12 +51,18 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { flagValue, posIntArg, nextAttempt as nextAttemptOf } from '../src/daemonArgs.mjs';
+import {
+  flagValue, posIntArg, flagPresent, boolFlag, nextAttempt as nextAttemptOf,
+} from '../src/daemonArgs.mjs';
 import { agentLaunch, permissionScope } from '../src/agentPermissions.mjs';
 
 const REPO = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const argv = process.argv.slice(2);
-const has = (f) => argv.includes(f);
+/*
+ * PRESENCE SEES BOTH SPELLINGS. This was `argv.includes(f)`, which cannot
+ * see `--max-ticks=0`, so the M-D refusal below never fired for it. T-285.
+ */
+const has = (f) => flagPresent(argv, f);
 /*
  * PARSING LIVES IN src/daemonArgs.mjs, WHERE THE SUITE CAN REACH IT.
  *
@@ -77,10 +83,12 @@ const refuse = (r) => {
   return undefined;
 };
 const flag = (n, d = null) => refuse(flagValue(argv, n, d));
+/* A value on a boolean (`--launch=no`) is refused rather than read either way. */
+const bool = (n) => refuse(boolFlag(argv, n));
 
-const ONCE = has('--once');
-const LAUNCH = has('--launch');
-const SUPERVISE = has('--supervise');
+const ONCE = bool('--once');
+const LAUNCH = bool('--launch');
+const SUPERVISE = bool('--supervise');
 /*
  * Parsed strictly, and a malformed value is FATAL rather than defaulted.
  * `--max-ticks abc` silently becoming 5 is an operator asking for one

@@ -34,25 +34,102 @@
 /** The parse failed. Carries a reason an operator can act on. */
 export const ARG_ERROR = 'arg_error';
 
-/**
- * The value following `name` in argv.
+const refusal = (why) => ({ ok: false, code: ARG_ERROR, why });
+
+/*
+ * ═══ TWO SPELLINGS, ONE MATCHER. T-285 ═══
  *
- * A flag PRESENT WITH NO VALUE is an error, not the default — for every
- * flag, not only the numeric ones. That distinction is M-3: guarding
- * inside the numeric parser left `--by` behind.
+ * `--by=sess-1` and `--by sess-1` are the same request, and every reader
+ * here used `argv.indexOf(name)` / `argv.includes(name)`, which sees only
+ * the second. Measured by T-276:
  *
- * @returns {{ok:true, value:string|null} | {ok:false, code:string, why:string}}
+ *   --by=sess-1     became audit-daemon@<host>: the identity the daemon
+ *                   claims work AS, silently replaced, so the
+ *                   author-cannot-audit exclusion could not fire.
+ *   --max-ticks=0   became 5: an operator asking for a dry run got a spend.
+ *   M-D             "a loop flag without --supervise is refused" read
+ *                   `includes` too, so `--max-ticks=0` without --supervise
+ *                   was discarded without a word.
+ *
+ * Fourth spelling of one class (M-6 trailing, M-3 `--by` left behind, M-A
+ * the next flag as the value). So EVERY reader -- value, number, presence,
+ * boolean -- goes through this one function, and a new spelling is handled
+ * once or nowhere rather than once per reader.
+ *
+ * Unknown flags are NOT refused, in either spelling: the daemon has never
+ * validated argv against a known set, and `--x=1` is ignored exactly as
+ * `--x 1` is. That policy is unchanged here.
  */
-export function flagValue(argv, name, dflt = null) {
+
+/**
+ * Every place `name` appears in argv, in either spelling.
+ * `--name` is the space form; `--name=<v>` is the equals form and carries
+ * its value. A longer flag that merely shares the prefix is not `name`.
+ */
+export function flagOccurrences(argv, name) {
   const list = Array.isArray(argv) ? argv : [];
-  const i = list.indexOf(name);
-  if (i === -1) return { ok: true, value: dflt };
-  if (i + 1 >= list.length) {
-    return {
-      ok: false,
-      code: ARG_ERROR,
-      why: `${name} was given with no value. Refusing to guess it.`,
-    };
+  const eq = `${name}=`;
+  const out = [];
+  list.forEach((a, index) => {
+    if (a === name) out.push({ index, form: 'space' });
+    else if (typeof a === 'string' && a.startsWith(eq)) out.push({ index, form: 'equals', value: a.slice(eq.length) });
+  });
+  return out;
+}
+
+/** Was `name` given at all, in either spelling. What every presence check asks. */
+export function flagPresent(argv, name) {
+  return flagOccurrences(argv, name).length > 0;
+}
+
+/**
+ * A flag that takes NO value: present or not.
+ *
+ * `--launch=no` would launch under a presence check and `--launch=yes`
+ * would not launch under an exact-match one. Neither reading is the
+ * operator's, so a value on a boolean flag is refused. Repeating the bare
+ * flag is harmless and accepted.
+ */
+export function boolFlag(argv, name) {
+  const withValue = flagOccurrences(argv, name).find((o) => o.form === 'equals');
+  if (withValue) {
+    return refusal(`${name} takes no value, and was given ${JSON.stringify(`${name}=${withValue.value}`)}. `
+      + 'Refusing to guess whether that means on or off.');
+  }
+  return { ok: true, value: flagPresent(argv, name) };
+}
+
+/*
+ * The raw value, with every refusal EXCEPT the blank one. Shared by both
+ * readers so the structural checks -- repeated, trailing, a flag as the
+ * value -- live in one place (M-3). The blank check is `flagValue`'s: the
+ * numeric reader already refuses a blank as "not a whole number", and the
+ * message it has always given is kept.
+ */
+function rawValue(argv, name) {
+  const list = Array.isArray(argv) ? argv : [];
+  const seen = flagOccurrences(list, name);
+  if (seen.length === 0) return { ok: true, value: null, absent: true };
+
+  /*
+   * REPEATED IS REFUSED, in any mix of spellings. The old reader took the
+   * first `--by` and ignored the rest; with two spellings "first" also
+   * depends on which one the reader happens to see. Either occurrence is a
+   * guess about which the operator meant.
+   */
+  if (seen.length > 1) {
+    return refusal(`${name} was given ${seen.length} times. Refusing to guess which one was meant.`);
+  }
+
+  const [at] = seen;
+  let value;
+  if (at.form === 'equals') {
+    value = at.value;
+  } else {
+    if (at.index + 1 >= list.length) {
+      return refusal(`${name} was given with no value. Refusing to guess it.`);
+    }
+    value = list[at.index + 1];
   }
 
   /*
@@ -76,17 +153,36 @@ export function flagValue(argv, name, dflt = null) {
    *
    * Guarding in the shared helper rather than in the numeric parser is
    * the same correction M-3 already made once, one spelling short.
+   *
+   * It applies to the equals form as well: `--by=--once` is the same
+   * defect spelled with an `=`.
    */
-  const value = list[i + 1];
   if (typeof value === 'string' && /^--?[A-Za-z]/.test(value)) {
-    return {
-      ok: false,
-      code: ARG_ERROR,
-      why: `${name} was followed by ${JSON.stringify(value)}, which is another flag rather `
-        + 'than a value. Refusing to guess it.',
-    };
+    return refusal(`${name} was followed by ${JSON.stringify(value)}, which is another flag rather `
+      + 'than a value. Refusing to guess it.');
   }
-  return { ok: true, value };
+  return { ok: true, value, absent: false };
+}
+
+/**
+ * The value of `name` in argv, given as `--name value` or `--name=value`.
+ *
+ * A flag PRESENT WITH NO VALUE is an error, not the default — for every
+ * flag, not only the numeric ones. That distinction is M-3: guarding
+ * inside the numeric parser left `--by` behind. A BLANK value (empty or
+ * whitespace, in either spelling) is the same thing and is refused too:
+ * T-276 F2, `--by ""` was accepted as an identity.
+ *
+ * @returns {{ok:true, value:string|null} | {ok:false, code:string, why:string}}
+ */
+export function flagValue(argv, name, dflt = null) {
+  const got = rawValue(argv, name);
+  if (!got.ok) return got;
+  if (got.absent) return { ok: true, value: dflt };
+  if (typeof got.value === 'string' && got.value.trim() === '') {
+    return refusal(`${name} was given a blank value ${JSON.stringify(got.value)}. Refusing to guess it.`);
+  }
+  return { ok: true, value: got.value };
 }
 
 /**
@@ -97,9 +193,9 @@ export function flagValue(argv, name, dflt = null) {
  * mistake here that costs money rather than correctness.
  */
 export function posIntArg(argv, name, dflt) {
-  const got = flagValue(argv, name, null);
+  const got = rawValue(argv, name);
   if (!got.ok) return got;
-  if (got.value === null) return { ok: true, value: dflt };
+  if (got.absent) return { ok: true, value: dflt };
 
   const raw = String(got.value).trim();
   if (!/^\d+$/.test(raw)) {
