@@ -86,28 +86,35 @@ const FIELDS = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo
  */
 const SUMMARY_LINE = /^(ℹ|#) ([a-z_]+) ([\d.]+)$/;
 
+const splitLines = (text) => String(text ?? '').split('\n').map((l) => l.replace(/\r$/, ''));
+
 export function summaryBlocks(text) {
+  return locatedBlocks(splitLines(text)).map((b) => b.fields);
+}
+
+/*
+ * The same blocks, with the index of each one's first and last line. Kept
+ * separate so `summaryBlocks` returns exactly the shape it always has.
+ */
+function locatedBlocks(lines) {
   const blocks = [];
   let current = null;
   let prefix = null;
+  const close = (at) => { blocks.push({ fields: current.fields, start: current.start, end: at }); current = null; };
 
-  for (const rawLine of String(text ?? '').split('\n')) {
-    const line = rawLine.replace(/\r$/, '');
+  for (const [i, line] of lines.entries()) {
     const m = SUMMARY_LINE.exec(line);
     if (m && FIELDS.includes(m[2])) {
-      if (current && m[1] !== prefix) {
-        blocks.push(current);
-        current = null;
-      }
-      current ??= {};
+      if (current && m[1] !== prefix) close(i - 1);
+      current ??= { fields: {}, start: i };
       prefix = m[1];
       // A repeated label starts a NEW block: one block never states `fail`
       // twice, so a repeat means two summaries ran together.
-      if (Object.hasOwn(current, m[2])) {
-        blocks.push(current);
-        current = {};
+      if (Object.hasOwn(current.fields, m[2])) {
+        close(i - 1);
+        current = { fields: {}, start: i };
       }
-      current[m[2]] = Number(m[3]);
+      current.fields[m[2]] = Number(m[3]);
       continue;
     }
     /*
@@ -120,13 +127,80 @@ export function summaryBlocks(text) {
      * one file whose entire subject is a mechanism nobody checked. Caught by a
      * blind auditor reading the comment against the code.
      */
-    if (current && !line.startsWith(`${prefix} `)) {
-      blocks.push(current);
-      current = null;
-    }
+    if (current && !line.startsWith(`${prefix} `)) close(i - 1);
   }
-  if (current) blocks.push(current);
+  if (current) close(lines.length - 1);
   return blocks;
+}
+
+/*
+ * ═══ WHERE A RUN'S OWN SUMMARY SITS, MEASURED (T-288, node v24.19.0) ═══
+ *
+ * v4 refused two complete summaries but accepted ONE without asking whose it
+ * was. So when the run's own (parent) summary was truncated or never printed,
+ * a single CHILD block -- a test's column-zero stdout carrying another
+ * `node --test` run -- was reported as this run's result: `tests 7, fail 1`
+ * for a 2992-test run (T-276 F1). v3 had refused that shape.
+ *
+ * Measured with a real parent/child pair (live/T-288/work/realorder*.mjs):
+ *
+ *   - a test file's stdout and stderr are printed at COLUMN ZERO, BEFORE that
+ *     file's result lines. So a child block is always followed by at least the
+ *     result line of the test that printed it (`✔ x (1ms)` / `✖ x (1ms)`).
+ *   - the parent's summary comes after EVERY result line; after it there is
+ *     only `✖ failing tests:` and the failing detail, whose column-zero lines
+ *     are `test at <loc>` followed by one `✖ <name>` line. All else is indented.
+ *   - an assertion message carrying a child's output is INDENTED in the detail,
+ *     so it never parses as a block at all.
+ *
+ * So the block that is this run's own sits in one position, and a complete
+ * block anywhere else means the parent's is missing or truncated:
+ *
+ *   A. no summary line follows it (a later partial block is the parent's,
+ *      truncated);
+ *   B. it is not inside failing detail (the nearest column-zero line before it
+ *      is not the marker, a `test at` line, or the `✖` line that follows one);
+ *   C. no result line follows it outside failing detail.
+ *
+ * Returns null when the block is in that position, else the reason.
+ *
+ * BOUND, stated so nobody trusts this too far: a child's output that is the
+ * LAST thing in the text, with no parent line of any kind after it, is
+ * byte-identical to a real run of that child. Nothing here can tell them apart;
+ * test/suiteSummaryParent.test.mjs pins that limit.
+ */
+const MARKER = /^✖ failing tests:$/;
+const TEST_AT = /^test at /;
+const RESULT_LINE = /^[✔✖﹣▶] /;
+const indentedOrBlank = (line) => line === '' || /^\s/.test(line);
+
+function parentProblem(lines, block) {
+  /* B: look back to the nearest column-zero line. */
+  for (let k = block.start - 1; k >= 0; k -= 1) {
+    const line = lines[k];
+    if (indentedOrBlank(line)) continue;
+    const detailHeader = RESULT_LINE.test(line) && k > 0 && TEST_AT.test(lines[k - 1]);
+    if (MARKER.test(line) || TEST_AT.test(line) || detailHeader) {
+      return `it sits inside failing-test detail (after "${line}" at line ${k + 1}), where node prints `
+        + 'another run\'s output, never its own summary';
+    }
+    break;
+  }
+  /* A and C: look forward over everything after it. */
+  let afterTestAt = false;
+  for (let k = block.end + 1; k < lines.length; k += 1) {
+    const line = lines[k];
+    const m = SUMMARY_LINE.exec(line);
+    if (m && FIELDS.includes(m[2])) {
+      return `an incomplete summary follows it at line ${k + 1} ("${line}"): that is the run's own summary, truncated`;
+    }
+    if (!indentedOrBlank(line) && RESULT_LINE.test(line) && !MARKER.test(line) && !afterTestAt) {
+      return `a test result ("${line}", line ${k + 1}) is printed after it, and node prints a run's own `
+        + 'summary after every result';
+    }
+    afterTestAt = TEST_AT.test(line);
+  }
+  return null;
 }
 
 /**
@@ -181,6 +255,11 @@ export function readSuiteSummary(text, status) {
    * output order, which is the part I kept getting wrong. The failing-test names
    * and the exit status still print either way, so a refusal is not a blackout.
    *
+   * THAT CLAIM WAS FALSE (T-276 F1): with the parent's summary truncated or
+   * absent, ONE child block was reported as this run's. v3 refused it. The
+   * position check in parentProblem, above, closes it (T-288), and it depends on
+   * node's output order -- measured, not assumed, this time.
+   *
    * ONE MORE UNVERIFIED MECHANISM WENT IN HERE AND CAME STRAIGHT BACK OUT.
    * This said: "Node indents captured output beneath a failing test, so an
    * indented block never parses as a summary in the first place. That may well
@@ -204,7 +283,11 @@ export function readSuiteSummary(text, status) {
    * The refusal above does not depend on any of this, which is the whole reason
    * it was chosen. Recorded so nobody rebuilds a boundary on the guess.
    */
-  const complete = summaryBlocks(text).filter((b) => b.tests !== undefined && b.fail !== undefined);
+  const lines = splitLines(text);
+  const located = locatedBlocks(lines).filter((b) => b.fields.tests !== undefined && b.fields.fail !== undefined);
+  const complete = located.map((b) => b.fields);
+  /* T-288: is the LAST complete block where node prints a run's own summary? */
+  const misplaced = located.length ? parentProblem(lines, located[located.length - 1]) : null;
 
   if (complete.length > 1) {
     /*
@@ -230,7 +313,8 @@ export function readSuiteSummary(text, status) {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
       why: `${complete.length} complete summaries are present in this output (${shown}), so some `
         + 'of these numbers belong to another run and nothing here can tell which. Refusing '
-        + 'rather than picking one.',
+        + 'rather than picking one.'
+        + (misplaced ? ` And the parent summary is missing or truncated: the last of them is not in its position -- ${misplaced}.` : ''),
     };
   }
 
@@ -238,7 +322,21 @@ export function readSuiteSummary(text, status) {
     return {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
       why: 'no complete summary block was printed, so the suite did not finish reporting. '
-        + 'This is NOT a green run: nothing was counted.',
+        + 'This is NOT a green run: nothing was counted. The parent summary is missing or truncated.',
+    };
+  }
+
+  /*
+   * ONE COMPLETE BLOCK IS NOT NECESSARILY THIS RUN'S (T-288). When the parent's
+   * own summary is truncated or absent, the one block left is a child's, and
+   * reporting it quotes another run's numbers. Refuse, and name the parent.
+   */
+  if (misplaced) {
+    const b0 = complete[0];
+    return {
+      ok: false, tests: null, pass: null, fail: null, skipped: null,
+      why: `the parent summary is missing or truncated. The only complete summary here (tests ${b0.tests}/fail ${b0.fail}) `
+        + `is not this run's own: ${misplaced}. Refusing rather than quoting another run's numbers.`,
     };
   }
 
