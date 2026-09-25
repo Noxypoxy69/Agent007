@@ -88,15 +88,19 @@ const SUMMARY_LINE = /^(ℹ|#) ([a-z_]+) ([\d.]+)$/;
 
 const splitLines = (text) => String(text ?? '').split('\n').map((l) => l.replace(/\r$/, ''));
 
-export function summaryBlocks(text) {
-  return locatedBlocks(splitLines(text)).map((b) => b.fields);
-}
-
 /*
- * The same blocks, with the index of each one's first and last line. Kept
- * separate so `summaryBlocks` returns exactly the shape it always has.
+ * Each block is `{ fields, start, end }`: the parsed labels, and the index of its
+ * first and last line in splitLines(text).
+ *
+ * EXPORTED BECAUSE readSuiteSummary CALLS IT (T-310, B-29). T-288 moved
+ * readSuiteSummary onto this function and left a `summaryBlocks` projection
+ * (`.map((b) => b.fields)`) exported for the tests alone -- "correct, proven, and
+ * called by nothing", which test/deadExports.test.mjs counted (test-only 83 -> 84).
+ * The projection is gone; the tests read `.fields` off the function production
+ * actually runs, so what they pin is the parse that decides the result.
  */
-function locatedBlocks(lines) {
+export function locatedBlocks(text) {
+  const lines = splitLines(text);
   const blocks = [];
   let current = null;
   let prefix = null;
@@ -317,7 +321,7 @@ export function readSuiteSummary(text, status) {
    * it was chosen. Recorded so nobody rebuilds a boundary on the guess.
    */
   const lines = splitLines(text);
-  const located = locatedBlocks(lines).filter((b) => b.fields.tests !== undefined && b.fields.fail !== undefined);
+  const located = locatedBlocks(text).filter((b) => b.fields.tests !== undefined && b.fields.fail !== undefined);
   const complete = located.map((b) => b.fields);
   /* T-288: is the LAST complete block where node prints a run's own summary? */
   const misplaced = located.length ? parentProblem(lines, located[located.length - 1]) : null;

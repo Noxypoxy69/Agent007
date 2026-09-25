@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { readSuiteSummary, summaryBlocks } from '../src/suiteSummary.mjs';
+import { readSuiteSummary, locatedBlocks } from '../src/suiteSummary.mjs';
 
 /** A complete node --test summary block. */
 const block = ({ tests, pass, fail = 0, skipped = 0, cancelled = 0, todo = 0 }) => [
@@ -175,14 +175,14 @@ test('BLOCKS ARE CONTIGUOUS, so a repeated label splits rather than merges', () 
    * on today's fixtures and fail on the next shape node emits.
    */
   const two = `${block({ tests: 1, pass: 1 })}\nsomething else\n${block({ tests: 2, pass: 2 })}`;
-  const found = summaryBlocks(two);
+  const found = locatedBlocks(two).map((b) => b.fields);
   assert.equal(found.length, 2, 'two summaries did not parse as two blocks');
   assert.equal(found[0].tests, 1);
   assert.equal(found[1].tests, 2);
 
   // back to back, with no intervening line: a repeated label must still split
   const glued = `${block({ tests: 1, pass: 1 })}\n${block({ tests: 2, pass: 2 })}`;
-  assert.equal(summaryBlocks(glued).length, 2, 'adjacent summaries merged into one');
+  assert.equal(locatedBlocks(glued).length, 2, 'adjacent summaries merged into one');
 });
 
 test('A NON-ZERO EXIT IS NOT THE ONLY CONTRADICTION: exit 0 with failures is refused too', () => {
@@ -255,6 +255,6 @@ test('NOTHING IS INVENTED FROM PROSE THAT LOOKS LIKE A SUMMARY', () => {
    * is exact.
    */
   const prose = 'the run said tests 99 pass 99 fail 0\n# \u2139 tests 99\n\u2139 fail not-a-number';
-  assert.deepEqual(summaryBlocks(prose), [], 'prose was parsed as a summary block');
+  assert.deepEqual(locatedBlocks(prose), [], 'prose was parsed as a summary block');
   assert.equal(readSuiteSummary(prose, 0).ok, false);
 });
