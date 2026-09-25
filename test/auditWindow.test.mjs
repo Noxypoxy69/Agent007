@@ -298,19 +298,24 @@ test('AGAINST REAL GIT, LINEAR: the three counts reconcile to the branch total',
 
 test('AGAINST REAL GIT, MERGES: side commits inside the window AND ahead of it', async (t) => {
   /*
-   *   t0 - t1 - t2 - t3(base) - t4(merge) - t5 - t6(tip) - t7(merge) - t8(HEAD)
-   *         \    \              /                          /
-   *          \    s2a - s2b ---/--------------------------'   (AHEAD, dated OLD)
-   *           s1a - s1b ------'                               (INSIDE the window)
+   *   t0 - t1 - t2(merge) - t3(base) - t4(merge) - t5 - t6(tip) - t7(merge) - t8(HEAD)
+   *    \    \   / \                  /                          /
+   *     \    \ /   s2a - s2b -------/--------------------------'   (AHEAD, dated OLD)
+   *      \    s1a - s1b ------------'                               (INSIDE the window)
+   *       s0a - s0b                                                 (BEHIND, off the first-parent line)
    *
-   * s1 forks below base and merges between base and tip: NOT behind (not in
-   * reach(base)) but in the window. s2 forks below base and merges above the
-   * tip: ahead of the window, and dated older than every window commit -- so a
-   * temporal gloss on "ahead" is false on this fixture (rule 9: it can fail).
+   * s0 forks from t0 and merges at t2, below base: it IS behind (in
+   * reach(base)) but not on base's first-parent line, so a first-parent count
+   * of `behind` is a different number here (T-253, verify F-1). s1 forks below
+   * base and merges between base and tip: NOT behind (not in reach(base)) but
+   * in the window. s2 forks below base and merges above the tip: ahead of the
+   * window, and dated older than every window commit -- so a temporal gloss on
+   * "ahead" is false on this fixture (rule 9: it can fail).
    */
   const d = (n) => T0 + n * DAY;
   const spec = [
-    ['t0', [], d(0)], ['t1', ['t0'], d(1)], ['t2', ['t1'], d(2)],
+    ['t0', [], d(0)], ['s0a', ['t0'], d(1)], ['s0b', ['s0a'], d(1)],
+    ['t1', ['t0'], d(1)], ['t2', ['t1', 's0b'], d(2)],
     ['s1a', ['t1'], d(3)], ['s1b', ['s1a'], d(4)],
     ['s2a', ['t2'], d(5)], ['s2b', ['s2a'], d(6)],
     ['t3', ['t2'], d(10)], ['t4', ['t3', 's1b'], d(11)], ['t5', ['t4'], d(12)], ['t6', ['t5'], d(13)],
@@ -319,18 +324,19 @@ test('AGAINST REAL GIT, MERGES: side commits inside the window AND ahead of it',
   const repo = buildRepo(t, spec, 't8');
   const { git, sha } = repo;
 
-  /* PRECONDITION: both merges are real merges, read from git, not from the spec. */
-  for (const m of ['t4', 't7']) {
+  /* PRECONDITION: all three merges are real merges, read from git, not from the spec. */
+  for (const m of ['t2', 't4', 't7']) {
     const parents = git(['rev-list', '--parents', '-n', '1', sha[m]]).split(' ').slice(1);
     assert.ok(parents.length >= 2, `PRECONDITION: ${m} is not a merge (parents: ${parents.length})`);
   }
 
   const expect = {
-    behind: ['t0', 't1', 't2', 't3'],
+    behind: ['t0', 's0a', 's0b', 't1', 't2', 't3'],
     window: ['s1a', 's1b', 't4', 't5', 't6'],
     ahead: ['s2a', 's2b', 't7', 't8'],
   };
-  /* PRECONDITION: each placement really occurs -- side commits inside the window AND ahead. */
+  /* PRECONDITION: each placement really occurs -- side commits behind, inside the window AND ahead. */
+  assert.ok(expect.behind.filter((n) => n.startsWith('s')).length > 0, 'PRECONDITION: no side commit behind the window');
   assert.ok(expect.window.filter((n) => n.startsWith('s')).length > 0, 'PRECONDITION: no side commit inside the window');
   assert.ok(expect.ahead.filter((n) => n.startsWith('s')).length > 0, 'PRECONDITION: no side commit ahead of the window');
 
@@ -350,4 +356,10 @@ test('AGAINST REAL GIT, MERGES: side commits inside the window AND ahead of it',
   assert.notEqual(firstParentAhead, expect.ahead.length,
     'PRECONDITION: first-parent and full reachability agree on this fixture, so it cannot separate them');
   assert.equal(span.ahead, expect.ahead.length);
+
+  /* The same for BEHIND (T-253): base's first-parent line misses s0, so the two counts differ. */
+  const firstParentBehind = git(['rev-list', '--first-parent', sha.t3]).split(/\r?\n/).filter(Boolean).length;
+  assert.notEqual(firstParentBehind, expect.behind.length,
+    'PRECONDITION: first-parent and full reachability agree on behind, so this fixture cannot separate them');
+  assert.equal(span.behind, expect.behind.length, 'behind is not the size of reach(base) on merge history');
 });
