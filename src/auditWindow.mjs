@@ -106,7 +106,13 @@ export function describeWindow(span) {
   if (span.behind === null) parts.push('an UNKNOWN number behind it');
   else if (span.behind > 0) parts.push(`${span.behind} behind it`);
   if (span.ahead === null) parts.push('an UNKNOWN number ahead of it');
-  else if (span.ahead > 0) parts.push(`${span.ahead} AHEAD of it, i.e. newer than anything examined`);
+  /*
+   * NO TEMPORAL CLAIM. `ahead` is reach(HEAD) minus reach(tip), a topological
+   * set; nothing here reads a date. On merge history a merged-in commit can be
+   * ahead of the tip and still predate every examined commit (T-249 measured
+   * 2 of 26), so the sentence says only what was counted.
+   */
+  else if (span.ahead > 0) parts.push(`${span.ahead} AHEAD of it (reachable from HEAD, not from its tip)`);
   if (parts.length === 0) return null;
   return `A WINDOW, NOT THE BRANCH: ${parts.join(', and ')}.`;
 }
