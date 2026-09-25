@@ -219,7 +219,18 @@ export function posIntArg(argv, name, dflt) {
  */
 export function nextAttempt(stored, bound) {
   const max = Number.isInteger(bound) && bound >= 0 ? bound : 0;
-  if (stored === null || stored === undefined) return 1;
+  /*
+   * ═══ ABSENT IS FRESH. NULL IS CORRUPT. T-291 / B-12 ═══
+   *
+   * These were one case, and they are not. A row that never had a counter
+   * has NO KEY, which reads back as `undefined`: that is a fresh count.
+   * A JSON `null` is exactly what the old NaN corruption left behind --
+   * `JSON.stringify(NaN)` is "null" -- so treating null as fresh restarted
+   * the count on precisely the rows L3 was about. Measured by T-276
+   * (f5196a3 F2). Null therefore falls through to the unreadable path
+   * below with the blank and non-digit strings: AT THE BOUND, fail closed.
+   */
+  if (stored === undefined) return 1;
 
   /*
    * A BLANK STRING IS NOT ZERO, and this is the half I had already fixed

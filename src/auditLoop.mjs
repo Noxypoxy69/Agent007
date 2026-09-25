@@ -292,8 +292,19 @@ export function nextAction(state = {}, opts = {}) {
    * `backoffServed` is the caller saying "I have slept". It resets with
    * every tick, so the backoff still grows across genuine no-progress
    * cycles rather than being skipped.
+   *
+   * ═══ SERVED MEANS THE BOOLEAN true, AND NOTHING ELSE. T-291 / B-10 ═══
+   *
+   * This was read by truthiness while every other state field goes through
+   * `num`. So the strings "false" and "no", the number 1 and `{}` all read
+   * as "I have slept" and skipped the backoff -- a caller that serialised
+   * the flag, or a hand-written state file, turned the anti-spin wait off
+   * with a value that says the opposite. Measured by T-277 (09c51a3 F1).
+   * Skipping a wait is the unsafe direction, so anything that is not
+   * exactly `true` is "not served": the worst it costs is one extra wait.
    */
-  if (noProgress > 0 && !s.backoffServed) {
+  const backoffServed = s.backoffServed === true;
+  if (noProgress > 0 && !backoffServed) {
     /*
      * EXPONENTIAL, CAPPED. Both causes of no-progress resolve in minutes,
      * so doubling reaches a useful wait quickly and the cap stops it

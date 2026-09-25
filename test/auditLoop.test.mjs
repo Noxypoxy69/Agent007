@@ -194,6 +194,40 @@ test('A SERVED BACKOFF LEADS TO A TICK, not another backoff', () => {
   assert.equal(capped.code, LOOP_STOP.BUDGET);
 });
 
+test('T-291 B-10: backoffServed IS SERVED ONLY FOR THE BOOLEAN true', () => {
+  /*
+   * It was read by truthiness, so "false", "no", 1 and {} all skipped the
+   * backoff (T-277, 09c51a3 F1). Skipping a wait is the unsafe direction,
+   * so every value except the boolean true must still WAIT.
+   *
+   * THE POSITIVE FIRST (rule 5): this state waits when nothing is served
+   * and ticks when true is, or every WAIT row below is vacuous.
+   */
+  const s = { queueDepth: 50, consecutiveNoProgress: 1 };
+  const opts = { intervalMs: 1000 };
+  assert.equal(nextAction(s, opts).action, LOOP_ACTION.WAIT, 'precondition: this state does not back off at all');
+
+  const table = [
+    [true, LOOP_ACTION.TICK],
+    [false, LOOP_ACTION.WAIT],
+    ['true', LOOP_ACTION.WAIT],
+    ['false', LOOP_ACTION.WAIT],
+    ['no', LOOP_ACTION.WAIT],
+    [1, LOOP_ACTION.WAIT],
+    [0, LOOP_ACTION.WAIT],
+    [{}, LOOP_ACTION.WAIT],
+    [null, LOOP_ACTION.WAIT],
+    [undefined, LOOP_ACTION.WAIT],
+  ];
+  for (const [value, want] of table) {
+    const label = value === undefined ? 'undefined' : JSON.stringify(value);
+    const got = nextAction({ ...s, backoffServed: value }, opts).action;
+    assert.equal(got, want, want === LOOP_ACTION.TICK
+      ? `B-10: backoffServed ${label} was NOT read as served (got ${got})`
+      : `B-10: backoffServed ${label} was read as served (got ${got})`);
+  }
+});
+
 test('A DEADLINE STOPS THE LOOP whatever it is doing', () => {
   const r = nextAction(
     { queueDepth: 50, startedAt: 1000, now: 1000 + 60_000 },

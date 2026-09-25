@@ -134,8 +134,12 @@ test('AN UNREADABLE ATTEMPT COUNTER IS AT THE BOUND, NOT ZERO (L3)', () => {
   /* ABSENT IS ZERO, and that is not the same thing: every row written
    * before this field existed looks like this, and treating them as
    * exhausted would stall the whole historical queue -- the over-block
-   * direction that gets a bound switched off. */
-  assert.equal(nextAttempt(null, BOUND), 1);
+   * direction that gets a bound switched off.
+   *
+   * T-291 / B-12: ABSENT means NO KEY, which reads back as `undefined`.
+   * This line used to pin `nextAttempt(null) === 1` as absent too, and a
+   * JSON null is exactly what the NaN corruption above leaves behind, so it
+   * pinned the reset. null is now asserted at the bound in the table below. */
   assert.equal(nextAttempt(undefined, BOUND), 1);
 
   /* THE POSITIVE (rule 5): a readable counter increments, from both the
@@ -143,6 +147,37 @@ test('AN UNREADABLE ATTEMPT COUNTER IS AT THE BOUND, NOT ZERO (L3)', () => {
   assert.equal(nextAttempt(0, BOUND), 1);
   assert.equal(nextAttempt(2, BOUND), 3);
   assert.equal(nextAttempt('2', BOUND), 3);
+});
+
+test('T-291 B-12: A NULL COUNTER IS THE NaN CORRUPTION, SO IT IS AT THE BOUND; ABSENT IS FRESH', () => {
+  /*
+   * The premise, asserted rather than remembered: JSON writes NaN as null,
+   * so a counter that went NaN comes back as null on the next read. If this
+   * ever stops holding, the null row below loses its reason and must be
+   * re-argued, not silently kept.
+   */
+  const roundTrip = JSON.parse(JSON.stringify({ review_attempts: NaN }));
+  assert.equal(roundTrip.review_attempts, null, 'premise: NaN no longer round-trips to null');
+  /* And a row that never had the field reads back as undefined, not null. */
+  assert.equal(JSON.parse('{}').review_attempts, undefined, 'premise: an absent key is not undefined');
+
+  const BOUND = 3;
+  const table = [
+    // [stored, expected, what it is]
+    [undefined, 1, 'absent: a fresh row'],
+    [null, BOUND, 'null: what JSON.stringify(NaN) left behind'],
+    [roundTrip.review_attempts, BOUND, 'the round-tripped NaN itself'],
+    [0, 1, 'a readable zero'],
+    [1, 2, 'a readable one'],
+    ['1', 2, 'a readable string one'],
+    ['', BOUND, 'blank'],
+    ['null', BOUND, 'the string null'],
+    [NaN, BOUND, 'NaN before it was written'],
+  ];
+  for (const [stored, want, what] of table) {
+    assert.equal(nextAttempt(stored, BOUND), want,
+      `B-12: nextAttempt(${String(stored)}) [${what}] gave ${nextAttempt(stored, BOUND)}, want ${want}`);
+  }
 });
 
 /*
