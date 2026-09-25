@@ -174,6 +174,33 @@ const TEST_AT = /^test at /;
 const RESULT_LINE = /^[✔✖﹣▶] /;
 const indentedOrBlank = (line) => line === '' || /^\s/.test(line);
 
+/*
+ * ═══ A LINE CUT BEFORE ITS SPACE IS STILL A LINE (T-299, F3; T-290 measured) ═══
+ *
+ * RESULT_LINE needs the glyph AND the space. A capture cut 1-3 bytes into the
+ * first parent line after a child block leaves either a split glyph -- every
+ * glyph above is three UTF-8 bytes, and an incomplete sequence at the end of
+ * the text decodes to ONE U+FFFD -- or the whole glyph with no space. Neither
+ * matched, so nothing followed the child's block and it was read as this run's
+ * (336 wrong readings in T-290's real-output sweep).
+ *
+ * So an UNTERMINATED last line that is only a glyph, or only U+FFFD, counts as
+ * something after the block. Which glyph a U+FFFD was cannot be told from the
+ * text (a split `✔` and a split `ℹ` are both E2 ..), so ONE position is carved
+ * out: the line DIRECTLY after a block that has not yet printed its
+ * `duration_ms`. Node prints that line next, so the cut is the block's own last
+ * line being written, not a line after the block.
+ *
+ * THE COST, MEASURED (T-299 real-output sweep, 831,788 cuts): a red run cut 1-3
+ * bytes into its OWN `✖ failing tests:` is refused -- 12 right readings became
+ * refusals. A second carve-out for "one blank line after `duration_ms`" was
+ * built and measured: it kept those 12, and let 54 wrong readings back in (a red
+ * CHILD cut into its marker). A refusal is recoverable and a wrong number is
+ * quoted, so it was withdrawn.
+ */
+const PARTIAL_TAIL = /^(?:\uFFFD|[✔✖﹣▶ℹ])$/;
+const DURATION_LINE = /^(ℹ|#) duration_ms /;
+
 function parentProblem(lines, block) {
   /* B: look back to the nearest column-zero line. */
   for (let k = block.start - 1; k >= 0; k -= 1) {
@@ -197,6 +224,12 @@ function parentProblem(lines, block) {
     if (!indentedOrBlank(line) && RESULT_LINE.test(line) && !MARKER.test(line) && !afterTestAt) {
       return `a test result ("${line}", line ${k + 1}) is printed after it, and node prints a run's own `
         + 'summary after every result';
+    }
+    /* T-299 F3: the text ends partway into a line, before its space. */
+    const ownDurationBeingWritten = k === block.end + 1 && !DURATION_LINE.test(lines[block.end]);
+    if (k === lines.length - 1 && PARTIAL_TAIL.test(line) && !afterTestAt && !ownDurationBeingWritten) {
+      return `the text ends partway into a line after it (${JSON.stringify(line)}, line ${k + 1}), cut before `
+        + 'the line could say what it was: output continued after this block, so it is not the run\'s own summary';
     }
     afterTestAt = TEST_AT.test(line);
   }
@@ -337,6 +370,37 @@ export function readSuiteSummary(text, status) {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
       why: `the parent summary is missing or truncated. The only complete summary here (tests ${b0.tests}/fail ${b0.fail}) `
         + `is not this run's own: ${misplaced}. Refusing rather than quoting another run's numbers.`,
+    };
+  }
+
+  /*
+   * ═══ A KILLED RUN HAS NO SUMMARY OF ITS OWN TO TRUST (T-299, F2) ═══
+   *
+   * `status` null is node's word for "ended by a signal": spawnSync's timeout and
+   * maxBuffer kills, child.kill, the OOM killer. The exit cross-checks below
+   * could not see it: `fail 0` was refused, but `fail > 0` passed both, because
+   * null is not 0. So a run killed after a test printed a red child's output --
+   * measured: spawnSync with maxBuffer, node v24.19.0, signal SIGTERM -- read
+   * ok:true with the CHILD's `tests 3, fail 1`. T-290 counted 23,458 such wrong
+   * readings in its real-output sweep.
+   *
+   * A killed run stopped at a point nobody chose, so whatever block is last in
+   * its text is where the capture stopped, not where the run finished. Refuse.
+   * A non-integer status of any kind is refused the same way: without node's
+   * own exit code there is no cross-check left, only the text.
+   *
+   * NOT EVERY CALLER DELIVERS THE NULL. verifyRunner maps a signal-killed shard
+   * to exit 1 before calling this (pinned by verifyRunnerCancellation), and a
+   * Windows `taskkill /F` from outside reports status 1, not null (measured,
+   * T-299 killprobe). Those kills arrive here as an ordinary red exit.
+   */
+  if (!Number.isInteger(status)) {
+    const b0 = complete[0];
+    return {
+      ok: false, tests: null, pass: null, fail: null, skipped: null,
+      why: `the run was killed (exit status ${status === null ? 'null' : String(status)}): it did not finish, so the `
+        + `summary here (tests ${b0.tests}/fail ${b0.fail}) is wherever the capture stopped, not this run's own result. `
+        + 'Refusing rather than quoting it.',
     };
   }
 
