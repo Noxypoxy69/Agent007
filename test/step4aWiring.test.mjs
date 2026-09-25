@@ -13,7 +13,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync, renameSync, statSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -209,13 +209,12 @@ test('F the three formerly orphaned modules are REACHABLE from shipped entry poi
 });
 
 /*
- * SKIPPED OFF POSIX, NOT FAILED. The task argv below runs /bin/sh, which does not
- * exist on Windows, so this fails there for the shell rather than for the wiring
- * it is about. Rewriting it portably is worth doing; reporting a red suite on the
- * machine the operator actually uses is not, because rule 17 is that an outage is
- * how a guard gets switched off.
+ * RUNS ON EVERY PLATFORM. This test used to be skipped on win32 because its task
+ * argv ran /bin/sh, so the only real-chain test never ran on the operator's own
+ * machine. The argv is now node running a small driver file, so no shell is
+ * involved, the same way case H stopped shelling out in 301c200.
  */
-test('G the shipped controller binary opens a job the shipped verifier can actually verify', { skip: process.platform === 'win32' && 'the task argv uses /bin/sh' }, async (t) => {
+test('G the shipped controller binary opens a job the shipped verifier can actually verify', async (t) => {
   /*
    * THE ONE TEST THAT DRIVES THE REAL CHAIN, AND THE ONLY ONE THAT COULD HAVE
    * CAUGHT WHAT IT CAUGHT.
@@ -241,72 +240,51 @@ test('G the shipped controller binary opens a job the shipped verifier can actua
    * for a reason that has nothing to do with what is being tested.
    */
   const NODE = process.execPath;
-  const GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   /*
-   * AND THE SHELL ITSELF, WHICH WAS THE ONE INTERPRETER LEFT HARDCODED.
-   *
-   * argv[0] was the literal '/bin/sh'. Node spawns that path DIRECTLY -- it is
-   * not interpreted by a shell, unlike GIT and NODE above, which are pasted into
-   * a command string that sh expands. There is no /bin on Windows, so the spawn
-   * failed instantly: measured, ENOENT, 0 bytes of stdout, 0 bytes of stderr, no
-   * exit code, duration_ms 1. The pipeline correctly reported "outcome:crashed",
-   * and the test read that as the controller edge being broken.
-   *
-   * The comment directly above already says why absolute interpreter paths are
-   * needed here. It resolved two of the three and assumed the third.
-   *
-   * ASKED, NOT ASSUMED, and specifically not branched on process.platform: the
-   * question is "what path will THIS node accept for a POSIX shell", and the
-   * system is the thing that knows. cygpath is how Git for Windows answers it;
-   * where cygpath is absent the POSIX answer is already correct.
+   * GIT IS FOUND BY WALKING PATH, NOT BY ASKING A SHELL. It was
+   * `sh -c 'command -v git'`, and there is no sh in a PowerShell session. The
+   * executable suffixes come from PATHEXT where the system defines one, so this
+   * does not branch on process.platform. A git that cannot be found is a
+   * precondition failure with its own message, never a skip.
    */
-  const shPosix = execFileSync('sh', ['-c', 'command -v sh'], { encoding: 'utf8' }).trim();
-  let SH = shPosix;
-  try {
-    const win = execFileSync('cygpath', ['-w', shPosix], { encoding: 'utf8' }).trim();
-    if (win) SH = win;
-  } catch { /* no cygpath: the POSIX path is the spawnable one */ }
+  const exts = ['', ...String(process.env.PATHEXT ?? '').split(';').filter(Boolean)];
+  const GIT = String(process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
+    .flatMap((dir) => exts.map((ext) => path.join(dir, `git${ext}`)))
+    .find((p) => { try { return statSync(p).isFile(); } catch { return false; } });
+  assert.ok(GIT, 'precondition: git is on PATH as an absolute file');
 
   /*
-   * AND EVERY INTERPRETER PASTED INTO THE COMMAND STRING MUST BE QUOTED.
+   * NO SHELL IN THE TASK ARGV. The executor runs argv directly with shell:false,
+   * so the task is node running a small driver file, and the driver makes the
+   * same three moves the shell string used to make: edit, commit, run the tests.
+   * Every path reaches the driver as an argv element, so nothing is quoted and
+   * a space in C:\Program Files cannot split anything.
    *
-   * NODE is process.execPath -- on Windows that is
-   * C:\Program Files\nodejs\node.exe, with a SPACE and BACKSLASHES, and it was
-   * interpolated bare into an sh -c string. sh split it at the space and looked
-   * for a command called "C:Program": exit 127, tests never ran, and the
-   * verdict blamed the controller edge. Measured, all four forms:
+   * The attempt must commit: the pipeline refuses to dispose of a dirty
+   * workspace, and files_changed is read with `git diff --name-only`.
    *
-   *   C:\Program Files\...\node.exe      -> sh: C:Program: command not found
-   *   /c/Program Files/.../node.exe      -> sh: /c/Program: No such file
-   *   either one QUOTED                  -> works
-   *
-   * So it is a quoting bug, not a path-form bug. GIT escaped it only because
-   * /usr/bin/git happens to have no space on this machine -- rule 21, an
-   * accident of the authoring box -- so it is quoted too rather than left to
-   * luck.
-   *
-   * POSIX form inside single quotes: single quotes suppress every escape in sh,
-   * so no backslash question arises at all.
+   * NODE_TEST_* is stripped before the nested node --test, because an inherited
+   * NODE_TEST_CONTEXT makes the child report to its parent and print no TAP.
    */
-  const asPosix = (winPath) => {
-    try {
-      const out = execFileSync('cygpath', ['-u', winPath], { encoding: 'utf8' }).trim();
-      return out || winPath;
-    } catch { return winPath; }
-  };
-  const shQuote = (v) => `'${String(v).split("'").join(`'"'"'`)}'`;
-  const NODE_SH = shQuote(asPosix(NODE));
-  const GIT_SH = shQuote(asPosix(GIT));
+  const driver = path.join(root, 'task-driver.mjs');
+  writeFileSync(driver, [
+    "import { writeFileSync } from 'node:fs';",
+    "import { execFileSync } from 'node:child_process';",
+    'const [node, git] = process.argv.slice(2);',
+    "writeFileSync('src/feature.mjs', 'export const v=2;\\n');",
+    "execFileSync(git, ['add', '-A'], { stdio: 'inherit' });",
+    "execFileSync(git, ['commit', '-qm', 'change'], { stdio: 'inherit' });",
+    'const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^NODE_TEST/i.test(k)));',
+    "execFileSync(node, ['--test', '--test-reporter=tap', 'test/baseline.test.mjs'], { stdio: 'inherit', env });",
+    '',
+  ].join('\n'));
   const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
 
   const taskFile = path.join(root, 'task.json');
   writeFileSync(taskFile, JSON.stringify({
     task_id: 'wiring-g',
     base_sha: baseSha,
-    /* The attempt must commit: the pipeline refuses to dispose of a dirty
-     * workspace, and files_changed is read with `git diff --name-only`. */
-    argv: [SH, '-c',
-      `printf 'export const v=2;\\n' > src/feature.mjs && ${GIT_SH} add -A && ${GIT_SH} commit -qm change && ${NODE_SH} --test --test-reporter=tap test/baseline.test.mjs`],
+    argv: [NODE, driver, NODE, GIT],
     timeout_ms: 120000,
     allowed_paths: ['src/**', 'test/**'],
   }));
