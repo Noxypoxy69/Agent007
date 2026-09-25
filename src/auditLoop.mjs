@@ -302,7 +302,35 @@ export function nextAction(state = {}, opts = {}) {
    * with a value that says the opposite. Measured by T-277 (09c51a3 F1).
    * Skipping a wait is the unsafe direction, so anything that is not
    * exactly `true` is "not served": the worst it costs is one extra wait.
+   *
+   * ═══ A MARKER THAT IS NOT A BOOLEAN IS CORRUPT, AND STOPS. T-298 / B-22 ═══
+   *
+   * "One extra wait" was wrong. The caller writes the marker after every
+   * WAIT, so a caller that writes "true", 1 or {} writes it EVERY time: the
+   * loop read not-served, waited, came back to the same counters and waited
+   * again. Measured by T-293 F2: 200 waits, 0 ticks, STARVED unreachable --
+   * the permanent wait this module's own header calls worse than a spin.
+   *
+   * Neither reading of a corrupt marker is safe: "served" skips the anti-spin
+   * wait (B-10), "not served" waits for ever (B-22). So it is neither. It
+   * fails CLOSED to a terminal STOP, reusing STARVED because the loop is
+   * making no progress and the reason names the marker.
+   *
+   * ABSENT (`undefined`) is "not served", unchanged: that is the first call
+   * of a run. NULL IS CORRUPT, not absent: no caller writes null, and a
+   * JSON round-trip only produces it from NaN or an explicit null -- the
+   * same reason a null review counter is corrupt (T-291 B-12).
    */
+  if (s.backoffServed !== undefined && typeof s.backoffServed !== 'boolean') {
+    const shown = typeof s.backoffServed === 'number' ? String(s.backoffServed) : JSON.stringify(s.backoffServed);
+    return {
+      action: LOOP_ACTION.STOP,
+      code: LOOP_STOP.STARVED,
+      why: `backoffServed is ${shown}, which is not a boolean. The caller's "I have slept" `
+        + 'marker is corrupt, so neither "served" (skips the anti-spin wait) nor "not served" '
+        + '(waits for ever) can be read from it. Stopping rather than waiting unboundedly',
+    };
+  }
   const backoffServed = s.backoffServed === true;
   if (noProgress > 0 && !backoffServed) {
     /*

@@ -207,25 +207,86 @@ test('T-291 B-10: backoffServed IS SERVED ONLY FOR THE BOOLEAN true', () => {
   const opts = { intervalMs: 1000 };
   assert.equal(nextAction(s, opts).action, LOOP_ACTION.WAIT, 'precondition: this state does not back off at all');
 
+  /*
+   * T-298 (Controller ruling; pinned defect T-293 F2): the non-boolean rows
+   * were WAIT, and a caller that writes the marker after every WAIT then
+   * waited for ever. They are now the fail-closed terminal STOP (STARVED),
+   * which is neither "served" nor a wait. null is corrupt too (see src).
+   */
   const table = [
     [true, LOOP_ACTION.TICK],
     [false, LOOP_ACTION.WAIT],
-    ['true', LOOP_ACTION.WAIT],
-    ['false', LOOP_ACTION.WAIT],
-    ['no', LOOP_ACTION.WAIT],
-    [1, LOOP_ACTION.WAIT],
-    [0, LOOP_ACTION.WAIT],
-    [{}, LOOP_ACTION.WAIT],
-    [null, LOOP_ACTION.WAIT],
+    ['true', LOOP_ACTION.STOP],
+    ['false', LOOP_ACTION.STOP],
+    ['no', LOOP_ACTION.STOP],
+    [1, LOOP_ACTION.STOP],
+    [0, LOOP_ACTION.STOP],
+    [{}, LOOP_ACTION.STOP],
+    [NaN, LOOP_ACTION.STOP],
+    [null, LOOP_ACTION.STOP],
     [undefined, LOOP_ACTION.WAIT],
   ];
   for (const [value, want] of table) {
-    const label = value === undefined ? 'undefined' : JSON.stringify(value);
-    const got = nextAction({ ...s, backoffServed: value }, opts).action;
+    const label = value === undefined ? 'undefined' : Number.isNaN(value) ? 'NaN' : JSON.stringify(value);
+    const r = nextAction({ ...s, backoffServed: value }, opts);
+    const got = r.action;
     assert.equal(got, want, want === LOOP_ACTION.TICK
       ? `B-10: backoffServed ${label} was NOT read as served (got ${got})`
-      : `B-10: backoffServed ${label} was read as served (got ${got})`);
+      : want === LOOP_ACTION.STOP
+        ? `B-22: corrupt backoffServed ${label} did not fail closed (got ${got})`
+        : `B-10: backoffServed ${label} was read as served (got ${got})`);
+    if (want === LOOP_ACTION.STOP) {
+      assert.equal(r.code, LOOP_STOP.STARVED, `B-22: corrupt backoffServed ${label} stopped as ${r.code}`);
+      assert.ok(r.why.includes(`backoffServed is ${label}`), `B-22: the reason does not name the marker: ${r.why}`);
+    }
   }
+});
+
+test('T-298 B-22: A CORRUPT backoffServed ENDS THE CALLER LOOP, it never waits for ever', () => {
+  /*
+   * T-293 F2: a caller that writes a non-boolean marker after every WAIT got
+   * 200 waits and 0 ticks. Driven through the caller's real invariant
+   * (counters in lockstep, the marker written after each WAIT), over the
+   * marker table. Corrupt markers must reach a terminal STOP naming the
+   * marker; the boolean true must still tick and reach STARVED normally.
+   */
+  const drive = (marker) => {
+    let ticksUsed = 0; let noProgress = 1; let served = false; let last = null; let waits = 0; let ticks = 0;
+    for (let i = 0; i < 200; i += 1) {
+      last = nextAction({ ticksUsed, consecutiveNoProgress: noProgress, queueDepth: 40, backoffServed: served },
+        { intervalMs: 1000, maxTicks: 50 });
+      if (last.action === LOOP_ACTION.STOP) return { last, waits, ticks, steps: i + 1 };
+      if (last.action === LOOP_ACTION.WAIT) { waits += 1; served = marker; continue; }
+      ticks += 1; ticksUsed += 1; noProgress += 1; served = false;
+    }
+    return { last, waits, ticks, steps: 200 };
+  };
+
+  /* THE POSITIVE FIRST (rule 5): the boolean true ticks, then starves normally. */
+  const healthy = drive(true);
+  assert.equal(healthy.last.action, LOOP_ACTION.STOP);
+  assert.equal(healthy.last.code, LOOP_STOP.STARVED);
+  assert.ok(healthy.ticks >= 1, 'premise: the boolean true never ticked');
+  assert.ok(!/backoffServed is/.test(healthy.last.why), 'the healthy run stopped on the corrupt-marker path');
+
+  for (const [label, marker] of [['"true"', 'true'], ['"false"', 'false'], ['1', 1], ['0', 0], ['{}', {}], ['null', null], ['NaN', NaN]]) {
+    const r = drive(marker);
+    assert.equal(r.last.action, LOOP_ACTION.STOP,
+      `B-22: marker ${label} gave ${r.waits} waits and ${r.ticks} ticks in ${r.steps} steps with no terminal state`);
+    assert.equal(r.last.code, LOOP_STOP.STARVED, `B-22: marker ${label} stopped as ${r.last.code}`);
+    assert.ok(r.last.why.includes(`backoffServed is ${label}`), `B-22: the reason does not name marker ${label}: ${r.last.why}`);
+    assert.equal(r.waits, 1, `B-22: marker ${label} waited ${r.waits} times; only the first (unmarked) wait is legitimate`);
+  }
+
+  /* BOOLEAN false AND ABSENT ARE UNCHANGED: not served, so WAIT with progress
+   * pending, and TICK with none. */
+  for (const [label, marker] of [['false', false], ['undefined', undefined]]) {
+    assert.equal(nextAction({ queueDepth: 40, consecutiveNoProgress: 1, backoffServed: marker }, { intervalMs: 1000 }).action,
+      LOOP_ACTION.WAIT, `marker ${label} no longer waits`);
+    assert.equal(nextAction({ queueDepth: 40, consecutiveNoProgress: 0, backoffServed: marker }).action,
+      LOOP_ACTION.TICK, `marker ${label} no longer ticks with no backoff owed`);
+  }
+  assert.equal(nextAction({ queueDepth: 40, consecutiveNoProgress: 0, backoffServed: true }).action, LOOP_ACTION.TICK);
 });
 
 test('A DEADLINE STOPS THE LOOP whatever it is doing', () => {

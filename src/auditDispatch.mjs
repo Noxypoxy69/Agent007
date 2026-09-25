@@ -366,13 +366,21 @@ export function proposeAudit({
      * `Number('')` is 0 and `Number(' ')` is 0, so an empty or blank value
      * -- exactly what a truncated write leaves behind -- would read as a
      * fresh counter and dispatch for ever. A negative is not a count
-     * either. Absent (null/undefined) IS legitimately zero: that is what
-     * a row written before this field existed looks like, and refusing
-     * those would stall every historical job.
+     * either. Absent (undefined) IS legitimately zero: that is what a row
+     * written before this field existed looks like -- JSON has no key for
+     * it -- and refusing those would stall every historical job.
+     *
+     * NULL IS NOT ABSENT. T-298 / B-20. `JSON.stringify(NaN)` is "null", so
+     * a null is exactly what the old NaN corruption left behind, and the
+     * WRITER (`nextAttempt` in daemonArgs) already reads null as unreadable
+     * and returns the bound. This reader read it as 0 and dispatched: the
+     * two ends disagreed on the one value that means "this counter broke"
+     * (T-293 F1). Null now takes the unreadable path below -- exhausted,
+     * matching nextAttempt(null) === max.
      */
     const raw = job.review_attempts;
     let tries;
-    if (raw === null || raw === undefined) tries = 0;
+    if (raw === undefined) tries = 0;
     else if (typeof raw === 'number') tries = Number.isInteger(raw) && raw >= 0 ? raw : NaN;
     else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) tries = Number(raw.trim());
     else tries = NaN;

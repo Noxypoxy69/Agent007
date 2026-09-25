@@ -26,6 +26,7 @@ import {
   proposeAudit, isClaimable, UNPLACED, MAX_REVIEW_ATTEMPTS,
 } from '../src/auditDispatch.mjs';
 import { claimJob, CLAIM_LEASE_MS, JOB, AUTHOR_UNAVAILABLE } from '../src/auditJob.mjs';
+import { nextAttempt } from '../src/daemonArgs.mjs';
 
 const T0 = 1_000_000;
 const SHA = 'a'.repeat(40);
@@ -565,15 +566,22 @@ test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
    * from a queue file (rule 9).
    */
   /*
-   * `null` AND `undefined` ARE NOT IN THIS LIST, and that is deliberate.
-   * My first version put null here and the test went red, correctly: an
-   * absent field is what every row written before this counter existed
-   * looks like, and refusing those would stall the whole historical
-   * queue. Absent is a legitimate zero; a BLANK or malformed value is
-   * not, and `Number('')` being 0 is exactly the footgun that made the
-   * loose version dangerous.
+   * `undefined` IS NOT IN THIS LIST, and that is deliberate: an absent
+   * field is what every row written before this counter existed looks
+   * like, and refusing those would stall the whole historical queue.
+   * Absent is a legitimate zero; a BLANK or malformed value is not, and
+   * `Number('')` being 0 is exactly the footgun that made the loose
+   * version dangerous.
+   *
+   * `null` IS IN IT NOW. T-298, Controller ruling; pinned defect T-293 F1.
+   * This test used to list null as a legitimate zero, reasoning that it
+   * meant "absent". It does not: an absent key reads back as undefined,
+   * and a JSON null is what `JSON.stringify(NaN)` writes -- the corruption
+   * itself. The writer, `nextAttempt`, already returns the bound for null
+   * (T-291 B-12), so this reader dispatching it was the two ends of one
+   * counter disagreeing on the value that means "broken".
    */
-  for (const bad of ['', '  ', 'three', '1.5', '-1', {}, [], true, NaN, -1, 1.5, Infinity]) {
+  for (const bad of ['', '  ', 'three', '1.5', '-1', {}, [], true, NaN, -1, 1.5, Infinity, null]) {
     const r = proposeAudit({
       jobs: [job({ review_attempts: bad })],
       sessions: [seat('reviewer-one')],
@@ -587,7 +595,7 @@ test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
 
   /* THE POSITIVE (rule 5): a readable count under the bound still runs,
    * including the two spellings a JSON round-trip really produces. */
-  for (const ok of [0, 1, '2', undefined, null]) {
+  for (const ok of [0, 1, '2', undefined]) {
     const r = proposeAudit({
       jobs: [job({ review_attempts: ok })],
       sessions: [seat('reviewer-one')],
@@ -596,5 +604,73 @@ test('AN UNREADABLE review_attempts IS EXHAUSTED, NOT ZERO (L3)', () => {
     });
     assert.equal(r.proposals.length, 1,
       `review_attempts ${JSON.stringify(ok)} was refused: ${JSON.stringify(r.unassigned)}`);
+  }
+});
+
+const ATTEMPT_TABLE = [
+  /* [label, value, dispatches?] -- typed, not derived, so reader and writer
+   * cannot agree with each other through a shared mistake (hollow gate 2). */
+  ['undefined', undefined, true],
+  ['null', null, false],
+  ['0', 0, true],
+  ['1', 1, true],
+  ['3', 3, false],
+  ['NaN', NaN, false],
+  ['""', '', false],
+  ['"2"', '2', true],
+];
+
+test('T-298 B-20: THE DISPATCHER AND nextAttempt AGREE ON EVERY COUNTER VALUE', () => {
+  assert.equal(MAX_REVIEW_ATTEMPTS, 3, 'premise: the typed table below assumes a bound of 3');
+  /* The writer's own reading, asked of the SHIPPED function: with a bound far
+   * above any count, nextAttempt returns exactly that bound only for a value
+   * it cannot read, and n + 1 for a readable n. */
+  const FAR = 1000;
+  for (const [label, value, dispatches] of ATTEMPT_TABLE) {
+    const r = proposeAudit({
+      jobs: [job({ review_attempts: value })], sessions: [seat('reviewer-one')], now: T0, isLive: allLive,
+    });
+    assert.equal(r.proposals.length === 1, dispatches,
+      `B-20: review_attempts ${label} ${dispatches ? 'was refused' : 'dispatched'}: ${JSON.stringify(r.unassigned)}`);
+    if (!dispatches) assert.equal(r.unassigned[0].code, UNPLACED.REVIEW_EXHAUSTED);
+
+    const next = nextAttempt(value, FAR);
+    const writerUnreadable = next === FAR;
+    const writerUnderBound = !writerUnreadable && next - 1 < MAX_REVIEW_ATTEMPTS;
+    assert.equal(writerUnderBound, dispatches,
+      `B-20: nextAttempt reads ${label} as ${writerUnreadable ? 'unreadable' : `count ${next - 1}`} `
+      + `but the dispatcher ${dispatches ? 'dispatches' : 'refuses'} it -- reader and writer disagree`);
+  }
+});
+
+test('T-298 B-20: END TO END, propose -> claim -> requeue never re-dispatches past the bound', () => {
+  /*
+   * The daemon's non-attributable re-queue path, serialised through JSON as
+   * the JSONL queue store does, driven until the dispatcher refuses.
+   */
+  const run = (start) => {
+    let row = start === '<absent>' ? job() : job({ review_attempts: start });
+    let dispatches = 0;
+    for (let i = 0; i < 20; i += 1) {
+      const now = T0 + i * 10 * CLAIM_LEASE_MS;
+      const r = proposeAudit({ jobs: [row], sessions: [seat('reviewer-one')], now, isLive: allLive });
+      if (r.proposals.length === 0) return { dispatches, code: r.unassigned[0]?.code };
+      const c = claimJob(row, { by: 'reviewer-one', now });
+      assert.equal(c.ok, true, `claimJob refused a proposed pairing: ${c.why}`);
+      dispatches += 1;
+      row = JSON.parse(JSON.stringify({
+        ...c.job, state: JOB.PENDING, claimed_by: null, claimed_at: null,
+        review_attempts: nextAttempt(c.job.review_attempts, MAX_REVIEW_ATTEMPTS),
+      }));
+    }
+    return { dispatches, code: 'NEVER_STOPPED' };
+  };
+  /* THE POSITIVE FIRST (rule 5): a fresh row is dispatched up to the bound. */
+  assert.deepEqual(run('<absent>'), { dispatches: MAX_REVIEW_ATTEMPTS, code: UNPLACED.REVIEW_EXHAUSTED });
+  const want = { null: 0, 0: 3, 1: 2, 3: 0, NaN: 0, '': 0, 2: 1 };
+  for (const [label, value] of [['null', null], ['0', 0], ['1', 1], ['3', 3], ['NaN', NaN], ['""', ''], ['"2"', '2']]) {
+    const key = value === null ? 'null' : Number.isNaN(value) ? 'NaN' : String(value);
+    assert.deepEqual(run(value), { dispatches: want[key], code: UNPLACED.REVIEW_EXHAUSTED },
+      `B-20 end to end: review_attempts ${label}`);
   }
 });
