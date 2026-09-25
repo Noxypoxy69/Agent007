@@ -77,8 +77,16 @@ const FIELDS = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo
  */
 /*
  * TWO REPORTERS, ONE RULE (T-248). The spec reporter writes `ℹ tests 5`; the TAP
- * reporter -- what node --test prints to a PIPE, which is how verifyRunner's shards
- * run -- writes `# tests 5`, also at column zero. A block is lines of ONE prefix:
+ * reporter writes `# tests 5`, also at column zero.
+ *
+ * WHICH ONE A SHARD PRINTS, MEASURED (T-295, node v24.19.0): SPEC. This comment used
+ * to say TAP is what node --test prints to a pipe. It is not: verifyRunner's shards
+ * run `node --test <shard> <glob>` with stdout piped and no reporter flag, and print
+ * `ℹ`. `NODE_TEST_REPORTER=tap` did not change that; only `--test-reporter=tap` gave
+ * TAP. So the `ℹ` branch is the one real shards depend on
+ * (test/verifyShardSummary.test.mjs drives real spawned shards), and `#` covers TAP
+ * output from any source, a TAP child printed by a test among them
+ * (test/suiteSummaryTapChildAndKill.test.mjs). A block is lines of ONE prefix:
  * a line with the other prefix ends it, exactly as any non-prefixed line does, so
  * a TAP block and a spec block can never merge into one. Everything downstream --
  * one summary or none, reconciliation, agreement with the exit status -- is the
@@ -325,6 +333,15 @@ export function readSuiteSummary(text, status) {
   const complete = located.map((b) => b.fields);
   /* T-288: is the LAST complete block where node prints a run's own summary? */
   const misplaced = located.length ? parentProblem(lines, located[located.length - 1]) : null;
+  /*
+   * A KILL IS NAMED ON EVERY REFUSAL, NOT ONLY THE LAST ONE (T-307, B-27; T-303 F2). A non-integer
+   * status was refused on every path, but only the one-well-placed-block path below said the run was
+   * killed. With 0 blocks, 2+ or a misplaced one, the reason named something else, and the fact that
+   * makes every number in the text untrustworthy went unsaid. Appended, so each path's own reason stays.
+   */
+  const killNote = Number.isInteger(status) ? ''
+    : ` The run was also killed (exit status ${status === null ? 'null' : String(status)}): it did not finish, `
+      + 'so no summary in this text is its own result.';
 
   if (complete.length > 1) {
     /*
@@ -351,7 +368,8 @@ export function readSuiteSummary(text, status) {
       why: `${complete.length} complete summaries are present in this output (${shown}), so some `
         + 'of these numbers belong to another run and nothing here can tell which. Refusing '
         + 'rather than picking one.'
-        + (misplaced ? ` And the parent summary is missing or truncated: the last of them is not in its position -- ${misplaced}.` : ''),
+        + (misplaced ? ` And the parent summary is missing or truncated: the last of them is not in its position -- ${misplaced}.` : '')
+        + killNote,
     };
   }
 
@@ -359,7 +377,8 @@ export function readSuiteSummary(text, status) {
     return {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
       why: 'no complete summary block was printed, so the suite did not finish reporting. '
-        + 'This is NOT a green run: nothing was counted. The parent summary is missing or truncated.',
+        + 'This is NOT a green run: nothing was counted. The parent summary is missing or truncated.'
+        + killNote,
     };
   }
 
@@ -373,7 +392,8 @@ export function readSuiteSummary(text, status) {
     return {
       ok: false, tests: null, pass: null, fail: null, skipped: null,
       why: `the parent summary is missing or truncated. The only complete summary here (tests ${b0.tests}/fail ${b0.fail}) `
-        + `is not this run's own: ${misplaced}. Refusing rather than quoting another run's numbers.`,
+        + `is not this run's own: ${misplaced}. Refusing rather than quoting another run's numbers.`
+        + killNote,
     };
   }
 

@@ -17,6 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,7 +26,13 @@ import { runVerification, readRecord } from '../src/verifyRunner.mjs';
 import { VERIFY, aggregateShards } from '../src/verifyCache.mjs';
 import { readSuiteSummary } from '../src/suiteSummary.mjs';
 
-/** What node --test prints to a pipe: its TAP reporter, summary block at column zero. */
+/*
+ * node's TAP reporter, summary block at column zero. NOT what verifyRunner's shards print: measured
+ * on node v24.19.0 (live/T-295/work/measure2-results.json), `node --test` with stdout piped and no
+ * reporter flag prints the SPEC reporter (`ℹ tests 5`), and `NODE_TEST_REPORTER=tap` did not change
+ * that; only `--test-reporter=tap` produced TAP. These scripted TAP shards exercise the `#` branch;
+ * the REAL-spawn tests at the end of this file are the ones that exercise what a shard actually prints.
+ */
 function tap({ tests, pass, fail = 0, cancelled = 0, skipped = 0, todo = 0 }) {
   const body = Array.from({ length: pass }, (_, i) => `ok ${i + 1} - t${i + 1}\n  ---\n  duration_ms: 1\n  ...\n`).join('');
   return `TAP version 13\n${body}1..${tests}\n# tests ${tests}\n# suites 0\n# pass ${pass}\n# fail ${fail}\n`
@@ -126,4 +133,75 @@ test('readSuiteSummary reads a node TAP summary block, and still refuses when th
   const none = readSuiteSummary('TAP version 13\nok 1 - x\n', 0);
   assert.equal(none.ok, false, 'no summary must be a refusal, never zero');
   assert.equal(none.tests, null);
+});
+
+/*
+ * ═══ REAL SHARDS PRINT THE SPEC REPORTER, SO DRIVE REAL SHARDS (T-307, B-18) ═══
+ *
+ * Every test above feeds runVerification scripted TAP. The shards it really spawns print the spec
+ * reporter (see the comment on `tap`), so deleting the `ℹ` branch of SUMMARY_LINE left this file
+ * green 6/6 (T-295) while every real shard would have read as "no summary" and every real run as
+ * PARTIAL. These run the runner's OWN spawn (`node --test <shard> test/**\/*.test.mjs`, argv
+ * untouched) against real test files in a temp root.
+ *
+ * THE ONE CHANGE TO THE SPAWN IS THE ENVIRONMENT: NODE_TEST* and NODE_OPTIONS are stripped. Under
+ * `node --test` this process carries NODE_TEST_CONTEXT, and a child `node --test` that inherits it
+ * does not print its own summary (the trap verifyRunner's header cites at stopGateDeadline.test.mjs).
+ * The Stop gate that calls runVerification in production is not a test and does not carry it.
+ */
+const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^NODE_TEST|^NODE_OPTIONS$/i.test(k)));
+
+function realSpawn(seen) {
+  return (cmd, args, opts) => {
+    const child = spawn(cmd, args, { ...opts, env: cleanEnv });
+    const row = { cmd, args, out: '' };
+    child.stdout.on('data', (d) => { row.out += d; });
+    child.stderr.on('data', (d) => { row.out += d; });
+    seen.push(row);
+    return child;
+  };
+}
+
+async function verifyReal(t, files) {
+  const root = mkdtempSync(path.join(tmpdir(), 'shard-real-root-'));
+  const home = mkdtempSync(path.join(tmpdir(), 'shard-real-home-'));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); });
+  mkdirSync(path.join(root, 'test'));
+  for (const [name, body] of Object.entries(files)) writeFileSync(path.join(root, 'test', name), body);
+  const key = 'rs'.repeat(16);
+  const seen = [];
+  await runVerification({ root, key, identity: { t: 'real-spec' }, shards: 2, concurrency: 1, home, spawnFn: realSpawn(seen) });
+  /* Preconditions (rule 5 and rule 9): two real shards ran, with the runner's own argv, and printed SPEC. */
+  assert.equal(seen.length, 2, 'precondition: the runner spawned exactly two shards');
+  for (const s of seen) {
+    assert.equal(s.cmd, process.execPath, 'precondition: the shard is node itself');
+    assert.equal(s.args[0], '--test', `precondition: argv is the runner's own: ${JSON.stringify(s.args)}`);
+    assert.ok(!s.args.some((a) => /reporter/.test(a)), `precondition: no reporter flag: ${JSON.stringify(s.args)}`);
+    assert.match(s.out, /^ℹ tests [1-9]\d*\r?$/m, `precondition: the shard printed the SPEC reporter's summary:\n${s.out}`);
+    assert.doesNotMatch(s.out, /^# tests /m, `precondition: the shard printed no TAP summary:\n${s.out}`);
+  }
+  const rec = readRecord(key, home);
+  assert.ok(rec, 'precondition: the runner persisted a record');
+  assert.equal(rec.shards?.length, 2, 'precondition: two shards were planned and reported');
+  return rec;
+}
+
+const passing = (names) => `import test from 'node:test';\n${names.map((n) => `test('${n}', () => {});`).join('\n')}\n`;
+
+test('B-18: two REAL spec-reporter shards, all green, aggregate to VERIFY_PASSED with the real counts', async (t) => {
+  const rec = await verifyReal(t, { 'a.test.mjs': passing(['a1', 'a2']), 'b.test.mjs': passing(['b1', 'b2', 'b3']) });
+  assert.equal(rec.state, VERIFY.PASSED, `real green shards were not read as a pass: ${rec.state}: ${rec.why}`);
+  assert.equal(rec.tests, 5, 'the two real spec summaries, added');
+  assert.equal(rec.fail, 0);
+  assert.deepEqual(rec.shards.map((s) => [s.exitCode, s.tests, s.fail]).sort(), [[0, 2, 0], [0, 3, 0]]);
+});
+
+test('B-18: a REAL spec-reporter shard with one failing test aggregates to VERIFY_FAILED, fail 1', async (t) => {
+  const red = "import test from 'node:test';\nimport assert from 'node:assert';\n"
+    + "test('b1', () => {});\ntest('b2', () => { assert.equal(1, 2); });\ntest('b3', () => {});\n";
+  const rec = await verifyReal(t, { 'a.test.mjs': passing(['a1', 'a2']), 'b.test.mjs': red });
+  assert.equal(rec.state, VERIFY.FAILED, `a real red shard was not read as a failure: ${rec.state}: ${rec.why}`);
+  assert.equal(rec.tests, 5, 'the two real spec summaries, added');
+  assert.equal(rec.fail, 1, 'the failing count comes from the red shard\'s spec summary');
+  assert.deepEqual(rec.shards.map((s) => [s.exitCode, s.tests, s.fail]).sort(), [[0, 2, 0], [1, 3, 1]]);
 });
