@@ -618,6 +618,13 @@ const ATTEMPT_TABLE = [
   ['NaN', NaN, false],
   ['""', '', false],
   ['"2"', '2', true],
+  /* T-305 B-25 F2: numbers that are not counts. The reader refused 1.5 while
+   * nextAttempt floored it to count 1 -- the "EVERY" in the test name below
+   * was not true until both sides failed closed on it. */
+  ['1.5', 1.5, false],
+  ['-1', -1, false],
+  ['Infinity', Infinity, false],
+  ['"1.5"', '1.5', false],
 ];
 
 test('T-298 B-20: THE DISPATCHER AND nextAttempt AGREE ON EVERY COUNTER VALUE', () => {

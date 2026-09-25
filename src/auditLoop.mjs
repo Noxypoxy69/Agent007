@@ -73,6 +73,31 @@ export const LOOP_DEFAULTS = Object.freeze({
 
 const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d);
 
+/*
+ * ═══ A REASON BUILDER ON A FAIL-CLOSED PATH MUST BE TOTAL. T-305 / B-25 F1 ═══
+ *
+ * The corrupt-marker reason used JSON.stringify, which THROWS on a BigInt, a
+ * cycle or a throwing toJSON, and returns undefined for a symbol or a
+ * function. A fail-closed branch that throws hands the caller an exception
+ * instead of STOP. So: every step is guarded, the text falls back to String()
+ * and then to a placeholder, and the TYPE is always named -- `10n (bigint)`
+ * and `"1" (string)` must not read alike.
+ */
+function describeValue(v) {
+  let type = v === null ? 'null' : typeof v;
+  try { if (Array.isArray(v)) type = 'array'; } catch { /* a revoked proxy throws here */ }
+  let text;
+  try {
+    if (typeof v === 'number') text = String(v);
+    else if (typeof v === 'bigint') text = `${String(v)}n`;
+    else text = JSON.stringify(v);
+  } catch { text = undefined; }
+  if (typeof text !== 'string') {
+    try { text = String(v); } catch { text = '<unprintable>'; }
+  }
+  return `${text} (${type})`;
+}
+
 /**
  * Decide the next action. PURE: no clock, no fs, no spawn.
  *
@@ -321,8 +346,20 @@ export function nextAction(state = {}, opts = {}) {
    * JSON round-trip only produces it from NaN or an explicit null -- the
    * same reason a null review counter is corrupt (T-291 B-12).
    */
+  /*
+   * ═══ THE CALLER CONTRACT, AND ITS ONE UNBOUNDED CASE. T-305 / B-25 F4 ═══
+   *
+   * A caller MUST write the boolean `true` after it has slept a WAIT, and
+   * `false` (or leave it absent) after a TICK. The boolean `false` is a legal
+   * marker meaning "not served", so a caller that writes `false` after every
+   * WAIT presents the same counters for ever and gets WAIT for ever: this
+   * function cannot tell it from a first call. That is a LIMIT, not a STOP
+   * this function can detect -- the only bound on such a caller is its own
+   * `deadlineMs`. Pinned by the "F4 LIMIT" test; the one real caller
+   * (scripts/audit-daemon.mjs) writes `true` and is pinned to it there.
+   */
   if (s.backoffServed !== undefined && typeof s.backoffServed !== 'boolean') {
-    const shown = typeof s.backoffServed === 'number' ? String(s.backoffServed) : JSON.stringify(s.backoffServed);
+    const shown = describeValue(s.backoffServed);
     return {
       action: LOOP_ACTION.STOP,
       code: LOOP_STOP.STARVED,

@@ -17,9 +17,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readFileSync } from 'node:fs';
+import {
+  readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
+
+import { auditQueuePath } from '../src/auditQueueStore.mjs';
+import { JOB } from '../src/auditJob.mjs';
 
 import {
   flagValue, posIntArg, nextAttempt, ARG_ERROR,
@@ -353,5 +361,82 @@ test('T-285 WIRING: the script refuses the equals form itself, and names why', (
     assert.equal(r.status, 2, `${args.join(' ')}: exit ${r.status}`);
     assert.doesNotMatch(r.stderr, /another flag/, `SCRIPT IGNORED ${args.join(' ')}: only the backstop refused`);
     assert.match(r.stderr, want, `${args.join(' ')} refused for another reason: ${r.stderr}`);
+  }
+});
+
+test('T-305 B-16 WIRING: the script USES --by=sess-1 given alone, as the identity it claims work as', () => {
+  /*
+   * T-286 F1: the case above sees `--by=sess-1` only through the "given 2
+   * times" refusal, which fires whenever the bare form is ALSO present. So a
+   * script that read `--by` only when the bare form was there (mutant S3)
+   * still refused that row, and nothing showed the equals form was READ when
+   * it stands alone -- which is how an operator types it.
+   *
+   * WHAT MAKES THE IDENTITY OBSERVABLE: a queue, in a private
+   * AGENTBRIDGE_HOME, holding one PENDING job whose trailer author is
+   * `sess-1`. If the daemon is `sess-1`, `proposeAudit`'s author exclusion
+   * refuses it and the stderr names the author. If the daemon is anyone
+   * else, the job is proposed and claimed IN MEMORY.
+   *
+   * THE SAFE BACKSTOP: the job's candidate is not a sha, so
+   * `allocateWorkspace` refuses it at its first line -- before any mkdir,
+   * any git and any queue write -- and the tick returns. The queue file's
+   * bytes are asserted unchanged on every run, so a regression here cannot
+   * touch anything a later run would see.
+   */
+  const env = Object.fromEntries(Object.entries(process.env)
+    .filter(([k]) => !/^NODE_TEST/i.test(k) && !/^AGENTBRIDGE_HOME$/i.test(k)));
+  const home = mkdtempSync(path.join(os.tmpdir(), 't305-by-'));
+  try {
+    const repoRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+    const queue = auditQueuePath(repoRoot, home);
+    mkdirSync(path.dirname(queue), { recursive: true });
+    const row = {
+      audit_id: 'audit-t305-by-wiring',
+      state: JOB.PENDING,
+      candidate_sha: 'not-a-sha-t305',
+      author_session: 'sess-1',
+      author_source: 'trailer',
+      first_seen_at: '2026-01-01T00:00:00.000Z',
+    };
+    writeFileSync(queue, `${JSON.stringify(row)}\n`);
+    const sha = () => createHash('sha256').update(readFileSync(queue)).digest('hex');
+    const before = sha();
+
+    const run = (args) => {
+      const r = spawnSync(process.execPath, [SCRIPT, ...args, '--once'],
+        { encoding: 'utf8', env: { ...env, AGENTBRIDGE_HOME: home }, timeout: 60_000 });
+      assert.equal(sha(), before, `${args.join(' ')}: THE BACKSTOP FAILED -- the queue was written`);
+      return r;
+    };
+    const EXCLUDED = /audit-t305-by-wiring: the only free seat authored this candidate \(sess-1\)/;
+    const PROPOSED = /could not allocate a workspace for audit-t305-by-wiring: not a candidate sha/;
+
+    /* THE POSITIVE FIRST (rule 5): the space form IS sess-1, and the
+     * exclusion is what stops it. */
+    const space = run(['--by', 'sess-1']);
+    assert.equal(space.status, 0, `space form exit ${space.status}: ${space.stderr}`);
+    assert.match(space.stderr, EXCLUDED, `premise: --by sess-1 was not excluded as the author: ${space.stderr}`);
+    assert.doesNotMatch(space.stderr, PROPOSED);
+
+    /* AND THE FIXTURE CAN TELL IDENTITIES APART (rule 9): a different id,
+     * and the default id an unread --by falls back to, are both proposed and
+     * stop at the backstop. If these were excluded too, the arm below could
+     * not fail. */
+    for (const args of [['--by', 'reviewer-x'], []]) {
+      const other = run(args);
+      assert.equal(other.status, 0, `${JSON.stringify(args)} exit ${other.status}: ${other.stderr}`);
+      assert.match(other.stderr, PROPOSED, `premise: ${JSON.stringify(args)} did not reach the backstop: ${other.stderr}`);
+      assert.doesNotMatch(other.stderr, EXCLUDED);
+    }
+
+    /* THE CLAIM: the equals form alone is read, and it is sess-1. */
+    const eq = run(['--by=sess-1']);
+    assert.equal(eq.status, 0, `--by=sess-1 exit ${eq.status}: ${eq.stderr}`);
+    assert.doesNotMatch(eq.stderr, PROPOSED,
+      'B-16: --by=sess-1 ALONE WAS NOT READ: the daemon claimed the job as another identity');
+    assert.match(eq.stderr, EXCLUDED, `B-16: --by=sess-1 refused for another reason: ${eq.stderr}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

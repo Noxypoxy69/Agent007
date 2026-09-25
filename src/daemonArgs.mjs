@@ -247,6 +247,14 @@ export function nextAttempt(stored, bound) {
   if (typeof stored === 'number') n = stored;
   else if (typeof stored === 'string' && /^\d+$/.test(stored.trim())) n = Number(stored.trim());
 
-  if (!Number.isFinite(n) || n < 0) return max;
-  return Math.floor(n) + 1;
+  /*
+   * ═══ A COUNT IS AN INTEGER. T-305 / B-25 F2 ═══
+   *
+   * This was `isFinite` then `Math.floor(n) + 1`, so 1.5 read as count 1
+   * while `proposeAudit` -- which requires `Number.isInteger` -- refused it
+   * as unreadable. The two ends disagreed again, on the value the B-20 test
+   * claimed they agreed on. A fractional count is not a count: at the bound.
+   */
+  if (!Number.isInteger(n) || n < 0) return max;
+  return n + 1;
 }

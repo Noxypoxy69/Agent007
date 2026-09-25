@@ -12,7 +12,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
+import { stripComments } from '../src/moduleGraph.mjs';
 import {
   nextAction, LOOP_ACTION, LOOP_STOP, LOOP_DEFAULTS,
 } from '../src/auditLoop.mjs';
@@ -287,6 +289,91 @@ test('T-298 B-22: A CORRUPT backoffServed ENDS THE CALLER LOOP, it never waits f
       LOOP_ACTION.TICK, `marker ${label} no longer ticks with no backoff owed`);
   }
   assert.equal(nextAction({ queueDepth: 40, consecutiveNoProgress: 0, backoffServed: true }).action, LOOP_ACTION.TICK);
+});
+
+test('T-305 B-25 F1: THE CORRUPT-MARKER REASON IS TOTAL -- it never throws, and it names the type', () => {
+  /*
+   * T-302 F1: the reason was built with JSON.stringify, which THROWS on a
+   * BigInt (and on a cycle, or a throwing toJSON) and returns undefined for a
+   * symbol or a function. A fail-closed branch that throws is not closed: the
+   * caller sees an exception, not STOP. Generated from the shapes
+   * JSON.stringify cannot print, not from the one that was reported (rule 8).
+   */
+  const s = { queueDepth: 50, consecutiveNoProgress: 1 };
+  const cyclic = {}; cyclic.self = cyclic;
+  const { proxy: revoked, revoke } = Proxy.revocable({}, {}); revoke();
+  const hostile = [
+    ['bigint', 10n],
+    ['bigint', 0n],
+    ['symbol', Symbol('x')],
+    ['function', () => true],
+    ['object', cyclic],
+    ['object', Object.create(null)],
+    ['object', { toJSON() { throw new Error('toJSON bomb'); } }],
+    ['object', { toJSON() { throw new Error('bomb'); }, toString() { throw new Error('bomb'); } }],
+    ['object', revoked],
+    ['array', [1n]],
+  ];
+  for (const [type, value] of hostile) {
+    let r;
+    assert.doesNotThrow(() => { r = nextAction({ ...s, backoffServed: value }, { intervalMs: 1000 }); },
+      `F1: a ${type} backoffServed threw in the reason builder`);
+    assert.equal(r.action, LOOP_ACTION.STOP, `F1: a ${type} marker did not fail closed (got ${r.action})`);
+    assert.equal(r.code, LOOP_STOP.STARVED);
+    assert.equal(typeof r.why, 'string');
+    assert.match(r.why, /^backoffServed is /, `F1: the reason lost its subject: ${r.why}`);
+    assert.ok(r.why.includes(`(${type})`), `F1: the reason does not name the type ${type}: ${r.why}`);
+  }
+  /* The BigInt is shown as what it is, not as a number it is not. */
+  assert.ok(nextAction({ ...s, backoffServed: 10n }).why.startsWith('backoffServed is 10n (bigint)'));
+});
+
+test('T-305 B-25 F4 LIMIT: boolean false written after every WAIT waits WITHOUT BOUND in nextAction', () => {
+  /*
+   * A LIMIT, PINNED, NOT FIXED (T-302 F4; semantics deliberately unchanged).
+   * `false` is a legal marker meaning "not served", so a caller that writes
+   * it after every WAIT -- instead of `true` after sleeping -- presents the
+   * same counters for ever and nextAction answers WAIT for ever. nextAction
+   * cannot tell that caller from a first call, so no STOP code exists for it.
+   * The ONLY bound is a caller-supplied deadlineMs against an advancing
+   * clock. If this test goes red because a bound appeared, re-argue it.
+   *
+   * The caller contract is in src/auditLoop.mjs above the marker check; the
+   * one real caller is pinned to it at the end of this test.
+   */
+  const drive = (marker, opts) => {
+    let now = 0; let waits = 0; let ticks = 0; let last = null;
+    for (let i = 0; i < 1000; i += 1) {
+      last = nextAction({ ticksUsed: 1, consecutiveNoProgress: 1, queueDepth: 40, backoffServed: marker, startedAt: 0, now },
+        { intervalMs: 1000, maxTicks: 50, ...opts });
+      if (last.action === LOOP_ACTION.STOP) return { last, waits, ticks, steps: i + 1 };
+      if (last.action === LOOP_ACTION.WAIT) { waits += 1; now += last.waitMs; continue; }
+      ticks += 1;
+    }
+    return { last, waits, ticks, steps: 1000 };
+  };
+
+  /* THE POSITIVE FIRST (rule 5): the marker true, same counters, ticks. */
+  assert.equal(drive(true).ticks, 1000, 'premise: served=true no longer ticks on these counters');
+
+  /* THE LIMIT: no deadline -> 1000 waits, 0 ticks, no STOP. */
+  const unbounded = drive(false);
+  assert.equal(unbounded.waits, 1000, `F4: false-after-every-WAIT is now bounded (${JSON.stringify(unbounded.last)})`);
+  assert.equal(unbounded.ticks, 0);
+  assert.equal(unbounded.last.action, LOOP_ACTION.WAIT);
+
+  /* THE ONLY BOUND: a deadline, reached by the waits themselves. */
+  const bounded = drive(false, { deadlineMs: 10_000 });
+  assert.equal(bounded.last.action, LOOP_ACTION.STOP);
+  assert.equal(bounded.last.code, LOOP_STOP.DEADLINE);
+  assert.equal(bounded.ticks, 0);
+  assert.ok(bounded.waits >= 1 && bounded.waits < 1000, `deadline bound took ${bounded.waits} waits`);
+
+  /* THE ONE REAL CALLER KEEPS THE CONTRACT: after the WAIT sleep it writes
+   * the boolean true. Comment-blanked first (rule 13). */
+  const daemon = stripComments(readFileSync(new URL('../scripts/audit-daemon.mjs', import.meta.url), 'utf8'));
+  assert.match(daemon, /setTimeout\(r, decision\.waitMs\);\s*\}\);\s*backoffServed = true;/,
+    'F4: scripts/audit-daemon.mjs no longer writes backoffServed = true after the WAIT sleep');
 });
 
 test('A DEADLINE STOPS THE LOOP whatever it is doing', () => {
