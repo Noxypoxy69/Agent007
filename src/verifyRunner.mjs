@@ -34,6 +34,7 @@ import path from 'node:path';
 
 import { aggregateShards, shardPlan, VERIFY, HEARTBEAT_MS } from './verifyCache.mjs';
 import { verifyRecordPath } from './verifyIdentity.mjs';
+import { readSuiteSummary } from './suiteSummary.mjs';
 
 /**
  * ATOMIC. Two sessions can reach the store at once, and a half-written record
@@ -62,16 +63,28 @@ export function countTestFiles(root) {
 }
 
 /**
- * THE COUNTS COME FROM THE REPORTER, NEVER FROM THE EXIT CODE.
+ * THE COUNTS COME FROM THE REPORTER, NEVER FROM THE EXIT CODE -- AND "NO
+ * SUMMARY" IS NOT ZERO. (T-248, P2)
  *
  * A non-zero exit is evidence a process was unhappy, not that a test ran --
  * rule 3 -- and a ZERO exit with no tests is what a broken glob looks like.
- * `aggregateShards` refuses that case, but only if it is given the number.
+ *
+ * THE DEFECT THIS REPLACES. countFrom answered 0 when a shard printed no
+ * summary, and aggregateShards refuses only a TOTAL of 0, so a shard that exited
+ * 0 having counted nothing, beside one that reported tests, aggregated to
+ * VERIFY_PASSED. Confirmed by final audit T-245; test/verifyShardSummary.test.mjs
+ * was watched red on 93c50a2.
+ *
+ * So both counts come from ONE read of the output by the existing
+ * src/suiteSummary.mjs readSuiteSummary (one summary or none, reconciled, and
+ * agreeing with the exit status). Anything it refuses is `null` here -- never a
+ * number -- and aggregateShards makes a null-count shard PARTIAL.
  */
-function countFrom(output, label) {
-  const m = output.match(new RegExp(`^#\\s*${label}\\s+(\\d+)$`, 'm'))
-    ?? output.match(new RegExp(`ℹ\\s*${label}\\s+(\\d+)`));
-  return m ? Number(m[1]) : 0;
+function shardCounts(output, exitCode) {
+  const s = readSuiteSummary(output, exitCode);
+  return s.ok
+    ? { tests: s.tests, fail: s.fail, summary: null }
+    : { tests: null, fail: null, summary: s.why };
 }
 
 /**
@@ -178,18 +191,18 @@ function runShard(root, shard, signal, spawnFn = spawn, killTree = defaultKillTr
     });
     child.on('close', (code) => {
       done();
+      /*
+       * A CHILD KILLED BY A SIGNAL EXITS WITH code === null, AND
+       * `Number(null) === 0`. Downstream that read as a green shard, so a
+       * suite killed by the OOM killer -- or by the cancellation above --
+       * could carry the whole run to VERIFY_PASSED as long as one other
+       * shard reported tests. A forged pass. Non-integer means failed.
+       */
+      const exitCode = Number.isInteger(code) ? code : 1;
       resolve({
         index: shard.index,
-        /*
-         * A CHILD KILLED BY A SIGNAL EXITS WITH code === null, AND
-         * `Number(null) === 0`. Downstream that read as a green shard, so a
-         * suite killed by the OOM killer -- or by the cancellation above --
-         * could carry the whole run to VERIFY_PASSED as long as one other
-         * shard reported tests. A forged pass. Non-integer means failed.
-         */
-        exitCode: Number.isInteger(code) ? code : 1,
-        tests: countFrom(out, 'tests'),
-        fail: countFrom(out, 'fail'),
+        exitCode,
+        ...shardCounts(out, exitCode),
         output: out.slice(-6000),
       });
     });

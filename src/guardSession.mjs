@@ -249,6 +249,13 @@ export const PROTECTED_PATHS = Object.freeze([
    * merged tree. Mirrored in src/policy.mjs (protectedPathParity).
    */
   'src/stopVerdict.mjs',
+  /*
+   * T-248 (P2): verifyRunner now reads every shard's counts through
+   * readSuiteSummary, so rewriting it could turn "no summary" back into a
+   * count the gate accepts. Named by test/guardDependenciesProtected.test.mjs.
+   * Mirrored in src/policy.mjs (protectedPathParity).
+   */
+  'src/suiteSummary.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

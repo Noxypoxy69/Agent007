@@ -379,6 +379,29 @@ export function aggregateShards(results, { total = 0 } = {}) {
       fail,
     };
   }
+  /*
+   * A SHARD WHOSE COUNTS COULD NOT BE READ COUNTED NOTHING, AND NOTHING IS NOT
+   * ZERO. (T-248, P2.) verifyRunner reports `tests: null` / `fail: null` when
+   * readSuiteSummary refuses the shard's output: no summary, two summaries, or
+   * one that does not reconcile with itself or the exit status. The sums above
+   * turn null into 0 (`Number(null) || 0`), which is exactly how a no-summary
+   * shard beside a reporting one aggregated to VERIFY_PASSED. So this is decided
+   * BEFORE `failed` and before the zero-test check, from the rows themselves,
+   * and never from the sums. PARTIAL, not FAILED: an unreadable shard is "could
+   * not measure", and a crashed shard that printed nothing lands here too --
+   * refused either way, and never reused.
+   */
+  const unreadable = rows.filter((r) => r.tests === null || r.fail === null);
+  if (unreadable.length) {
+    return {
+      state: VERIFY.PARTIAL,
+      why: `${unreadable.length} of ${expected} shard(s) printed no usable summary`
+        + `${unreadable[0].summary ? ` (${unreadable[0].summary})` : ''}, so their tests were never counted `
+        + 'and "green" would mean only that the counted ones were green',
+      tests,
+      fail,
+    };
+  }
   if (failed.length) {
     return {
       state: VERIFY.FAILED,

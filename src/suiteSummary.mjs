@@ -59,8 +59,10 @@
  * reachable from a fixture, which is the point of it not living in the script.
  */
 
-/** Node writes its summary lines prefixed with U+2139 INFORMATION SOURCE. */
-const INFO = 'ℹ';
+/*
+ * Node's spec reporter prefixes its summary lines with U+2139 INFORMATION SOURCE;
+ * its TAP reporter uses `#`. Both prefixes live in SUMMARY_LINE below.
+ */
 
 const FIELDS = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo'];
 
@@ -73,22 +75,39 @@ const FIELDS = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo
  * independently is what let one number come from the parent and the next from a
  * grandchild.
  */
+/*
+ * TWO REPORTERS, ONE RULE (T-248). The spec reporter writes `ℹ tests 5`; the TAP
+ * reporter -- what node --test prints to a PIPE, which is how verifyRunner's shards
+ * run -- writes `# tests 5`, also at column zero. A block is lines of ONE prefix:
+ * a line with the other prefix ends it, exactly as any non-prefixed line does, so
+ * a TAP block and a spec block can never merge into one. Everything downstream --
+ * one summary or none, reconciliation, agreement with the exit status -- is the
+ * same code for both.
+ */
+const SUMMARY_LINE = /^(ℹ|#) ([a-z_]+) ([\d.]+)$/;
+
 export function summaryBlocks(text) {
   const blocks = [];
   let current = null;
+  let prefix = null;
 
   for (const rawLine of String(text ?? '').split('\n')) {
     const line = rawLine.replace(/\r$/, '');
-    const m = /^ℹ ([a-z_]+) ([\d.]+)$/.exec(line);
-    if (m && FIELDS.includes(m[1])) {
+    const m = SUMMARY_LINE.exec(line);
+    if (m && FIELDS.includes(m[2])) {
+      if (current && m[1] !== prefix) {
+        blocks.push(current);
+        current = null;
+      }
       current ??= {};
+      prefix = m[1];
       // A repeated label starts a NEW block: one block never states `fail`
       // twice, so a repeat means two summaries ran together.
-      if (Object.hasOwn(current, m[1])) {
+      if (Object.hasOwn(current, m[2])) {
         blocks.push(current);
         current = {};
       }
-      current[m[1]] = Number(m[2]);
+      current[m[2]] = Number(m[3]);
       continue;
     }
     /*
@@ -101,7 +120,7 @@ export function summaryBlocks(text) {
      * one file whose entire subject is a mechanism nobody checked. Caught by a
      * blind auditor reading the comment against the code.
      */
-    if (current && !line.startsWith(`${INFO} `)) {
+    if (current && !line.startsWith(`${prefix} `)) {
       blocks.push(current);
       current = null;
     }
