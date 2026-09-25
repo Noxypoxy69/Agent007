@@ -375,9 +375,18 @@ const SHELL_TOOL_NAMES = new Set(['Bash', 'PowerShell', 'Shell', 'Cmd', 'Termina
  * records the same defect about sed. A comment naming the wrong control is how
  * the next reader "fixes" something that was already right.
  */
-const COMMAND_FIELDS = ['command', 'script', 'cmd'];
-const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
+// Exported so the routing tests generate their cases from the real lists.
+export const COMMAND_FIELDS = ['command', 'script', 'cmd'];
+export const PATH_FIELDS = ['file_path', 'notebook_path', 'filePath', 'path'];
 
+/*
+ * MERGE T-246: local 637cdb9 (ceb92fe, T-096) replaced firstStringField with a
+ * value-only `stringFields` for the same defect -- a command field outranking a
+ * path field. The trunk's allStringFields below judges the same set AND keeps each
+ * field's NAME, which the leftovers backstop needs, so it supersedes local's
+ * helper. Local's value de-duplication is dropped: judging one value twice gives
+ * the same verdict, so it changed nothing a caller could observe.
+ */
 /**
  * EVERY matching field, not the first. firstStringField below takes one and
  * discards the rest, which is how a decoy field stole a verdict from the field
@@ -981,6 +990,15 @@ export function evaluateClaudeTool({ tool_name: toolName, tool_input: input = {}
     return actionNotice ? { allowed: true, overridden: true, notice: actionNotice } : { allowed: true };
   }
 
+  /*
+   * MERGE T-246: both lines closed "a command excuses a path" -- local as T-096
+   * ({command:'git status', file_path:'CLAUDE.md'} was ALLOWED, observed at
+   * 301c200), the trunk by audit. The trunk's version below is the superset:
+   * every command, every path, then the backstop over unjudged fields, which
+   * also closes the residual local named ("a path under any other name beside a
+   * command is still not examined here (T-102's residual)"). Local's
+   * test/claudeGuardFieldRouting.test.mjs runs against it unchanged.
+   */
   /*
    * A TOOL CARRYING BOTH SHAPES IS JUDGED ON BOTH, AND THIS RETURNED ON THE
    * FIRST ONE IT FOUND.

@@ -24,10 +24,113 @@
  * identity the registry exists to verify, and it would look like it worked.
  */
 
-/** Past this with no heartbeat, a worker is offline whatever it last claimed. */
+/** Past this with no heartbeat, a worker is not live whatever it last claimed. */
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 
 export const CAPACITIES = ['idle', 'busy', 'blocked', 'offline'];
+
+/**
+ * FOUR FACTS, NOT ONE. They were collapsed, and the collapse cost fifteen hours.
+ *
+ *   presence      SELF-DECLARED departure -- see the limit below
+ *   liveness      heartbeat age           -- have we heard from it?
+ *   availability  may receive work        -- presence AND liveness
+ *   lease         authority over one task (elsewhere; untouched here)
+ *
+ * ═══ WHAT `presence` HERE IS NOT: OWNER INTENT ═══
+ *
+ * The contract this was written against says presence = owner intent. THIS
+ * IMPLEMENTATION DOES NOT DELIVER THAT, and saying so here is the point --
+ * a field named `presence` will otherwise be read as the owner's word by the
+ * next person who sees it.
+ *
+ * What is implemented is the WORKER'S OWN declaration: a row reads DEPARTED
+ * because that session set its capacity to 'offline'. A session asserting its
+ * own presence is not the owner intending it to be there, and any session can
+ * assert it by simply not declaring otherwise.
+ *
+ * There is currently NO owner-intent anchor to key this on. Migration
+ * 20260915122811 settles why: "There is exactly ONE registration token, shared
+ * by every worker", and the `registered_by` column ships the comment
+ * "PROVENANCE ONLY -- never an authorization check". So the registration token
+ * cannot distinguish one worker from another, let alone carry Danny's intent.
+ * Keying presence on it would be decoration.
+ *
+ * Closing that needs either a fourth token class for owner-presence (this repo
+ * already runs four classes in four tables, deliberately) or presence set by an
+ * out-of-band owner action rather than by the session itself. Both are the
+ * owner's decision, and neither is taken here.
+ *
+ * So this is HALF the contract, and it is labelled as half rather than reported
+ * as a closed loop. The useful half is real: a fault is now distinguishable
+ * from an orderly shutdown, which is what the fifteen-hour outage needed.
+ *
+ * ═══ WHY SEPARATING THEM IS THE FIX ═══
+ *
+ * Two different things used to render as the same word:
+ *
+ *     code-b   stopped reporting           ->  'offline'
+ *     b6       DECLARED offline, leaving   ->  'offline'
+ *
+ * They call for OPPOSITE responses. A worker that declared offline is gone by
+ * intent: leave it, it did what it meant to. A worker that went silent while
+ * the owner still intends it to be there is a FAULT: chase it, restart it, tell
+ * somebody. Collapsed into one token a fault is indistinguishable from an
+ * orderly shutdown, which is why code-b sat dead for fifteen hours with nothing
+ * anywhere raising its hand -- the roster was not missing the information, it
+ * was rendering it in a vocabulary that could not carry it.
+ *
+ * A MISSED HEARTBEAT IS EVIDENCE ABOUT LIVENESS. IT IS NOT THE OWNER CHANGING
+ * THEIR MIND. So presence below never reads the clock, and that is asserted as
+ * a property in test/presenceIsNotLiveness.test.mjs rather than promised here.
+ */
+export const PRESENCE = { PRESENT: 'present', DEPARTED: 'departed' };
+export const LIVENESS = { LIVE: 'live', STALE: 'stale', UNKNOWN: 'unknown' };
+
+/**
+ * THE WORKER'S OWN DECLARATION, AND NOTHING ELSE -- not the owner's. See the
+ * limit recorded above PRESENCE: there is no owner-intent anchor to read yet.
+ *
+ * The clock is deliberately not a parameter here: taking a `now` would invite
+ * the next edit to consult it, which is the conflation this split removes.
+ *
+ * A worker declaring `capacity: 'offline'` is the one statement the stored
+ * column carries, and it is trusted in that direction ONLY -- it can take
+ * itself out, it cannot put itself in. Silence is not a statement.
+ */
+export function presenceOf(row) {
+  return row?.capacity === 'offline' ? PRESENCE.DEPARTED : PRESENCE.PRESENT;
+}
+
+/**
+ * HEARTBEAT AGE, AND NOTHING ELSE.
+ *
+ * A declared-offline worker with a fresh heartbeat is LIVE -- the process is
+ * running and saying so. Folding its declaration in here would rebuild exactly
+ * the conflation this split exists to remove, from the other side.
+ *
+ * UNKNOWN is its own answer. "We have never heard from it" is not "we heard
+ * from it too long ago", and neither is "it is running"; a reader that cannot
+ * see the difference will eventually act on the wrong one.
+ */
+export function livenessOf(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  const age = heartbeatAgeMs(row, now);
+  if (age === null) return LIVENESS.UNKNOWN;
+  return age >= 0 && age <= staleAfterMs ? LIVENESS.LIVE : LIVENESS.STALE;
+}
+
+/**
+ * MAY THIS SESSION RECEIVE WORK? Present by intent AND live by heartbeat.
+ *
+ * This is the predicate the dispatch paths mean, stated in its own words. Its
+ * truth table is IDENTICAL to the isLive it replaces -- asserted case by case
+ * in test/presenceIsNotLiveness.test.mjs, because the one real risk in naming
+ * these apart is that "may receive work" quietly widens while nobody is looking.
+ */
+export function isAvailable(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
+  return presenceOf(row) === PRESENCE.PRESENT
+    && livenessOf(row, { now, staleAfterMs }) === LIVENESS.LIVE;
+}
 
 const str = (v) => (typeof v === 'string' && v.trim().length ? v.trim() : null);
 
@@ -49,11 +152,19 @@ export function heartbeatAgeMs(row, now) {
  * never resolve as "present" -- that is the difference between refusing a
  * delegation and addressing one to nobody.
  */
+/*
+ * THE NAME THE CALL SITES ALREADY USE. isLive is availability -- it always was,
+ * and every caller (assignTask, confirmProposal, the dispatcher, the CLI) means
+ * "may this receive work". It is kept as the spelling rather than renamed
+ * through twenty call sites in a change about semantics, and it now delegates
+ * so there is ONE definition of the predicate instead of two that agree today.
+ *
+ * Its truth table is unchanged. That is a claim under test, not a comment:
+ * test/presenceIsNotLiveness.test.mjs compares the two functions case by case
+ * over every shape that decides an assignment.
+ */
 export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
-  if (row?.capacity === 'offline') return false;
-  const age = heartbeatAgeMs(row, now);
-  if (age === null) return false;
-  return age >= 0 && age <= staleAfterMs;
+  return isAvailable(row, { now, staleAfterMs });
 }
 
 /**
@@ -102,11 +213,35 @@ export function isLive(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
  * it. Writing the derivation inline at the read site would have been three
  * lines and a second source of truth for "what does a reader see", and the two
  * would disagree the first time somebody changed one.
+ *
+ * ═══ WHAT THIS FUNCTION IS, NOW THAT THE FACTS ARE NAMED APART ═══
+ *
+ * It answers AVAILABILITY, in the four-token vocabulary the dispatch path
+ * already branches on. It no longer derives presence from the clock: presence
+ * is presenceOf() and liveness is livenessOf(), and this composes them.
+ *
+ * THE 'offline' IT RETURNS FOR A SILENT WORKER IS AN AVAILABILITY VERDICT, NOT
+ * A CLAIM THAT THE OWNER WITHDREW THE AGENT. That distinction is carried by the
+ * `presence` and `liveness` fields on every registry row, which is where a
+ * reader must look to tell a fault from an orderly shutdown.
+ *
+ * ═══ WHY THE TOKEN ITSELF DID NOT CHANGE, STATED SO NOBODY READS THIS AS DONE ═══
+ *
+ * A distinct token here -- 'stale' -- would be the fuller fix, and it is NOT
+ * safe from inside this module. src/laneRegistry.mjs admits any session whose
+ * `capacity !== 'offline'`, so a stale row carrying a new token would start
+ * RESOLVING, and work would be assigned to a process that is not there. Its
+ * `validate` would separately reject the token as unknown. Both live outside
+ * this slice's surface.
+ *
+ * So the conflation is removed from the MODEL here, and the wire token is left
+ * exactly as safe as it was. Changing it is a coupled edit to laneRegistry and
+ * to the baseline tests that pin this value, and it is escalated rather than
+ * taken unilaterally.
  */
 export function observedCapacity(row, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
-  return isLive(row, { now, staleAfterMs })
-    ? (CAPACITIES.includes(row?.capacity) ? row.capacity : 'idle')
-    : 'offline';
+  if (!isAvailable(row, { now, staleAfterMs })) return 'offline';
+  return CAPACITIES.includes(row?.capacity) ? row.capacity : 'idle';
 }
 
 export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS } = {}) {
@@ -136,6 +271,22 @@ export function registryFromSessions(rows, { now, staleAfterMs = STALE_AFTER_MS 
       // Staleness OVERRIDES the declared capacity. A worker that claimed `idle`
       // and then died still says `idle` in its last row forever.
       capacity: observedCapacity(r, { now, staleAfterMs }),
+      /*
+       * THE SEPARATED FACTS TRAVEL WITH THE ROW.
+       *
+       * The original defect was a second implementation at the read site: the
+       * rule existed here and the edge function derived its own answer. Leaving
+       * consumers to recompute presence and liveness from `heartbeat_at` would
+       * rebuild that exact shape, one reader at a time, and the copies would
+       * disagree the first time one was fixed.
+       *
+       * `capacity` stays the availability projection the dispatch path branches
+       * on. These three are what a READER needs to tell a fault from an orderly
+       * shutdown, and they are computed by the same functions, in one place.
+       */
+      presence: presenceOf(r),
+      liveness: livenessOf(r, { now, staleAfterMs }),
+      available: isAvailable(r, { now, staleAfterMs }),
     });
   }
 

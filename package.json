@@ -17,6 +17,7 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "verify": "node scripts/verify-run.mjs",
     "audit:workspace": "node scripts/audit-workspace.mjs",
+    "test:gate-integration": "node --test test/stopGateReuse.integration.mjs",
     "bridge": "node bridge/server.mjs",
     "mcp:stdio": "node mcp/stdio.mjs",
     "agent:check": "node scripts/start-agent.mjs",

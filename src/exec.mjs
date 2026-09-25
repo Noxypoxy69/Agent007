@@ -82,7 +82,58 @@ function refuseGit(file) {
   }
 }
 
-function childEnv(file, override) {
+/*
+ * EXPORTED FOR THE SUITE, AND THE EXPORT IS THE POINT RATHER THAN A CONVENIENCE.
+ *
+ * test/psmodulepath.test.mjs used to assert the matcher by RE-IMPLEMENTING it.
+ * That test defined its own basename lambda and checked it against string
+ * literals, so it agreed with itself.
+ *
+ * MEASURED, AND STATED THE WAY IT REPRODUCES ON ANY HOST: nine mutations of
+ * this file left EVERY assertion in that file unchanged. Four of the matcher --
+ * also strip pwsh, match the full path instead of the basename, compare
+ * case-sensitively, drop the extensionless alias. Five of the cleared VALUE --
+ * a hardcoded system32 path, a nonexistent root, undefined, a single space, and
+ * the key spelled PSMODULEPATH. Widening the matcher to strip pwsh is the exact
+ * regression that test was named after. Hollow gate #2.
+ *
+ * An earlier version of this comment said those mutations "shipped 10/10
+ * green". That was a fact about one machine: on a host with no PowerShell 7
+ * that file is 9/10 BEFORE any mutation, because its own control is red. A
+ * one-machine number in a comment is the defect the paired test file was
+ * rewritten to remove, so it is not repeated here. The per-assertion statement
+ * above holds anywhere.
+ *
+ * The value mutations survived for a specific reason, and an earlier version
+ * misstated it as "nothing could see what this function returns". Something
+ * could: the old file observed the child's PSModulePath, but only NEGATIVELY --
+ * "the poison substring is absent" -- and any replacement value satisfies that.
+ *
+ * CLAUDE.md rule 10 is the instruction being followed: put the decision where
+ * the suite can import it, and let the caller call it. Exporting this is cheap
+ * because it does no I/O and holds no module state.
+ *
+ * IT IS NOT PURE, AND AN EARLIER VERSION OF THIS COMMENT CLAIMED IT WAS -- in
+ * the same sentence that argued the export therefore "costs nothing", which is
+ * the worst place to be wrong. It is deterministic given (file, process.env),
+ * so process.env is a second, implicit input. And on the path where it changes
+ * nothing it returns the base environment BY REFERENCE: childEnv('git.exe') ===
+ * process.env is true, and a caller writing through the result mutates the real
+ * process environment. That was already so when only run() could reach it --
+ * run() hands the value straight to execFile and never writes to it -- but this
+ * export widens who can reach it. COPY IT BEFORE MUTATING IT.
+ *
+ * isWindowsPowerShell stays private, and the reason is observability rather
+ * than risk. Across 19 adversarial spellings, every answer the matcher gives is
+ * visible in what this function returns, so a second export would buy no
+ * coverage. An earlier version argued instead that two exports "would have made
+ * it possible to test the matcher while nothing checked that childEnv still
+ * asks it" -- a blind audit falsified that by mutating childEnv to stop asking
+ * and watching seven assertions go red. The conclusion held; the argument did
+ * not, and an argument that does not hold teaches the next export decision
+ * wrong.
+ */
+export function childEnv(file, override) {
   /*
    * AN EXPLICIT ENVIRONMENT REPLACES THE PARENT'S, IT DOES NOT EXTEND IT.
    *

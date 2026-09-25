@@ -241,6 +241,14 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/verifyCache.mjs',
   'src/verifyIdentity.mjs',
   'src/verifyRunner.mjs',
+  /*
+   * MERGE T-246: the Stop gate's key and reuse rule now come from local
+   * 637cdb9's stopVerdict (verdictKey, envForKey, chooseReuse, shouldRecord,
+   * acquireOrReuse). Rewriting it could make the gate reuse a PASS for a tree
+   * nobody tested. Named by test/guardDependenciesProtected.test.mjs on the
+   * merged tree. Mirrored in src/policy.mjs (protectedPathParity).
+   */
+  'src/stopVerdict.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',

@@ -168,6 +168,26 @@ export function positionals(argv, { valueless = VALUELESS_FLAGS } = {}) {
   const list = Array.isArray(argv) ? argv : [];
   for (let i = 0; i < list.length; i += 1) {
     const a = typeof list[i] === 'string' ? list[i] : '';
+    /*
+     * THE END-OF-OPTIONS SEPARATOR, DECIDED BEFORE ANY FLAG RULE.
+     *
+     * A bare `--` starts with `--`, carries no `=`, and slices to the EMPTY
+     * STRING — which is legitimately absent from VALUELESS_FLAGS, so it fell
+     * through to the value-taking branch below and CONSUMED the token after it.
+     * The one token whose entire job is protecting later operands was eating
+     * one: `['--', 'roster']` returned `[]`.
+     *
+     * Everything after it is a positional INCLUDING dashed tokens. That half is
+     * the point rather than a detail: merely stopping `--` from consuming would
+     * still drop `--json` as if it were a flag, and a file named `--json` is
+     * the reason POSIX has this token at all.
+     */
+    if (a === '--') {
+      for (let j = i + 1; j < list.length; j += 1) {
+        words.push(typeof list[j] === 'string' ? list[j] : '');
+      }
+      break;
+    }
     if (!a.startsWith('--')) { words.push(a); continue; }
     if (a.includes('=')) continue;                   // --flag=value carries its own
     if (novalue.has(a.slice(2))) continue;           // boolean: the next token is not its value

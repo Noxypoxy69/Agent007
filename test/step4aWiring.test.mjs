@@ -13,7 +13,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync, renameSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -208,7 +208,14 @@ test('F the three formerly orphaned modules are REACHABLE from shipped entry poi
   }
 });
 
-test('G the shipped controller binary opens a job the shipped verifier can actually verify', async (t) => {
+/*
+ * SKIPPED OFF POSIX, NOT FAILED. The task argv below runs /bin/sh, which does not
+ * exist on Windows, so this fails there for the shell rather than for the wiring
+ * it is about. Rewriting it portably is worth doing; reporting a red suite on the
+ * machine the operator actually uses is not, because rule 17 is that an outage is
+ * how a guard gets switched off.
+ */
+test('G the shipped controller binary opens a job the shipped verifier can actually verify', { skip: process.platform === 'win32' && 'the task argv uses /bin/sh' }, async (t) => {
   /*
    * THE ONE TEST THAT DRIVES THE REAL CHAIN, AND THE ONLY ONE THAT COULD HAVE
    * CAUGHT WHAT IT CAUGHT.
@@ -400,7 +407,25 @@ test('H a job whose repository was swapped at the same path is refused', async (
   /* Put it at the authoritative path. */
   const original = mkdtempSync(path.join(tmpdir(), 's4w-orig-'));
   t.after(() => { for (const d of [impostor, original]) rmSync(d, { recursive: true, force: true }); });
-  execFileSync('sh', ['-c', `mv ${JSON.stringify(s.auth)}/.git ${JSON.stringify(original)}/git && mv ${JSON.stringify(impostor)}/.git ${JSON.stringify(s.auth)}/.git`]);
+  /*
+   * PORTABLE, BECAUSE THIS LINE SHELLED OUT AND THE SHELL IS NOT THERE.
+   *
+   * This was execFileSync('sh', ['-c', 'mv … && mv …']), which dies with
+   * spawnSync sh ENOENT in a PowerShell session -- BEFORE the three assertions
+   * below ever run. Every precondition above passed, so the file exited 1 while
+   * the property it exists to prove was never evaluated: repository-swap
+   * refusal was UNPROVEN on the operator's own platform rather than failing,
+   * which is the worse of the two.
+   *
+   * renameSync is what production uses for exactly this move -- see
+   * src/verificationControl.mjs and src/approvalStore.mjs -- and case H already
+   * calls git directly four times above, so this matches the file's own
+   * established practice rather than introducing a new one. No shell was ever
+   * needed here: the product runs with shell:false in src/exec.mjs and
+   * src/workerDeps.mjs, and src/worker.mjs says NO SHELL, ANYWHERE.
+   */
+  renameSync(path.join(s.auth, '.git'), path.join(original, 'git'));
+  renameSync(path.join(impostor, '.git'), path.join(s.auth, '.git'));
 
   const after = runBin(VERIFY_BIN, ['--job', jobId], s.state);
   assert.notEqual(after.json?.decision, 'approve', 'a swapped repository must not verify');

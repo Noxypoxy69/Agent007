@@ -189,7 +189,21 @@ const BASELINE_UNREFERENCED = 5;
  * unspliced exports decide when to probe and nothing schedules a prober, and
  * seatReaper mirrors SQL that executes the same predicate.
  */
-const BASELINE_TEST_ONLY = 80;
+/*
+ * PROVISIONAL: 80 -> 83 AT THE TRUNK MERGE (T-246, Controller ruling, 2026-09-26).
+ * MEASURED on the merged tree, not chosen: the three new test-only FUNCTIONS are
+ *   src/stopVerdict.mjs  parseVerdictStore, formatVerdictRecord -- they served
+ *     local 637cdb9's guard-sessions/stop-verdicts.jsonl, which the merge ruling
+ *     RETIRED (one store: the trunk's verify/<key>.json). A later plan step
+ *     deletes them, and this number goes back down with them.
+ *   src/verifyCache.mjs  admitVerification -- its only production caller was the
+ *     trunk's Stop gate, which the merge re-wired to stopVerdict.chooseReuse
+ *     (the owner's PASS-only, 10-minute rule) plus decideVerify's ATTACH.
+ * The local-origin CONSTANTS that are also test-only -- stopVerdict REUSE_RESIDUAL,
+ * run2Envelope FIELD_IDS, safeGit AMBIENT_ONLY_VARS (kept so local's tests still
+ * import) -- are NOT in this count: IS_CONSTANT excludes them from fnsByCategory.
+ */
+const BASELINE_TEST_ONLY = 83;
 
 /*
  * GATE MACHINERY IS TEST-ONLY BY NATURE, and excluding it makes the number mean

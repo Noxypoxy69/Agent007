@@ -19,9 +19,18 @@
  * failing cleanup in every test that runs the gate against a temp fixture; a
  * child spawned by filename was invisible to the fixtures that build a repo
  * from the hooks' imports. See the START branch.
+ *
+ * MERGE T-246: the fs/crypto/os imports below are local 637cdb9's, for the
+ * stopVerdict key and the one-suite lock. spawnSync and the append-only verdict
+ * store's openSync/writeSync/closeSync are gone with that store (retired).
  */
-import { readFileSync } from 'node:fs';
+import {
+  readFileSync, writeFileSync, renameSync, rmSync, statSync, readdirSync, mkdirSync,
+} from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { homedir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   readSnapshot, protectedDrift, baselineTestDrift, discoverTests, writeSnapshot, overrideCovers,
   isGateSelfConfig, gateConfigArms, selfConfigHeadline, settingsAddsOnly,
@@ -224,6 +233,12 @@ const out = (reason) => {
     ? [carriedNotice, escalationBlock].filter(Boolean).join('\n')
     : carriedNotice;
   if (carry) decision.systemMessage = carry;
+  /*
+   * MERGE T-246: local 637cdb9's `notices` array (T-153) existed only for the
+   * "verdict store unusable" line. That store is retired (one store: the trunk's
+   * ~/.agentbridge/verify/<key>.json), and a reused-PASS message rides on
+   * carriedNotice above, so the trunk's single mechanism covers both.
+   */
   process.stdout.write(`${JSON.stringify(decision)}\n`);
   process.exit(0);
 };
@@ -1002,6 +1017,282 @@ if (budget !== null && suiteMs < MIN_SUITE_MS) {
 }
 
 /*
+ * ═══ MERGE 2026-09-25 (T-246): ONE VERIFICATION DESIGN FROM TWO LINES ═══
+ *
+ * The trunk (design/action-authority) turned this gate into a result CONSUMER:
+ * single-flight records in ~/.agentbridge/verify/<key>.json, a heartbeat, a
+ * sharded runner, PARTIAL for a run that proved nothing. Local master 637cdb9
+ * (T-147/T-153) kept running the suite here but made its KEY sound and its
+ * reuse owner-ruled. Measured by two blind reviewers (T-242A/B): the trunk's
+ * identity did not move for an assume-unchanged edit, a git-ignored test, a test
+ * hidden by .git/info/exclude, or an edit to a C-quoted file name. Local's did.
+ *
+ * SO, BY PROPERTY:
+ *   LIFECYCLE -- the trunk's: verifyKey -> decideVerify (ATTACH to a run in
+ *     flight) -> runVerification -> the record. ONE store; local's
+ *     guard-sessions/stop-verdicts.jsonl is RETIRED from the decision path (not
+ *     deleted, simply no longer read or written).
+ *   KEY -- local's: observeKeyParts below (working bytes via ls-files --cached,
+ *     untracked, ignored, the full environment minus EXCLUDED_ENV, the gate's own
+ *     sha, the suite file list, the secrets dir) hashed by stopVerdict.verdictKey.
+ *     That 64-hex value IS the identity's tree_digest, so it decides the store key.
+ *   REUSE -- the owner's ruling (T-147), amendment #7: ONLY a PASS, ONLY after
+ *     exact identity equality, and only then younger than 10 minutes
+ *     (stopVerdict.chooseReuse). A FAILED, PARTIAL, TIMED_OUT or stale PASS is
+ *     never reused: it STARTS a run. The trunk's verifyCache reused FAILED with no
+ *     age limit (FINDINGS F-46); that policy is not carried into this gate.
+ *   OBSERVATION -- local's: the key before the wait, before the suite, and again
+ *     after the run (stopVerdict.shouldRecord). A key that moved makes the record
+ *     PARTIAL: never a PASS, never reused. The change-and-revert (ABA) residual
+ *     stays, stated in every reused-PASS message (amendment #5).
+ *   ONE SUITE AT A TIME -- local's lock, guard-sessions/stop-suite.lock.
+ *
+ * STATED COST (Controller decision, T-246 addendum): the key holds the FULL
+ * environment, CLAUDE_PROJECT_DIR included -- amendment #3 forbids excluding it
+ * until a test proves it irrelevant, and no such test exists. Claude Code sets it
+ * for a hook and not for a shell, so this gate and `npm run verify`
+ * (scripts/verify-run.mjs, which keys on verifyIdentity's narrower identity)
+ * derive DIFFERENT keys for the same tree. Single-flight therefore holds within
+ * one entrypoint only. That is the safe direction: an extra run, never a reuse of
+ * a result for inputs that were not the ones tested.
+ *
+ * NOT FIXED HERE, deliberately (plan step 1/2): verifyRunner counts a shard with
+ * no TAP summary as 0 tests (P2). Local's gate refused that shape itself
+ * (tap-summary-invalid, tap-counts-refused); under the trunk's lifecycle this gate
+ * no longer parses TAP, so that local check does not survive the merge.
+ *
+ * EVERY THROW IN THIS SECTION REFUSES -- the trunk's rule, see below -- and that
+ * now covers the key, the lock and the wait, not only the runner.
+ */
+let verifyBlock = null;
+try {
+const V = await import('../src/stopVerdict.mjs');
+const { verifyKey, decideVerify, VERIFY, ACTION } = await import('../src/verifyCache.mjs');
+const { verifyRecordPath, toolchainFingerprint, envDigest, VERIFY_COMMAND } = await import('../src/verifyIdentity.mjs');
+const { runVerification, killLiveShards, writeRecord } = await import('../src/verifyRunner.mjs');
+
+const stateDir = path.join(process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge'), 'guard-sessions');
+const lockPath = path.join(stateDir, 'stop-suite.lock');
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+const deadlineAt = Date.now() + suiteMs;
+
+/*
+ * THE GATE'S OWN WRITES ARE NOT INPUTS (MERGE T-246). Under the trunk's
+ * lifecycle the runner writes and heartbeats <AGENTBRIDGE_HOME>/verify/<key>.json
+ * DURING the run, and this gate writes the one-suite lock. When AGENTBRIDGE_HOME
+ * lies inside the repository (every stop-gate test fixture does this), local's
+ * key -- which hashes untracked and ignored files -- saw those writes, and the
+ * post-run observation called every run PARTIAL. MEASURED: stopGateDeadline's
+ * "a green suite inside the budget is still approved" refused with exactly that.
+ * So exactly these two locations are left out of the observation, and only when
+ * they are inside the root. STATED LIMIT: a suite that READ its own verify store
+ * or lock would have that input unkeyed; nothing in test/ does today (unverified
+ * beyond this merge's scoped run).
+ */
+const repoRel = (abs) => {
+  const r = path.relative(path.resolve(root), path.resolve(abs)).split(path.sep).join('/');
+  return r && !r.startsWith('..') && !path.isAbsolute(r) ? r : null;
+};
+const SELF_WRITTEN_DIR = repoRel(path.dirname(verifyRecordPath('x')));
+const SELF_WRITTEN_LOCK = repoRel(lockPath);
+const selfWritten = (rel) => (SELF_WRITTEN_DIR !== null && (rel === SELF_WRITTEN_DIR || rel.startsWith(`${SELF_WRITTEN_DIR}/`)))
+  || (SELF_WRITTEN_LOCK !== null && (rel === SELF_WRITTEN_LOCK || rel.startsWith(`${SELF_WRITTEN_LOCK}.`)));
+
+/**
+ * Every input the key covers, observed now. ANY failure to observe returns null:
+ * no key -- and under the merged lifecycle, no key refuses (verify-identity-unknown).
+ */
+function observeKeyParts() {
+  try {
+    const git = (args) => runGit(args, { cwd: root, timeout: 30_000, env: { GIT_OPTIONAL_LOCKS: '0' } });
+    const list = (args) => [...new Set(git(args).split('\0').filter(Boolean))].filter((rel) => !selfWritten(rel));
+    const hashAt = (rel) => {
+      try { return sha256(readFileSync(path.join(root, rel))); } catch (e) {
+        if (e?.code === 'ENOENT') return 'deleted';
+        if (e?.code === 'EISDIR') return 'directory';
+        throw e;
+      }
+    };
+    let head;
+    try { head = git(['rev-parse', '--verify', 'HEAD^{commit}']).trim(); } catch { head = 'unborn'; }
+    // Tracked files by their WORKING bytes: unstaged modifications included.
+    const tracked = list(['ls-files', '-z', '--cached']).map((rel) => [rel, hashAt(rel)]);
+    const untracked = list(['ls-files', '-z', '--others', '--exclude-standard']).map((rel) => [rel, hashAt(rel)]);
+    /*
+     * IGNORED FILES THE SUITE CAN READ: every ignored file, by content, EXCEPT
+     * inside node_modules/, which is represented by npm's own manifest
+     * (node_modules/.package-lock.json records every installed package's
+     * version and integrity, so a dependency change changes it) and the tracked
+     * package-lock.json. That covers .env*, config.json, registry.json and
+     * .claude/settings.local.json by construction, whatever else .gitignore adds.
+     */
+    const ignored = list(['ls-files', '-z', '--others', '--ignored', '--exclude-standard'])
+      .filter((rel) => !rel.startsWith('node_modules/'))
+      .map((rel) => [rel, hashAt(rel)]);
+    ignored.push(['node_modules/.package-lock.json', hashAt('node_modules/.package-lock.json')]);
+    // The secrets directory test/coordinatorAuthLive.test.mjs reads, by the same rule it uses.
+    const secretsDir = process.env.AGENTBRIDGE_SECRETS_DIR ?? path.join(homedir(), 'Documents', 'agentbridge-secrets');
+    const secrets = [['dir', path.resolve(secretsDir)]];
+    try {
+      for (const name of readdirSync(secretsDir)) {
+        /*
+         * BY CONTENT, NOT ONLY METADATA (T-159, T-154). An entry keyed by name,
+         * size and mtime let a same-size edit with the mtime preserved -- a
+         * fixed-length token restored by a timestamp-keeping copy -- reuse a PASS
+         * for secret bytes the suite never read. The digest goes only into this
+         * row, and the row only into the one sha256 key: no secret byte and no
+         * per-file digest is written to the store, the lock or any output.
+         * The live test reads top-level files by name, so a subdirectory is
+         * marked as one rather than walked, as hashAt does for the tree.
+         */
+        const full = path.join(secretsDir, name);
+        const st = statSync(full);
+        secrets.push(['entry', name, String(st.size), String(st.mtimeMs), st.isDirectory() ? 'directory' : sha256(readFileSync(full))]);
+      }
+    } catch (e) {
+      if (e?.code !== 'ENOENT') throw e;
+      secrets.push(['absent']);
+    }
+    return {
+      repoRoot: path.resolve(root),
+      head,
+      tracked,
+      untracked,
+      ignored,
+      gateScriptSha256: sha256(readFileSync(fileURLToPath(import.meta.url))),
+      suiteFiles: tests,
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      env: V.envForKey(process.env),
+      secrets,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/*
+ * THE TRUNK'S IDENTITY, WITH LOCAL'S KEY AS ITS TREE DIGEST. verifyKey still
+ * frames command, toolchain and env_digest in; the tree part is the 64-hex
+ * stopVerdict key over every observed input.
+ */
+const identityFor = (vk) => ({
+  tree_digest: vk, command: VERIFY_COMMAND, toolchain: toolchainFingerprint(), env_digest: envDigest(process.env),
+});
+const keyedFor = (vk) => (vk ? verifyKey(identityFor(vk)) : { ok: false, errors: ['no key could be observed for this tree'] });
+const readStored = (storeKey) => {
+  try { return JSON.parse(readFileSync(verifyRecordPath(storeKey), 'utf8')); } catch { return null; }
+};
+
+/**
+ * A reusable PASS for exactly these inputs, or null. THE OWNER'S RULE, IN ORDER
+ * (amendment #7: age never substitutes for identity):
+ *   1. the record's key AND its whole identity equal the ones derived now;
+ *   2. only then: state PASSED, finished, and younger than MAX_REUSE_AGE_MS --
+ *      decided by stopVerdict.chooseReuse, the tested function, unchanged.
+ * A FAILED, PARTIAL, TIMED_OUT, running or stale record is not a reuse.
+ */
+function freshPass(vk) {
+  const keyed = keyedFor(vk);
+  if (!keyed.ok) return null;
+  const rec = readStored(keyed.key);
+  if (!rec || rec.key !== keyed.key) return null;
+  if (JSON.stringify(rec.identity ?? null) !== JSON.stringify(identityFor(vk))) return null;
+  if (!Number.isFinite(rec.finished_at)) return null;
+  const candidate = { outcome: rec.state === VERIFY.PASSED ? 'pass' : 'not-a-pass', key: vk, at: new Date(rec.finished_at).toISOString() };
+  return V.chooseReuse({ records: [candidate], key: vk, nowMs: Date.now() }).reuse ? { ...candidate, record: rec } : null;
+}
+
+/** The key over every input as it is NOW, or null (no key: no reuse, no record). */
+const currentKey = () => {
+  const parts = observeKeyParts();
+  try { return parts ? V.verdictKey(parts) : null; } catch { return null; }
+};
+
+const pidAlive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
+};
+
+let lockMine = null;
+const releaseLock = () => {
+  if (!lockMine) return;
+  try {
+    const now = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (now.pid === lockMine.pid && now.startedAt === lockMine.startedAt) rmSync(lockPath, { force: true });
+  } catch { /* gone or replaced: not ours to remove */ }
+  lockMine = null;
+};
+process.on('exit', releaseLock);
+
+/*
+ * ONE SUITE AT A TIME, AND EVERY REUSE ON THE KEY AS IT IS NOW. The decisions
+ * are V.acquireOrReuse (pure, effects injected, tested point by point); this
+ * block supplies the effects. The lock records its holder's own budget, so a
+ * holder that died or overran is broken rather than waited on forever. A
+ * waiter whose budget runs out refuses with stop-deadline -- it never passes.
+ */
+const POLL_MS = 1_000;
+mkdirSync(stateDir, { recursive: true });
+const waited = await V.acquireOrReuse({
+    deadlineAt,
+    minSuiteMs: MIN_SUITE_MS,
+    pollMs: POLL_MS,
+    effects: {
+      currentKey,
+      freshPass,
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+      tryLock: () => {
+        const mine = { pid: process.pid, startedAt: new Date().toISOString(), budgetMs: suiteMs + OUTPUT_RESERVE_MS };
+        try {
+          writeFileSync(lockPath, JSON.stringify(mine), { flag: 'wx' });
+          lockMine = mine;
+          return 'taken';
+        } catch (e) {
+          return e?.code === 'EEXIST' ? 'held' : 'unusable'; // unusable: run as today, unlocked
+        }
+      },
+      readLock: () => {
+        try {
+          const text = readFileSync(lockPath, 'utf8');
+          let held;
+          try { held = JSON.parse(text); } catch { held = { unreadable: true, mtimeMs: statSync(lockPath).mtimeMs }; }
+          if (!held.unreadable) held.mtimeMs = statSync(lockPath).mtimeMs;
+          return held;
+        } catch { return 'vanished'; } // gone between the two calls: try again
+      },
+      lockIsStale: (held) => V.lockState({
+        lock: held, nowMs: Date.now(), pidAlive: Number.isInteger(held.pid) ? pidAlive(held.pid) : undefined,
+        fallbackBudgetMs: UNDECLARED_SUITE_MS + OUTPUT_RESERVE_MS,
+      }) === 'stale',
+      breakLock: () => {
+        try { renameSync(lockPath, `${lockPath}.stale.${process.pid}.${randomBytes(4).toString('hex')}`); } catch { /* another breaker won */ }
+      },
+    },
+  });
+if (waited.action === 'deadline' && waited.where === 'lock-attempt') {
+  out(`[agentbridge:stop-deadline] This gate's budget (${budget === null ? `${UNDECLARED_SUITE_MS}ms, because no Stop timeout could be read from .claude/settings.json` : `${budget.ms}ms from ${budget.source}`}) ran out while trying to take the one-suite lock. NOTHING WAS VERIFIED, so this turn is not approved.`);
+}
+if (waited.action === 'deadline') {
+  const held = waited.holder ?? {};
+  out(`[agentbridge:stop-deadline] Another Stop gate on this machine holds the one-suite lock (pid ${held.pid ?? 'unknown'}, since ${held.startedAt ?? 'unknown'}), and this gate's budget (${budget === null ? `${UNDECLARED_SUITE_MS}ms, because no Stop timeout could be read from .claude/settings.json` : `${budget.ms}ms from ${budget.source}`}) ran out while waiting for it. NOTHING WAS VERIFIED, so this turn is not approved.`);
+}
+
+/*
+ * WHICH INPUTS THIS VERDICT IS ABOUT. On reuse, the key the PASS was found under;
+ * on a run, the key observed immediately before the suite (T-153). No key at all
+ * means no identity, and no identity means no trustworthy result -- the trunk's
+ * rule: refuse rather than run a suite whose result nothing could ever be keyed by.
+ */
+const vk = waited.action === 'reuse' ? waited.record.key : waited.keyBeforeSuite;
+const keyed = keyedFor(vk);
+if (!keyed.ok) {
+  out(`[agentbridge:verify-identity-unknown] Could not form a verification identity for this tree, so no result could be trusted: ${keyed.errors.join('; ')}`);
+}
+const ident = identityFor(vk);
+
+/*
  * ═══ THIS GATE NO LONGER RUNS THE SUITE. IT CONSUMES A RESULT. ═══
  *
  * WHAT IT USED TO DO, AND WHY THAT COULD NOT WORK. It spawned the whole suite
@@ -1040,6 +1331,9 @@ if (budget !== null && suiteMs < MIN_SUITE_MS) {
  * STARTING IS DETACHED AND UNAWAITED, so this hook still answers in
  * milliseconds. The turn is refused -- nothing has been verified yet -- but the
  * NEXT turn consumes the result instead of starting a seventh duplicate.
+ *
+ * MERGE T-246: "a completed result -> consume it" now means ONLY a fresh PASS
+ * for exactly these inputs (see freshPass); the identity is local's key.
  */
 /*
  * ═══ EVERY THROW IN THIS SECTION BECOMES A REFUSAL, NEVER A SILENT EXIT ═══
@@ -1059,30 +1353,26 @@ if (budget !== null && suiteMs < MIN_SUITE_MS) {
  *
  * So the whole section is wrapped, and the catch REFUSES. Failing closed here
  * costs a blocked turn and a legible reason; failing open costs the gate.
+ * (MERGE T-246: the `try` now opens above, before the key and the lock.)
  */
-let verifyBlock = null;
-try {
-  const { verifyKey, decideVerify, admitVerification, VERIFY, ACTION } = await import('../src/verifyCache.mjs');
-  const { verificationIdentity, verifyRecordPath } = await import('../src/verifyIdentity.mjs');
+let record = waited.action === 'reuse' ? waited.record.record : readStored(keyed.key);
 
-  const ident = verificationIdentity(root, process.env);
-  const keyed = verifyKey(ident);
-
-  if (!keyed.ok) {
-  /*
-   * NO IDENTITY MEANS NO TRUSTWORTHY RESULT. Refuse rather than fall back to
-   * running the suite here -- falling back is how the duplicate returns.
-   */
-  out(`[agentbridge:verify-identity-unknown] Could not form a verification identity for this tree, so no result could be trusted: ${keyed.errors.join('; ')}`);
+/*
+ * THE TRUNK'S SINGLE-FLIGHT, UNDER THE OWNER'S REUSE RULE. decideVerify still
+ * says whether a run for this exact key is IN FLIGHT (ATTACH: start nothing). Its
+ * REUSE answer is NOT honoured here: a completed record that freshPass did not
+ * accept above is a FAILED, PARTIAL, TIMED_OUT or stale PASS, and the owner's
+ * rule says none of those is reused -- so it is treated as START and run again.
+ */
+const decision = waited.action === 'reuse'
+  ? { action: ACTION.REUSE, why: 'a fresh PASS for exactly these inputs' }
+  : decideVerify(record, { now: Date.now(), key: keyed.key });
+if (waited.action === 'reuse') {
+  const note = V.reusedPassMessage(waited.record, Date.now());
+  carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
 }
 
-let record = null;
-try { record = JSON.parse(readFileSync(verifyRecordPath(keyed.key), 'utf8')); } catch { record = null; }
-
-const decision = decideVerify(record, { now: Date.now(), key: keyed.key });
-let admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
-
-if (decision.action === ACTION.START) {
+if (waited.action === 'run' && decision.action !== ACTION.ATTACH) {
   /*
    * ═══ THIS GATE STARTS NOTHING. NOT EVEN DETACHED. ═══
    *
@@ -1131,9 +1421,14 @@ if (decision.action === ACTION.START) {
    * is the other half of the saving: without it, a turn that blocks for any
    * other reason throws away a perfectly good suite run.
    */
-  const left = budget === null ? UNDECLARED_SUITE_MS : budget.ms - Math.round(performance.now()) - OUTPUT_RESERVE_MS;
+  /*
+   * MERGE T-246: what is LEFT is measured against the gate's own deadline, so
+   * time spent waiting for the one-suite lock is charged too (local 637cdb9).
+   */
+  const left = deadlineAt - Date.now();
   if (left < MIN_SUITE_MS) {
-    out(`[agentbridge:stop-deadline] The work before verification spent ${Math.round(performance.now())}ms of a `
+    out(`[agentbridge:stop-deadline] The work before verification, including any wait for the one-suite lock, `
+      + `spent ${Math.round(performance.now())}ms of a `
       + `${budget === null ? UNDECLARED_SUITE_MS : budget.ms}ms budget, leaving ${left}ms -- less than the `
       + `${MIN_SUITE_MS}ms a run needs. NOTHING WAS VERIFIED, so this turn is not approved. Produce a result `
       + 'out of band with: npm run verify');
@@ -1148,7 +1443,7 @@ if (decision.action === ACTION.START) {
    * `guardDependenciesProtected` exist to prevent; a spawn by filename is
    * outside both.
    */
-  const { runVerification, killLiveShards } = await import('../src/verifyRunner.mjs');
+  /* runVerification and killLiveShards are imported at the top of this section (MERGE T-246). */
 
   /*
    * A DEADLINE HERE IS A REFUSAL, NOT A PASS -- AND IT MUST ALSO STOP THE RUN.
@@ -1196,8 +1491,30 @@ if (decision.action === ACTION.START) {
    * disagreed with it would be a proxy -- rule 4, which agrees with the truth
    * right up until something unusual happens.
    */
-  try { record = JSON.parse(readFileSync(verifyRecordPath(keyed.key), 'utf8')); } catch { record = null; }
-  admitted = admitVerification(record, { now: Date.now(), key: keyed.key });
+  record = readStored(keyed.key);
+
+  /*
+   * THE KEY IS OBSERVED A THIRD TIME, AFTER THE RUN (local T-153, stopVerdict.
+   * shouldRecord). The runner wrote its verdict under the key observed BEFORE the
+   * suite; if the inputs moved at any point -- during the lock wait or during
+   * the run -- that verdict describes no single state. It is rewritten PARTIAL
+   * (never FAILED, never reusable) so no later gate can take it as a PASS, and
+   * this turn is refused. Only a record THIS process wrote is rewritten.
+   * RESIDUAL, stated (amendment #5): a change made and reverted during the run
+   * leaves all three observations equal and is not detected.
+   */
+  const keyBeforeRecord = currentKey();
+  if (record && record.pid === process.pid
+      && !V.shouldRecord({ keyBeforeWait: waited.keyBeforeWait, keyBeforeSuite: waited.keyBeforeSuite, keyBeforeRecord })) {
+    record = {
+      ...record,
+      state: VERIFY.PARTIAL,
+      why: 'the observed inputs changed between the key taken before the lock wait, before the suite and after '
+        + 'the run, so this result describes no single state and must never be reused',
+    };
+    writeRecord(keyed.key, record);
+  }
+  releaseLock();
 
   if (!record) {
     out('[agentbridge:verify-absent] Verification produced no record for this tree, so NOTHING WAS VERIFIED '
@@ -1209,6 +1526,7 @@ if (decision.action === ACTION.ATTACH) {
   out(`[agentbridge:verify-in-flight] ${decision.why}. THIS TURN IS NOT APPROVED: a run in flight is not a result. `
     + 'No second suite was started -- that duplication is what made every run miss the deadline.');
 }
+/* MERGE T-246: local's tap-summary-invalid check has no TAP to read under the trunk's lifecycle; see P2 above. */
 
   /*
    * ═══ ONLY A PASS PASSES. EVERYTHING ELSE REFUSES, INCLUDING "NO ANSWER". ═══

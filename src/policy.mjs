@@ -164,6 +164,8 @@ export const PROTECTED_PATHS = Object.freeze([
   'src/verifyCache.mjs',
   'src/verifyIdentity.mjs',
   'src/verifyRunner.mjs',
+  // MERGE T-246: the gate's key and reuse rule (local's stopVerdict). Mirrors guardSession.mjs.
+  'src/stopVerdict.mjs',
   'bin/agentbridge-claude-guard.mjs',
   'scripts/claude-stop-gate.mjs',
   'test/claudeGuard.test.mjs',
