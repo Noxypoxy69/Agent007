@@ -22,10 +22,11 @@
  *
  * MERGE T-246: the fs/crypto/os imports below are local 637cdb9's, for the
  * stopVerdict key and the one-suite lock. spawnSync and the append-only verdict
- * store's openSync/writeSync/closeSync are gone with that store (retired).
+ * store are gone with that store (retired). openSync/writeSync/closeSync are
+ * back for one append-only file only: the T-264 event log (T-273 port).
  */
 import {
-  readFileSync, writeFileSync, renameSync, rmSync, statSync, readdirSync, mkdirSync,
+  readFileSync, writeFileSync, renameSync, rmSync, statSync, readdirSync, mkdirSync, openSync, writeSync, closeSync,
 } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -203,7 +204,32 @@ try { input = JSON.parse(raw || '{}'); } catch { input = null; }
 let carriedNotice = null;
 /* Set by the audit-coverage escalation; emitted after the suite, never before. */
 let escalationBlock = null;
+
+/*
+ * T-264 (ported to the merged gate by T-273): EVERY GATE EXIT IS COUNTED. A
+ * reuse, a stop-deadline, a hall pass and every other refusal left no trace, so
+ * the cost of this gate could not be measured from its own records. One line
+ * per exit to guard-sessions/stop-events.jsonl, read by NO decision; a failure
+ * to write it changes nothing. It carries the refusal TAG, never the reason text.
+ */
+let exitWasReuse = false;
+const eventLog = (verdict, text) => {
+  try {
+    const dir = path.join(process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge'), 'guard-sessions');
+    mkdirSync(dir, { recursive: true });
+    const tag = /^\[agentbridge:([a-z0-9-]+)\]/.exec(String(text ?? ''))?.[1] ?? null;
+    const line = JSON.stringify({
+      v: 1, at: new Date().toISOString(), verdict, tag, session: input?.session_id ?? null, pid: process.pid, elapsedMs: Math.round(performance.now()),
+    });
+    const fd = openSync(path.join(dir, 'stop-events.jsonl'), 'a');
+    try { writeSync(fd, `${line}\n`); } finally { closeSync(fd); }
+  } catch { /* observability only: never a verdict */ }
+};
+
 const out = (reason) => {
+  if (reason) eventLog('block', reason);
+  else if (exitWasReuse) eventLog('reuse', '[agentbridge:stop-verdict-reused]');
+  else eventLog('approve', null);
   const decision = reason ? { decision: 'block', reason } : {};
   /*
    * THE ESCALATION RIDES ALONG ON WHATEVER EXIT HAPPENS FIRST.
@@ -447,6 +473,7 @@ if (input.stop_hook_active === true) {
    * dropped for the whole exchange.
    */
   const loopBreak = '[agentbridge:stop-loop-break] A Stop hook already blocked this turn. Ending the turn unapproved instead of re-entering the same autonomous verification loop. Resolve the prior guard refusal in a fresh turn.';
+  eventLog('loop-break', loopBreak);
   process.stdout.write(`${JSON.stringify({
     systemMessage: [loopBreak, carriedNotice, escalationBlock].filter(Boolean).join('\n'),
   })}\n`);
@@ -1037,7 +1064,7 @@ if (budget !== null && suiteMs < MIN_SUITE_MS) {
  *     sha, the suite file list, the secrets dir) hashed by stopVerdict.verdictKey.
  *     That 64-hex value IS the identity's tree_digest, so it decides the store key.
  *   REUSE -- the owner's ruling (T-147), amendment #7: ONLY a PASS, ONLY after
- *     exact identity equality, and only then younger than 10 minutes
+ *     exact identity equality, and only then younger than one hour (T-273; was 10 minutes)
  *     (stopVerdict.chooseReuse). A FAILED, PARTIAL, TIMED_OUT or stale PASS is
  *     never reused: it STARTS a run. The trunk's verifyCache reused FAILED with no
  *     age limit (FINDINGS F-46); that policy is not carried into this gate.
@@ -1069,7 +1096,9 @@ try {
 const V = await import('../src/stopVerdict.mjs');
 const { verifyKey, decideVerify, VERIFY, ACTION } = await import('../src/verifyCache.mjs');
 const { verifyRecordPath, toolchainFingerprint, envDigest, VERIFY_COMMAND } = await import('../src/verifyIdentity.mjs');
-const { runVerification, killLiveShards, writeRecord } = await import('../src/verifyRunner.mjs');
+const {
+  runVerification, killLiveShards, writeRecord, readOutcomeLog, appendOutcome, outcomeLogDir,
+} = await import('../src/verifyRunner.mjs');
 
 const stateDir = path.join(process.env.AGENTBRIDGE_HOME || path.join(homedir(), '.agentbridge'), 'guard-sessions');
 const lockPath = path.join(stateDir, 'stop-suite.lock');
@@ -1095,8 +1124,18 @@ const repoRel = (abs) => {
 };
 const SELF_WRITTEN_DIR = repoRel(path.dirname(verifyRecordPath('x')));
 const SELF_WRITTEN_LOCK = repoRel(lockPath);
+/*
+ * T-273: and the three this gate now also writes -- the event log (every exit), the failure files and the
+ * hall-pass debts -- on the same terms: only when inside the root, and with the same stated limit.
+ */
+const SELF_WRITTEN_MORE = [
+  repoRel(path.join(stateDir, 'stop-events.jsonl')), repoRel(path.join(stateDir, 'stop-failures')), repoRel(path.join(stateDir, 'stop-debts')),
+  // T-344: and the outcome log (every key's directory and the temp files entries are published from).
+  repoRel(path.dirname(outcomeLogDir('0'.repeat(32)))),
+].filter((r) => r !== null);
 const selfWritten = (rel) => (SELF_WRITTEN_DIR !== null && (rel === SELF_WRITTEN_DIR || rel.startsWith(`${SELF_WRITTEN_DIR}/`)))
-  || (SELF_WRITTEN_LOCK !== null && (rel === SELF_WRITTEN_LOCK || rel.startsWith(`${SELF_WRITTEN_LOCK}.`)));
+  || (SELF_WRITTEN_LOCK !== null && (rel === SELF_WRITTEN_LOCK || rel.startsWith(`${SELF_WRITTEN_LOCK}.`)))
+  || SELF_WRITTEN_MORE.some((w) => rel === w || rel.startsWith(`${w}/`));
 
 /**
  * Every input the key covers, observed now. ANY failure to observe returns null:
@@ -1189,8 +1228,10 @@ const readStored = (storeKey) => {
  * A reusable PASS for exactly these inputs, or null. THE OWNER'S RULE, IN ORDER
  * (amendment #7: age never substitutes for identity):
  *   1. the record's key AND its whole identity equal the ones derived now;
- *   2. only then: state PASSED, finished, and younger than MAX_REUSE_AGE_MS --
- *      decided by stopVerdict.chooseReuse, the tested function, unchanged.
+ *   2. only then: state PASSED, finished, and younger than REUSE_WINDOW_MS (one
+ *      hour, T-273) -- decided by stopVerdict.chooseReuse, the tested function.
+ *      This store holds ONE record per key, overwritten by every run, so "the
+ *      newest record for the key must be a PASS" (T-273) holds by construction.
  * A FAILED, PARTIAL, TIMED_OUT, running or stale record is not a reuse.
  */
 function freshPass(vk) {
@@ -1209,6 +1250,188 @@ const currentKey = () => {
   const parts = observeKeyParts();
   try { return parts ? V.verdictKey(parts) : null; } catch { return null; }
 };
+
+/*
+ * ═══ T-273: THE HALL PASS, AND THE DEBT IT LEAVES (ported from the master gate) ═══
+ *
+ * Owner: "if your job runs late you can't be dinged if it runs." When the suite
+ * is still running at the budget, or another session's run holds the one-suite
+ * lock until it, this gate ends the turn with [agentbridge:stop-hall-pass] --
+ * UNVERIFIED, STILL OWED, never an approval, never a PASSED record -- and writes
+ * the owed key to guard-sessions/stop-debts/, per repository and session. This
+ * session's NEXT Stop must settle it: a reuse is accepted only if it settles the
+ * debt (V.debtSettledBy), otherwise verification runs; a PASS settles, a FAIL
+ * refuses and names the failing test, and a second hall pass is refused. A
+ * hall pass is also refused while the audit escalation is blocking: it never
+ * hides another refusal. NOT covered: ATTACH (a run in flight for these inputs)
+ * still refuses with verify-in-flight, as before.
+ * T-344: WHETHER A HALL PASS MAY BE GIVEN is decided from ONE source, the per-key
+ * outcome log (stopVerdict.hallPassDecision; I/O in verifyRunner). This gate
+ * appends to it after every completed run and after a run cut once it had failed.
+ */
+const {
+  failureReport, failureFileName, failureRefusalLine, hallPassMessage,
+} = V;
+const debtPath = path.join(stateDir, 'stop-debts', `${sha256(`${path.resolve(root)}|${sessionId ?? 'no-session-id'}`).slice(0, 16)}.json`);
+let debt = null;
+try { debt = V.parseDebt(readFileSync(debtPath, 'utf8')); } catch (e) {
+  if (e?.code !== 'ENOENT') debt = { key: null, at: null, cause: null, corrupt: true };   // unreadable is STILL owed
+}
+const addNotice = (line) => { carriedNotice = carriedNotice ? `${carriedNotice}\n${line}` : line; };
+const OWED_PREFIX = '[agentbridge:stop-hall-pass-owed]';
+if (debt) {
+  addNotice(`${OWED_PREFIX} This session owes verification from an earlier hall pass (key ${debt.key ? debt.key.slice(0, 16) : 'unreadable'}, since ${debt.at ?? 'unknown'}). This Stop must settle it: only a PASS for those inputs or a later state is accepted, a FAIL refuses, and no second hall pass is given.`);
+}
+function settleDebt(how) {
+  if (!debt) return;
+  try { rmSync(debtPath, { force: true }); } catch (e) {
+    addNotice(`${OWED_PREFIX} The debt was settled by ${how}, but its file could not be removed (${e?.code ?? e?.message}): ${debtPath}.`);
+    return;
+  }
+  carriedNotice = (carriedNotice ?? '').split('\n').filter((l) => l && !l.startsWith(OWED_PREFIX)).join('\n') || null;
+  addNotice(`[agentbridge:stop-hall-pass-settled] The earlier hall pass (key ${debt.key ? debt.key.slice(0, 16) : 'unreadable'}, since ${debt.at ?? 'unknown'}) is settled by ${how}.`);
+  debt = null;
+}
+/*
+ * ═══ T-273: A NON-PASS KEEPS THE NAME OF WHAT FAILED (T-269; ported from the master gate) ═══
+ *
+ * The runner keeps the tail of each failing shard's output in the record
+ * (failing_output: 6000 characters per shard, 16000 in all). Its failing test
+ * names and first message lines -- redacted of every environment value and every
+ * secrets-dir value (values shorter than FAILURE_LIMITS.minSecret are NOT) -- go to
+ * guard-sessions/stop-failures/<at>-<key8>.txt, and the refusal names the first.
+ * STATED LIMIT: a failure whose lines fell outside that tail cannot be named here;
+ * the node spec reporter prints its "failing tests" summary LAST, so the tail is
+ * where the names are, but a shard with many long failures can push early ones out.
+ * T-353 (T-344 §8 V2-F1): THAT LIMIT NOW BOUNDS THE DISPLAY ONLY. Once the tail
+ * decided allow versus refuse, a red followed by >6000 characters was a hall pass.
+ * Every decision -- the completed-run outcome, the cut path, the name in a FAIL entry
+ * and the failure file -- reads record.failure_excerpts (stopVerdict.decisionTexts):
+ * the failure lines of each failing shard's WHOLE stream, scanned as it arrived.
+ */
+const secretsDirForRedaction = process.env.AGENTBRIDGE_SECRETS_DIR ?? path.join(homedir(), 'Documents', 'agentbridge-secrets');
+function redactionValues() {
+  const values = Object.entries(process.env).map(([k, v]) => ({ label: `env:${k}`, value: v }));
+  try {
+    for (const name of readdirSync(secretsDirForRedaction)) {
+      try {
+        const full = path.join(secretsDirForRedaction, name);
+        const st = statSync(full);
+        if (!st.isFile() || st.size > 65_536) continue;
+        const body = readFileSync(full, 'utf8');
+        values.push({ label: 'secret', value: body });
+        // Token-shaped pieces too, so a token inside JSON or KEY=value is redacted on its own.
+        for (const piece of body.split(/[^A-Za-z0-9._~+/-]+/)) values.push({ label: 'secret', value: piece });
+      } catch { /* unreadable: nothing of it can reach the output through this gate */ }
+    }
+  } catch { /* no secrets dir */ }
+  return values;
+}
+/** Write the failure file; return the refusal line (which says so when the file could not be written). */
+function keepFailures({ output, key, outcome, counts }) {
+  let report = null;
+  let file = null;
+  try {
+    const at = new Date().toISOString();
+    report = failureReport({ output, at, key, outcome, counts, secrets: redactionValues() });
+    const dir = path.join(stateDir, 'stop-failures');
+    mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, failureFileName(at, key));
+    writeFileSync(target, report.text, { flag: 'wx' });
+    file = target;
+  } catch { /* observability only: never a verdict */ }
+  return failureRefusalLine({ first: report?.first ?? null, named: report?.named ?? 0, file });
+}
+
+/** How many times the one-suite-lock wait slept: > 0 means this gate's budget went on another session's run. */
+let lockWaits = 0;
+/** A reusable PASS that ALSO settles this session's debt, or null (so verification runs). */
+const freshPassForSession = (k) => {
+  const p = freshPass(k);
+  return p && V.debtSettledBy({ debt, record: p }) ? p : null;
+};
+/*
+ * The failure files kept for these inputs -- a VIEW (T-344): read only to point at where a known FAIL's detail is
+ * kept, never to decide anything. A file NAME carries only 8 key characters, so each is read and its `key:` line
+ * must match 16; a file that cannot be read is skipped here, because the outcome log, not this list, decides.
+ */
+function failureFilesFor(k) {
+  const dir = path.join(stateDir, 'stop-failures');
+  let names;
+  try { names = readdirSync(dir); } catch { return []; }
+  const files = [];
+  for (const n of names.filter((x) => x.endsWith(`-${String(k).slice(0, 8)}.txt`)).sort().reverse()) {
+    let text;
+    try { text = readFileSync(path.join(dir, n), 'utf8'); } catch { continue; }
+    if (!String(text).split(/\r?\n/).includes(`key: ${String(k).slice(0, 16)}`)) continue;
+    files.push({ file: path.join(dir, n), name: V.firstFailingFromReport(text, k) });
+  }
+  return files;
+}
+/**
+ * T-344: THE ONE SOURCE. The outcome log for these inputs, judged by stopVerdict.parseOutcomeLog. No store key
+ * means no log could be located, which is not the same as an empty one: it refuses.
+ */
+function outcomeLogFor(k) {
+  const keyedNow = keyedFor(k);
+  if (!keyedNow.ok) return { ok: false, why: 'no store key could be formed for these inputs' };
+  return readOutcomeLog(keyedNow.key);
+}
+/** The one veto (stopVerdict, T-344): the verify record for these inputs EXISTS and cannot be read. */
+function recordUnreadableFor(k) {
+  const keyedNow = keyedFor(k);
+  if (!keyedNow.ok) return true;
+  let text;
+  try { text = readFileSync(verifyRecordPath(keyedNow.key), 'utf8'); } catch (e) { return e?.code !== 'ENOENT'; }
+  return V.recordIsUnreadable(text);
+}
+/**
+ * Append a completed outcome for these inputs to the log (T-344). A failure to append is SAID, because the next
+ * Stop cannot know what this one saw -- the one gap a single source leaves, stated rather than papered over.
+ */
+function recordOutcome(k, outcome, { first = null, cut = false } = {}) {
+  const keyedNow = keyedFor(k);
+  const r = keyedNow.ok
+    ? appendOutcome(keyedNow.key, { outcome, first, cut, session: sessionId })
+    : { ok: false, why: 'no store key could be formed for these inputs' };
+  if (!r.ok) addNotice(`[agentbridge:stop-outcome-unrecorded] This run's ${outcome.toUpperCase()} could not be added to the outcome log for these inputs (${r.why}); a later Stop will not know of it.`);
+  return r;
+}
+/** The first failing test in some output, redacted exactly as the failure file is. Null when none can be named. */
+function firstFailingName(output) {
+  try { return failureReport({ output, at: new Date().toISOString(), key: null, outcome: 'fail', counts: null, secrets: redactionValues() }).first; } catch { return null; }
+}
+/** Name the failing test of a KNOWN FAIL: from the log entry itself, and where its detail is kept (the view). */
+function knownFailureLine(d, k) {
+  const kept = failureFilesFor(k);
+  const where = kept[0] ? `; kept in ${kept[0].file}` : '';
+  const name = d.first ?? kept.find((f) => f.name)?.name ?? null;
+  return name
+    ? `[agentbridge:stop-failing-test] First failing test: "${name}" -- from the recorded FAIL for these inputs (outcome log entry #${d.seq}${where}).`
+    : `[agentbridge:stop-failing-test] No failing test could be named for the recorded FAIL (outcome log entry #${d.seq}${where}).`;
+}
+/** Issue a hall pass and exit, or add the reason it was refused and return (the caller then refuses). */
+function tryHallPass(cause, k, failuresSeen) {
+  if (escalationBlock) { addNotice('[agentbridge:stop-hall-pass-refused] No hall pass: the audit escalation is refusing this turn, and a hall pass never hides another refusal.'); return; }
+  const d = V.hallPassDecision({
+    cause, key: k, debt, log: outcomeLogFor(k), failuresSeen, recordUnreadable: recordUnreadableFor(k),
+  });
+  if (!d.issue) {
+    addNotice(`[agentbridge:stop-hall-pass-refused] No hall pass: ${d.why}.`);
+    if (d.knownFail) addNotice(knownFailureLine(d, k));
+    return;
+  }
+  try {
+    mkdirSync(path.dirname(debtPath), { recursive: true });
+    writeFileSync(debtPath, V.formatDebt({ session: sessionId, key: k, at: new Date().toISOString(), cause }), { flag: 'wx' });
+  } catch (e) {
+    addNotice(`[agentbridge:stop-hall-pass-refused] No hall pass: the owed key could not be recorded (${e?.code ?? e?.message}).`);
+    return;
+  }
+  eventLog('hall-pass', '[agentbridge:stop-hall-pass]');
+  process.stdout.write(`${JSON.stringify({ systemMessage: [hallPassMessage({ key: k, cause, file: debtPath }), carriedNotice].filter(Boolean).join('\n') })}\n`);
+  process.exit(0);
+}
 
 const pidAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
@@ -1240,9 +1463,9 @@ const waited = await V.acquireOrReuse({
     pollMs: POLL_MS,
     effects: {
       currentKey,
-      freshPass,
+      freshPass: freshPassForSession,
       now: () => Date.now(),
-      sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+      sleep: (ms) => { lockWaits += 1; return new Promise((resolve) => { setTimeout(resolve, ms); }); },
       tryLock: () => {
         const mine = { pid: process.pid, startedAt: new Date().toISOString(), budgetMs: suiteMs + OUTPUT_RESERVE_MS };
         try {
@@ -1271,6 +1494,8 @@ const waited = await V.acquireOrReuse({
       },
     },
   });
+// T-273: another session's run held the lock through this gate's budget -- a late job, not a failed one.
+if (waited.action === 'deadline') tryHallPass('lock-held', currentKey(), 0);
 if (waited.action === 'deadline' && waited.where === 'lock-attempt') {
   out(`[agentbridge:stop-deadline] This gate's budget (${budget === null ? `${UNDECLARED_SUITE_MS}ms, because no Stop timeout could be read from .claude/settings.json` : `${budget.ms}ms from ${budget.source}`}) ran out while trying to take the one-suite lock. NOTHING WAS VERIFIED, so this turn is not approved.`);
 }
@@ -1370,6 +1595,7 @@ const decision = waited.action === 'reuse'
 if (waited.action === 'reuse') {
   const note = V.reusedPassMessage(waited.record, Date.now());
   carriedNotice = carriedNotice ? `${carriedNotice}\n${note}` : note;
+  exitWasReuse = true;
 }
 
 if (waited.action === 'run' && decision.action !== ACTION.ATTACH) {
@@ -1427,6 +1653,9 @@ if (waited.action === 'run' && decision.action !== ACTION.ATTACH) {
    */
   const left = deadlineAt - Date.now();
   if (left < MIN_SUITE_MS) {
+    // T-273: if the budget went on WAITING for another session's run, that is a late job. If it went on this
+    // gate's own work before verification (no wait happened), it is not a hall-pass cause: it still refuses.
+    if (lockWaits > 0) tryHallPass('lock-held', vk, 0);
     out(`[agentbridge:stop-deadline] The work before verification, including any wait for the one-suite lock, `
       + `spent ${Math.round(performance.now())}ms of a `
       + `${budget === null ? UNDECLARED_SUITE_MS : budget.ms}ms budget, leaving ${left}ms -- less than the `
@@ -1463,9 +1692,11 @@ if (waited.action === 'run' && decision.action !== ACTION.ATTACH) {
   const timedOut = Symbol('timed-out');
   let produced = null;
   let timer = null;
+  let running = null;
   try {
+    running = runVerification({ root, key: keyed.key, identity: ident, signal: control.signal });
     produced = await Promise.race([
-      runVerification({ root, key: keyed.key, identity: ident, signal: control.signal }),
+      running,
       new Promise((resolve) => { timer = setTimeout(() => resolve(timedOut), left); timer.unref?.(); }),
     ]);
   } catch (e) {
@@ -1479,6 +1710,28 @@ if (waited.action === 'run' && decision.action !== ACTION.ATTACH) {
   if (produced === timedOut) {
     control.abort();
     const reaped = killLiveShards();
+    addNotice(`[agentbridge:stop-run-stopped] ${reaped} suite process(es) were killed rather than orphaned.`);
+    /*
+     * T-273: A LATE RUN GETS A HALL PASS -- UNLESS IT HAD ALREADY FAILED. The aborted run
+     * writes its cancelled (PARTIAL) record with the output of every shard that did not
+     * exit 0; that is waited for briefly (inside the output reserve) and read for a
+     * failing test. Unknown -- no record in time -- counts as a failure seen: no hall pass.
+     */
+    const late = await Promise.race([
+      Promise.resolve(running).catch(() => null),
+      new Promise((resolve) => { const t = setTimeout(() => resolve(null), 3_000); t.unref?.(); }),
+    ]);
+    /* T-353 (T-344 §8 V2-F1): the WHOLE stream's scanned excerpts, not the display tail (V.decisionTexts). */
+    const lateTexts = late && (Array.isArray(late.failure_excerpts) || typeof late.failing_output === 'string') ? V.decisionTexts(late) : null;
+    const lateFailures = lateTexts === null ? null : V.failuresIn(lateTexts).length;
+    /*
+     * T-344 (T-331 V1, V2): a run cut AFTER it printed `not ok` is a KNOWN red, so it goes into the outcome log
+     * as a FAIL before anything is decided -- the next Stop reads it there, whatever happens to the record or the
+     * failure file. (No record in time is unknown, not red: it refuses here and writes nothing.)
+     */
+    if (lateFailures) recordOutcome(vk, 'fail', { first: firstFailingName(V.namingText(lateTexts)), cut: true });
+    tryHallPass('suite-running', vk, lateFailures);
+    if (lateFailures) addNotice(keepFailures({ output: V.failureText(lateTexts), key: vk, outcome: 'deadline', counts: null }));
     out(`[agentbridge:stop-deadline] Verification was still running after ${left}ms and this gate answered so its `
       + `verdict is not discarded; ${reaped} suite process(es) were killed rather than orphaned. NOTHING WAS `
       + 'VERIFIED, so this turn is not approved. A healthy run finishes far inside this; one that does not is a '
@@ -1504,8 +1757,22 @@ if (waited.action === 'run' && decision.action !== ACTION.ATTACH) {
    * leaves all three observations equal and is not detected.
    */
   const keyBeforeRecord = currentKey();
-  if (record && record.pid === process.pid
-      && !V.shouldRecord({ keyBeforeWait: waited.keyBeforeWait, keyBeforeSuite: waited.keyBeforeSuite, keyBeforeRecord })) {
+  const keysAgree = V.shouldRecord({ keyBeforeWait: waited.keyBeforeWait, keyBeforeSuite: waited.keyBeforeSuite, keyBeforeRecord });
+  /*
+   * T-344: A COMPLETED RUN IS ONE OUTCOME-LOG ENTRY, appended BEFORE any view of it is rewritten. Which entry is the
+   * pure stopVerdict.completedOutcome: a FAIL whenever the run ended FAILED or its output NAMES a failing test,
+   * whatever the state (T-344 r2, verifier F1: a PARTIAL run that printed `not ok` is a known red) and whether or
+   * not the key held (a red seen on a moving tree still refuses -- the safe direction); a PASS only when the key
+   * held through the run, because a PASS for a state that moved describes no single state.
+   */
+  if (record && record.pid === process.pid && produced !== timedOut) {
+    // T-353: the decision reads the scanned WHOLE stream (V.decisionTexts), never the display tail.
+    const texts = V.decisionTexts(record);
+    const outcome = V.completedOutcome({ state: record.state, failingOutput: texts, keysAgree });
+    if (outcome === 'fail') recordOutcome(vk, 'fail', { first: firstFailingName(V.namingText(texts)) });
+    else if (outcome === 'pass') recordOutcome(vk, 'pass');
+  }
+  if (record && record.pid === process.pid && !keysAgree) {
     record = {
       ...record,
       state: VERIFY.PARTIAL,
@@ -1559,6 +1826,13 @@ if (decision.action === ACTION.ATTACH) {
       + `${r.why ? `: ${r.why}` : ''}. ${r.tests ?? '?'} test(s), ${r.fail ?? '?'} failing. `
       + 'NOTHING PROVED THIS TREE PASSES, so this turn is not approved. '
       + 'Read the detail with: npm run verify -- --status --json';
+    // T-273: the refusal names the first failing test, and the failure file keeps the rest.
+    verifyBlock += `\n${keepFailures({
+      output: V.failureText(V.decisionTexts(r)), key: vk, outcome: state ?? 'no result', counts: { tests: r.tests ?? null, fail: r.fail ?? null },
+    })}`;
+  } else {
+    // T-273: a PASS for these exact inputs settles any hall pass this session owes.
+    settleDebt(waited.action === 'reuse' ? `a PASS for these inputs recorded at ${waited.record.at}` : 'a PASS from this run');
   }
 } catch (e) {
   /*

@@ -29,12 +29,17 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, renameSync, readFileSync, readdirSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  mkdirSync, writeFileSync, renameSync, readFileSync, readdirSync, linkSync, unlinkSync, lstatSync, statSync,
+} from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { aggregateShards, shardPlan, VERIFY, HEARTBEAT_MS } from './verifyCache.mjs';
 import { verifyRecordPath } from './verifyIdentity.mjs';
 import { readSuiteSummary } from './suiteSummary.mjs';
+import { failureScanner, formatOutcomeEntry, outcomeEntryName, parseOutcomeLog } from './stopVerdict.mjs';
 
 /**
  * ATOMIC. Two sessions can reach the store at once, and a half-written record
@@ -53,6 +58,108 @@ export function writeRecord(key, record, home) {
 
 export function readRecord(key, home) {
   try { return JSON.parse(readFileSync(verifyRecordPath(key, home), 'utf8')); } catch { return null; }
+}
+
+/*
+ * ═══ T-344: THE OUTCOME LOG'S I/O (the decision about it is stopVerdict.parseOutcomeLog / hallPassDecision) ═══
+ *
+ * <home>/verify-outcomes/<key>/<seq as 12 digits>.json, one file per entry. WRITE ORDER IS BY CONSTRUCTION: an
+ * entry is written in full to a temp file OUTSIDE the key's directory, then PUBLISHED under its sequence number
+ * with a hard link, which fails with EEXIST if that number is taken -- so two sessions appending at once can never
+ * both be entry N, and a reader never sees an entry half-written by a live writer. The loser re-reads and takes the
+ * next number. (A filesystem without hard links falls back to an exclusive create, 'wx', which a reader CAN catch
+ * mid-write: that is a transient refusal, never an allow.) A crash can still leave an entry NUL-filled or cut short;
+ * parseOutcomeLog refuses that, permanently for that key. Same-user state: honest-error detection only.
+ */
+const defaultHome = () => process.env.AGENTBRIDGE_HOME || path.join(os.homedir(), '.agentbridge');
+const LOG_KEY = /^[0-9a-f]{32}$/;                               // the store key (verifyCache.verifyKey)
+
+/** The key's log directory. A key that is not a 32-hex store key is refused, so no caller value can steer the path. */
+export function outcomeLogDir(key, home = defaultHome()) {
+  if (typeof key !== 'string' || !LOG_KEY.test(key)) throw new Error('outcome log: the key must be a 32-hex store key');
+  return path.join(home, 'verify-outcomes', key);
+}
+
+/*
+ * T-344 r2 (verifier §5 F2a): ONLY A GENUINELY ABSENT LOG IS "NONE". On Windows, listing <file>/<key> (the log ROOT
+ * replaced by a file) fails with ENOENT, not ENOTDIR (measured by the verifier), so "readdir said ENOENT" cannot mean
+ * "no log": it read a FAIL-bearing log as nothing ever completed. The root and the key path are therefore examined
+ * FIRST, each with lstat (a dangling link is not an absence): a path is absent only when lstat says ENOENT AND its
+ * parent is a real directory. A file, a link to nowhere, any other error, or an ENOENT under a non-directory is
+ * UNREADABLE, and parseOutcomeLog refuses it. A listing error after that (the dir vanished mid-read) refuses too.
+ */
+function pathKind(p) {
+  try { lstatSync(p); } catch (e) { return e?.code === 'ENOENT' ? 'absent' : `unexaminable (${e?.code ?? e?.message})`; }
+  try { return statSync(p).isDirectory() ? 'dir' : 'not a directory'; } catch (e) { return `a link to nothing (${e?.code ?? e?.message})`; }
+}
+function outcomeLogPresence(dir) {
+  const root = path.dirname(dir);
+  const r = pathKind(root);
+  if (r === 'absent') return pathKind(path.dirname(root)) === 'dir' ? { missing: true } : { error: 'the outcome log root is absent under a parent that is not a directory' };
+  if (r !== 'dir') return { error: `the outcome log root is ${r}` };
+  const k = pathKind(dir);
+  if (k === 'absent') return { missing: true };
+  if (k !== 'dir') return { error: `the key's outcome log is ${k}` };
+  return { present: true };
+}
+
+/** List and read the key's log, and let the pure parser judge it. Never throws. */
+export function readOutcomeLog(key, home = defaultHome()) {
+  let dir;
+  try { dir = outcomeLogDir(key, home); } catch (e) { return parseOutcomeLog({ key, listing: { error: e.message } }); }
+  const presence = outcomeLogPresence(dir);
+  if (presence.missing) return parseOutcomeLog({ key, listing: { missing: true } });
+  if (presence.error) return parseOutcomeLog({ key, listing: { error: presence.error } });
+  let names;
+  try { names = readdirSync(dir); } catch (e) {
+    return parseOutcomeLog({ key, listing: { error: String(e?.code ?? e?.message ?? e) } });   // present a moment ago
+  }
+  const entries = names.map((name) => {
+    try { return { name, text: readFileSync(path.join(dir, name), 'utf8') }; } catch (e) { return { name, error: String(e?.code ?? e?.message ?? e) }; }
+  });
+  return parseOutcomeLog({ key, listing: { entries } });
+}
+
+/**
+ * Append one entry: { outcome: 'pass'|'fail', first?, cut?, session?, at? }. Returns { ok: true, seq } or
+ * { ok: false, why } -- never throws. An entry is NOT appended to a log that is already malformed: that log refuses
+ * every hall pass for this key anyway, and a sequence number after an unreadable entry would be a guess.
+ */
+export function appendOutcome(key, entry, home = defaultHome(), { attempts = 32, beforePublish = null } = {}) {
+  try {
+    const dir = outcomeLogDir(key, home);
+    const root = path.dirname(dir);
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const log = readOutcomeLog(key, home);
+      if (!log.ok) return { ok: false, why: log.why };
+      const seq = log.count + 1;
+      const text = formatOutcomeEntry({
+        key, seq, outcome: entry?.outcome, at: entry?.at ?? new Date().toISOString(),
+        first: entry?.first ?? null, cut: entry?.cut === true, session: entry?.session ?? null,
+      });
+      mkdirSync(dir, { recursive: true });
+      const target = path.join(dir, outcomeEntryName(seq));
+      const tmp = path.join(root, `.tmp-${key.slice(0, 16)}-${process.pid}-${randomBytes(6).toString('hex')}`);
+      writeFileSync(tmp, text, { flag: 'wx' });
+      try {
+        if (beforePublish) beforePublish({ seq, target });             // a TEST seam: lets a test take #seq first
+        linkSync(tmp, target);
+        return { ok: true, seq, retries: attempt };
+      } catch (e) {
+        if (e?.code === 'EEXIST') continue;                           // lost the race for #seq: re-read, take the next
+        if (!['EPERM', 'ENOTSUP', 'ENOSYS', 'EXDEV', 'EINVAL'].includes(e?.code)) return { ok: false, why: String(e?.code ?? e?.message) };
+        try { writeFileSync(target, text, { flag: 'wx' }); return { ok: true, seq, retries: attempt }; } catch (e2) {
+          if (e2?.code === 'EEXIST') continue;
+          return { ok: false, why: String(e2?.code ?? e2?.message) };
+        }
+      } finally {
+        try { unlinkSync(tmp); } catch { /* already gone */ }
+      }
+    }
+    return { ok: false, why: `lost the race for a sequence number ${attempts} times` };
+  } catch (e) {
+    return { ok: false, why: String(e?.code ?? e?.message ?? e) };
+  }
 }
 
 /** How many test files there are, so a shard plan cannot outnumber them. */
@@ -179,8 +286,11 @@ function runShard(root, shard, signal, spawnFn = spawn, killTree = defaultKillTr
     const onAbort = () => { try { killTree(child); } catch { /* already gone */ } };
     signal?.addEventListener?.('abort', onAbort, { once: true });
     let out = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { out += d; });
+    /* T-353: each stream is SCANNED as it arrives, so the decision never depends on the display tail below. One
+     * scanner per stream: a line is never spliced from two streams, and a red on stderr is read like one on stdout. */
+    const scan = { stdout: failureScanner(), stderr: failureScanner() };
+    child.stdout.on('data', (d) => { out += d; scan.stdout.push(d); });
+    child.stderr.on('data', (d) => { out += d; scan.stderr.push(d); });
     const done = () => {
       live.delete(entry);
       signal?.removeEventListener?.('abort', onAbort);
@@ -203,10 +313,32 @@ function runShard(root, shard, signal, spawnFn = spawn, killTree = defaultKillTr
         index: shard.index,
         exitCode,
         ...shardCounts(out, exitCode),
-        output: out.slice(-6000),
+        output: out.slice(-6000),   // the DISPLAY tail only (T-353): no decision reads it when `failures` is present
+        failures: ['stdout', 'stderr'].map((stream) => ({ stream, ...scan[stream].end() })),
       });
     });
   });
+}
+
+/*
+ * T-273 r2 (T-292 F1): THE STORE HOLDS ONE RECORD PER KEY, AND THIS RUNNER OVERWRITES IT WITH RUNNING AT ITS START
+ * AND PARTIAL ON ABORT -- which erased a VERIFY_FAILED, so a slow re-run of a KNOWN failing tree looked like a
+ * late job and the Stop gate gave it a hall pass. The last COMPLETED outcome (PASSED or FAILED) is therefore
+ * carried forward in `last_completed` through every write this runner makes. Only the state and time: no output.
+ * T-273 r3 (T-323 F7, F9): a previous record that EXISTS but cannot be read (NUL-filled, empty, truncated) or that
+ * carries a malformed result is not "nothing before" -- it is carried as { state: 'UNKNOWN' } until a run completes.
+ * T-344: THIS IS NOW A VIEW for people reading the record. The Stop gate's hall-pass decision no longer reads it:
+ * it reads the per-key outcome log (appendOutcome above), whose write order is the order of events.
+ */
+function lastCompletedOf(key, home) {
+  const UNKNOWN = { state: 'UNKNOWN' };
+  const done = (r) => (r && (r.state === VERIFY.PASSED || r.state === VERIFY.FAILED) && Number.isSafeInteger(r.finished_at)
+    ? { state: r.state, finished_at: r.finished_at } : null);
+  let prev;
+  try { prev = JSON.parse(readFileSync(verifyRecordPath(key, home), 'utf8')); } catch (e) { return e?.code === 'ENOENT' ? null : UNKNOWN; }
+  if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return UNKNOWN;
+  if (prev.last_completed === undefined || prev.last_completed === null) return done(prev);
+  return done(prev) ?? done(prev.last_completed) ?? UNKNOWN;
 }
 
 /**
@@ -240,10 +372,12 @@ export async function runVerification({
   const files = countTestFiles(root);
   const wanted = Number.isInteger(shards) && shards > 0 ? shards : 1;
   const plan = shardPlan({ total: files > 0 ? Math.min(wanted, files) : 1, files });
+  // T-273 r2: this key's last COMPLETED outcome survives the RUNNING/PARTIAL writes below (the Stop gate's hall pass reads it).
+  const last_completed = lastCompletedOf(key, home);
   if (!plan.ok) {
     const rec = {
       key, identity, state: VERIFY.PARTIAL, why: plan.errors.join('; '), pid: process.pid,
-      started_at: now(), heartbeat_at: now(), finished_at: now(), tests: 0, fail: 0,
+      started_at: now(), heartbeat_at: now(), finished_at: now(), tests: 0, fail: 0, last_completed,
     };
     writeRecord(key, rec, home);
     return rec;
@@ -258,6 +392,7 @@ export async function runVerification({
     started_at: started,
     heartbeat_at: started,
     shards: plan.shards.map((s) => ({ index: s.index, total: s.total })),
+    last_completed,
   };
   writeRecord(key, base, home);
 
@@ -339,6 +474,18 @@ export async function runVerification({
     failing_output: verdict.state === VERIFY.PASSED
       ? null
       : results.filter((r) => r.exitCode !== 0).map((r) => r.output).join('\n---\n').slice(-16000),
+    /*
+     * T-353 (T-344 §8 V2-F1): WHAT A DECISION READS. failing_output above is a DISPLAY: 6000 characters per shard and
+     * 16000 in all, so a red followed by more output than that was not in it. These are the lines of EVERY failing
+     * shard's WHOLE stream that name a failure (stopVerdict.failureScanner), one segment per shard and stream, never
+     * joined or sliced: stopVerdict.decisionTexts reads them and failuresIn counts a red in any one of them.
+     * Same shards as failing_output (exit non-zero), and null for a PASS, exactly as before.
+     */
+    failure_excerpts: verdict.state === VERIFY.PASSED
+      ? null
+      : results.filter((r) => r.exitCode !== 0).sort((a, b) => a.index - b.index).flatMap((r) => (Array.isArray(r.failures) ? r.failures : [])
+        .filter((f) => f.text !== '')
+        .map((f) => ({ shard: r.index, stream: f.stream, text: f.text, entries: f.entries, dropped: f.dropped }))),
   };
   writeRecord(key, final, home);
   return final;

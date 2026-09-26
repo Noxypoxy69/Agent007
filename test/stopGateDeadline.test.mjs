@@ -190,6 +190,7 @@ function stop(dir, sessionId, killAfterMs = null) {
     killed: r.error?.code === 'ETIMEDOUT',
     reason: parsed.reason ?? '',
     blocked: parsed.decision === 'block',
+    message: parsed.systemMessage ?? '',
   };
 }
 
@@ -220,10 +221,19 @@ test('the gate refuses before the hook deadline instead of being killed into a s
    */
   assert.equal(verdict.killed, false,
     `the hook deadline killed the gate, so it rendered no decision -- which IS an approval (${verdict.elapsedMs}ms)`);
-  assert.equal(verdict.blocked, true,
-    `a suite that could not finish must refuse, got: ${JSON.stringify(verdict)}`);
-  assert.match(verdict.reason, /stop-deadline/,
-    `the refusal must name the deadline so it is actionable, got: ${verdict.reason}`);
+  /*
+   * T-273 (owner: "if your job runs late you can't be dinged if it runs"): the POST-RUN branch -- a suite still
+   * running at the budget -- now ends the turn with a HALL PASS: rendered, distinct, owed, never an approval.
+   * The PRE-RUN branch (this gate's own work left too little budget, no lock wait) still refuses. Either way the
+   * gate SPEAKS before the killer, which is what this test exists for.
+   */
+  const hallPass = /^\[agentbridge:stop-hall-pass\] UNVERIFIED, STILL OWED -- this is NOT an approval/.test(verdict.message);
+  assert.equal(verdict.blocked, !hallPass,
+    `a suite that could not finish must either refuse or take a hall pass, got: ${JSON.stringify(verdict)}`);
+  if (!hallPass) {
+    assert.match(verdict.reason, /stop-deadline/,
+      `the refusal must name the deadline so it is actionable, got: ${verdict.reason}`);
+  }
   assert.ok(verdict.elapsedMs < HOOK_TIMEOUT_S * 1000,
     `the gate must speak BEFORE the deadline, not race it (${verdict.elapsedMs}ms of ${HOOK_TIMEOUT_S * 1000}ms)`);
 
@@ -267,12 +277,14 @@ test('the gate refuses before the hook deadline instead of being killed into a s
    * CHILDREN" and "killLiveShards REAPS A CHILD THE ABORT DID NOT"). Without
    * that, this would be a guard dressed as an assertion.
    */
-  const postRun = /killed rather than orphaned/.test(verdict.reason);
+  const said = `${verdict.reason}\n${verdict.message}`;
+  const postRun = /killed rather than orphaned/.test(said);
+  assert.equal(postRun, hallPass, `T-273: the post-run branch and the hall pass must coincide here (no failing test, no debt): ${said}`);
   if (postRun) {
-    const reaped = Number(/(\d+) suite process\(es\) were killed/.exec(verdict.reason)?.[1] ?? -1);
+    const reaped = Number(/(\d+) suite process\(es\) were killed/.exec(said)?.[1] ?? -1);
     assert.ok(reaped >= 1,
       `the gate reached the post-run deadline and reaped nothing (reaped=${reaped}). Every timed-out Stop `
-      + `then leaks a full suite per shard, unbounded across turns: ${verdict.reason}`);
+      + `then leaks a full suite per shard, unbounded across turns: ${said}`);
   } else {
     assert.match(verdict.reason, /less than the|cannot finish|NOTHING WAS VERIFIED/,
       `the refusal is a deadline but matches neither known branch, so the gate has grown a third path `
