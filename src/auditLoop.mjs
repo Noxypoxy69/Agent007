@@ -82,20 +82,226 @@ const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v
  * instead of STOP. So: every step is guarded, the text falls back to String()
  * and then to a placeholder, and the TYPE is always named -- `10n (bigint)`
  * and `"1" (string)` must not read alike.
+ *
+ * ═══ AND BOUNDED, BEFORE ANY CONCATENATION. T-316 / B-28 F-A ═══
+ *
+ * Total was not enough: an object whose toString returns a near-
+ * MAX_STRING_LENGTH string made `${text} (${type})` overflow, a RangeError out
+ * of the same fail-closed branch, and nothing capped the text at all. The
+ * text is cut to DESCRIBED_MAX characters plus an ellipsis FIRST, so every
+ * concatenation after it is over a bounded string. A cut never splits a
+ * surrogate pair.
+ *
+ * Exported because src/auditDispatch.mjs builds its unreadable-counter reason
+ * with it: one helper, so the two fail-closed reasons cannot drift apart.
  */
-function describeValue(v) {
+const DESCRIBED_MAX = 200;
+/*
+ * Exported for the one caller that must cap a string it has already
+ * validated WITHOUT describing it -- auditDispatch's `(${author})`, whose
+ * unquoted form test/daemonArgs.test.mjs pins (T-316 r3 (b)).
+ *
+ * TOTAL, because an exported cap is a promise to every caller (T-316 r4 /
+ * T-324 F1): r3 reached it with a BigInt from an attacker's iterator and it
+ * threw `t.charCodeAt is not a function`. A non-string is DESCRIBED instead
+ * -- describeValue only ever hands this a string, so there is no loop.
+ */
+export function capText(t) {
+  if (typeof t !== 'string') return describeValue(t);
+  if (t.length <= DESCRIBED_MAX) return t;
+  let cut = DESCRIBED_MAX;
+  const c = t.charCodeAt(cut - 1);
+  if (c >= 0xd800 && c <= 0xdbff) cut -= 1;
+  return `${t.slice(0, cut)}…`;
+}
+
+/*
+ * ═══ DESCRIBING A VALUE MUST NOT WALK IT. T-316 r5 / T-326 F1 ═══
+ *
+ * Bounded LENGTH was not enough; the TIME was unbounded. The String()
+ * fallback joined every hole of a sparse length-2**32-1 array (~66 s,
+ * measured by T-326), and r4 had routed three sites that used to throw in
+ * under 50 ms through it. JSON.stringify itself walked a sparse 1e8 array
+ * for ~4 s at every site, 8a8e136 included (live/T-316/work/r5/timing-*.json).
+ * My B-36 note blamed JSON.stringify for the first one; it was the fallback.
+ *
+ * So nothing here walks a container without a budget:
+ *  - JSON.stringify runs with a replacer that counts every value it visits
+ *    and stops at WALK_MAX, and refuses, BEFORE they are walked, any array
+ *    or typed array longer than WALK_MAX -- at any depth, since the replacer
+ *    sees each value before JSON enumerates it.
+ *  - String() is never applied to an object. A container JSON could not
+ *    print is described by kind and length; a function through the
+ *    intrinsic Function.prototype.toString; anything else as unprintable.
+ *  - A typed array's kind and length come from the intrinsic %TypedArray%
+ *    getters, which the value cannot override.
+ *
+ * ═══ AND NOTHING HERE COSTS TIME IN PROPORTION TO THE VALUE. T-356 / B-28 ═══
+ *
+ * The visit budget bounds how many values the replacer is SHOWN, not what
+ * JSON.stringify does before it shows them, and both gaps are reachable from
+ * the JSONL audit store (JSON.parse of one line, up to MAX_STRING_LENGTH):
+ *  - JSON collects ALL of an object's own keys before the replacer sees the
+ *    first one. `{"k0":0,...}` with 5e6 keys (65M chars, one line) took
+ *    5.2 s at the review_attempts and last-cause sites; measured ~0.77 us
+ *    per key, the same as Object.keys, so NO enumeration is cheap enough and
+ *    no O(1) probe of an object's size exists. So `keys: false` (the
+ *    dispatcher's mode: its values ARE store rows) never lets JSON open a
+ *    plain object: the value is named, its keys are not read. auditLoop's own
+ *    sites keep `keys: true`, because their values are the daemon's
+ *    in-process counters and CLI numbers -- no store row reaches them -- and
+ *    `backoffServed is {}` is pinned (T-291 B-10).
+ *  - JSON escapes a WHOLE string before capText cuts it: 1e7 lone
+ *    surrogates took 1.75 s. A string longer than STRING_WALK_MAX is handed
+ *    to JSON already cut. That cannot change the shown text: every input
+ *    character yields at least one output character, so the first
+ *    DESCRIBED_MAX output characters come from the first DESCRIBED_MAX input
+ *    characters, and the cut string still overruns the cap, so the ellipsis
+ *    stays. A pair split at STRING_WALK_MAX lands past the cap too.
+ */
+const WALK_MAX = 1000;
+const STRING_WALK_MAX = DESCRIBED_MAX + 56;
+const OBJECT_NOT_READ = 'its keys were not read';
+const TOO_LARGE = Object.freeze({ tooLarge: true });
+const TYPED_PROTO = Object.getPrototypeOf(Uint8Array.prototype);
+const typedName = Object.getOwnPropertyDescriptor(TYPED_PROTO, Symbol.toStringTag).get;
+const typedLength = Object.getOwnPropertyDescriptor(TYPED_PROTO, 'length').get;
+const viewByteLength = Object.getOwnPropertyDescriptor(DataView.prototype, 'byteLength').get;
+const fnSource = Function.prototype.toString;
+
+/* The kind and length of a container too large to walk, or null. An array's
+ * length may be a proxy trap; the caller guards. A length that is not a
+ * number counts as too large, since JSON would coerce it and walk. */
+function tooLargeToWalk(value) {
+  if (value === null || typeof value !== 'object') return null;
+  if (ArrayBuffer.isView(value)) {
+    const name = typedName.call(value);
+    const length = name === undefined ? viewByteLength.call(value) : typedLength.call(value);
+    return length > WALK_MAX ? { kind: name ?? 'DataView', length } : null;
+  }
+  if (Array.isArray(value)) {
+    const { length } = value;
+    if (typeof length === 'number' && length <= WALK_MAX) return null;
+    return { kind: 'array', length: typeof length === 'number' ? length : 'unreadable' };
+  }
+  return null;
+}
+
+/* A plain object: something JSON would open by collecting all its keys. */
+const isPlainObject = (value) => value !== null && typeof value === 'object'
+  && !Array.isArray(value) && !ArrayBuffer.isView(value);
+
+function boundedJSON(v, type, keys) {
+  let visits = 0;
+  let big = null;
+  try {
+    return JSON.stringify(v, function bounded(key, value) {
+      visits += 1;
+      if (visits > WALK_MAX) { big = { budget: true }; throw TOO_LARGE; }
+      const size = tooLargeToWalk(value);
+      if (size) { big = { ...size, root: visits === 1 }; throw TOO_LARGE; }
+      if (!keys && isPlainObject(value)) { big = { object: true, root: visits === 1 }; throw TOO_LARGE; }
+      if (typeof value === 'string' && value.length > STRING_WALK_MAX) return value.slice(0, STRING_WALK_MAX);
+      return value;
+    });
+  } catch (e) {
+    if (e !== TOO_LARGE || big === null) throw e;
+    if (big.budget) return `<${type} with more than ${WALK_MAX} values>`;
+    if (big.object) return big.root ? `<object: ${OBJECT_NOT_READ}>` : `<${type} holding an object: ${OBJECT_NOT_READ}>`;
+    if (big.root) return `<${big.kind} of length ${big.length}>`;
+    return `<${type} holding ${big.kind === 'array' ? 'an' : 'a'} ${big.kind} of length ${big.length}>`;
+  }
+}
+
+/* When JSON could not print it: never String() an object. */
+function describeUnprintable(v) {
+  if (typeof v === 'function') return fnSource.call(v);
+  if (v === null || typeof v !== 'object') return String(v);
+  if (Array.isArray(v)) {
+    const { length } = v;
+    return `<array of length ${typeof length === 'number' ? length : 'unreadable'}>`;
+  }
+  return '<unprintable>';
+}
+
+/**
+ * @param {{keys?: boolean}} [opts] keys: false never opens a plain object
+ *   (T-356): for values that come from the audit store, where an object's key
+ *   count is bounded only by the line cap. Default true (auditLoop's own sites).
+ */
+export function describeValue(v, { keys = true } = {}) {
   let type = v === null ? 'null' : typeof v;
   try { if (Array.isArray(v)) type = 'array'; } catch { /* a revoked proxy throws here */ }
   let text;
   try {
     if (typeof v === 'number') text = String(v);
     else if (typeof v === 'bigint') text = `${String(v)}n`;
-    else text = JSON.stringify(v);
+    else text = boundedJSON(v, type, keys);
   } catch { text = undefined; }
   if (typeof text !== 'string') {
-    try { text = String(v); } catch { text = '<unprintable>'; }
+    try { text = describeUnprintable(v); } catch { text = '<unprintable>'; }
   }
-  return `${text} (${type})`;
+  const shown = capText(text);
+  return `${shown} (${type})`;
+}
+
+/*
+ * THE DISPATCHER'S REASONS, READ SAFELY AND PRINTED BOUNDED. T-316 r3 (a).
+ *
+ * `Array.isArray` throws on a revoked proxy, `.filter` runs a hostile get
+ * trap, and `join` overflowed on one near-max element -- inside the STARVED
+ * STOP, the message an operator most needs. So: the whole read is guarded
+ * (a throw is reported as unreadable, never as "none reported"), only
+ * non-blank strings count, each is capped with capText BEFORE the join, and
+ * at most MAX_REASONS are printed with a count of the rest.
+ *
+ * ═══ AND NOTHING THE INPUT CAN OVERRIDE IS EVER CALLED. T-316 r4 / T-324 F1 ═══
+ *
+ * r3 used Array.prototype.filter, which builds its result through the
+ * input's `constructor[Symbol.species]`, then spread `new Set(result)`, which
+ * runs that result's own iterator. So a REAL Array (isArray true) put 5n,
+ * null and an object into capText, outside the guard -- a new throw where
+ * 8a8e136 had returned STARVED. Now: an index loop reads `length` and each
+ * element of the input under the guard and copies strings into arrays THIS
+ * function created; no filter, slice, map, species or iterator of the input
+ * is touched, and the join is inside the guard too.
+ *
+ * THE SCAN IS BOUNDED. `a.length = 2 ** 32 - 1` made the old filter walk four
+ * billion holes (over 20 s, measured at 8a8e136 and at r3), and an index loop
+ * inherits that unless it stops. At most MAX_SCAN entries are read, and a
+ * cut-short scan says so.
+ */
+const MAX_REASONS = 10;
+const MAX_SCAN = 1000;
+function readReasons(state) {
+  try {
+    const v = state.unplacedReasons;
+    if (!Array.isArray(v)) return { text: '', unreadable: false };
+    /* A length that is not a non-negative safe integer is UNREADABLE, never
+     * empty (T-316 r5 / T-326 F3): only a proxy can hand one over, and "none
+     * reported" would be a claim about reasons this never saw. */
+    const length = v.length;
+    if (!Number.isSafeInteger(length) || length < 0) return { text: '', unreadable: true };
+    const total = length;
+    const scan = Math.min(total, MAX_SCAN);
+    const distinct = [];
+    for (let i = 0; i < scan; i += 1) {
+      const r = v[i];
+      if (typeof r !== 'string' || r.trim() === '' || distinct.includes(r)) continue;
+      distinct[distinct.length] = r;
+    }
+    const shown = [];
+    for (let i = 0; i < distinct.length && i < MAX_REASONS; i += 1) shown[i] = capText(distinct[i]);
+    let text = shown.join(', ');
+    const more = distinct.length - MAX_REASONS;
+    if (more > 0) text += `, and ${more} more`;
+    if (total > scan) {
+      text += `${text === '' ? 'nothing readable' : ''} (only the first ${scan} of ${total} entries were read)`;
+    }
+    return { text, unreadable: false };
+  } catch {
+    return { text: '', unreadable: true };
+  }
 }
 
 /**
@@ -194,7 +400,9 @@ export function nextAction(state = {}, opts = {}) {
     return {
       action: LOOP_ACTION.STOP,
       code: LOOP_STOP.DEADLINE,
-      why: `deadlineMs is ${JSON.stringify(o.deadlineMs)}, which is not a duration in `
+      /* describeValue, not JSON.stringify: that threw on 17 of 33 hostile
+       * values out of this fail-closed branch, uncapped (T-316 r2 / T-320 F2). */
+      why: `deadlineMs is ${describeValue(o.deadlineMs)}, which is not a duration in `
         + 'milliseconds. A deadline that was asked for and cannot be read stops the loop: '
         + 'running unbounded is the one outcome the caller did not ask for',
     };
@@ -251,17 +459,16 @@ export function nextAction(state = {}, opts = {}) {
      * guessed. When they are absent the message says the causes are
      * CANDIDATES rather than asserting them.
      */
-    const reasons = Array.isArray(s.unplacedReasons)
-      ? [...new Set(s.unplacedReasons.filter((r) => typeof r === 'string' && r.trim()))]
-      : [];
+    const reasons = readReasons(s);
     return {
       action: LOOP_ACTION.STOP,
       code: LOOP_STOP.STARVED,
       why: `${noProgress} consecutive cycles placed nothing while ${depth} job(s) were `
-        + `claimable. THE QUEUE IS NOT EMPTY. ${reasons.length > 0
-          ? `The dispatcher refused them for: ${reasons.join(', ')}. `
+        + `claimable. THE QUEUE IS NOT EMPTY. ${reasons.text !== ''
+          ? `The dispatcher refused them for: ${reasons.text}. `
             + 'Note that a seat or a lapsing lease only helps the seat-related ones'
-          : 'No reason was reported, so the cause is UNKNOWN rather than assumed. '
+          : `${reasons.unreadable ? 'The reasons passed in could not be read'
+            : 'No reason was reported'}, so the cause is UNKNOWN rather than assumed. `
             + 'Common ones are a live claim on every seat, a candidate that is this '
             + "daemon's own work, an exhausted review counter, or an author that "
             + 'could not be established -- and the last two are not fixed by waiting'}`,

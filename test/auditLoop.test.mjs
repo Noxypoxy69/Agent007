@@ -13,10 +13,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { constants } from 'node:buffer';
+import { spawnSync } from 'node:child_process';
 
 import { stripComments } from '../src/moduleGraph.mjs';
 import {
-  nextAction, LOOP_ACTION, LOOP_STOP, LOOP_DEFAULTS,
+  nextAction, LOOP_ACTION, LOOP_STOP, LOOP_DEFAULTS, capText,
 } from '../src/auditLoop.mjs';
 
 test('THE POSITIVE FIRST: work available and budget left means TICK (rule 5)', () => {
@@ -237,10 +239,10 @@ test('T-291 B-10: backoffServed IS SERVED ONLY FOR THE BOOLEAN true', () => {
       : want === LOOP_ACTION.STOP
         ? `B-22: corrupt backoffServed ${label} did not fail closed (got ${got})`
         : `B-10: backoffServed ${label} was read as served (got ${got})`);
-    if (want === LOOP_ACTION.STOP) {
-      assert.equal(r.code, LOOP_STOP.STARVED, `B-22: corrupt backoffServed ${label} stopped as ${r.code}`);
-      assert.ok(r.why.includes(`backoffServed is ${label}`), `B-22: the reason does not name the marker: ${r.why}`);
-    }
+    /* Two-sided (T-356 r2, hook K-5: no assertion behind an if): a STOP names the marker and carries STARVED; a
+     * WAIT or TICK carries no stop code and does not talk about the marker. */
+    assert.equal(r.code, want === LOOP_ACTION.STOP ? LOOP_STOP.STARVED : undefined, `B-22: backoffServed ${label} ${want === LOOP_ACTION.STOP ? `stopped as ${r.code}` : `carries stop code ${r.code} on a ${got}`}`);
+    assert.equal(r.why.includes(`backoffServed is ${label}`), want === LOOP_ACTION.STOP, `B-22: the reason does not name the marker${want === LOOP_ACTION.STOP ? '' : ' -- or names it on a non-stop'}: ${r.why}`);
   }
 });
 
@@ -326,6 +328,422 @@ test('T-305 B-25 F1: THE CORRUPT-MARKER REASON IS TOTAL -- it never throws, and 
   }
   /* The BigInt is shown as what it is, not as a number it is not. */
   assert.ok(nextAction({ ...s, backoffServed: 10n }).why.startsWith('backoffServed is 10n (bigint)'));
+});
+
+/*
+ * ═══ T-316 / B-28 F-A: THE DESCRIBED VALUE IS BOUNDED, BEFORE ANY CONCATENATION ═══
+ *
+ * T-308 F-A: after T-305 the builder no longer threw on a BigInt or a cycle,
+ * but an object whose toString returns a near-MAX_STRING_LENGTH string made
+ * `${text} (${type})` overflow -- a RangeError out of a fail-closed branch --
+ * and nothing capped the text at all. The rope is derived from the running
+ * engine (rule 21); `repeat` builds it lazily and the first slice flattens
+ * it once (measured ~0.15 s, ~540 MB transient on node 24).
+ */
+const NEAR_MAX = 'x'.repeat(constants.MAX_STRING_LENGTH - 5);
+const shownFor = (value) => {
+  const r = nextAction({ queueDepth: 50, consecutiveNoProgress: 1, backoffServed: value }, { intervalMs: 1000 });
+  assert.equal(r.action, LOOP_ACTION.STOP);
+  const m = /^backoffServed is ([\s\S]*) \((\w+)\), which is not a boolean\. /.exec(r.why);
+  assert.ok(m, `F-A: the reason lost its subject or type: ${String(r.why).slice(0, 120)}`);
+  return { text: m[1], type: m[2] };
+};
+
+test('T-316 B-28 F-A: A NEAR-MAX-LENGTH VALUE NEVER THROWS, and the text shown is capped', () => {
+  const hostile = [
+    ['object', { toJSON() { return undefined; }, toString() { return NEAR_MAX; } }],
+    ['object', { toJSON() { throw new Error('t'); }, toString() { return NEAR_MAX; } }],
+    ['object', { toJSON() { return NEAR_MAX; } }],
+    ['string', NEAR_MAX],
+    ['string', `${NEAR_MAX}yyyy`],
+    ['array', [NEAR_MAX]],
+    ['object', { k: NEAR_MAX }],
+    ['string', 'y'.repeat(1e6)],
+    ['bigint', 10n ** 1000n],
+  ];
+  for (const [type, value] of hostile) {
+    let got;
+    try { got = shownFor(value); } catch (e) {
+      if (e?.code === 'ERR_ASSERTION') throw e;
+      assert.fail(`F-A: a ${type} backoffServed THREW in the reason builder: `
+        + `${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+    }
+    assert.equal(got.type, type, `F-A: a ${type} was described as ${got.type}`);
+    assert.ok(got.text.length <= 201, `F-A: the described ${type} is UNBOUNDED (${got.text.length} chars)`);
+  }
+});
+
+test('T-316 r3 (a): THE STARVED REASON NEVER THROWS ON A HOSTILE unplacedReasons, and it is capped', () => {
+  /*
+   * `Array.isArray` throws on a revoked proxy, `.filter` runs a hostile get
+   * trap, and `reasons.join(', ')` overflowed on a near-max element -- all
+   * inside the STOP branch the operator most needs to see. Hostile at BOTH
+   * levels: the container, and the elements in it (rule 7).
+   */
+  const { proxy: revoked, revoke } = Proxy.revocable({}, {}); revoke();
+  const { proxy: revokedArr, revoke: revokeArr } = Proxy.revocable([], {}); revokeArr();
+  const trapArr = new Proxy(['a'], {
+    get(t, k) { if (k === 'length' || typeof k === 'symbol') return Reflect.get(t, k); throw new Error('arr get trap'); },
+  });
+  const cyclic = {}; cyclic.self = cyclic;
+  const hostile = [
+    ['revoked proxy', revoked], ['revoked array proxy', revokedArr], ['array with a get trap', trapArr],
+    ['[nearMax]', [NEAR_MAX]], ['[nearMax, nearMax+y]', [NEAR_MAX, `${NEAR_MAX}y`]],
+    ['50 distinct 250-char reasons', Array.from({ length: 50 }, (_, i) => `${i}`.padEnd(250, 'r'))],
+    ['hostile elements', [2n, Symbol('s'), cyclic, revoked, { toString() { throw new Error('t'); } }, null, 'ok_code']],
+    ['2n', 2n], ['string', 'review_exhausted'], ['object', { length: 3 }],
+  ];
+  for (const [label, value] of hostile) {
+    let r;
+    try {
+      r = nextAction({ ticksUsed: 1, consecutiveNoProgress: 5, queueDepth: 7, unplacedReasons: value }, { starvedLimit: 5 });
+    } catch (e) {
+      assert.fail(`(a): a ${label} unplacedReasons THREW in the STARVED reason: `
+        + `${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+    }
+    assert.equal(r.code, LOOP_STOP.STARVED, `(a): a ${label} unplacedReasons did not stop as STARVED`);
+    assert.ok(r.why.length <= 3000, `(a): the STARVED reason for a ${label} is UNBOUNDED (${r.why.length} chars)`);
+    assert.match(r.why, /THE QUEUE IS NOT EMPTY/);
+  }
+  /* A container that cannot be read is NAMED as such, not passed off as "none reported". */
+  const unread = nextAction({ ticksUsed: 1, consecutiveNoProgress: 5, queueDepth: 7, unplacedReasons: revoked }, { starvedLimit: 5 });
+  assert.match(unread.why, /could not be read/, '(a): an unreadable unplacedReasons was reported as if absent');
+  /* THE POSITIVE (rule 5): real codes still print whole, beside hostile elements. */
+  const mixed = nextAction({ ticksUsed: 1, consecutiveNoProgress: 5, queueDepth: 7, unplacedReasons: hostile[6][1] }, { starvedLimit: 5 });
+  assert.match(mixed.why, /The dispatcher refused them for: ok_code\. /);
+  /* The cap is on the COUNT too: 50 distinct reasons show the first 10 and say how many were left out. */
+  const many = nextAction({ ticksUsed: 1, consecutiveNoProgress: 5, queueDepth: 7, unplacedReasons: hostile[5][1] }, { starvedLimit: 5 });
+  assert.match(many.why, /, and 40 more\. /, '(a): 50 reasons were not cut to 10 plus a count');
+  /* Positive first: the 10th IS printed (as its capped prefix); then the 11th is not. */
+  assert.ok(many.why.includes('9rrrr'), '(a): premise: the 10th reason is not shown');
+  assert.ok(!many.why.includes('10rrrr'), '(a): the 11th reason was printed');
+});
+
+/*
+ * ═══ T-316 r4 / T-324 F1: A REAL ARRAY CAN STILL BE HOSTILE ═══
+ *
+ * r3 called Array.prototype.filter on the input, which builds its result
+ * through `constructor[Symbol.species]`, and then spread `new Set(result)`,
+ * which runs the result's own iterator -- so a real Array (isArray true)
+ * delivered 5n, null, an object and a Symbol into capText, OUTSIDE the
+ * guard. At 8a8e136 four of those returned STARVED: a new throw. The fix
+ * is the matcher, not these inputs (rule 8): an index loop into a fresh
+ * array, no method the input can override, everything inside the guard.
+ */
+const STARVED_WITH = (reasons) => nextAction(
+  { ticksUsed: 1, consecutiveNoProgress: 5, queueDepth: 7, unplacedReasons: reasons }, { starvedLimit: 5 },
+);
+const hostileArrays = () => {
+  const yields = [5n, null, { toString() { return 'objreason'; } }, 7, Symbol('s')];
+  const species = ['real_code'];
+  species.constructor = {
+    [Symbol.species]: function Species() {
+      const out = [];
+      out[Symbol.iterator] = function* it() { yield* yields; };
+      return out;
+    },
+  };
+  const ownIterator = ['real_code'];
+  ownIterator[Symbol.iterator] = function* it() { yield* yields; };
+  const ownMethods = ['real_code'];
+  for (const m of ['filter', 'map', 'slice', 'join', 'includes', 'forEach', 'concat', 'indexOf', 'some', 'every', 'reduce']) {
+    ownMethods[m] = () => { throw new Error(`own ${m} called`); };
+  }
+  const getterElement = ['real_code'];
+  Object.defineProperty(getterElement, 1, { get() { throw new Error('element getter'); }, enumerable: true });
+  const lengthTrap = new Proxy(['real_code'], { get(t, k) { if (k === 'length') throw new Error('length trap'); return Reflect.get(t, k); } });
+  const protoSwapped = ['real_code'];
+  Object.setPrototypeOf(protoSwapped, { get length() { return 1; }, filter() { throw new Error('proto filter'); } });
+  return [
+    ['a species array yielding 5n, null, {toString}, 7 and a Symbol', species],
+    ['an array with its own iterator', ownIterator],
+    ['an array with its own methods', ownMethods],
+    ['an array with a throwing element getter', getterElement],
+    ['an array proxy whose length throws', lengthTrap],
+    ['an array with a swapped prototype', protoSwapped],
+  ];
+};
+
+test('T-316 r4 (2): A SPECIES OR ITERATOR-HOSTILE REAL ARRAY NEVER THROWS IN THE STARVED REASON', () => {
+  for (const [label, value] of hostileArrays()) {
+    let r;
+    try { r = STARVED_WITH(value); } catch (e) {
+      assert.fail(`r4: ${label} THREW in the STARVED reason: ${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+    }
+    assert.equal(r.code, LOOP_STOP.STARVED, `r4: ${label} did not stop as STARVED`);
+    assert.ok(r.why.length <= 3000, `r4: the reason for ${label} is UNBOUNDED`);
+  }
+  /* What is PRINTED comes from the array's own elements, never from what an
+   * override hands back: the species array's one real element is shown, and
+   * none of the species iterator's yields are. */
+  const [[, species]] = hostileArrays();
+  const why = STARVED_WITH(species).why;
+  assert.match(why, /The dispatcher refused them for: real_code\. /,
+    'r4: the reasons were not read from the array\'s own elements');
+  assert.ok(!why.includes('objreason'), 'r4: a value yielded by an attacker iterator reached the reason');
+  /* An element that cannot be read makes the list unreadable, and says so. */
+  const [, , , [, getterElement]] = hostileArrays();
+  assert.match(STARVED_WITH(getterElement).why, /could not be read/, 'r4: an unreadable element was not reported');
+  /* RULE 11: with the join inside the guard, two UNCAPPED near-max reasons
+   * overflow IN the join, are caught, and read as "could not be read" -- no
+   * throw, so nothing above would notice the per-element cap going. (One
+   * near-max reason overflows later, in nextAction's template, which the r3
+   * test catches as a throw.) Both are SHOWN, cut. */
+  let pair;
+  try { pair = STARVED_WITH([NEAR_MAX, `${NEAR_MAX}y`]).why; } catch (e) {
+    assert.fail(`r4: two near-max reasons THREW: ${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+  }
+  assert.ok(/The dispatcher refused them for: x{200}…, x{200}…\. /.test(pair),
+    `r4: a near-max reason was not shown capped: ${pair.slice(0, 160)}`);
+});
+
+test('T-316 r4 (2): A HUGE SPARSE unplacedReasons IS READ UP TO A BOUND, NOT FOR EVER', () => {
+  /*
+   * Found while building the index loop: `a.length = 2 ** 32 - 1` made the
+   * filter walk four billion holes -- over 20 s at 8a8e136 and at r3,
+   * measured. An index loop inherits that unless it is bounded. Run in a
+   * child with a timeout, so a regression is a named failure, not a hang.
+   */
+  const code = `const L = await import(${JSON.stringify(new URL('../src/auditLoop.mjs', import.meta.url).href)});
+const a = ['real_code']; a.length = 2 ** 32 - 1;
+const r = L.nextAction({ ticksUsed: 1, consecutiveNoProgress: 5, queueDepth: 7, unplacedReasons: a }, { starvedLimit: 5 });
+process.stdout.write(JSON.stringify({ code: r.code, why: r.why }));`;
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (/^NODE_TEST/i.test(k)) delete env[k];
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10000, env });
+  assert.equal(child.signal, null, `r4: a sparse 2**32-1 array ran past 10 s (${child.signal}): the scan is unbounded`);
+  assert.equal(child.status, 0, `r4: the child failed: ${child.stderr.slice(0, 200)}`);
+  const r = JSON.parse(child.stdout);
+  assert.equal(r.code, LOOP_STOP.STARVED);
+  assert.match(r.why, /refused them for: real_code/, 'r4: the readable prefix of a huge array was not shown');
+  assert.match(r.why, /only the first \d+ of 4294967295 entries were read/, 'r4: a cut-short scan did not say so');
+});
+
+/*
+ * ═══ T-316 r5 / T-326 F1: DESCRIBING A VALUE MUST NOT WALK IT ═══
+ *
+ * r4 routed three more sites through describeValue, whose String() fallback
+ * joins every hole of a sparse length-2**32-1 array (~66 s, measured by
+ * T-326); at 8a8e136 those sites threw in under 50 ms. And JSON.stringify
+ * itself walks a sparse 1e8 array for ~4 s at every site, base included
+ * (live/T-316/work/r5/timing-*.json). So this pins TIME at every
+ * describeValue site, one child per site with a hard timeout, on the huge
+ * shapes -- a regression is a named failure, never a hang.
+ */
+const DESCRIBE_SITES = {
+  backoffServed: 'L.nextAction({ queueDepth: 5, consecutiveNoProgress: 1, backoffServed: V }).why',
+  deadlineMs: 'L.nextAction({ queueDepth: 5 }, { deadlineMs: V }).why',
+  review_attempts: 'D.proposeAudit({ jobs: [job({ review_attempts: V })], sessions: [seat], now: 1e6, isLive: () => true }).unassigned[0].why',
+  'last cause at the bound': 'D.proposeAudit({ jobs: [job({ review_attempts: 3, last_review: { not_recorded_because: V } })], sessions: [seat], now: 1e6, isLive: () => true }).unassigned[0].why',
+  'isClaimable clock': "(() => { try { D.isClaimable(job({ state: JOB.CLAIMED, claimed_at: 1 }), { now: V }); return 'ACCEPTED'; } catch (e) { return e.message; } })()",
+  capText: 'L.capText(V)',
+};
+const HUGE = {
+  'sparse 2**32-1': "(() => { const a = ['real_code']; a.length = 2 ** 32 - 1; return a; })()",
+  '[sparse 2**32-1]': "(() => { const a = ['real_code']; a.length = 2 ** 32 - 1; return [a]; })()",
+  'sparse 1e8': "(() => { const a = ['real_code']; a.length = 1e8; return a; })()",
+  'Uint8Array(2e6)': 'new Uint8Array(2e6)',
+  'object of 1e6 keys': '(() => { const o = {}; for (let i = 0; i < 1e6; i += 1) o[`k${i}`] = i; return o; })()',
+  /* Every array here is SHORT, so only the visit budget stops JSON walking 1e9 shared values. */
+  'shared 1000**3 arrays': '(() => { const a = Array(1000).fill(0); const b = Array(1000).fill(a); return Array(1000).fill(b); })()',
+  /* JSON throws on the 1n FIRST, so this reaches the fallback -- where String() would join the sparse array. */
+  '[1n, sparse 2**32-1]': "(() => { const a = ['real_code']; a.length = 2 ** 32 - 1; return [1n, a]; })()",
+};
+
+/*
+ * T-356 r2 (V1-F2): THE GATE IS THE SHAPE OF THE ANSWER, NOT THE CLOCK. The
+ * first version asserted `ms < 2000` on every (site, case) cell, and went red
+ * in a loaded full suite on a CORRECT tree: the backoffServed site took
+ * 3.8 s on 'object of 1e6 keys', because auditLoop's own sites open plain
+ * objects by design (keys: true; the daemon's values, not the store's) and
+ * JSON collects every key before the visit budget can stop it. That cell is
+ * proportional to the object, so no absolute bar on it is load-proof. Every
+ * cell now has an EXPECTED TEXT per site mode, measured (r2/f1matrix.mjs):
+ * the text differs for every mechanism a mutant can remove (the length
+ * pre-check, the visit budget, the store-mode refusal, the typed-array
+ * getters), so removing one changes the answer, whatever the load. The
+ * 2 s bar stays only on cells whose cost is O(1) or O(1000) by construction,
+ * where it is a thousand times the honest cost; the opened-object cell is
+ * bounded by RATIO to an Object.keys of the same object in the same child
+ * (both scale with load together), and the child's 60 s limit is a hang
+ * guard, not a measurement.
+ */
+const OPENS = new Set(['backoffServed', 'deadlineMs', 'capText']);   // keys: true sites (auditLoop's own values)
+const EXPECTED_TEXT = {
+  'sparse 2**32-1': () => '<array of length 4294967295>',
+  '[sparse 2**32-1]': () => '<array holding an array of length 4294967295>',
+  'sparse 1e8': () => '<array of length 100000000>',
+  'Uint8Array(2e6)': () => '<Uint8Array of length 2000000>',
+  'object of 1e6 keys': (opens) => (opens ? '<object with more than 1000 values>' : '<object: its keys were not read>'),
+  'shared 1000**3 arrays': () => '<array with more than 1000 values>',
+  '[1n, sparse 2**32-1]': () => '<array of length 2>',
+};
+
+test('T-316 r5 F1: NO describeValue SITE WALKS A HUGE CONTAINER -- pinned by the shape of every answer, with a clock only where the cost is O(1)', () => {
+  const src = (f) => JSON.stringify(new URL(`../src/${f}`, import.meta.url).href);
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (/^NODE_TEST/i.test(k)) delete env[k];
+  assert.deepEqual(Object.keys(EXPECTED_TEXT), Object.keys(HUGE), 'premise: every huge case has an expected text');
+  for (const [site, expr] of Object.entries(DESCRIBE_SITES)) {
+    const opens = OPENS.has(site);
+    const code = `const L = await import(${src('auditLoop.mjs')}); const D = await import(${src('auditDispatch.mjs')});
+const { JOB } = await import(${src('auditJob.mjs')});
+const job = (x) => ({ audit_id: 'a', candidate_sha: 'a'.repeat(40), state: JOB.PENDING, claimed_by: null, claimed_at: null, first_seen_at: 'x', ...x });
+const seat = { session_id: 'r', agent_id: 'r', capacity: 'idle' };
+const out = {};
+${Object.entries(HUGE).map(([k, build]) => `{ const V = ${build}; const t = Date.now(); let w; try { w = ${expr}; } catch (e) { w = 'THREW ' + e.message; }
+  out[${JSON.stringify(k)}] = { ms: Date.now() - t, why: String(w).slice(0, 400) };
+  if (${JSON.stringify(k)} === 'object of 1e6 keys') { let best = Infinity; for (let i = 0; i < 3; i += 1) { const t2 = Date.now(); Object.keys(V); best = Math.min(best, Date.now() - t2); } out[${JSON.stringify(k)}].keysMs = best; } }`).join('\n')}
+process.stdout.write(JSON.stringify(out));`;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 60000, env, maxBuffer: 1 << 24 });
+    assert.equal(child.signal, null, `r5: the ${site} site did not finish all huge cases within 60 s (${child.signal}): it walks the container`);
+    assert.equal(child.status, 0, `r5: the ${site} child failed: ${child.stderr.slice(0, 200)}`);
+    const got = JSON.parse(child.stdout);
+    assert.deepEqual(Object.keys(got), Object.keys(HUGE), `r5: the ${site} child did not answer every case`);
+    for (const [kase, { ms, why, keysMs }] of Object.entries(got)) {
+      assert.ok(!why.startsWith('THREW'), `r5: the ${site} site threw on ${kase}: ${why}`);
+      /* THE SHAPE: named by kind and length, by the budget, or as not read -- never a bare placeholder,
+       * never the walked JSON. Anchored to the site's mode, so a store site that opened the object, or an
+       * auditLoop site that suddenly refused it, both read as the wrong text. */
+      const want = EXPECTED_TEXT[kase](opens);
+      assert.ok(why.includes(want), `r5: the ${site} site did not answer ${JSON.stringify(want)} on ${kase}: ${why.slice(0, 160)}`);
+      /* THE BAR. An opened object (auditLoop's own sites, V1-F4, recorded) costs one key collection plus 1000
+       * visits by design, so its bar is a multiple of Object.keys on the SAME object in the SAME child, never a
+       * wall-clock number; every other cell is O(1) or O(1000) and 2 s is a thousand-fold margin. */
+      const walkedByDesign = kase === 'object of 1e6 keys' && opens;
+      const bar = walkedByDesign ? 4 * keysMs + 250 : 2000;
+      assert.ok(Number.isFinite(bar), `r5: no Object.keys baseline for the ${site} site on ${kase}`);
+      assert.ok(ms < bar, `r5: the ${site} site took ${ms} ms on ${kase}${walkedByDesign ? `, more than 4x its Object.keys baseline of ${keysMs} ms: something walks the object twice, or more` : ''}`);
+    }
+  }
+});
+
+test('T-356 r2: THE VISIT BUDGET STOPS THE WALK -- proved by a trap the walk would spring, not by the clock', () => {
+  /*
+   * r5's proof of the budget was the 20 s child timeout on 'shared 1000**3
+   * arrays' (1e9 values): a time catch, load-dependent in the safe direction
+   * but a catch by exhaustion. This one plants ACCESSORS past the budget:
+   * every array here is short (so the length pre-check cannot refuse it, and
+   * only the budget can stop the walk), and the elements JSON would reach
+   * only after visit 1000 count their own reads. With the budget in place
+   * they are never read; with it removed they are read 500 times.
+   */
+  let reads = 0;
+  const inner = (trap) => {
+    const a = [0, 0];
+    if (trap) Object.defineProperty(a, 1, { get() { reads += 1; return 0; }, enumerable: true });
+    return a;
+  };
+  /* Root visit 1, then 3 visits per element ([x, y] and its two values): the budget of 1000 is spent inside
+   * the first 334 elements; traps sit from element 500 on. */
+  const v = Array.from({ length: 1000 }, (_, i) => inner(i >= 500));
+  const shown = nextAction({ queueDepth: 50, consecutiveNoProgress: 1, backoffServed: v }, { intervalMs: 1000 }).why;
+  assert.match(shown, /^backoffServed is <array with more than 1000 values> \(array\), /,
+    `T-356 r2: the walk was not stopped by the visit budget: ${shown.slice(0, 120)}`);
+  assert.equal(reads, 0, `T-356 r2: the walk read ${reads} trapped values past the visit budget`);
+  /* THE POSITIVE (rule 5): the traps DO fire when something walks the array whole, so a zero above is a
+   * stopped walk and not a trap that cannot spring. */
+  JSON.stringify(v);
+  assert.equal(reads, 500, `premise: a full walk should have read the 500 traps, read ${reads}`);
+});
+
+test('T-316 r5 F1: SMALL VALUES ARE STILL SHOWN AS THEY ARE -- the bound is not an off switch', () => {
+  /* Rule 5: a describer that says "<array of length N>" for everything would
+   * pass the timing test above. Ordinary values keep their JSON form. */
+  const small = 'r5: a small value was not shown as it is';
+  assert.equal(capText([1, 'a', null]), '[1,"a",null] (array)', small);
+  assert.equal(capText({ a: 1, b: [2] }), '{"a":1,"b":[2]} (object)', small);
+  assert.equal(capText(Array.from({ length: 50 }, () => 0)), `[${Array(50).fill(0).join(',')}] (array)`, small);
+  assert.equal(capText(10n), '10n (bigint)', small);
+});
+
+test('T-316 r5 F3: A LENGTH THAT IS NOT A NON-NEGATIVE SAFE INTEGER IS UNREADABLE, NEVER "none reported"', () => {
+  /* Only a Proxy can do this -- a real array's length is always a number.
+   * T-326 F3: '5' read as EMPTY, so 8a8e136's "refused them for: real_code"
+   * became "No reason was reported". Checklist U: a read that cannot be
+   * trusted is reported as unreadable. */
+  for (const [label, len] of [['"5"', '5'], ['5n', 5n], ['NaN', NaN], ['-1', -1], ['1.5', 1.5], ['2**53', 2 ** 53],
+    ['Infinity', Infinity], ['{valueOf throws}', { valueOf() { throw new Error('valueOf'); } }], ['null', null]]) {
+    const reasons = new Proxy(['real_code'], { get(t, k) { return k === 'length' ? len : Reflect.get(t, k); } });
+    let r;
+    try { r = STARVED_WITH(reasons); } catch (e) {
+      assert.fail(`r5 F3: a length of ${label} THREW: ${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+    }
+    assert.match(r.why, /could not be read/, `r5 F3: a length of ${label} was read as "${r.why.slice(90, 170)}", not as unreadable`);
+  }
+  /* THE POSITIVE (rule 5): a proxy with an honest length still prints its reasons. */
+  const honest = new Proxy(['real_code'], {});
+  assert.match(STARVED_WITH(honest).why, /The dispatcher refused them for: real_code\. /);
+});
+
+test('T-316 r4 (1): capText IS TOTAL -- a non-string never throws, and the result is bounded', () => {
+  const { proxy: revoked, revoke } = Proxy.revocable({}, {}); revoke();
+  for (const v of [5n, null, undefined, 7, NaN, Symbol('s'), { toString() { throw new Error('t'); } }, revoked,
+    { toJSON() {}, toString() { return NEAR_MAX; } }, [1n], () => 1]) {
+    let out;
+    try { out = capText(v); } catch (e) {
+      assert.fail(`r4: capText THREW on a ${typeof v}: ${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+    }
+    assert.equal(typeof out, 'string', `r4: capText returned a ${typeof out} for a ${typeof v}`);
+    assert.ok(out.length <= 230, `r4: capText of a ${typeof v} is UNBOUNDED (${out.length})`);
+  }
+  /* THE POSITIVE (rule 5): a string is still cut exactly as before -- the author form depends on it. */
+  assert.equal(capText('sess-1'), 'sess-1');
+  assert.equal(capText('a'.repeat(201)), `${'a'.repeat(200)}…`);
+});
+
+test('T-316 r2 F2: THE deadlineMs REASON IS TOTAL, BOUNDED, AND THE SAME HELPER', () => {
+  /*
+   * T-320 F2: `deadlineMs is ${JSON.stringify(o.deadlineMs)}` threw on 17 of
+   * 33 hostile values (BigInt, cycles, throwing toJSON, trap/revoked proxies,
+   * near-max strings) and was uncapped. Generated from the same shapes as the
+   * backoffServed reason, and each answer compared with that reason's, so the
+   * two sites cannot describe one value two ways.
+   */
+  const cyclic = {}; cyclic.self = cyclic;
+  const cyclicArr = []; cyclicArr.push(cyclicArr);
+  const { proxy: revoked, revoke } = Proxy.revocable({}, {}); revoke();
+  const hostile = [
+    ['bigint', 2n], ['bigint', 10n ** 400n], ['object', Object(3n)], ['array', [1n]], ['object', { b: 2n }],
+    ['object', cyclic], ['array', cyclicArr], ['object', { toJSON() { throw new Error('toJSON bomb'); } }],
+    ['object', new Proxy({}, { get() { throw new Error('get trap'); } })], ['object', revoked],
+    ['object', { get x() { throw new Error('getter bomb'); } }],
+    ['string', NEAR_MAX], ['object', { toJSON() { return NEAR_MAX; } }], ['array', [NEAR_MAX]],
+    ['string', 'z'.repeat(250)], ['symbol', Symbol('d')], ['string', '600000'],
+  ];
+  const past = { queueDepth: 50, startedAt: 0, now: 10 };
+  for (const [type, value] of hostile) {
+    let r;
+    try { r = nextAction(past, { deadlineMs: value, maxTicks: 99 }); } catch (e) {
+      assert.fail(`F2: a ${type} deadlineMs THREW in the reason builder: `
+        + `${e?.constructor?.name}: ${String(e?.message).slice(0, 80)}`);
+    }
+    assert.equal(r.action, LOOP_ACTION.STOP, `F2: a ${type} deadlineMs did not stop the loop`);
+    assert.equal(r.code, LOOP_STOP.DEADLINE);
+    const m = /^deadlineMs is ([\s\S]*) \((\w+)\), which is not a duration in milliseconds\. /.exec(r.why);
+    assert.ok(m, `F2: the deadlineMs reason lost its subject or type: ${String(r.why).slice(0, 120)}`);
+    assert.equal(m[2], type, `F2: a ${type} deadlineMs was described as ${m[2]}`);
+    assert.ok(m[1].length <= 201, `F2: the described ${type} deadlineMs is UNBOUNDED (${m[1].length} chars)`);
+    const other = shownFor(value);
+    assert.equal(`${m[1]} (${m[2]})`, `${other.text} (${other.type})`,
+      `F2: deadlineMs and backoffServed describe a ${type} differently`);
+  }
+});
+
+test('T-316 B-28 F-A: THE CAP IS 200 CHARACTERS PLUS AN ELLIPSIS, and short values are shown whole', () => {
+  /* Exactly at the cap: a 198-char string is 200 chars once JSON-quoted. */
+  const at = 'a'.repeat(198);
+  assert.equal(shownFor(at).text, JSON.stringify(at), 'F-A: a value exactly at the cap was cut');
+  /* One over: cut to 200 and marked, so a reader knows it was cut. */
+  const over = 'a'.repeat(199);
+  assert.equal(shownFor(over).text, `${JSON.stringify(over).slice(0, 200)}…`,
+    'F-A: a value one over the cap was not cut to 200 plus an ellipsis');
+  assert.equal(shownFor({ a: 1 }).text, '{"a":1}');
+  assert.equal(shownFor(10n).text, '10n');
+  /* A CUT NEVER SPLITS A SURROGATE PAIR: the high half lands at index 199. */
+  const pair = shownFor(`${'a'.repeat(198)}\u{1F600}`).text;
+  assert.ok(pair.isWellFormed(), 'F-A: the cut left a lone surrogate in the reason');
+  assert.equal(pair, `"${'a'.repeat(198)}…`, 'F-A: the cut did not stop before the surrogate pair');
 });
 
 test('T-305 B-25 F4 LIMIT: boolean false written after every WAIT waits WITHOUT BOUND in nextAction', () => {

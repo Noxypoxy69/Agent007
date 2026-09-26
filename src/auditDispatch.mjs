@@ -44,9 +44,126 @@
  * failed, never silently dropped, and never left looking claimed.
  */
 import { CLAIM_LEASE_MS, JOB, AUTHOR_UNAVAILABLE } from './auditJob.mjs';
+/*
+ * ONE REASON BUILDER FOR A VALUE THAT MAY BE ANYTHING. T-316 / B-28.
+ * Every reason below that prints a caller-supplied value went through
+ * JSON.stringify or a bare template, which THROW on a BigInt, a cycle, a
+ * throwing toJSON, a Symbol, and overflow on a near-max string -- so a
+ * fail-closed branch handed its caller an exception instead of a decision.
+ * auditLoop's describeValue is total, bounded and names the type; shared, not
+ * copied, so the two cannot drift. capText is the same file's cap WITHOUT the
+ * description, for a string already validated whose unquoted form is pinned
+ * (the only-author reason, T-316 r3 (b)).
+ */
+import { describeValue, capText } from './auditLoop.mjs';
+/*
+ * EVERY VALUE THIS FILE DESCRIBES IS A STORE ROW'S (or the clock), so it is
+ * described WITHOUT opening plain objects. T-356 / B-28: a row is one JSONL
+ * line, up to MAX_STRING_LENGTH, and a 5e6-key object in review_attempts or
+ * last_review.not_recorded_because made proposeAudit take 5.2 s -- JSON reads
+ * every key before any bound applies. See auditLoop's "NOTHING HERE COSTS
+ * TIME IN PROPORTION TO THE VALUE".
+ */
+const STORE_VALUE = Object.freeze({ keys: false });
 
-const str = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
+/*
+ * ═══ A TRIM THAT COSTS THE SAME WHATEVER THE STRING HOLDS. T-356 r2 / V1-F1 ═══
+ *
+ * `str` was `v.trim() !== '' ? v.trim() : null`: two native trims per call,
+ * and proposeAudit calls it six to fifteen times per row (audit_id, state,
+ * claimed_by, author_session, author_source, candidate_sha, and both seat
+ * ids). A native trim walks the WHOLE leading and trailing whitespace run
+ * every time, and caches nothing -- so one store row whose id is padded with
+ * 1e8 spaces on each side (a legal JSON string, 2e8 characters, well under
+ * the line cap) made proposeAudit take 2.2-6.2 s. The blind verifier found
+ * it because the round-1 table swept string LENGTH in one content class
+ * ('x'), where trim stops at the first character. Time is a verdict, and
+ * the cost of an operation depends on the CONTENT it is given, not only on
+ * the length.
+ *
+ * So the scan is BOUNDED: at most TRIM_SCAN code units are read from each
+ * end. A string whose leading or trailing whitespace run is longer than that
+ * is not trimmed at all -- it is UNREADABLE (TRIM_OVER), and proposeAudit
+ * names it (UNPLACED.ROW_UNREADABLE, or a seat marked `unreadable`) rather
+ * than dropping the row silently, because a corrupt row must surface
+ * (Controller decision, T-356 r2). Below the bound the result is exactly
+ * `.trim()`'s, for every code unit the engine trims: the predicate is the
+ * ECMAScript WhiteSpace + LineTerminator set (25 code units on this engine),
+ * pinned against the running engine by test/auditDispatch.test.mjs so an
+ * engine that changes its set turns the test red rather than the trim wrong.
+ * No whitespace code point lies outside the BMP and a lone surrogate is
+ * never whitespace, so a per-code-unit scan equals the spec's TrimString.
+ *
+ * The bound is not a cut: nothing about a string's CONTENT is truncated
+ * (an audit id is an identity; T-316 r3 (b) pins that a 1e6-character id is
+ * read whole and only its DISPLAY is capped). Only the whitespace around the
+ * content is bounded. 4096 is four thousand times any padding a real row
+ * carries and costs at most about 20 us per call.
+ */
+export const TRIM_SCAN = 4096;
+export const TRIM_OVER = Symbol('whitespace run longer than TRIM_SCAN: not read');
+const isWs = (c) => c === 0x20 || (c >= 0x09 && c <= 0x0d) || c === 0xa0 || c === 0x1680
+  || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f
+  || c === 0x205f || c === 0x3000 || c === 0xfeff;
+export function boundedTrim(v) {
+  const n = v.length;
+  let i = 0;
+  while (i < n && isWs(v.charCodeAt(i))) { if (++i > TRIM_SCAN) return TRIM_OVER; }
+  if (i === n) return '';
+  let j = n;
+  while (isWs(v.charCodeAt(j - 1))) { if (n - --j > TRIM_SCAN) return TRIM_OVER; }
+  return v.slice(i, j);
+}
+/* The usable text of a store string, or null: not a string, blank, or padded past the bound (which
+ * `unreadableFields` names separately -- str() alone cannot tell the caller which it was). */
+const str = (v) => {
+  if (typeof v !== 'string') return null;
+  const t = boundedTrim(v);
+  return t === TRIM_OVER || t === '' ? null : t;
+};
+const overBound = (v) => typeof v === 'string' && boundedTrim(v) === TRIM_OVER;
+/* Every field of a row / a seat that str() reads. A row with any of these past the bound is REFUSED whole and
+ * named: deciding on the others would decide with a field it could not read (an author_session past the bound
+ * would otherwise read as "no author" and hand the candidate to whoever wrote it). */
+const ROW_TEXT_FIELDS = Object.freeze(['audit_id', 'state', 'claimed_by', 'author_session', 'author_source', 'candidate_sha']);
+const SEAT_TEXT_FIELDS = Object.freeze(['session_id', 'agent_id']);
+function unreadableFields(o, fields) {
+  const out = [];
+  for (const f of fields) if (overBound(o[f])) out[out.length] = f;
+  return out;
+}
+const unreadableWhy = (fields) => `${fields.join(', ')} ${fields.length > 1 ? 'are strings' : 'is a string'} with more `
+  + `than ${TRIM_SCAN} whitespace characters at one end, so the text was not read: an unbounded trim was where a `
+  + 'padded row cost seconds per call (T-356). ';
+/*
+ * A COUNT IS SHORT. A review counter arrives as a number from nextAttempt, or
+ * as a digit string from a hand-edited row; `/^\d+$/` and `Number()` both
+ * read every character (0.6 s at 5e8 digits, measured), so a count text
+ * longer than this is unreadable before either runs. 20 characters holds any
+ * safe integer's digits with room; MAX_REVIEW_ATTEMPTS is 3.
+ */
+const COUNT_TEXT_MAX = 20;
 const arr = (v) => (Array.isArray(v) ? v : []);
+
+/*
+ * THE LAST REVIEW'S CAUSE, READ ONLY WHERE IT IS PRINTED, AND READ SAFELY.
+ * T-316 r2 / T-320 F1.
+ *
+ * r1 hoisted `job.last_review?.not_recorded_because` above the
+ * unreadable/exhausted split, so the READ ran on both branches, and a
+ * last_review that throws when read (a revoked proxy, a get trap, a
+ * throwing getter) made proposeAudit throw for review_attempts null, where
+ * 3af14ea had returned REVIEW_EXHAUSTED. So this is called only from the
+ * at-the-bound reason, and a read that throws is reported as unreadable
+ * rather than escaping the fail-closed branch.
+ */
+function lastReviewCause(job) {
+  let cause;
+  try { cause = job.last_review?.not_recorded_because; } catch {
+    return '<unreadable: reading last_review threw>';
+  }
+  return cause == null ? 'unknown' : describeValue(cause, STORE_VALUE);
+}
 
 /** Reasons a job could not be placed. Codes, so a caller can branch. */
 export const UNPLACED = Object.freeze({
@@ -55,6 +172,8 @@ export const UNPLACED = Object.freeze({
   ALL_SEATS_BUSY: 'all_seats_busy',
   AUTHOR_UNKNOWN: 'author_unknown',
   REVIEW_EXHAUSTED: 'review_exhausted',
+  /* A row whose text fields could not be read (whitespace past TRIM_SCAN). Named, never dropped: T-356 r2. */
+  ROW_UNREADABLE: 'row_unreadable',
 });
 
 /**
@@ -127,7 +246,7 @@ export function isClaimable(job, { now, leaseMs = CLAIM_LEASE_MS } = {}) {
    */
   if (typeof now !== 'number' || !Number.isFinite(now)) {
     throw new TypeError('isClaimable needs `now` as epoch milliseconds, got '
-      + `${typeof now} ${JSON.stringify(now)}. A non-number makes (now - claimed_at) NaN, `
+      + `${describeValue(now, STORE_VALUE)}. A non-number makes (now - claimed_at) NaN, `
       + 'so every lease reads as un-expired and a recoverable backlog reports as empty');
   }
   return (now - since) > leaseMs;
@@ -211,10 +330,30 @@ function byUrgency(a, b, demotePrepared = true) {
     ? Number(Boolean(a?.prepared_at)) - Number(Boolean(b?.prepared_at))
     : 0;
   if (prepped !== 0) return prepped;
-  const at = String(a?.first_seen_at ?? '');
-  const bt = String(b?.first_seen_at ?? '');
+  const at = sortKey(a?.first_seen_at);
+  const bt = sortKey(b?.first_seen_at);
   if (at !== bt) return at < bt ? -1 : 1;
-  return String(a?.audit_id ?? '') < String(b?.audit_id ?? '') ? -1 : 1;
+  return sortKey(a?.audit_id) < sortKey(b?.audit_id) ? -1 : 1;
+}
+
+/*
+ * A SORT KEY THAT CANNOT THROW OR WALK. T-356 / B-28.
+ *
+ * This was `String(x ?? '')`, and a store row can make that throw or stall
+ * out of proposeAudit, on the ordering step before any reason is built:
+ * JSON.parse gives `first_seen_at` as an array nested 1e4 deep (String()
+ * joins recursively: RangeError, call stack), as `{"toString":"x"}` (a
+ * non-callable toString: TypeError, cannot convert object to primitive), or
+ * as 1e8 short arrays (String() joins them all: 3.6 s). A string, number or
+ * boolean keeps its old key exactly; null/absent keeps ''; anything else keys
+ * as U+FFFF, AFTER every real timestamp -- where '[object Object]' already
+ * sorted -- so a corrupt row never jumps the queue, and audit_id breaks ties.
+ */
+const UNREADABLE_KEY = String.fromCharCode(0xffff);
+function sortKey(v) {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return v == null ? '' : UNREADABLE_KEY;
 }
 
 /**
@@ -272,17 +411,71 @@ export function proposeAudit({
       .filter(Boolean),
   );
 
-  const seats = live
-    .map((s) => ({
-      session_id: str(s.session_id),
-      agent_id: str(s.agent_id),
-      busy: busy.has(str(s.session_id)) || busy.has(str(s.agent_id)),
-    }))
-    .filter((s) => s.session_id || s.agent_id);
-
+  /*
+   * A ROW WITH A TEXT FIELD PAST THE BOUND IS REFUSED WHOLE AND NAMED. It is
+   * not claimable and not dispatched, and it does not vanish: the operator
+   * sees a corrupt row where they would otherwise see nothing. Its audit_id
+   * is shown when that field itself could be read, else null.
+   *
+   * ═══ AND A LIVE CLAIM WHOSE HOLDER CANNOT BE READ BLOCKS EVERY SEAT. T-356 r3 / V2-F1 ═══
+   *
+   * Round 2 let such a row mark NO seat busy ("the holder is unknown") and
+   * the blind verifier showed what that means: a CLAIMED row still inside
+   * its lease, its claimed_by padded past the bound, and the second job was
+   * PROPOSED to the very seat that holds the first. Base and round 1 read the
+   * padding whole and kept that seat busy; round 2 had laundered the busy
+   * exclusion the way it refused to launder the author exclusion. The
+   * Controller's decision covers both: unknown fails CLOSED. So a row whose
+   * clock says the claim is live (claimed_at within the lease) and whose
+   * state or claimed_by cannot be read marks EVERY seat busy -- the holder
+   * is one of them and nothing here can say which -- until the row is
+   * repaired, and both the row's own entry and ALL_SEATS_BUSY say so. A row
+   * whose clock says the claim is expired, or that carries no claimed_at,
+   * is not a live claim under any reading of its padding and blocks nothing.
+   */
+  const liveByClock = (j) => typeof j.claimed_at === 'number' && Number.isFinite(j.claimed_at) && (now - j.claimed_at) <= leaseMs;
+  const unreadable = [];
+  const unknownHolders = [];
   const claimable = arr(jobs)
-    .filter((j) => j && str(j.audit_id) && isClaimable(j, { now, leaseMs }))
+    .filter((j) => {
+      if (!j) return false;
+      const fields = unreadableFields(j, ROW_TEXT_FIELDS);
+      if (fields.length === 0) return str(j.audit_id) && isClaimable(j, { now, leaseMs });
+      const holderUnknown = (fields.includes('claimed_by') || fields.includes('state')) && liveByClock(j);
+      const id = fields.includes('audit_id') ? null : str(j.audit_id);
+      if (holderUnknown) unknownHolders.push(id);
+      unreadable.push({
+        audit_id: id,
+        code: UNPLACED.ROW_UNREADABLE,
+        why: `${unreadableWhy(fields)}The row is refused whole, not dispatched, and stays in the queue until it is `
+          + 'repaired; a field this refuses could otherwise decide the author exclusion or a lease'
+          + (holderUnknown ? '. Its clock says the claim is LIVE and its holder cannot be read, so every seat is treated as '
+            + 'busy until it is repaired: the holder is one of them' : ''),
+      });
+      return false;
+    })
     .sort((a, b) => byUrgency(a, b, demotePrepared));
+
+  /*
+   * A SEAT WHOSE ID CANNOT BE READ IS NOT FREE, AND SAYS SO. T-356 r2. Its
+   * ids are null (str refused them), so the author exclusion below could not
+   * tell it from a stranger -- and the padded id might BE the author's. It
+   * is kept in `seats`, marked busy and `unreadable`, never offered work --
+   * kept even when BOTH ids are unreadable, so a roster of one such seat
+   * reads as a seat that cannot be used, not as no seat at all (V2-F2).
+   */
+  const seats = live
+    .map((s) => {
+      const unreadable = unreadableFields(s, SEAT_TEXT_FIELDS);
+      const seat = {
+        session_id: str(s.session_id),
+        agent_id: str(s.agent_id),
+        busy: unreadable.length > 0 || unknownHolders.length > 0 || busy.has(str(s.session_id)) || busy.has(str(s.agent_id)),
+      };
+      return unreadable.length > 0 ? { ...seat, unreadable } : seat;
+    })
+    .filter((s) => s.session_id || s.agent_id || s.unreadable);
+  const unreadableSeats = seats.filter((s) => s.unreadable).length;
 
   const proposals = [];
   const unassigned = [];
@@ -298,7 +491,13 @@ export function proposeAudit({
         code: seats.length === 0 ? UNPLACED.NO_LIVE_SEAT : UNPLACED.ALL_SEATS_BUSY,
         why: seats.length === 0
           ? 'no reviewer seat is live. The job stays PENDING -- this is a queue waiting, not a failure'
-          : 'every live seat already holds an unexpired claim',
+          : `every live seat already holds an unexpired claim${unreadableSeats > 0
+            ? ` or has an id that could not be read (${unreadableSeats} seat(s) with more than ${TRIM_SCAN} whitespace `
+              + 'characters around an id are not offered work, T-356)'
+            : ''}${unknownHolders.length > 0
+            ? `, or a live claim's holder could not be read (${unknownHolders.length} row(s): every seat is treated as busy `
+              + 'until the row is repaired, because the holder is one of them, T-356 r3)'
+            : ''}`,
       });
       continue;
     }
@@ -382,19 +581,29 @@ export function proposeAudit({
     let tries;
     if (raw === undefined) tries = 0;
     else if (typeof raw === 'number') tries = Number.isInteger(raw) && raw >= 0 ? raw : NaN;
-    else if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) tries = Number(raw.trim());
-    else tries = NaN;
+    else if (typeof raw === 'string') {
+      /* The same bounded scan as str(): a count padded past TRIM_SCAN, or longer than COUNT_TEXT_MAX, is
+       * unreadable before the regex or Number() read a character of it (T-356 r2, operation O2). */
+      const t = boundedTrim(raw);
+      tries = t !== TRIM_OVER && t.length <= COUNT_TEXT_MAX && /^\d+$/.test(t) ? Number(t) : NaN;
+    } else tries = NaN;
     const unreadable = !Number.isFinite(tries);
     if (unreadable || tries >= MAX_REVIEW_ATTEMPTS) {
+      /*
+       * 2n IS UNREADABLE HERE AND AT THE BOUND IN nextAttempt, and both ends
+       * now say so without throwing (T-316 / B-28): a BigInt is not
+       * `typeof 'number'`, so it takes the unreadable branch -- exhausted --
+       * exactly as nextAttempt(2n) returns the bound.
+       */
       unassigned.push({
         audit_id: str(job.audit_id),
         code: UNPLACED.REVIEW_EXHAUSTED,
         why: unreadable
-          ? `review_attempts is ${JSON.stringify(raw)}, which is not a count. Refusing to `
+          ? `review_attempts is ${describeValue(raw, STORE_VALUE)}, which is not a count. Refusing to `
             + 'dispatch: an unreadable counter cannot bound anything, and treating it as zero '
             + 'is how one corrupt row gets reviewed for ever'
           : `reviewed ${tries} times without the result being attributable `
-            + `(last: ${job.last_review?.not_recorded_because ?? 'unknown'}). Not re-dispatching: `
+            + `(last: ${lastReviewCause(job)}). Not re-dispatching: `
             + 'a candidate that cannot be pinned will not become pinnable by being reviewed again',
       });
       continue;
@@ -420,7 +629,7 @@ export function proposeAudit({
       unassigned.push({
         audit_id: str(job.audit_id),
         code: UNPLACED.ONLY_AUTHOR_AVAILABLE,
-        why: `the only free seat authored this candidate (${author}). Rule 20: the party `
+        why: `the only free seat authored this candidate (${capText(author)}). Rule 20: the party `
           + 'that wrote a fix cannot clear it, so this waits for a different reviewer',
       });
       continue;
@@ -445,6 +654,9 @@ export function proposeAudit({
       escaped: Boolean(job.escaped),
     });
   }
+
+  /* The refused rows come LAST: a well-formed queue's first reason is still the first claimable job's. */
+  for (const u of unreadable) unassigned.push(u);
 
   return { proposals, unassigned, seats };
 }
